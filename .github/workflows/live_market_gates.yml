@@ -24,7 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
-        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        # Job-scoped credential rewrite (see ci.yml): per-job temp file via
+        # GITHUB_ENV, never the runner owner's persistent global git config.
+        run: |
+          config="$RUNNER_TEMP/axiusflow-job-gitconfig"
+          git config --file "$config" url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - name: Validate private chart credential
         env:
           NUCLEUS_CHARTS_TOKEN: ${{ secrets.NUCLEUS_CHARTS_TOKEN }}
@@ -52,6 +57,9 @@ jobs:
           name: live-market-gate-coinbase
           path: .cache/evidence/live_market_gate_coinbase.json
           retention-days: 30
+      - name: Remove job-scoped git credential
+        if: always()
+        run: rm -f "$RUNNER_TEMP/axiusflow-job-gitconfig"
 
   rithmic:
     # Rithmic needs credentials in the runner's native vault, so this job only
@@ -67,7 +75,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
-        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        # Job-scoped credential rewrite (see ci.yml): per-job temp file via
+        # GITHUB_ENV, never the runner owner's persistent global git config.
+        # This job assumes a Windows runner, matching its pwsh preflight.
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'axiusflow-job-gitconfig'
+          git config --file $config url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf 'https://github.com/'
+          Add-Content -Path $env:GITHUB_ENV -Value "GIT_CONFIG_GLOBAL=$config"
       - name: Validate private chart credential
         shell: pwsh
         env:
@@ -91,3 +106,7 @@ jobs:
           name: live-market-gate-rithmic
           path: .cache/evidence/live_market_gate_rithmic.json
           retention-days: 30
+      - name: Remove job-scoped git credential
+        if: always()
+        shell: pwsh
+        run: Remove-Item -Force (Join-Path $env:RUNNER_TEMP 'axiusflow-job-gitconfig') -ErrorAction SilentlyContinue

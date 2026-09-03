@@ -30,7 +30,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
-        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        # Job-scoped credential rewrite: the config lives in a per-job temp
+        # file exported via GITHUB_ENV, so it applies to every later cargo
+        # fetch yet can never leak into the runner owner's persistent global
+        # git configuration (a `--global` rewrite here once broke the owner's
+        # own push access until it was removed by hand).
+        run: |
+          config="$RUNNER_TEMP/axiusflow-job-gitconfig"
+          git config --file "$config" url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - name: Validate private chart credential
         env:
           NUCLEUS_CHARTS_TOKEN: ${{ secrets.NUCLEUS_CHARTS_TOKEN }}
@@ -93,9 +101,14 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-          name: market-data-performance-linux
+            name: market-data-performance-linux
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
+      - name: Remove job-scoped git credential
+        # The per-job config file carries the chart token: always delete it,
+        # even when the lane fails, so no secret lingers in runner temp.
+        if: always()
+        run: rm -f "$RUNNER_TEMP/axiusflow-job-gitconfig"
 
   workspace-windows:
     runs-on: [self-hosted, axiusflow, windows]
@@ -107,7 +120,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
-        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        # Job-scoped credential rewrite: the config lives in a per-job temp
+        # file exported via GITHUB_ENV, so it applies to every later cargo
+        # fetch yet can never leak into the runner owner's persistent global
+        # git configuration (a `--global` rewrite here once broke the owner's
+        # own push access until it was removed by hand).
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'axiusflow-job-gitconfig'
+          git config --file $config url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf 'https://github.com/'
+          Add-Content -Path $env:GITHUB_ENV -Value "GIT_CONFIG_GLOBAL=$config"
       - name: Validate private chart credential
         shell: pwsh
         env:
@@ -156,9 +178,15 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-          name: market-data-performance-windows
+            name: market-data-performance-windows
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
+      - name: Remove job-scoped git credential
+        # The per-job config file carries the chart token: always delete it,
+        # even when the lane fails, so no secret lingers in runner temp.
+        if: always()
+        shell: pwsh
+        run: Remove-Item -Force (Join-Path $env:RUNNER_TEMP 'axiusflow-job-gitconfig') -ErrorAction SilentlyContinue
 
   workspace-macos:
     runs-on: [self-hosted, axiusflow, macos]
@@ -170,7 +198,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
-        run: git config --global url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+        # Job-scoped credential rewrite: the config lives in a per-job temp
+        # file exported via GITHUB_ENV, so it applies to every later cargo
+        # fetch yet can never leak into the runner owner's persistent global
+        # git configuration (a `--global` rewrite here once broke the owner's
+        # own push access until it was removed by hand).
+        run: |
+          config="$RUNNER_TEMP/axiusflow-job-gitconfig"
+          git config --file "$config" url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - name: Validate private chart credential
         env:
           NUCLEUS_CHARTS_TOKEN: ${{ secrets.NUCLEUS_CHARTS_TOKEN }}
@@ -218,6 +254,11 @@ jobs:
       - name: Upload market-data baseline
         uses: actions/upload-artifact@v4
         with:
-          name: market-data-performance-macos
+            name: market-data-performance-macos
           path: .cache/evidence/market_data_performance.json
           retention-days: 30
+      - name: Remove job-scoped git credential
+        # The per-job config file carries the chart token: always delete it,
+        # even when the lane fails, so no secret lingers in runner temp.
+        if: always()
+        run: rm -f "$RUNNER_TEMP/axiusflow-job-gitconfig"

@@ -1445,6 +1445,23 @@ mod tests {
                 "CI must stay on zero-cost self-hosted runners, found {hosted}"
             );
         }
+        // The chart credential rewrite must stay scoped to the job temp file:
+        // a persistent `--global` rewrite once hijacked the runner owner's
+        // own push access until it was removed by hand.
+        assert!(
+            !workflow.contains("git config --global"),
+            "CI must not rewrite the runner owner's persistent git configuration"
+        );
+        assert_eq!(
+            workflow.matches("GIT_CONFIG_GLOBAL").count(),
+            3,
+            "every native workspace lane must scope its chart credential to the job"
+        );
+        assert_eq!(
+            workflow.matches("Remove job-scoped git credential").count(),
+            3,
+            "every native workspace lane must delete its job-scoped credential file"
+        );
         for gate in [
             "cargo fmt --all -- --check",
             "cargo clippy --workspace --all-targets --all-features -- -D warnings",
@@ -1531,6 +1548,20 @@ mod tests {
         assert!(
             !workflow.contains("continue-on-error"),
             "live-market gates must keep venue failures visible"
+        );
+        assert!(
+            !workflow.contains("git config --global"),
+            "live-market gates must not rewrite the runner owner's persistent git configuration"
+        );
+        assert_eq!(
+            workflow.matches("GIT_CONFIG_GLOBAL").count(),
+            2,
+            "every live-market gate must scope its chart credential to the job"
+        );
+        assert_eq!(
+            workflow.matches("Remove job-scoped git credential").count(),
+            2,
+            "every live-market gate must delete its job-scoped credential file"
         );
     }
 

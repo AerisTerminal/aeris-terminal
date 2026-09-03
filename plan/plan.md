@@ -981,6 +981,28 @@ stay queued with no runners and will fail closed at their timeouts;
 macOS remains without an execution path until Apple hardware exists.
 The exit gate stays closed and phase 5 remains blocked.
 
+Self-hosted git-credential pollution (same day, this batch): the first
+green Windows run executed the `git config --global ...insteadOf`
+authentication step as the maintainer user, permanently redirecting all
+of this machine's github.com git traffic through the chart token — the
+next push failed with `Repository not found` (the token cannot see
+`Axiusflow_GPUI`) until the global rewrite was removed by hand and push
+access verified restored. All five authenticated jobs (three `ci.yml`
+lanes, both live gates) now write the rewrite to a per-job temp file
+exported via `GITHUB_ENV` as `GIT_CONFIG_GLOBAL` (bash and pwsh
+variants; checkout still runs before it, so its own token is
+unaffected) and delete the file in an always-run cleanup step, so no
+secret or rewrite can leak into the owner's persistent configuration or
+linger in runner temp. Architecture checks forbid any return to `git
+config --global` and pin the scoped credential plus cleanup in every
+job. Mechanism proven locally: a bogus-token scoped file intercepts
+CLI git (`Invalid username or token`), while the clean tree resolves
+`HEAD` through the credential manager with an empty global config.
+Verification on Windows (this machine): fmt clean, targeted
+warnings-denied clippy clean, architecture checks 36 of 36. The next
+Windows lane execution is the live proof; the exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
