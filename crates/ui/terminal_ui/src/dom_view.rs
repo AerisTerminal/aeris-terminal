@@ -654,6 +654,15 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
             format!("Depth stale · last sequence {watermark}"),
             |theme| theme.colors.bearish,
         )),
+        // Awaiting the first snapshot is still loading, not a failure, so
+        // it renders neutral. Red is reserved for a book that broke.
+        OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot) => Some((
+            format!(
+                "Depth recovering · {}",
+                recovery_label(OrderBookRecoveryReason::AwaitingSnapshot)
+            ),
+            |theme| theme.colors.text_secondary,
+        )),
         OrderBookState::Recovering(reason) => Some((
             format!("Depth recovering · {}", recovery_label(reason)),
             |theme| theme.colors.bearish,
@@ -759,6 +768,23 @@ mod tests {
                 .expect("recovery banner");
             assert_eq!(label, format!("Depth recovering · {expected}"));
         }
+        // Awaiting the first snapshot is loading, not failure: it must not
+        // share the failure color used by stale and broken books.
+        let theme = AxiusflowTheme::default();
+        let awaiting = status_presentation(
+            OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot),
+            0,
+        )
+        .expect("awaiting banner");
+        let stale = status_presentation(OrderBookState::Stale, 0).expect("stale banner");
+        let gap = status_presentation(
+            OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap),
+            0,
+        )
+        .expect("gap banner");
+        assert_ne!(awaiting.1(&theme), stale.1(&theme));
+        assert_ne!(awaiting.1(&theme), gap.1(&theme));
+        assert_eq!(stale.1(&theme), gap.1(&theme));
     }
 
     #[test]
