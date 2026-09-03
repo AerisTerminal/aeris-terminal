@@ -1410,6 +1410,40 @@ mod tests {
     }
 
     #[test]
+    fn successive_upgrades_leave_one_matching_release_and_no_staging() {
+        let root = temporary_root("successive-upgrades");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        for generation in [2_u64, 3] {
+            let (next, _, next_bundle) = release(&root, generation);
+            let next = sign_release_manifest(next.manifest, &key).expect("same release key");
+            let outcome = installer
+                .install(&next, &next_bundle, &Hooks::default())
+                .expect("upgrade");
+            assert_eq!(outcome.active.install_generation, generation);
+        }
+        assert_eq!(
+            installer
+                .active_release()
+                .expect("active")
+                .expect("one active release")
+                .install_generation,
+            3
+        );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert!(!installer.update_journal_path().exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
     fn normal_launch_audit_rejects_post_install_file_mutation() {
         let root = temporary_root("launch-audit");
         let (signed, key, bundle) = release(&root, 1);
@@ -1491,6 +1525,8 @@ mod tests {
                 .install_generation,
             1
         );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert!(!installer.update_journal_path().exists());
         let _ = remove_owned_path(&root);
     }
 

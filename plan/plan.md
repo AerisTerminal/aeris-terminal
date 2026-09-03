@@ -514,6 +514,27 @@ execution, the `NUCLEUS_CHARTS_TOKEN` value, and the self-hosted
 `[rithmic-credentials]` runner remain open, so the exit gate stays
 closed and phase 5 remains blocked.
 
+Update-transaction coverage (same day, this batch): the phase 4 exit
+gate names multi-version upgrades and failed-candidate deletion
+explicitly, but the lifecycle suite proved only a single 1-to-2 upgrade
+and asserted only the restored generation after a failed health check.
+The new `successive_upgrades_leave_one_matching_release_and_no_staging`
+regression installs 1, upgrades through 2 to 3, and asserts exactly one
+version directory, active generation 3, and no residual journal; the
+rollback regression now also asserts the failed candidate directory is
+deleted and the journal is gone. No production behavior changed: the
+strengthened assertions pass against the existing rollback path, which
+already removes the candidate pointer, manifest, directory, and journal
+before reporting `HealthCheckFailed`. Verification on Windows (this
+machine): `cargo fmt --all -- --check`, workspace clippy with warnings
+denied, workspace build, and `cargo test --workspace --all-features`
+all pass with zero failures (architecture checks 35 of 35, desktop 141
+of 141, `axiusflow_platform_runtime` 42 of 42, handshake 17 of 17,
+protocol 7 of 7, engine 106 with 1 ignored). Items 4 through 7,
+remote-lane execution, the `NUCLEUS_CHARTS_TOKEN` value, and the
+self-hosted `[rithmic-credentials]` runner remain open, so the exit
+gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
