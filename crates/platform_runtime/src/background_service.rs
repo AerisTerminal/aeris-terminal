@@ -12,7 +12,7 @@ use std::{
 use sysinfo::{ProcessesToUpdate, System};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::fs;
+use std::{fs, io::Write};
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 const SERVICE_NAME: &str = "Axiusflow Engine";
@@ -359,7 +359,34 @@ fn configure_autostart_file(
         .parent()
         .ok_or(BackgroundServiceError::UserConfigurationDirectory)?;
     fs::create_dir_all(parent).map_err(|_| BackgroundServiceError::AutostartUpdate)?;
-    fs::write(path, contents).map_err(|_| BackgroundServiceError::AutostartUpdate)
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(BackgroundServiceError::AutostartUpdate)?;
+    let temporary = parent.join(format!(".{file_name}.next"));
+    match fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(BackgroundServiceError::AutostartUpdate),
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| BackgroundServiceError::AutostartUpdate)?;
+    if file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .is_err()
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(BackgroundServiceError::AutostartUpdate);
+    }
+    if fs::rename(&temporary, path).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(BackgroundServiceError::AutostartUpdate);
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

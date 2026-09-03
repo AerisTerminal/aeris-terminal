@@ -696,6 +696,14 @@ a Windows-shaped root. Formatting, warnings-denied platform clippy, and the
 45-test platform suite pass after this change; native-host verification on
 macOS/Linux remains a CI responsibility.
 
+Atomic autostart configuration (same day, this batch): Linux desktop-entry
+and macOS LaunchAgent writes now use a same-directory synced temporary file
+followed by an atomic rename. Failed writes remove the temporary artifact and
+leave the prior registration intact, so a crash cannot expose a truncated
+startup definition. The Windows registry path remains unchanged. Platform
+runtime tests (45/45), warnings-denied clippy, formatting, and architecture
+checks (35/35) pass after this change.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,
