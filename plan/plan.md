@@ -230,6 +230,20 @@ and phase 5 remains blocked.
   local gates count. The scheduled rithmic live-gate additionally needs a
   self-hosted `[rithmic-credentials]` runner that does not exist (it queues
   to timeout); that is maintainer infrastructure, still open.
+
+  Correction after local proof (same day): the secret did land and the
+  `insteadOf` step runs green, but all lanes still failed auth — and the
+  token was exonerated by experiment. Forced-clone probes on this machine
+  (cargo 1.97.1) proved cargo's built-in git client does not use
+  `url.insteadOf`-embedded credentials: with a bogus token armed, the fetch
+  silently succeeded through the system Git Credential Manager instead of
+  failing. The rewrite only takes effect through the git CLI, proven the
+  same way (`CARGO_NET_GIT_FETCH_WITH_CLI=true` + bogus token fails with
+  "Invalid username or token"). The fix is therefore job-level
+  `CARGO_NET_GIT_FETCH_WITH_CLI: "true"` on all three `ci.yml` lanes plus
+  the scheduled coinbase gate, keeping the `insteadOf` step. Local machine
+  state was restored pristine afterward (global gitconfig empty, cargo git
+  db intact, experiment artifacts removed).
 - Item 8 (partial): the architecture check pins the deliberate protocol
   revision and now rejects unguarded Unix/Windows filesystem and autostart
   assumptions in shared platform code

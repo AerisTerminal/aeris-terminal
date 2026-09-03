@@ -15,6 +15,10 @@ jobs:
   coinbase:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Cargo's built-in git client ignores URL-embedded credentials, so the
+      # private chart dependency below must be fetched through the git CLI.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate private chart dependency
