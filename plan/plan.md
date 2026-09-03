@@ -638,6 +638,14 @@ This proves identity-bound release startup/status IPC on Windows; it is not
 installed packaging, update/rollback, rendering, transition, endurance, or
 macOS/Linux runtime evidence.
 
+Locked-file lifecycle coverage (same day, this batch): Windows now removes a
+failed journal replacement's temporary `.next` file before returning the
+staging error. A native `share_mode(0)` regression fixture holds the existing
+journal open, proves the replacement fails closed, verifies the original
+record remains readable after the lock is released, and verifies no temporary
+artifact remains. Windows platform-runtime verification is 45/45 tests with
+warnings-denied clippy green; installed update/reboot behavior remains open.
+
 Atomic lifecycle-record replacement (same day, this batch): `write_json_atomic`
 previously deleted an existing active pointer or manifest before renaming the
 new record into place. That created a real absence window on Unix and macOS,

@@ -3,6 +3,8 @@
 //! Packaging supplies the small stable launcher that calls this boundary. The
 //! desktop and resident engine never replace or delete themselves.
 
+#[cfg(all(windows, test))]
+use std::os::windows::fs::OpenOptionsExt;
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -1183,7 +1185,10 @@ fn write_json_atomic<T: Serialize>(
         .and_then(|()| file.sync_all())
         .map_err(|_| LifecycleError::StagingFailed)?;
     let destination = directory.join(name);
-    replace_file_atomic(&temporary, &destination)?;
+    if let Err(error) = replace_file_atomic(&temporary, &destination) {
+        let _ = remove_file_if_present(&temporary);
+        return Err(error);
+    }
     #[cfg(unix)]
     return sync_directory(directory);
     #[cfg(not(unix))]
@@ -1763,6 +1768,59 @@ mod tests {
         assert_eq!(
             installer.read_update_journal(),
             Err(LifecycleError::JournalCorrupt)
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_update_journal_preserves_old_record_and_cleans_temporary_file() {
+        let root = temporary_root("journal-locked");
+        let (_, key, _) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let journal = UpdateJournal {
+            state: UpdateState::Preparing,
+            candidate: ActiveRelease {
+                release_identity: "candidate".to_string(),
+                install_generation: 2,
+                directory_name: "00000000000000000002-candidate".to_string(),
+            },
+            previous: None,
+        };
+        installer
+            .write_update_journal(&journal)
+            .expect("write original journal");
+        let path = installer
+            .lifecycle_root
+            .join(update_journal_name(UpdateState::Preparing));
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("open journal without delete sharing");
+        assert_eq!(
+            installer.write_update_journal(&journal),
+            Err(LifecycleError::StagingFailed)
+        );
+        drop(lock);
+        assert_eq!(
+            installer
+                .read_update_journal()
+                .expect("read preserved journal")
+                .expect("journal")
+                .state,
+            UpdateState::Preparing
+        );
+        assert!(
+            !installer
+                .lifecycle_root
+                .join(".update-0-preparing.json.next")
+                .exists()
         );
         let _ = remove_owned_path(&root);
     }
