@@ -2681,6 +2681,9 @@ impl WorkspaceSurface {
                     self.market_state.symbol_selection_pending = false;
                     self.connection_state = Some(FeedConnectionState::Disconnected);
                     self.connection_message = Some(message.clone());
+                    self.dom.update(cx, |dom, dom_cx| {
+                        dom.mark_unavailable(dom_cx);
+                    });
                     if swapping {
                         self.restore_coinbase_selection_after_failure(&message, cx);
                     } else {
@@ -2811,6 +2814,12 @@ impl WorkspaceSurface {
         }
         if let Some(product) = self.coinbase_pending_product.take() {
             self.coinbase_product = Some(product);
+            // Price levels belong to one instrument: a product switch drops
+            // the old book back to loading instead of showing BTC levels
+            // under an ETH selection. Interval-only switches keep the book.
+            self.dom.update(cx, |dom, dom_cx| {
+                dom.clear(dom_cx);
+            });
         }
         self.coinbase_pending_sequence = None;
         self.coinbase_switch = if self.chart.is_some() {
@@ -2840,6 +2849,9 @@ impl WorkspaceSurface {
         self.coinbase_pending_product = None;
         self.coinbase_pending_sequence = None;
         self.coinbase_switch = CoinbaseSwitchState::Idle;
+        self.dom.update(cx, |dom, dom_cx| {
+            dom.clear(dom_cx);
+        });
         let restored = product.and_then(|product| {
             self.market_worker
                 .try_select_coinbase(product, interval)
@@ -2951,6 +2963,26 @@ impl WorkspaceSurface {
             self.chart_state_message.clone_from(&message);
         }
         self.connection_state = Some(state);
+        // Depth follows the same honesty rule as the empty panel: a fresh
+        // demand restarts from loading, and only a concrete stop marks the
+        // book unavailable. An engine replacement additionally clears books
+        // from the dead incarnation, whose reset generations would fence
+        // every new frame out forever.
+        match state {
+            FeedConnectionState::Stopped => {
+                self.dom.update(cx, |dom, dom_cx| {
+                    dom.mark_unavailable(dom_cx);
+                });
+            }
+            FeedConnectionState::Recovering
+                if message == engine_market_worker::ENGINE_RESTARTED_MESSAGE =>
+            {
+                self.dom.update(cx, |dom, dom_cx| {
+                    dom.clear(dom_cx);
+                });
+            }
+            _ => {}
+        }
         let ready_action = rithmic_ready_action(
             state,
             &message,

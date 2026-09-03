@@ -128,6 +128,7 @@ impl DomColumnVisibility {
 pub struct ReadOnlyDomView {
     frame: Option<DomFrame>,
     pending_frame: Option<DomFrame>,
+    unavailable: bool,
     last_presented: Option<Instant>,
     presentation_task: Option<Task<()>>,
     theme: AxiusflowTheme,
@@ -141,6 +142,7 @@ impl ReadOnlyDomView {
         Self {
             frame: None,
             pending_frame: None,
+            unavailable: false,
             last_presented: None,
             presentation_task: None,
             theme,
@@ -186,9 +188,24 @@ impl ReadOnlyDomView {
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         let had_frame = self.frame.take().is_some() || self.pending_frame.take().is_some();
+        let was_unavailable = std::mem::replace(&mut self.unavailable, false);
         self.last_presented = None;
         self.presentation_task = None;
-        if had_frame {
+        if had_frame || was_unavailable {
+            cx.notify();
+        }
+    }
+
+    /// Marks depth as known-unavailable after a concrete failure (dead
+    /// worker, stopped provider). The stale frame is dropped so a frozen
+    /// book is never presented as live. Any later frame or demand clears it,
+    /// so the panel returns to loading and then data on recovery.
+    pub fn mark_unavailable(&mut self, cx: &mut Context<Self>) {
+        let had_frame = self.frame.take().is_some() || self.pending_frame.take().is_some();
+        if !self.unavailable || had_frame {
+            self.unavailable = true;
+            self.last_presented = None;
+            self.presentation_task = None;
             cx.notify();
         }
     }
@@ -207,6 +224,7 @@ impl ReadOnlyDomView {
                 || (current.rows.is_empty() && !frame.rows.is_empty())
         });
         self.frame = Some(frame);
+        self.unavailable = false;
         self.last_presented = Some(Instant::now());
         if recenter {
             self.ask_scroll.scroll_to_bottom();
@@ -262,6 +280,7 @@ impl Render for ReadOnlyDomView {
             .frame
             .as_ref()
             .map_or(0, |frame| frame.source_watermark);
+        let empty_copy = empty_book_copy(self.unavailable, self.frame.is_some());
         let ask_scroll = self.ask_scroll.clone();
         let columns = self.columns;
 
@@ -285,7 +304,7 @@ impl Render for ReadOnlyDomView {
                     .children(state.and_then(|state| status_banner(state, watermark, &self.theme)))
                     .child(render_ladder(
                         rows,
-                        state,
+                        empty_copy,
                         columns,
                         &self.theme,
                         &ask_scroll,
@@ -320,9 +339,22 @@ fn render_header(columns: DomColumnVisibility, theme: &AxiusflowTheme) -> impl I
         )
 }
 
+/// Empty-panel copy: loading until the first frame, and the unavailable
+/// verdict only after a concrete failure marked the book dead. An empty
+/// book with no failure behind it is still loading, never an error.
+const fn empty_book_copy(unavailable: bool, has_frame: bool) -> &'static str {
+    if unavailable {
+        "Depth unavailable"
+    } else if has_frame {
+        "Waiting for depth snapshot"
+    } else {
+        "Loading depth…"
+    }
+}
+
 fn render_ladder(
     rows: &[DomRow],
-    state: Option<OrderBookState>,
+    empty_copy: &'static str,
     columns: DomColumnVisibility,
     theme: &AxiusflowTheme,
     ask_scroll: &ScrollHandle,
@@ -343,11 +375,7 @@ fn render_ladder(
                 .justify_center()
                 .text_sm()
                 .text_color(gpui_color(theme.colors.text_secondary))
-                .child(if state.is_none() {
-                    "Depth unavailable"
-                } else {
-                    "Waiting for depth snapshot"
-                }),
+                .child(empty_copy),
         );
     }
 
@@ -675,6 +703,14 @@ mod tests {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    #[test]
+    fn empty_book_reports_loading_until_a_concrete_failure() {
+        assert_eq!(empty_book_copy(false, false), "Loading depth…");
+        assert_eq!(empty_book_copy(false, true), "Waiting for depth snapshot");
+        assert_eq!(empty_book_copy(true, false), "Depth unavailable");
+        assert_eq!(empty_book_copy(true, true), "Depth unavailable");
     }
 
     #[test]

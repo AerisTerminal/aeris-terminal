@@ -47,6 +47,11 @@ const COMMAND_CAPACITY: usize = 32;
 const RETAINED_BAR_CAPACITY: usize = 32_768;
 const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
 const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
+/// Recovery notice sent when the worker observes an engine replacement.
+/// The UI matches on this to reset generation-fenced views back to loading
+/// instead of holding books from a dead engine incarnation.
+pub(crate) const ENGINE_RESTARTED_MESSAGE: &str =
+    "Resident engine restarted; restoring chart demand";
 const EVENT_WAIT: Duration = Duration::from_millis(8);
 /// Engine events one chart drains per tick before yielding to the other charts.
 const MARKET_EVENTS_PER_POLL: usize = 512;
@@ -519,7 +524,7 @@ fn receive_and_apply_event(
             endpoint.publication = None;
             let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
-                message: "Resident engine restarted; restoring chart demand".to_string(),
+                message: ENGINE_RESTARTED_MESSAGE.to_string(),
             });
         }
         return Ok(true);
@@ -971,7 +976,7 @@ fn request_snapshot(
         if poll.reconnected {
             let _ = messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
-                message: "Resident engine restarted; restoring chart demand".to_string(),
+                message: ENGINE_RESTARTED_MESSAGE.to_string(),
             });
         }
         let Some(event) = poll.event else {
