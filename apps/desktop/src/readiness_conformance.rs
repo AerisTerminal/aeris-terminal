@@ -1029,7 +1029,12 @@ mod tests {
 
     #[test]
     fn short_endurance_preserves_continuity_and_bounds() {
-        let evidence = super::collect_endurance(std::time::Duration::from_millis(80))
+        // The window carries scheduling margin: an 80 ms window managed a
+        // single frame on a loaded shared macOS runner, which is runner
+        // starvation rather than a broken loop. The continuity and bounds
+        // assertions below are the actual subject; the frame count only
+        // guards against a vacuous run.
+        let evidence = super::collect_endurance(std::time::Duration::from_millis(320))
             .expect("short endurance evidence passes");
         assert!(evidence.frame_cycles > 1);
         assert_eq!(evidence.stale_or_gapped_publications, 0);
