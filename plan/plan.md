@@ -383,6 +383,15 @@ modules), and the status probe now prints per-provider state to make this
 visible. Next step is maintainer-driven selection in the open window while
 watching the engine state change.
 
+Rithmic entry point found (same day): Rithmic has no in-window switcher in
+this build; it is a separate desktop mode launched with
+`axiusflow_desktop --rithmic-test` (the instrument dialog's Rithmic
+branches render only for Rithmic surfaces). A second desktop was launched
+with that flag alongside the Coinbase window: single engine PID 32852,
+`clients=2` with multi-client isolation holding, and the Rithmic provider
+session establishing (`rithmic:1:gen6`, reconnecting at probe time). The
+Rithmic window is open for maintainer-driven search and selection.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
