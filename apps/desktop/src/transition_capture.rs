@@ -18,7 +18,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 
-use axiusflow_engine_protocol::{InstallProviderInstrument, SeriesCadence, SeriesKey, envelope};
+use axiusflow_engine_protocol::{
+    InstallProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, envelope,
+};
 use axiusflow_local_engine_client::EngineClient;
 use axiusflow_platform_runtime::{
     NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
@@ -1448,6 +1450,17 @@ impl CaptureDriver {
                 if self.snapshot_completes_restoration(recorder) {
                     self.complete_restoration(recorder);
                 }
+            }
+            envelope::Payload::SeriesState(state)
+                if SeriesLoadState::try_from(state.state) == Ok(SeriesLoadState::Failed) =>
+            {
+                if self.current_provider_generation == 0 {
+                    eprintln!(
+                        "[capture] offline demand retired; waiting for native network restoration"
+                    );
+                    return Ok(true);
+                }
+                self.record_loss(recorder);
             }
             envelope::Payload::DemandError(error) => {
                 if self.current_provider_generation == 0 {
