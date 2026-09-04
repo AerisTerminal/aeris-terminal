@@ -5,11 +5,12 @@ not yet qualified — deterministic gates are green on Windows and Linux,
 installed lifecycle is proven complete on both supported targets, and the
 Rithmic credential/session paths are green on every stage the test feed
 populates. Still open: physical transition evidence (producer built and
-unit-proven, no passing run yet), eight-hour endurance (started, incomplete),
-a data-carrying Rithmic feed (test plant publishes no prints), Windows/Linux
-window/input/DPI/pacing runs, and maintainer approval for phase 5. macOS native
+unit-proven, no passing run yet), a data-carrying Rithmic feed (test plant
+publishes no prints), and Windows/Linux window/input/DPI/pacing runs. The
+maintainer has moved the eight-hour endurance campaign to the final production
+qualification after phase 5, so it is not a phase-4 exit gate. macOS native
 qualification is explicitly deferred and is not a phase-4 blocker. Phase 5
-remains blocked.
+starts after the remaining phase-4 integration and native qualification closes.
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
@@ -201,11 +202,13 @@ release approval.
    Windows capture external physical scanout at 60, 120, and 144 Hz, including single-GPU,
    hybrid-GPU, and virtual-display configurations. Equivalent platform-appropriate pacing evidence
    is required on Linux.
-7. **Run endurance and fault campaigns.** Complete at least eight continuous hours per supported OS with the
-   real release desktop, resident engine, and live public market path. Inject bounded IPC pressure,
-   provider silence, reconnects, process replacement, disk-full/locked-file failures, and device
-   loss where supported. Record memory high-water marks, queue overflow/recovery, frame pacing,
-   worker shutdown, and terminal errors.
+7. **Prepare the final endurance and fault campaign.** Keep the bounded probes and evidence
+   recorder ready, but execute the qualifying eight continuous hours per supported OS after phase
+   5 against the complete production candidate. That final campaign covers the release desktop,
+   resident engine, update and login/account pipelines, and live public market path. It injects
+   bounded IPC pressure, provider silence, reconnects, process replacement,
+   disk-full/locked-file failures, and device loss where supported, recording memory high-water
+   marks, queue overflow/recovery, frame pacing, worker shutdown, and terminal errors.
 8. **Prevent recurrence.** Make all automated gates required for `main`, retain provenance-bound
    physical and credentialed results for release approval, and add architecture checks that reject
    unguarded Unix-only filesystem or process assumptions in shared platform code.
@@ -1407,6 +1410,16 @@ clean. This is interactive Windows product evidence; the formal offline-first
 transition recorder, suspend/resume, mixed-DPI, and frame-pacing evidence remain
 separate exit-gate work.
 
+Endurance sequencing decision (same day, maintainer-approved): the eight-hour
+Windows and Linux campaigns are final production-release qualification, not a
+phase-4 prerequisite. They will run after phase 5 so one uninterrupted campaign
+can exercise the completed update, authentication, account, billing,
+entitlement, resident-engine, and market-data paths together. The earlier
+incomplete endurance attempt remains historical evidence only. Phase 4 still
+requires its deterministic, installed-lifecycle, provider, transition,
+window/input/DPI, and pacing evidence; this sequencing decision does not permit
+a production-ready claim before the final endurance campaigns pass.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows
@@ -1420,14 +1433,14 @@ and Linux:
 - offline, network, power, display, session, and process lifecycle transitions recover correctly;
 - window controls, input, mixed-DPI behavior, and physical frame pacing meet their acceptance
   thresholds;
-- the eight-hour release endurance run completes without unbounded growth, silent data loss,
-  stuck loading, leaked workers, or an unexplained process exit; and
 - the evidence names the exact source revision, dependency lock, package, executable hashes,
   hardware/display configuration, OS version, and test result.
 
-Phase 4 cannot pass, phase 5 cannot begin, and a production release cannot be approved while this
-supported-platform gate is incomplete. macOS may become supported only after the same gate passes
-on native Apple hardware; until then it remains explicitly unqualified and does not block the
+Phase 4 cannot pass and phase 5 cannot begin while this supported-platform gate is incomplete. A
+production release additionally requires the post-phase-5 eight-hour endurance campaign on both
+supported targets to complete without unbounded growth, silent data loss, stuck loading, leaked
+workers, or an unexplained process exit. macOS may become supported only after the same native gate
+passes on Apple hardware; until then it remains explicitly unqualified and does not block the
 Windows/Linux product.
 
 ## Target ownership after migration
