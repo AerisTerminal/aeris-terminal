@@ -288,6 +288,29 @@ enum Phase {
     Complete,
 }
 
+impl Phase {
+    const fn operator_message(self) -> &'static str {
+        match self {
+            Self::AwaitingOfflineStart | Self::StartupRecovery => {
+                "reconnect internet and hold it until Coinbase recovery is confirmed"
+            }
+            Self::AwaitingNetworkLoss => {
+                "offline startup recovered; disconnect internet now and hold it offline"
+            }
+            Self::NetworkRecovery => {
+                "network loss confirmed; reconnect internet and hold it until recovery"
+            }
+            Self::AwaitingPowerLoss => {
+                "network recovery confirmed; put Windows to sleep, then resume"
+            }
+            Self::PowerRecovery => {
+                "resume confirmed; keep internet connected until Coinbase recovery completes"
+            }
+            Self::Complete => "all transition recoveries confirmed; capture is completing",
+        }
+    }
+}
+
 /// Evidence state machine for one physical capture.
 ///
 /// The machine never synthesizes transitions: it only records observed
@@ -1313,6 +1336,7 @@ impl CaptureDriver {
         use std::sync::atomic::Ordering::Relaxed;
         let mut demanded = false;
         let mut initial_demand_sent = false;
+        let mut announced_phase = None;
         let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             if Instant::now() >= deadline {
@@ -1340,6 +1364,10 @@ impl CaptureDriver {
             }
             for _ in 0..dropped.swap(0, std::sync::atomic::Ordering::Relaxed) {
                 recorder.note_observer_overflow();
+            }
+            if announced_phase != Some(recorder.phase) {
+                eprintln!("[operator] {}", recorder.phase.operator_message());
+                announced_phase = Some(recorder.phase);
             }
             if !demanded && (!initial_demand_sent || online.load(Relaxed)) {
                 // Coinbase demand is installed once while offline. The
