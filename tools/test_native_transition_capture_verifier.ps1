@@ -116,7 +116,7 @@ try {
     $executableHash = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash
     $report = [ordered]@{
         schema_version = 2
-        evidence_scope = "rithmic_test_physical_native_transition_capture"
+        evidence_scope = "coinbase_public_physical_native_transition_capture"
         platform = "windows"
         completion_state = "completed"
         checkpoint_sequence = 12
@@ -129,8 +129,8 @@ try {
         executable_path = $executablePath
         executable_sha256 = $executableHash
         callback_source = "NativeNetworkMonitor_and_NativePowerMonitor"
-        shipping_mode = "rithmic_test_existing_native_vault_worker"
-        credential_source = "native_vault"
+        shipping_mode = "coinbase_public_existing_engine_worker"
+        credential_source = "public_feed_none"
         credentials_embedded = $false
         transitions_triggered_by_capture = $false
         initial_network_state = "unavailable"
@@ -152,7 +152,7 @@ try {
     Write-Json $artifact $report
     $manifest = [ordered]@{
         schema_version = 1
-        evidence_scope = "rithmic_test_native_transition_capture_manifest"
+        evidence_scope = "coinbase_public_native_transition_capture_manifest"
         source_revision = $sourceRevision
         clean_worktree = $true
         cargo_lock_path = $cargoLockPath

@@ -1492,8 +1492,11 @@ smoke independently reached `rithmic_ticker_login=passed` and then reported
 `symbol_search_read_failed=Rithmic session deadline expired`, confirming the
 current external boundary. Adapter tests pass 112/112, warnings-denied clippy
 passes, the workspace build passes, and the complete workspace test rerun
-passes. This closes the unbounded catalog-command behavior but does not count
-as data-carrying Rithmic evidence.
+passes. The native-transition verifier self-test fixture now matches the
+Coinbase public-feed capture schema, and the endurance, physical-pacing, and
+native-transition evidence-tool self-test suites all pass. This closes the
+unbounded catalog-command behavior but does not count as data-carrying Rithmic
+evidence.
 
 ### Supported-platform exit gate
 
