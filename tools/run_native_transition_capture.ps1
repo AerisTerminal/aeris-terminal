@@ -9,7 +9,7 @@ application records the real offline initial probe, reconnect, wait for the char
 and DOM to become ready, perform a separate physical online-to-offline-to-online
 cycle, then perform one physical suspend/resume cycle. Close the application
 normally only after both later scenarios rehydrate. The existing shipping worker
-loads credentials only from the native vault.
+uses Coinbase's public feed and requires no credential material.
 #>
 [CmdletBinding()]
 param(
@@ -124,7 +124,7 @@ $null = Read-Host "Physically disconnect all network access, then press Enter to
 
 $manifest = [ordered]@{
     schema_version = 1
-    evidence_scope = "rithmic_test_native_transition_capture_manifest"
+    evidence_scope = "coinbase_public_native_transition_capture_manifest"
     source_revision = $sourceRevision
     clean_worktree = $true
     cargo_lock_path = $cargoLockPath

@@ -1,6 +1,6 @@
 //! Physical native-transition capture recorder.
 //!
-//! This module owns the evidence state machine for the Rithmic
+//! This module owns the evidence state machine for the public Coinbase
 //! offline-startup, network-offline, and suspend/resume capture. It is
 //! deliberately free of UI, monitor, and worker handles: the capture
 //! command feeds it observed facts (monitor callbacks, provider
@@ -18,9 +18,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 
-use axiusflow_engine_protocol::{
-    InstallProviderInstrument, SearchProviderInstruments, SeriesCadence, SeriesKey, envelope,
-};
+use axiusflow_engine_protocol::{InstallProviderInstrument, SeriesCadence, SeriesKey, envelope};
 use axiusflow_local_engine_client::EngineClient;
 use axiusflow_platform_runtime::{
     NativeNetworkMonitor, NativePowerMonitor, NetworkEvent, PowerEvent,
@@ -29,14 +27,14 @@ use axiusflow_platform_runtime::{
 /// Schema version pinned by the external verifier.
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 /// Evidence scope pinned by the external verifier.
-pub const REPORT_EVIDENCE_SCOPE: &str = "rithmic_test_physical_native_transition_capture";
+pub const REPORT_EVIDENCE_SCOPE: &str = "coinbase_public_physical_native_transition_capture";
 /// Monitor surface pinned by the external verifier.
 pub const REPORT_CALLBACK_SOURCE: &str = "NativeNetworkMonitor_and_NativePowerMonitor";
-/// Shipping path pinned by the external verifier: the existing Rithmic
-/// worker backed by native-vault credentials, never a parallel harness.
-pub const REPORT_SHIPPING_MODE: &str = "rithmic_test_existing_native_vault_worker";
+/// Shipping path pinned by the external verifier: the existing engine-owned
+/// Coinbase worker, never a parallel harness.
+pub const REPORT_SHIPPING_MODE: &str = "coinbase_public_existing_engine_worker";
 /// Credential origin pinned by the external verifier.
-pub const REPORT_CREDENTIAL_SOURCE: &str = "native_vault";
+pub const REPORT_CREDENTIAL_SOURCE: &str = "public_feed_none";
 
 /// One applied native-monitor observation. Network availability changes
 /// bracket the offline and network phases; suspend/resume brackets the
@@ -1039,11 +1037,8 @@ fn file_sha256_hex(path: &std::path::Path) -> Result<String, String> {
 // visual recovery on their own desktop window in parallel; this command
 // records the data-plane evidence.
 
-/// Exact Rithmic contract the capture demands. An exact proven-referenceable
-/// symbol keeps the evidence deterministic; the nightly soak (which resolves
-/// front-month roots) covers rollover separately. Update when the venue
-/// delists it: the capture fails closed naming the symbol otherwise.
-const CAPTURE_SYMBOL: &str = "MNQU6";
+/// Stable public Coinbase product used for native transition evidence.
+const CAPTURE_SYMBOL: &str = "BTC-USD";
 /// Sixty-second bars: a bucket rolls visibly inside the capture window, so
 /// handoff continuity is exercised by every transition.
 const CAPTURE_INTERVAL_SECONDS: u32 = 60;
@@ -1055,9 +1050,6 @@ const CAPTURE_DEADLINE: Duration = Duration::from_mins(30);
 const OBSERVER_QUEUE: usize = 64;
 /// Silence window proving the retired generation stopped producing.
 const RETIRED_SILENCE: Duration = Duration::from_secs(5);
-/// Consecutive demand attempts before the capture concludes the venue or
-/// account is not serving tonight instead of hammering the plant.
-const MAXIMUM_DEMAND_ATTEMPTS: u32 = 8;
 
 /// Outcome of one monitor observer step.
 enum MonitorOutcome {
@@ -1223,9 +1215,6 @@ fn spawn_monitor(
 struct CaptureDriver {
     client: EngineClient,
     consumer_id: u64,
-    demand_cycle: u64,
-    demand_instrument_id: String,
-    demand_entitlement: String,
     installed: bool,
     snapshot_seen: bool,
     live_seen: bool,
@@ -1251,9 +1240,6 @@ impl CaptureDriver {
         Ok(Self {
             client,
             consumer_id,
-            demand_cycle: 0,
-            demand_instrument_id: String::new(),
-            demand_entitlement: String::new(),
             installed: false,
             snapshot_seen: false,
             live_seen: false,
@@ -1274,35 +1260,26 @@ impl CaptureDriver {
     /// mid-attempt, and the next attempt retries with a fresh generation.
     /// Every attempt and outcome is printed: the operator watches this
     /// console while performing the physical sequence.
-    fn demand(
-        &mut self,
-        online_now: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<bool, String> {
-        use std::sync::atomic::Ordering::Relaxed;
-        let online_at_entry = online_now.load(Relaxed);
-        eprintln!(
-            "[demand] attempt {} ({} at entry)",
-            self.demand_cycle.saturating_add(1),
-            if online_at_entry { "online" } else { "offline" }
-        );
-        // Fatal only when online both at entry and at expiry: any physical
-        // move mid-attempt retries instead.
-        let online = || online_at_entry && online_now.load(Relaxed);
-        let Some(instrument) = self.search_contract(&online)? else {
-            eprintln!("[demand] search stalled while offline; waiting for reconnect");
-            return Ok(false);
+    fn demand(&mut self) -> Result<(), String> {
+        let instrument = InstallProviderInstrument {
+            provider: "coinbase".to_string(),
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            provider_symbol: CAPTURE_SYMBOL.to_string(),
+            display_symbol: "BTC/USD".to_string(),
+            venue_id: "coinbase".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+            entitlement_id: "crypto_public_realtime".to_string(),
         };
-        if !self.select_contract(&online, &instrument)? {
-            eprintln!("[demand] selection stalled while offline; waiting for reconnect");
-            return Ok(false);
-        }
         self.client.install_provider_instrument(instrument)?;
         let series = SeriesKey {
-            provider: "rithmic".to_string(),
-            instrument_id: self.demand_instrument_id.clone(),
+            provider: "coinbase".to_string(),
+            instrument_id: "instrument:coinbase:btc:usd".to_string(),
             cadence_value: CAPTURE_INTERVAL_SECONDS,
             definition_revision: 1,
-            entitlement_id: self.demand_entitlement.clone(),
+            entitlement_id: "crypto_public_realtime".to_string(),
             cadence: SeriesCadence::FixedSeconds as i32,
         };
         self.client
@@ -1310,128 +1287,7 @@ impl CaptureDriver {
         self.client.set_market_visibility(self.consumer_id, true)?;
         self.history_open = true;
         self.live_open = true;
-        Ok(true)
-    }
-
-    fn search_contract(
-        &mut self,
-        online: &impl Fn() -> bool,
-    ) -> Result<Option<InstallProviderInstrument>, String> {
-        self.demand_cycle = self.demand_cycle.saturating_add(1);
-        self.client
-            .search_provider_instruments(SearchProviderInstruments {
-                consumer_id: self.consumer_id,
-                search_generation: self.demand_cycle,
-                provider: "rithmic".to_string(),
-                query: CAPTURE_SYMBOL.to_string(),
-                maximum_results: 16,
-            })?;
-        let deadline = Instant::now() + Duration::from_secs(45);
-        loop {
-            if Instant::now() >= deadline {
-                if online() {
-                    return Err(format!(
-                        "Rithmic catalog search returned no {CAPTURE_SYMBOL} contract"
-                    ));
-                }
-                return Ok(None);
-            }
-            match self
-                .client
-                .receive_market_event_timeout(Duration::from_millis(200))
-            {
-                Ok(Some((_, envelope::Payload::ProviderInstrumentSearchResult(result)))) => {
-                    if let Some(summary) = result
-                        .instruments
-                        .iter()
-                        .find(|candidate| candidate.symbol == CAPTURE_SYMBOL)
-                    {
-                        break Ok(Some(InstallProviderInstrument {
-                            provider: "rithmic".to_string(),
-                            session_generation: result.provider_generation,
-                            selection_generation: 1,
-                            instrument_id: format!(
-                                "rithmic-test:{}:{}",
-                                summary.exchange, summary.symbol
-                            ),
-                            provider_symbol: summary.symbol.clone(),
-                            display_symbol: summary.symbol.clone(),
-                            venue_id: summary.exchange.clone(),
-                            price_scale: 2,
-                            quantity_scale: 0,
-                            entitlement_id: format!(
-                                "rithmic-test:{}:{}",
-                                summary.exchange, summary.symbol
-                            ),
-                        }));
-                    }
-                    return Err(format!(
-                        "Rithmic catalog lists no {CAPTURE_SYMBOL} contract tonight"
-                    ));
-                }
-                Ok(Some((_, envelope::Payload::DemandError(error)))) => {
-                    return Err(format!("Rithmic catalog demand failed: {}", error.detail));
-                }
-                Ok(Some((_, envelope::Payload::ProviderCatalogRejected(_)))) => {
-                    // Generation advance retired this attempt engine-side:
-                    // re-demand immediately instead of running out the
-                    // deadline. A short breath avoids hammering a session
-                    // that is still restarting.
-                    std::thread::sleep(Duration::from_secs(2));
-                    return Ok(None);
-                }
-                Ok(_) | Err(_) => {}
-            }
-        }
-    }
-
-    fn select_contract(
-        &mut self,
-        online: &impl Fn() -> bool,
-        instrument: &InstallProviderInstrument,
-    ) -> Result<bool, String> {
-        self.client.select_provider_instrument(
-            axiusflow_engine_protocol::SelectProviderInstrument {
-                consumer_id: self.consumer_id,
-                selection_generation: self.demand_cycle,
-                search_generation: self.demand_cycle,
-                provider: "rithmic".to_string(),
-                symbol: instrument.provider_symbol.clone(),
-                exchange: instrument.venue_id.clone(),
-                entitlement_id: instrument.entitlement_id.clone(),
-            },
-        )?;
-        self.demand_instrument_id
-            .clone_from(&instrument.instrument_id);
-        self.demand_entitlement
-            .clone_from(&instrument.entitlement_id);
-        let deadline = Instant::now() + Duration::from_secs(45);
-        loop {
-            if Instant::now() >= deadline {
-                if online() {
-                    return Err(format!("Rithmic selection never resolved {CAPTURE_SYMBOL}"));
-                }
-                return Ok(false);
-            }
-            match self
-                .client
-                .receive_market_event_timeout(Duration::from_millis(200))
-            {
-                Ok(Some((_, envelope::Payload::ProviderInstrumentSelection(selection)))) => {
-                    if selection.instrument.is_some() {
-                        return Ok(true);
-                    }
-                }
-                Ok(Some((_, envelope::Payload::DemandError(error)))) => {
-                    return Err(format!("Rithmic selection failed: {}", error.detail));
-                }
-                Ok(Some((_, envelope::Payload::ProviderCatalogRejected(_)))) => {
-                    std::thread::sleep(Duration::from_secs(2));
-                    return Ok(false);
-                }
-                Ok(_) | Err(_) => {}
-            }
-        }
+        Ok(())
     }
 
     fn ready_snapshot(&self) -> ReadySnapshot {
@@ -1455,10 +1311,6 @@ impl CaptureDriver {
     ) -> Result<(), String> {
         use std::sync::atomic::Ordering::Relaxed;
         let mut demanded = false;
-        // Consecutive demand attempts are capped: a capture that cannot
-        // establish demand is evidence of a venue/account outage, not a
-        // license to hammer the plant indefinitely.
-        let mut attempts: u32 = 0;
         let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             if Instant::now() >= deadline {
@@ -1488,17 +1340,11 @@ impl CaptureDriver {
                 recorder.note_observer_overflow();
             }
             if !demanded {
-                // Demand retries across the offline window with fresh
-                // generations; only a stall online at both entry and expiry
-                // is fatal.
-                attempts = attempts.saturating_add(1);
-                if attempts > MAXIMUM_DEMAND_ATTEMPTS {
-                    return Err(
-                        "Rithmic demand could not be established; the venue or account is not serving tonight"
-                            .to_string(),
-                    );
-                }
-                demanded = self.demand(&online)?;
+                // Coinbase demand is installed once while offline. The
+                // engine owns bounded provider recovery and carries this
+                // demand into the fresh session after connectivity returns.
+                self.demand()?;
+                demanded = true;
                 continue;
             }
             if let Ok(Some((_, payload))) = self
@@ -1569,13 +1415,13 @@ impl CaptureDriver {
                 // waiting out the deadline would prove nothing. Details stay
                 // engine-side; only the fact travels further.
                 if self.current_provider_generation == 0 {
-                    return Err("Rithmic demand failed before first chart data".to_string());
+                    return Err("Coinbase demand failed before first chart data".to_string());
                 }
                 self.record_loss(recorder);
             }
             envelope::Payload::Fault(_) => {
                 if self.current_provider_generation == 0 {
-                    return Err("Rithmic demand faulted before first chart data".to_string());
+                    return Err("Coinbase demand faulted before first chart data".to_string());
                 }
                 self.record_loss(recorder);
             }
