@@ -305,6 +305,10 @@ fn install_symbol(
     let instrument = selection
         .instrument
         .expect("selection carries an instrument");
+    eprintln!(
+        "[select] provider={} instrument={} venue={} entitlement={}",
+        provider, instrument.instrument_id, instrument.venue_id, instrument.entitlement_id
+    );
     service
         .install_provider_instrument(&instrument)
         .expect("instrument installs");
