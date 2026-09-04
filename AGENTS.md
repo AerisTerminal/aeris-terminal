@@ -31,6 +31,11 @@ These constraints are load-bearing:
 - Loading always resolves to data, recovery/retry, or an actionable terminal error.
 - Never log credentials, tokens, or raw provider payloads. Preserve native credential storage and
   zeroizing memory where established.
+- Provider credentials live only in the native vault (DPAPI/Keychain/Secret Service) and are
+  provisioned only through the interactive terminal prompter, never pasted into chat, email,
+  environment, CI secrets, or the repo. CI and live gates use test/paper credentials exclusively;
+  production credentials never enter a scheduled job, and the single live session belongs to the
+  resident engine or one designated probe, never both at once.
 - Workspace-wide `unsafe_code` remains forbidden.
 - The UI thread performs no network, disk, process, or shutdown work. Background workers do not
   mutate GPUI state directly.

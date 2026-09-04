@@ -1585,6 +1585,53 @@ mod tests {
     }
 
     #[test]
+    fn rithmic_live_surface_stays_on_test_credentials() {
+        // Production provider credentials must never reach CI, the repo, or
+        // logs: every live Rithmic entry point below is pinned to the test
+        // vault scope, and production-credential markers are rejected so a
+        // future production key cannot leak into gates silently. Provisioning
+        // happens only through the interactive terminal prompter, never
+        // pasted secrets.
+        for (path, marker) in [
+            ("apps/engine/tests/live_market_soak.rs", "rithmic-test"),
+            (
+                "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
+                "RITHMIC_TEST_VAULT_KEY",
+            ),
+            (
+                "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
+                "RITHMIC_TEST_VAULT_KEY",
+            ),
+        ] {
+            let content = manifest(path);
+            assert!(
+                content.contains(marker),
+                "{path} lost its test-credential scope {marker}"
+            );
+        }
+        for path in [
+            "apps/engine/tests/live_market_soak.rs",
+            "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
+            "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
+            ".github/workflows/live_market_gates.yml",
+        ] {
+            let content = manifest(path);
+            for forbidden in [
+                "RITHMIC_PROD",
+                "rithmic-prod",
+                "production credential",
+                "production password",
+                "prod password",
+            ] {
+                assert!(
+                    !content.contains(forbidden),
+                    "{path} must not reference production credentials ({forbidden})"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn live_market_gates_stay_on_self_hosted_runners() {
         let workflow = manifest(".github/workflows/live_market_gates.yml");
         for runner in [
