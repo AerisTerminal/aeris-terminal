@@ -1307,6 +1307,35 @@ all pass (engine 113 passed plus one release-only ignore; naming 39 of 39;
 desktop main 147 of 147). Live Rithmic and physical evidence were not rerun in
 this code batch. The exit gate stays closed and phase 5 remains blocked.
 
+Linux installed-lifecycle qualification (same day, this batch): the existing
+Hyper-V Ubuntu runner is healthy (Ubuntu 24.04, Linux 6.8.0-138, static 16 GB
+RAM plus 8 GB swap, 92 GB free during the run), and the `workspace-linux` job
+in run `33884151294` passed formatting, warnings-denied clippy, workspace
+build, the provenance-bound release pair, all workspace tests, and the market
+data performance baseline on commit `eb48330`. A separate native campaign on
+that same clean checkout built two release identities (generations 9201 and
+9202) and exercised the real stable launcher. Fresh install passed the
+authenticated desktop/engine readiness check; update activated generation
+9202 and removed generation 9201, leaving one pointer, manifest, version, and
+no journal; `--remove-all-local-data` then removed the install, lifecycle,
+staging, native-vault, and application data inventory and passed the external
+absence audit. No Axiusflow process remains, while the runner and Secret
+Service units remain active. Evidence is retained on the VM at
+`local-data/evidence/linux-installed-lifecycle-20260904/report.json` (report
+SHA256 `8e4be3cd78d5ab768fbdbe2339920d61ef1f9a0d5811661c8c7b1444663a16c1`;
+launcher `2726d850be4c133ccdb2d5847f1435b19665f6884dfa2e94277ab03a918f54d3`,
+desktop `df36e95d9a49fe29e26dfee6fa6467a1cf72756982e56ed456ebc1477a67ead2`,
+engine `208648a5c6296ec6596487b6e21101e5d6093cf31a105f61bced662294a7a54f`).
+The first harness attempt failed closed on an externally serialized signature;
+the second stopped before signing on a temporary dependency-version mismatch.
+The passing run used the repository's own manifest types and signing function;
+all throwaway signing helpers and the ephemeral private key were deleted.
+This closes the Linux installed install/update/complete-uninstall evidence gap,
+but a Hyper-V VM is not physical Linux display, input, or frame-pacing proof.
+The macOS hardware, physical transition/rendering matrix, complete eight-hour
+endurance, and data-carrying Rithmic-feed blockers remain; phase 5 stays
+blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
