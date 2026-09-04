@@ -1420,6 +1420,20 @@ requires its deterministic, installed-lifecycle, provider, transition,
 window/input/DPI, and pacing evidence; this sequencing decision does not permit
 a production-ready claim before the final endurance campaigns pass.
 
+Windows physical transition follow-up (same day, maintainer-observed): the
+matching `8fea927` release pair was launched offline and exercised through
+internet restoration, a separate loss/restoration cycle, and Windows
+suspend/resume. The maintainer observed clean chart, DOM, connection-state,
+and application recovery after every transition. The provenance recorder did
+not complete and is not cited as passing formal evidence: its data-plane driver
+is coupled to the unavailable Rithmic Test catalog/feed, while the Windows
+connectivity-hint source on this host remained `Unavailable` after Wi-Fi and a
+direct Coinbase request had recovered (`HTTP 200`; Network Location Awareness
+was stopped). This is a recorder/platform-signal qualification gap, not a
+reproduced product recovery failure. Native callback evidence remains open
+until the recorder uses the available public provider path and a truthful
+Windows signal without synthesizing callbacks from provider success.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows
