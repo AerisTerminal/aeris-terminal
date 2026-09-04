@@ -22,7 +22,7 @@ jobs:
       # private chart dependency below must be fetched through the git CLI.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Authenticate private chart dependency
         # Job-scoped credential rewrite (see ci.yml): per-job temp file via
         # GITHUB_ENV, never the runner owner's persistent global git config.
@@ -52,7 +52,7 @@ jobs:
           --ignored --nocapture live_coinbase_streams_across_timeframe_and_symbol_switches
       - name: Upload the recorded gate
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: live-market-gate-coinbase
           path: .cache/evidence/live_market_gate_coinbase.json
@@ -73,7 +73,7 @@ jobs:
       # private chart dependency below must be fetched through the git CLI.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Restore licensed Rithmic kit
         # The kit is licensed material kept permanently outside Git. A
         # self-hosted credentialed runner keeps a copy at the conventional
@@ -124,7 +124,7 @@ jobs:
           --ignored --nocapture live_rithmic_streams_across_timeframe_and_instrument_switches
       - name: Upload the recorded gate
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: live-market-gate-rithmic
           path: .cache/evidence/live_market_gate_rithmic.json

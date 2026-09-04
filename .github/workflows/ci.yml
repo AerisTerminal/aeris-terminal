@@ -28,7 +28,7 @@ jobs:
       # private chart dependency below must be fetched through the git CLI.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Authenticate private chart dependency
         # Job-scoped credential rewrite: the config lives in a per-job temp
         # file exported via GITHUB_ENV, so it applies to every later cargo
@@ -86,7 +86,7 @@ jobs:
             sha256sum target/release/axiusflow_desktop target/release/axiusflow_engine
           } > target/release/release-pair.provenance
       - name: Upload release pair
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-pair-linux
           path: |
@@ -99,7 +99,7 @@ jobs:
       - name: Check local market-data performance
         run: cargo run -p axiusflow_market_data_performance --release -- .cache/evidence/market_data_performance.json 100000
       - name: Upload market-data baseline
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: market-data-performance-linux
           path: .cache/evidence/market_data_performance.json
@@ -118,7 +118,7 @@ jobs:
       # private chart dependency below must be fetched through the git CLI.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Authenticate private chart dependency
         # Job-scoped credential rewrite: the config lives in a per-job temp
         # file exported via GITHUB_ENV, so it applies to every later cargo
@@ -163,7 +163,7 @@ jobs:
             "$engine  target/release/axiusflow_engine.exe"
           ) | Set-Content target/release/release-pair.provenance -Encoding utf8NoBOM
       - name: Upload release pair
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-pair-windows
           path: |
@@ -176,7 +176,7 @@ jobs:
       - name: Check local market-data performance
         run: cargo run -p axiusflow_market_data_performance --release -- .cache/evidence/market_data_performance.json 100000
       - name: Upload market-data baseline
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: market-data-performance-windows
           path: .cache/evidence/market_data_performance.json
