@@ -1298,6 +1298,7 @@ impl CaptureDriver {
             entitlement_id: "crypto_public_realtime".to_string(),
         };
         self.client.install_provider_instrument(instrument)?;
+        self.installed = true;
         let series = SeriesKey {
             provider: "coinbase".to_string(),
             instrument_id: "instrument:coinbase:btc:usd".to_string(),
@@ -1423,23 +1424,30 @@ impl CaptureDriver {
                 self.installed = true;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
+                self.installed = true;
                 self.snapshot_seen = true;
                 self.history_open = false;
-                let restored = self.note_generation(recorder, snapshot.provider_generation);
-                if restored && self.snapshot_completes_restoration(recorder) {
+                self.note_generation(recorder, snapshot.provider_generation);
+                if self.snapshot_completes_restoration(recorder) {
                     self.complete_restoration(recorder);
                 }
             }
             envelope::Payload::SeriesUpdate(update) => {
+                self.installed = true;
                 self.live_seen = true;
                 self.live_open = false;
-                let restored = self.note_generation(recorder, update.provider_generation);
-                if restored && self.snapshot_completes_restoration(recorder) {
+                self.note_generation(recorder, update.provider_generation);
+                if self.snapshot_completes_restoration(recorder) {
                     self.complete_restoration(recorder);
                 }
             }
-            envelope::Payload::OrderBookSnapshot(_) => {
+            envelope::Payload::OrderBookSnapshot(snapshot) => {
+                self.installed = true;
                 self.depth_seen = true;
+                self.note_generation(recorder, snapshot.provider_generation);
+                if self.snapshot_completes_restoration(recorder) {
+                    self.complete_restoration(recorder);
+                }
             }
             envelope::Payload::DemandError(error) => {
                 if self.current_provider_generation == 0 {
@@ -1464,9 +1472,9 @@ impl CaptureDriver {
         Ok(false)
     }
 
-    fn note_generation(&mut self, recorder: &mut TransitionRecorder, generation: u64) -> bool {
+    fn note_generation(&mut self, recorder: &mut TransitionRecorder, generation: u64) {
         if generation == 0 {
-            return false;
+            return;
         }
         if generation > self.current_provider_generation {
             // A newer provider generation flowing after a loss is the
@@ -1481,12 +1489,10 @@ impl CaptureDriver {
                 let restored = self.ready_snapshot();
                 recorder.observe_restoration(fresh, at_ms, restored);
                 recorder.observe_authenticated(at_ms);
-                return true;
             }
         } else if self.retirement_pending && generation == self.retired_generation {
             self.last_old_generation_ms = unix_millis_now();
         }
-        false
     }
 
     fn snapshot_completes_restoration(&self, recorder: &TransitionRecorder) -> bool {
@@ -1497,6 +1503,7 @@ impl CaptureDriver {
             Phase::AwaitingOfflineStart | Phase::Complete
         ) && self.installed
             && self.live_seen
+            && self.depth_seen
     }
 
     fn complete_restoration(&mut self, recorder: &mut TransitionRecorder) {
