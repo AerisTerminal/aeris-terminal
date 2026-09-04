@@ -119,7 +119,7 @@ are the intended binaries. If live verification is impossible, state exactly wha
 ## Self-hosted CI (zero-cost; GitHub-hosted runners are forbidden)
 
 The account carries no paid Actions quota, so every lane runs on maintainer hardware. The
-`*-latest` ban, the three-lane matrix, and the job-scoped credential rule are pinned in
+`*-latest` ban, the two supported-target lanes, and the job-scoped credential rule are pinned in
 `tools/naming_check`; the full saga lives in `plan/plan.md`. What a new session must know:
 
 - Windows lane: runner `axiusflow-windows` in `C:\actions-runner`, labels `axiusflow,windows`,
@@ -130,8 +130,10 @@ The account carries no paid Actions quota, so every lane runs on maintainer hard
   a systemd service that auto-starts with the VM. Key-only SSH with `~/.ssh/axiusflow_linux`;
   the IP is DHCP-assigned, so resolve it per session (ARP scan for the `00-15-5d` NIC).
   Hyper-V automatic checkpoints stay off; start the VM after host reboot.
-- macOS lane has no runner (Apple hardware required, none exists): it queues to timeout and
-  fails closed. macOS is not a supported target until a native lane runs.
+- macOS native qualification is explicitly deferred because no Apple hardware exists. Keep
+  macOS-specific code guarded, warning-clean where cross-target tooling permits, and free of known
+  source defects, but do not add an unserviceable required CI lane or claim native support until an
+  Apple runner completes the same release gates.
 - Runner registration tokens expire after one hour and registration is case-sensitive on the
   repo path; the maintainer issues them from Settings, Actions, Runners.
 - Validate workflow YAML with a real parser before push: a run with zero jobs is a parse

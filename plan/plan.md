@@ -1,14 +1,15 @@
 # Axiusflow Architecture and Authentication Migration Plan
 
 Status: phases 1 through 3 implemented; phase 4 substantially built but
-not yet qualified — deterministic gates green on Windows and Linux,
-installed lifecycle proven complete on Windows, Rithmic credential and
-session paths green on every stage the test feed populates. Still open:
-physical transition evidence (producer built and unit-proven, no passing
-run yet), 8-hour endurance (started, incomplete), macOS lane (no Apple
-hardware), a data-carrying Rithmic feed (test plant publishes no prints),
-Linux installed-lifecycle campaign, window/input/DPI/pacing runs, and
-maintainer approval for phase 5. Phase 5 remains blocked.
+not yet qualified — deterministic gates are green on Windows and Linux,
+installed lifecycle is proven complete on both supported targets, and the
+Rithmic credential/session paths are green on every stage the test feed
+populates. Still open: physical transition evidence (producer built and
+unit-proven, no passing run yet), eight-hour endurance (started, incomplete),
+a data-carrying Rithmic feed (test plant publishes no prints), Windows/Linux
+window/input/DPI/pacing runs, and maintainer approval for phase 5. macOS native
+qualification is explicitly deferred and is not a phase-4 blocker. Phase 5
+remains blocked.
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
@@ -32,7 +33,8 @@ The completed system has:
 - durable local history behind `local_history`;
 - signed, transactional release delivery that activates one matching desktop/engine build and removes the superseded build;
 - a complete native uninstall that removes every Axiusflow-owned local artifact and credential;
-- equal end-to-end product support and release qualification on Windows, macOS, and Linux;
+- equal end-to-end product support and release qualification on Windows and Linux, with macOS
+  source portability retained but native support deferred until Apple hardware exists;
 - an engine-owned user session backed by standard native OIDC;
 - Axiusflow-owned account, billing, and entitlement truth; and
 - no dependency by the desktop or market core on Better Auth, Stripe, Dodo, Cloudflare, or provider wire types.
@@ -54,11 +56,11 @@ The completed system has:
 - An update is not complete until the new release passes a desktop/engine handshake and superseded binaries and staging files are removed. An uninstall is not complete while any Axiusflow-owned process, service registration, credential, market-data file, cache, setting, log, or update artifact remains.
 - `unsafe_code` remains forbidden workspace-wide.
 
-## Cross-platform support is a product requirement
+## Supported-platform qualification is a product requirement
 
-Windows, macOS, and Linux are equal, first-class Axiusflow targets. The intended outcome is not
-source compatibility, successful cross-compilation, or a desktop window that opens on all three
-platforms. It is complete end-to-end support for the real installed product on every target:
+Windows and Linux are equal, first-class Axiusflow targets. The intended outcome is not source
+compatibility, successful cross-compilation, or a desktop window that merely opens. It is complete
+end-to-end support for the real installed product on both supported targets:
 
 - the packaged desktop starts the matching resident engine and authenticates over the native IPC
   transport;
@@ -72,19 +74,26 @@ platforms. It is complete end-to-end support for the real installed product on e
   desktop close, user sign-out, and operating-system shutdown resolve safely;
 - bounded queues, cancellation, generation fencing, security, and data-integrity invariants remain
   intact; and
-- diagnostics and actionable terminal errors are available on every target without exposing secret
-  material.
+- diagnostics and actionable terminal errors are available on both supported targets without
+  exposing secret material.
 
-A change that passes Linux CI while breaking or leaving Windows or macOS unverified is not an
-acceptable development result. Neither "works on Linux" nor "compiles on all targets" is evidence
-of cross-platform support. Platform-specific code, tests, packaging, and physical validation are
-part of the feature itself and must land in the same completed batch. A target may be called
-supported only when its required automated and native release gates pass.
+A change that passes Linux CI while breaking or leaving Windows unverified, or vice versa, is not
+an acceptable development result. Neither "works on Linux" nor "compiles on both targets" is
+evidence of supported-platform qualification. Platform-specific code, tests, packaging, and
+physical validation are part of the feature itself and must land in the same completed batch. A
+target may be called supported only when its required automated and native release gates pass.
+
+macOS is a deferred target, not a supported release target and not a phase-4 gate. Shared and
+macOS-specific source must remain deliberately guarded and free of known defects; cross-target
+checks should run where the available toolchain can execute them. That evidence is not native
+qualification, and Axiusflow must not claim macOS support until Apple hardware runs the complete
+release gate. This deferral removes an unavailable machine from the critical path without turning
+an expectation of portability into an unsupported compatibility promise.
 
 ### Required development policy
 
 - Every pull request and push to `main` runs formatting, clippy, build, and deterministic workspace
-  tests on Windows, macOS, and Linux. All three jobs are required and none may be represented by a
+  tests on Windows and Linux. Both jobs are required and neither may be represented by a
   cross-compile-only substitute.
 - Any change to GPUI, Nucleus Charts, IPC, filesystem persistence, process lifecycle, credential
   storage, networking, power handling, packaging, or native window behavior must include the
@@ -95,8 +104,9 @@ supported only when its required automated and native release gates pass.
 - Required native tests cannot remain permanently ignored. Credentialed or physical tests may run
   in scheduled/self-hosted lanes, but their most recent provenance-bound result must be available
   and current before a release is approved.
-- A failing target blocks completion. Do not weaken, suppress, skip, or relabel the failure as a
-  platform limitation unless the maintainer explicitly removes that target from product support.
+- A failing supported target blocks completion. Do not weaken, suppress, skip, or relabel the
+  failure as a platform limitation unless the maintainer explicitly removes that target from
+  product support.
 - Platform parity is evaluated at the user-visible contract. Implementations should use the native
   mechanism appropriate to each OS rather than forcing one OS's mechanism onto the others.
 
@@ -174,23 +184,24 @@ release approval.
    Windows file flush, atomic replacement, sharing, reparse-point, locked-file, and reboot-required
    behavior instead of attempting Unix directory `fsync`. Repair every lifecycle fixture to use
    native executable names and paths.
-3. **Establish the three-OS CI matrix.** Add required Windows and macOS jobs alongside Linux for the
-   complete deterministic workspace gates. Keep platform-specific failures visible and fail the
-   workflow if any target is skipped unexpectedly.
-4. **Qualify installed release pairs.** Build release packages on each OS; launch the packaged
-   desktop; verify its executable identity and the matching engine release/generation; exercise
+3. **Establish the supported-OS CI matrix.** Run required Windows and Linux jobs for the complete
+   deterministic workspace gates. Keep platform-specific failures visible and fail the workflow if
+   either supported target is skipped unexpectedly. macOS stays outside the required matrix until
+   Apple hardware exists.
+4. **Qualify installed release pairs.** Build release packages on each supported OS; launch the
+   packaged desktop; verify its executable identity and the matching engine release/generation; exercise
    authenticated IPC, workspace restoration, Coinbase, available credentialed Rithmic, clean
    shutdown, relaunch, update, rollback, and uninstall.
-5. **Qualify native transitions.** On each target, capture offline startup, loss and restoration of
-   network availability, suspend/resume, display disconnect/reconnect, DPI and monitor changes,
+5. **Qualify native transitions.** On each supported target, capture offline startup, loss and
+   restoration of network availability, suspend/resume, display disconnect/reconnect, DPI and monitor changes,
    desktop close modes, session sign-out, and OS shutdown. Require data continuity or explicit
    bounded recovery after every transition.
 6. **Qualify rendering and input.** Exercise native window controls, IME, keyboard, pointer,
    drag/resize, fullscreen, multi-monitor movement, mixed DPI, and long chart/DOM interaction. On
    Windows capture external physical scanout at 60, 120, and 144 Hz, including single-GPU,
    hybrid-GPU, and virtual-display configurations. Equivalent platform-appropriate pacing evidence
-   is required on macOS and Linux.
-7. **Run endurance and fault campaigns.** Complete at least eight continuous hours per OS with the
+   is required on Linux.
+7. **Run endurance and fault campaigns.** Complete at least eight continuous hours per supported OS with the
    real release desktop, resident engine, and live public market path. Inject bounded IPC pressure,
    provider silence, reconnects, process replacement, disk-full/locked-file failures, and device
    loss where supported. Record memory high-water marks, queue overflow/recovery, frame pacing,
@@ -1336,10 +1347,30 @@ The macOS hardware, physical transition/rendering matrix, complete eight-hour
 endurance, and data-carrying Rithmic-feed blockers remain; phase 5 stays
 blocked.
 
-### Cross-platform exit gate
+Supported-target decision (same day, maintainer-approved): Windows and Linux
+are the phase-4 and production-release targets. Native macOS qualification is
+deferred because no Apple hardware is available; it no longer blocks phase 4
+and the unserviceable `workspace-macos` job is removed instead of queueing to
+timeout on every push. This is not a claim that macOS works: the existing
+CoreGraphics, Keychain, LaunchAgent, Unix IPC, lifecycle, and guarded source
+paths remain in the tree and must stay clean under available static and
+cross-target checks, but only a future native Apple lane can promote macOS to
+a supported target. `tools/naming_check` now pins the two required self-hosted
+lanes, their complete deterministic gates, provenance artifacts, scoped
+credentials, and the absence of a required macOS job. Historical three-OS
+results above remain accurate execution history and are not retroactively
+relabelled. The phase-4 exit gate below now applies to Windows and Linux. The
+edited workflow parsed successfully with exactly `workspace-linux` and
+`workspace-windows`; the naming policy passed all 39 tests, the complete
+Windows workspace format/clippy/build/test gate passed, and
+`axiusflow_platform_runtime` passed warning-denied Clippy for
+`x86_64-apple-darwin`. That Apple-target check is source-portability evidence
+only, not native macOS qualification.
 
-Cross-platform stabilization is complete only when all of the following are true for Windows,
-macOS, and Linux:
+### Supported-platform exit gate
+
+Supported-platform stabilization is complete only when all of the following are true for Windows
+and Linux:
 
 - the complete deterministic workspace gates pass on native runners;
 - no required platform or installed-binary test is ignored or represented by another OS;
@@ -1355,7 +1386,9 @@ macOS, and Linux:
   hardware/display configuration, OS version, and test result.
 
 Phase 4 cannot pass, phase 5 cannot begin, and a production release cannot be approved while this
-cross-platform gate is incomplete.
+supported-platform gate is incomplete. macOS may become supported only after the same gate passes
+on native Apple hardware; until then it remains explicitly unqualified and does not block the
+Windows/Linux product.
 
 ## Target ownership after migration
 

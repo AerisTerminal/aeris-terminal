@@ -1421,12 +1421,11 @@ mod tests {
     }
 
     #[test]
-    fn three_os_deterministic_gates_remain_required() {
+    fn supported_os_deterministic_gates_remain_required() {
         let workflow = manifest(".github/workflows/ci.yml");
         for runner in [
             "runs-on: [self-hosted, axiusflow, linux]",
             "runs-on: [self-hosted, axiusflow, windows]",
-            "runs-on: [self-hosted, axiusflow, macos]",
         ] {
             assert!(
                 workflow.contains(runner),
@@ -1454,12 +1453,12 @@ mod tests {
         );
         assert_eq!(
             workflow.matches("GIT_CONFIG_GLOBAL").count(),
-            3,
+            2,
             "every native workspace lane must scope its chart credential to the job"
         );
         assert_eq!(
             workflow.matches("Remove job-scoped git credential").count(),
-            3,
+            2,
             "every native workspace lane must delete its job-scoped credential file"
         );
         for gate in [
@@ -1471,17 +1470,15 @@ mod tests {
         ] {
             assert_eq!(
                 workflow.matches(gate).count(),
-                3,
+                2,
                 "every native OS lane must run {gate}"
             );
         }
         for artifact in [
             "market-data-performance-linux",
             "market-data-performance-windows",
-            "market-data-performance-macos",
             "release-pair-linux",
             "release-pair-windows",
-            "release-pair-macos",
         ] {
             assert!(
                 workflow.contains(artifact),
@@ -1490,19 +1487,19 @@ mod tests {
         }
         assert_eq!(
             workflow.matches("release-pair.provenance").count(),
-            6,
+            4,
             "each native release pair must record and upload its provenance manifest"
         );
         assert_eq!(
             workflow
                 .matches("Validate private chart credential")
                 .count(),
-            3,
+            2,
             "every native workspace lane must preflight private chart access"
         );
         assert_eq!(
             workflow.matches("if-no-files-found: error").count(),
-            3,
+            2,
             "every native release-pair upload must fail when its binaries are absent"
         );
         for identity in [
@@ -1511,10 +1508,15 @@ mod tests {
         ] {
             assert_eq!(
                 workflow.matches(identity).count(),
-                3,
+                2,
                 "every native release pair must embed {identity}"
             );
         }
+        assert!(
+            !workflow.contains("workspace-macos")
+                && !workflow.contains("runs-on: [self-hosted, axiusflow, macos]"),
+            "deferred macOS qualification must not leave an unserviceable required lane queued"
+        );
         assert!(
             !workflow.contains("continue-on-error"),
             "CI must keep platform-specific failures visible"
