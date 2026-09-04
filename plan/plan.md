@@ -1223,6 +1223,13 @@ after login churn as well as the wedge; a 45-minute quiet period with a
 single recovery probe distinguishes them. The exit gate stays closed
 and phase 5 remains blocked.
 
+Wedge fix proven live (same day): after the quiet period the stale
+engine still timed out search, while a fresh engine on the fixed binary
+passed search/select/demand within a minute on the same credential —
+failing only at the known empty feed. Not throttle, not lockout, not
+credential: the pre-fix catalog session genuinely wedges. The exit gate
+stays closed and phase 5 remains blocked.
+
 Empty-token gitconfig pollution, second occurrence (same day): push
 failed with `Invalid username or token` again — global
 `url.https://x-access-token:@github.com/.insteadOf` (EMPTY token) plus
