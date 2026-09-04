@@ -5870,12 +5870,6 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 .expect("transition capture completes");
             return Ok(None);
         }
-        #[cfg(feature = "diagnostics")]
-        if argument == "--capture-native-transitions" {
-            transition_capture::run_transition_capture_command(arguments)
-                .expect("transition capture completes");
-            return Ok(None);
-        }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");

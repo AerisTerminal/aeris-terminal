@@ -1281,6 +1281,32 @@ Open external blockers unchanged: Apple hardware, data-carrying Rithmic
 feed, Linux lifecycle campaign, window/input/DPI/pacing runs, phase 5
 approval. The exit gate stays closed and phase 5 remains blocked.
 
+Resume audit and catalog terminal-recovery fix (same day, this batch): the
+checkout began clean and synchronized (`main == origin/main` at `a38fcf7`).
+Phases 1 through 3 remain complete; phase 4 remains the active phase, with
+the cross-platform exit gate still blocked by macOS hardware, Linux installed
+lifecycle proof, physical transition/rendering/input/DPI/pacing evidence, a
+complete eight-hour endurance run, and a data-carrying Rithmic feed. The local
+evidence inventory confirms the earlier endurance attempt stopped after
+16,862,253 ms (about 4h41m) with `completion_state=incomplete`; the latest
+native-transition attempt exited 101 after 16 seconds without a report, so
+neither is counted as passing evidence. Its orphaned resident engine was shut
+down through the supported authenticated command, leaving no engine process.
+
+The adjacent Rithmic catalog gap recorded above is fixed: terminal callbacks
+and retry activation now advance the provider generation and publish an
+actionable rejection for every pending search or selection before clearing
+the bounded maps. Consumers can re-demand immediately instead of remaining
+silent until their 45-second outer deadline. The existing environment-advance
+path uses the same helper, and a regression proves generation advance, both
+command-domain rejections, and complete pending-map retirement. An accidental
+duplicate `--capture-native-transitions` argument branch was removed without
+changing the CLI contract. Windows verification: formatting, workspace clippy
+with warnings denied, workspace build, and the complete workspace test suite
+all pass (engine 113 passed plus one release-only ignore; naming 39 of 39;
+desktop main 147 of 147). Live Rithmic and physical evidence were not rerun in
+this code batch. The exit gate stays closed and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

@@ -189,24 +189,19 @@ fn run_catalog_session(
             &mut retries,
         ) {
             Ok(true) => {
-                generation = next_generation(generation, generation);
                 if searches.is_empty() && selections.is_empty() {
+                    generation = next_generation(generation, generation);
                     continue;
                 }
-                // Pending catalog demand cannot survive a generation
-                // advance: fail it fast with an actionable rejection so the
-                // consumer re-demands on the fresh generation instead of
-                // hanging, then restart the session so a connection is
-                // actually established (a session that starts offline never
-                // dials on its own).
-                reject_pending_catalog(
+                // Retire pending demand before restarting an offline-born
+                // session so consumers can re-demand on the fresh generation.
+                generation = retire_pending_catalog_generation(
                     channels.catalog_publications,
                     generation,
                     &mut searches,
                     &mut selections,
                 );
-                let _ = runtime.stop();
-                return CatalogSessionExit::Retry(generation);
+                return retry_catalog_session(&mut runtime, generation);
             }
             Ok(false) => {}
             Err(()) => {
@@ -256,26 +251,43 @@ fn run_catalog_session(
                 };
             }
         }
-        while events.has_ready() {
-            match try_recv_rithmic_event(&mut runtime, events, &mut retries, Instant::now()) {
-                Ok(Some(AppliedRithmicEvent::RetryScheduled(_)) | None) => break,
-                Ok(Some(AppliedRithmicEvent::TerminalFailure { .. })) | Err(_) => {
-                    let _ = runtime.stop();
-                    return CatalogSessionExit::Retry(generation);
-                }
-                Ok(Some(AppliedRithmicEvent::Semantic(_))) => {}
-            }
+        if catalog_session_failed(&mut runtime, events, &mut retries) {
+            generation = retire_pending_catalog_generation(
+                channels.catalog_publications,
+                generation,
+                &mut searches,
+                &mut selections,
+            );
+            return retry_catalog_session(&mut runtime, generation);
         }
         if retries
             .retry_due(&mut runtime, Instant::now())
             .is_ok_and(|started| started.is_some())
         {
-            generation = next_generation(generation, generation);
-            searches.clear();
-            selections.clear();
+            generation = retire_pending_catalog_generation(
+                channels.catalog_publications,
+                generation,
+                &mut searches,
+                &mut selections,
+            );
         }
         thread::sleep(EVENT_WAIT);
     }
+}
+
+fn catalog_session_failed(
+    runtime: &mut Runtime,
+    events: &RithmicProviderEvents,
+    retries: &mut RithmicRetryScheduler,
+) -> bool {
+    while events.has_ready() {
+        match try_recv_rithmic_event(runtime, events, retries, Instant::now()) {
+            Ok(Some(AppliedRithmicEvent::RetryScheduled(_)) | None) => break,
+            Ok(Some(AppliedRithmicEvent::TerminalFailure { .. })) | Err(_) => return true,
+            Ok(Some(AppliedRithmicEvent::Semantic(_))) => {}
+        }
+    }
+    false
 }
 
 fn poll_catalog_environment(
@@ -564,6 +576,25 @@ fn reject_pending_catalog(
     }
     searches.clear();
     selections.clear();
+}
+
+/// Retires one provider generation and resolves every command that can no
+/// longer receive a callback from it. Consumers can then re-demand on the
+/// fresh generation instead of waiting for their outer deadline.
+fn retire_pending_catalog_generation(
+    publications: &SyncSender<RithmicCatalogEvent>,
+    generation: u64,
+    searches: &mut BTreeMap<usize, u64>,
+    selections: &mut BTreeMap<usize, u64>,
+) -> u64 {
+    let generation = next_generation(generation, generation);
+    reject_pending_catalog(publications, generation, searches, selections);
+    generation
+}
+
+fn retry_catalog_session(runtime: &mut Runtime, generation: u64) -> CatalogSessionExit {
+    let _ = runtime.stop();
+    CatalogSessionExit::Retry(generation)
 }
 
 fn reject_deferred_selection(
@@ -1304,7 +1335,7 @@ mod tests {
 
     use super::{
         EnvironmentState, RithmicCatalogEvent, next_generation, publish_catalog_callback,
-        reject_deferred_selection, reject_pending_catalog,
+        reject_deferred_selection, reject_pending_catalog, retire_pending_catalog_generation,
     };
     use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
     use axiusflow_rithmic_protocol_adapter::{
@@ -1421,6 +1452,29 @@ mod tests {
                 && rejection.command_generation == 3
         ));
         assert!(published.try_recv().is_err());
+    }
+
+    #[test]
+    fn retry_advances_generation_and_rejects_every_pending_catalog_command() {
+        let (publications, published) = mpsc::sync_channel(2);
+        let mut searches = BTreeMap::from([(2, 41)]);
+        let mut selections = BTreeMap::from([(3, 42)]);
+
+        let generation =
+            retire_pending_catalog_generation(&publications, 9, &mut searches, &mut selections);
+
+        assert_eq!(generation, 10);
+        assert!(searches.is_empty());
+        assert!(selections.is_empty());
+        let rejections = [
+            published.recv().expect("search rejection is published"),
+            published.recv().expect("selection rejection is published"),
+        ];
+        assert!(rejections.iter().all(|event| matches!(
+            event,
+            RithmicCatalogEvent::Rejected { rejection, .. }
+                if rejection.provider_generation == Some(10)
+        )));
     }
 
     #[test]
