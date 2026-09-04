@@ -21,15 +21,17 @@ use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
 use loopback::{LoopbackListener, validate_callback_query};
-use oidc::{AuthorizationRequest, authorization_url, exchange_code, link_subject};
+use oidc::{
+    AuthorizationRequest, OidcEndpoints, authorization_url, discover, exchange_code, link_subject,
+};
 use pkce::{PkceVerifier, generate_oauth_random};
 
 /// How long one login transaction waits for the browser callback.
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Native public client identifier registered with the control plane.
 pub const NATIVE_CLIENT_ID: &str = "axiusflow-desktop";
-/// Default control-plane issuer until deployment configuration lands.
-pub const DEFAULT_AUTH_ISSUER: &str = "https://auth.axiusflow.com";
+/// Default control-plane OIDC issuer (the Better Auth mount).
+pub const DEFAULT_AUTH_ISSUER: &str = "https://auth.axiusflow.com/api/auth";
 
 const ACCOUNT_VAULT_SERVICE: &str = "com.axiusflow.account";
 const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
@@ -101,6 +103,7 @@ struct ServiceState {
 pub struct AccountService {
     config: AccountServiceConfig,
     state: Arc<Mutex<ServiceState>>,
+    endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
 }
 
 impl AccountService {
@@ -120,7 +123,26 @@ impl AccountService {
                 pending: None,
                 last_generation: 0,
             })),
+            endpoints: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Resolves cached OIDC endpoints, refreshing them from discovery once.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted actionable error when discovery fails.
+    pub fn oidc_endpoints(&self) -> Result<OidcEndpoints, String> {
+        if let Ok(cached) = self.endpoints.lock()
+            && let Some(endpoints) = cached.clone()
+        {
+            return Ok(endpoints);
+        }
+        let discovered = discover(&self.config.issuer)?;
+        if let Ok(mut cached) = self.endpoints.lock() {
+            *cached = Some(discovered.clone());
+        }
+        Ok(discovered)
     }
 
     /// Starts one generation-fenced login transaction and returns the
@@ -155,8 +177,9 @@ impl AccountService {
         let nonce = generate_oauth_random()?;
         let listener = LoopbackListener::bind()?;
         let redirect_uri = listener.redirect_uri();
+        let endpoints = self.oidc_endpoints()?;
         let url = authorization_url(&AuthorizationRequest {
-            issuer: &self.config.issuer,
+            endpoints: &endpoints,
             client_id: &self.config.client_id,
             redirect_uri: &redirect_uri,
             state: &oauth_state,
@@ -317,17 +340,19 @@ impl AccountService {
                 pending.nonce.clone(),
             )
         };
-        let outcome = exchange_code(
-            &self.config.issuer,
-            &self.config.client_id,
-            &redirect_uri,
-            code,
-            &verifier,
-            &nonce,
-        )
-        .and_then(|tokens| {
-            link_subject(&self.config.issuer, &tokens.access, &tokens.subject)
-                .map(|(account, plan)| (account, plan, tokens.refresh))
+        let outcome = self.oidc_endpoints().and_then(|endpoints| {
+            exchange_code(
+                &endpoints,
+                &self.config.client_id,
+                &redirect_uri,
+                code,
+                &verifier,
+                &nonce,
+            )
+            .and_then(|tokens| {
+                link_subject(&endpoints, &tokens.access, &tokens.subject)
+                    .map(|(account, plan)| (account, plan, tokens.refresh))
+            })
         });
         match outcome {
             Ok((account_id, plan, refresh)) => {
@@ -542,10 +567,29 @@ mod tests {
     }
 
     fn service() -> AccountService {
-        AccountService::new(
-            AccountServiceConfig::try_new("https://auth.axiusflow.com", "axiusflow-desktop")
-                .expect("test config builds"),
-        )
+        use super::oidc::OidcEndpoints;
+
+        let service = AccountService::new(
+            AccountServiceConfig::try_new(
+                "https://auth.axiusflow.com/api/auth",
+                "axiusflow-desktop",
+            )
+            .expect("test config builds"),
+        );
+        // Stub discovery so unit tests never touch the network.
+        service
+            .endpoints
+            .lock()
+            .expect("endpoint cache locks")
+            .replace(OidcEndpoints {
+                issuer: "https://auth.axiusflow.com/api/auth".to_string(),
+                authorization_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/authorize"
+                    .to_string(),
+                token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
+                jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
+                link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
+            });
+        service
     }
 
     #[test]

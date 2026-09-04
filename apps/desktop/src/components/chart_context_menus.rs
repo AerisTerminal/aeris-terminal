@@ -633,6 +633,7 @@ pub(super) fn chart_settings_menu_layer(
     menu: &ChartContextMenu,
     state: LifecyclePresentation,
     error: Option<&str>,
+    account: &axiusflow_desktop::account::AccountMenuState,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
@@ -701,6 +702,16 @@ pub(super) fn chart_settings_menu_layer(
                 !pending,
                 theme,
             ))
+            .child(menu_separator(theme))
+            .child(settings_account_row(terminal, &account.presentation, theme))
+            .children(account.error.as_deref().map(|error| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(gpui_color(colors.danger))
+                    .child(error.to_string())
+            }))
             .children(error.map(|error| {
                 div()
                     .px_3()
@@ -809,6 +820,58 @@ pub(super) fn settings_toggle_row(
                         switch_terminal.update(cx, setting.toggle());
                     }
                 }),
+        )
+}
+
+pub(super) fn settings_account_row(
+    terminal: &Entity<TerminalApp>,
+    account: &axiusflow_desktop::account::AccountPresentation,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let action_terminal = terminal.clone();
+    let cancellable = account.action == "Waiting for browser";
+    let interactive = !account.pending && (account.action == "Sign in" || cancellable);
+    let status = if account.detail.is_empty() {
+        format!("{} · {}", account.state, account.plan)
+    } else {
+        account.detail.clone()
+    };
+    div()
+        .id("settings_account")
+        .occlude()
+        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_3()
+        .text_sm()
+        .when(!interactive, |row| {
+            row.text_color(gpui_color(colors.text_muted))
+        })
+        .when(interactive, |row| {
+            row.cursor_pointer()
+                .hover(|row| row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            if interactive {
+                action_terminal.update(cx, |_, terminal_cx| {
+                    if cancellable {
+                        TerminalApp::cancel_sign_in(terminal_cx);
+                    } else {
+                        TerminalApp::request_sign_in(terminal_cx);
+                    }
+                });
+            }
+            cx.stop_propagation();
+        })
+        .child(account.action)
+        .child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child(status),
         )
 }
 

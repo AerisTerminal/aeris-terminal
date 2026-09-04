@@ -3,8 +3,21 @@
 //! The desktop sends bounded IPC commands and opens system-browser URLs
 //! supplied by the engine. It owns no cloud HTTP client, refresh token,
 //! payment secret, entitlement truth, or persistent identity data. Browser
-//! opening runs on the calling background thread; callers must keep it off
-//! the UI thread.
+//! opening runs on the account worker thread; the UI thread only polls
+//! presentation state.
+//!
+//! One [`DesktopAccount`] session is shared by all desktop windows, matching
+//! the engine-owned session. It owns a single background worker thread with
+//! bounded channels, mirroring the lifecycle client.
+
+use std::{
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
+    time::{Duration, Instant},
+};
 
 use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthorization};
 use axiusflow_local_engine_client::EngineClient;
@@ -97,6 +110,36 @@ pub fn account_action_label(view: &AccountView) -> &'static str {
     }
 }
 
+/// Presentation snapshot used when no account session is installed.
+#[must_use]
+pub fn unavailable_presentation() -> AccountPresentation {
+    AccountPresentation {
+        action: "Sign in",
+        state: "Sign-in unavailable",
+        plan: "No plan",
+        detail: String::new(),
+        pending: false,
+    }
+}
+
+/// Owned settings-menu state for one account session.
+#[derive(Clone, Debug)]
+pub struct AccountMenuState {
+    /// Row presentation snapshot.
+    pub presentation: AccountPresentation,
+    /// Latest redacted account error, if any.
+    pub error: Option<String>,
+}
+
+/// Menu state used when no account session is installed.
+#[must_use]
+pub fn unavailable_menu_state() -> AccountMenuState {
+    AccountMenuState {
+        presentation: unavailable_presentation(),
+        error: None,
+    }
+}
+
 /// Human-readable plan label for one sanitized internal plan identity.
 /// Unknown values stay generic: vendor price IDs never reach this boundary.
 #[must_use]
@@ -111,9 +154,324 @@ pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
     }
 }
 
+/// Bounded account worker command.
+#[derive(Clone, Copy, Debug)]
+enum AccountRequest {
+    BeginLogin { client_id: u64, generation: u64 },
+    CancelLogin { generation: u64 },
+    RefreshStatus,
+}
+
+/// Bounded account worker outcome.
+#[derive(Debug)]
+enum AccountResponse {
+    Authorized,
+    Status(AccountView),
+    Cancelled(AccountView),
+}
+
+/// Presentation snapshot for account rendering.
+#[derive(Clone, Debug)]
+pub struct AccountPresentation {
+    /// Action label for the settings row.
+    pub action: &'static str,
+    /// State label for the settings row.
+    pub state: &'static str,
+    /// Plan label for the settings row.
+    pub plan: &'static str,
+    /// Redacted engine detail for the settings row.
+    pub detail: String,
+    /// Whether an IPC request is in flight.
+    pub pending: bool,
+}
+
+struct AccountShared {
+    client_id: u64,
+    generation: AtomicU64,
+    pending: AtomicBool,
+    version: AtomicU64,
+    view: Mutex<AccountView>,
+    error: Mutex<Option<String>>,
+    last_status_poll: Mutex<Instant>,
+    last_seen_version: Mutex<u64>,
+    requests: SyncSender<AccountRequest>,
+}
+
+fn signed_out_view() -> AccountView {
+    AccountView {
+        state: AccountSessionState::SignedOut as i32,
+        account_id: String::new(),
+        plan_id: String::new(),
+        detail: String::new(),
+        request_generation: 0,
+    }
+}
+
+/// One desktop-owned account session shared by all windows.
+#[derive(Clone)]
+pub struct DesktopAccount {
+    shared: Arc<AccountShared>,
+}
+
+static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
+static INSTALL_LOCK: Mutex<()> = Mutex::new(());
+
+/// How often the UI refreshes the engine account view while authorizing.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+impl DesktopAccount {
+    /// Installs the shared account session once per desktop process.
+    ///
+    /// The first install wins; subsequent calls return the installed
+    /// session unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the background account client cannot start.
+    pub fn install(client_id: u64) -> Result<Self, String> {
+        if let Some(installed) = INSTALLED_ACCOUNT.get() {
+            return Ok(installed.clone());
+        }
+        let _guard = INSTALL_LOCK
+            .lock()
+            .map_err(|_| "account session install failed".to_string())?;
+        if let Some(installed) = INSTALLED_ACCOUNT.get() {
+            return Ok(installed.clone());
+        }
+        let session = Self::spawn(client_id)?;
+        let _ = INSTALLED_ACCOUNT.set(session);
+        INSTALLED_ACCOUNT
+            .get()
+            .cloned()
+            .ok_or_else(|| "account session install failed".to_string())
+    }
+
+    /// Returns the installed shared session, if any.
+    #[must_use]
+    pub fn shared() -> Option<Self> {
+        INSTALLED_ACCOUNT.get().cloned()
+    }
+
+    fn spawn(client_id: u64) -> Result<Self, String> {
+        let (request_tx, request_rx) = mpsc::sync_channel(2);
+        let (result_tx, result_rx) = mpsc::sync_channel(2);
+        std::thread::Builder::new()
+            .name("axiusflow-account-client".to_string())
+            .spawn(move || run_account_client(&request_rx, &result_tx))
+            .map_err(|_| "desktop account client could not start".to_string())?;
+        let shared = Arc::new(AccountShared {
+            client_id,
+            generation: AtomicU64::new(0),
+            pending: AtomicBool::new(false),
+            version: AtomicU64::new(0),
+            view: Mutex::new(signed_out_view()),
+            error: Mutex::new(None),
+            last_status_poll: Mutex::new(Instant::now()),
+            last_seen_version: Mutex::new(0),
+            requests: request_tx,
+        });
+        let poller = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("axiusflow-account-poller".to_string())
+            .spawn(move || {
+                for response in result_rx {
+                    apply_account_response(&poller, response);
+                }
+            })
+            .map_err(|_| "desktop account client could not start".to_string())?;
+        Ok(Self { shared })
+    }
+
+    /// Returns the owned settings-menu state for rendering.
+    #[must_use]
+    pub fn menu_state(&self) -> AccountMenuState {
+        AccountMenuState {
+            presentation: self.presentation(),
+            error: self.error(),
+        }
+    }
+
+    /// Returns the current presentation snapshot for rendering.
+    #[must_use]
+    pub fn presentation(&self) -> AccountPresentation {
+        let view = self
+            .shared
+            .view
+            .lock()
+            .map_or_else(|_| signed_out_view(), |view| view.clone());
+        AccountPresentation {
+            action: account_action_label(&view),
+            state: account_state_label(
+                AccountSessionState::try_from(view.state).unwrap_or(AccountSessionState::SignedOut),
+            ),
+            plan: sanitized_plan_label(&view.plan_id),
+            detail: view.detail.clone(),
+            pending: self.shared.pending.load(Ordering::Acquire),
+        }
+    }
+
+    /// Returns the latest redacted account error, if any.
+    #[must_use]
+    pub fn error(&self) -> Option<String> {
+        self.shared
+            .error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
+    }
+
+    /// Starts one engine-owned login transaction and opens the browser URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a request is already in flight or the worker
+    /// cannot be reached. The browser opens on the worker thread.
+    pub fn request_sign_in(&self) -> Result<(), String> {
+        if self.shared.pending.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.shared
+            .requests
+            .try_send(AccountRequest::BeginLogin {
+                client_id: self.shared.client_id,
+                generation,
+            })
+            .map_err(|_| "sign-in request is already pending".to_string())?;
+        self.shared.pending.store(true, Ordering::Release);
+        if let Ok(mut error) = self.shared.error.lock() {
+            error.take();
+        }
+        Ok(())
+    }
+
+    /// Cancels the pending engine-owned login transaction.
+    ///
+    /// The worker thread stays blocked on the loopback socket until the
+    /// browser completes or the engine transaction times out; engine state
+    /// clears immediately, so retired callbacks cannot sign the user in.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the worker cannot be reached.
+    pub fn request_cancel(&self) -> Result<(), String> {
+        let generation = self.shared.generation.load(Ordering::Acquire);
+        self.shared
+            .requests
+            .try_send(AccountRequest::CancelLogin { generation })
+            .map_err(|_| "sign-in cancellation is already pending".to_string())?;
+        Ok(())
+    }
+
+    /// Applies worker results and refreshes the engine view while
+    /// authorizing. Returns whether presentation changed.
+    #[must_use]
+    pub fn poll(&self) -> bool {
+        let mut changed = false;
+        let version = self.shared.version.load(Ordering::Acquire);
+        if let Ok(mut seen) = self.shared.last_seen_version.lock()
+            && *seen != version
+        {
+            *seen = version;
+            changed = true;
+        }
+        let authorizing = self
+            .shared
+            .view
+            .lock()
+            .is_ok_and(|view| view.state == AccountSessionState::Authorizing as i32);
+        if authorizing && !self.shared.pending.load(Ordering::Acquire) {
+            let due = self
+                .shared
+                .last_status_poll
+                .lock()
+                .map_or(true, |last| last.elapsed() >= STATUS_POLL_INTERVAL);
+            if due
+                && self
+                    .shared
+                    .requests
+                    .try_send(AccountRequest::RefreshStatus)
+                    .is_ok()
+                && let Ok(mut last) = self.shared.last_status_poll.lock()
+            {
+                *last = Instant::now();
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+fn apply_account_response(shared: &AccountShared, response: Result<AccountResponse, String>) {
+    match response {
+        Ok(AccountResponse::Authorized) => {
+            // The engine holds the Authorizing view; the browser is open.
+            // Status polling picks up the outcome.
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(AccountResponse::Status(view) | AccountResponse::Cancelled(view)) => {
+            shared.pending.store(false, Ordering::Release);
+            if let Ok(mut current) = shared.view.lock() {
+                *current = view;
+            }
+            if let Ok(mut error) = shared.error.lock() {
+                error.take();
+            }
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        Err(error) => {
+            shared.pending.store(false, Ordering::Release);
+            if let Ok(mut slot) = shared.error.lock() {
+                *slot = Some(error);
+            }
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+fn run_account_client(requests: &Receiver<AccountRequest>, results: &SyncSender<AccountResult>) {
+    while let Ok(request) = requests.recv() {
+        let response = handle_account_request(request);
+        if results.send(response).is_err() {
+            return;
+        }
+    }
+}
+
+type AccountResult = Result<AccountResponse, String>;
+
+fn handle_account_request(request: AccountRequest) -> AccountResult {
+    let mut client =
+        axiusflow_local_engine_client::sibling_engine_executable().and_then(|executable| {
+            axiusflow_local_engine_client::connect_or_start_engine(&executable)
+        })?;
+    match request {
+        AccountRequest::BeginLogin {
+            client_id,
+            generation,
+        } => {
+            // The engine holds the Authorizing view and expiry; the browser
+            // is already open on this thread.
+            let _ = start_login(&mut client, client_id, generation)?;
+            Ok(AccountResponse::Authorized)
+        }
+        AccountRequest::CancelLogin { generation } => {
+            let view = cancel_login(&mut client, generation)?;
+            Ok(AccountResponse::Cancelled(view))
+        }
+        AccountRequest::RefreshStatus => {
+            let view = fetch_account_status(&mut client)?;
+            Ok(AccountResponse::Status(view))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{account_action_label, account_state_label, sanitized_plan_label};
+    use super::{
+        DesktopAccount, account_action_label, account_state_label, sanitized_plan_label,
+        unavailable_menu_state,
+    };
     use axiusflow_engine_protocol::{AccountSessionState, AccountView};
 
     fn view(state: AccountSessionState) -> AccountView {
@@ -186,5 +544,27 @@ mod tests {
         assert_eq!(sanitized_plan_label(""), "No plan");
         assert_eq!(sanitized_plan_label("pro"), "Pro");
         assert_eq!(sanitized_plan_label("price_123"), "Unknown plan");
+    }
+
+    #[test]
+    fn unavailable_menu_state_invites_sign_in() {
+        let menu = unavailable_menu_state();
+        assert_eq!(menu.presentation.action, "Sign in");
+        assert_eq!(menu.presentation.state, "Sign-in unavailable");
+        assert!(menu.error.is_none());
+    }
+
+    #[test]
+    fn installed_session_starts_signed_out_and_poll_is_quiet() {
+        // Install spawns worker threads but performs no IPC until requested.
+        let session = DesktopAccount::install(u64::from(std::process::id()))
+            .expect("account session installs");
+        assert!(!session.poll());
+        let presentation = session.presentation();
+        assert_eq!(presentation.action, "Sign in");
+        assert!(!presentation.pending);
+        assert!(session.error().is_none());
+        let menu = session.menu_state();
+        assert_eq!(menu.presentation.action, "Sign in");
     }
 }

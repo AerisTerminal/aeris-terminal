@@ -1958,3 +1958,75 @@ Better Auth is selected for control and portability, not because authentication 
 ## Final approval statement
 
 Phases 1-4 are approved as the completed primary architecture migration. Authentication work begins in phase 5 using Axiusflow-operated Better Auth, provider-neutral OIDC on the native side, replaceable billing adapters, signed offline entitlements, and gradual enforcement.
+
+## Phase 5 execution record
+
+Batch 1 — contracts plus sandbox login (2026-09-05, `c290075`, pushed; CI
+run `33924364284` pending at commit time):
+
+- `crates/domain/account` (new, zero deps): `AccountId`, `PlanId`,
+  `FeatureId`/`FeatureSet`, seven engine-owned session states, sanitized
+  `AccountView`; no HTTP, vault, vendor, or provider types.
+- `PROTOCOL_VERSION` 17→18 with tags 55–59 (`BeginLogin`, `CancelLogin`,
+  `GetAccountStatus`, `LoginAuthorization`, sanitized `AccountView`); tag 16
+  stays retired. No tokens or vendor payloads cross IPC.
+- `apps/engine/src/account_service/`: generation-fenced state machine, RFC
+  7636 PKCE (Appendix B vector pinned), literal-`127.0.0.1` single-pending
+  loopback (timeout/duplicate/mismatch/port-collision fail closed),
+  discovery-driven OIDC (echoed-issuer match, same-origin endpoints,
+  Ed25519 JWKS verification with `ed25519-dalek`, issuer/audience/expiry/
+  nonce checks), subject→`AccountId` link, vault refresh/device storage.
+  Retired generations never mutate state. No market-coordinator logic.
+- `local_engine_client` typed `begin_login`/`cancel_login`/`account_status`;
+  desktop `account.rs` presenter plus readiness-probe wiring
+  (`account_ipc_ready` in the launcher-checked report); `platform_runtime`
+  system-browser helper (https-only) and three account vault keys in the
+  install inventory for complete uninstall.
+- The phase-4 authentication prohibition check is deliberately retired and
+  replaced by `phase_five_account_surface_remains_bounded` plus
+  `account_protocol_versions_and_tags_remain_pinned` (40/40 naming checks).
+- Website `workers/auth/` (separate repo): Better Auth 1.7.2 with
+  `@better-auth/oauth-provider` 1.7.2, email OTP plus Google, EdDSA/Ed25519
+  JWTs, standalone Worker plus D1 (`identity_links`, `devices`,
+  `entitlement_revisions` beside the Better Auth schema). Marketing Pages
+  site untouched.
+- Verification on Windows (this machine): `cargo fmt --check`, workspace
+  clippy `-D warnings`, workspace build, and `cargo test --workspace
+  --all-features` all pass with zero failures; live debug
+  `--desktop-readiness` completed the v18 handshake plus the new
+  `account_status` round trip (`account_ipc_ready:true`) with no residual
+  processes.
+- Still open: Worker deploy secrets (D1 id, `BETTER_AUTH_SECRET`, Google
+  OAuth client, email sender, DNS/TLS), live sandbox login against the
+  deployed issuer, hosted billing plus webhook reconciliation, signed-lease
+  shadow→warn→enforce, rotation/backup drills, and the post-phase-5
+  eight-hour endurance on both supported targets. No push of further work
+  until the maintainer says so (same-ref concurrency cancels lanes).
+
+Batch 2 — sign-in surface plus sandbox proof (2026-09-05, unpushed at the
+maintainer's direction while CI lanes run):
+
+- Desktop settings menu gains one account row (`Sign in` / `Waiting for
+  browser` / `Account` with state, plan, and redacted detail) backed by one
+  shared `DesktopAccount` session: a single background worker thread with
+  bounded channels owns IPC plus the system-browser open, and the frame
+  loop polls presentation (status refresh while authorizing). Sign-in
+  degrades, never fails startup. Cancellation clears engine state at once;
+  the worker thread stays bounded by the transaction timeout.
+- Native OIDC is discovery-driven: endpoints resolve from
+  `{issuer}/.well-known/openid-configuration` with exact echoed-issuer
+  match and same-origin enforcement, and the link route derives from the
+  `{origin}/api/auth` mount. Default issuer is now
+  `https://auth.axiusflow.com/api/auth`.
+- Worker sandbox proven locally: `npm install`, `tsc --noEmit` clean, D1
+  migrations (`0001` control plane plus generated `0002` Better Auth
+  schema via `src/cli.ts`) applied to local D1, `wrangler dev` serves
+  health, live discovery, an Ed25519 JWKS, and a validating token
+  endpoint. Along the way the config was corrected to pass the D1 binding
+  directly, move `emailOTP` to its 1.7 plugin form, and scope
+  `migrations_dir` per database.
+- Live loopback proof: a real bound listener accepted one browser-shaped
+  callback over TCP and validated it (`bound_listener_accepts_one_browser_
+  callback_over_loopback`).
+- Full workspace gates pass locally with zero failures; no push until the
+  maintainer approves (CI lanes still running).

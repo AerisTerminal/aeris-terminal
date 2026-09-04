@@ -5575,6 +5575,28 @@ impl TerminalApp {
         self.request_lifecycle_preferences(request, cx);
     }
 
+    fn request_sign_in(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.request_sign_in(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow sign-in degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    fn cancel_sign_in(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.request_cancel(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow sign-in cancellation degraded: {error}");
+        }
+        cx.notify();
+    }
+
     fn toggle_markets_live_permission(&mut self, cx: &mut Context<Self>) {
         let current = self.lifecycle.presentation();
         let permitted = !current.markets_live_permitted;
@@ -5709,6 +5731,11 @@ impl TerminalApp {
                 {
                     cx.notify();
                 }
+                if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                    && account.poll()
+                {
+                    cx.notify();
+                }
                 if terminal
                     .workspace_persistence
                     .as_ref()
@@ -5831,12 +5858,17 @@ impl TerminalApp {
             )
         });
         let preference_error = self.lifecycle.preference_error();
+        let account_menu = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            axiusflow_desktop::account::unavailable_menu_state,
+            |account| account.menu_state(),
+        );
         let settings_menu = self.chart_settings_menu.clone().map(|menu| {
             chart_settings_menu_layer(
                 terminal,
                 &menu,
                 self.lifecycle.presentation(),
                 preference_error.as_deref(),
+                &account_menu,
                 viewport,
                 &self.theme,
             )
@@ -5999,6 +6031,14 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Sign-in is optional: market data works signed out, so a failed
+    // account client degrades to an unavailable sign-in row, never a
+    // startup failure.
+    if let Err(error) =
+        axiusflow_desktop::account::DesktopAccount::install(u64::from(std::process::id()))
+    {
+        eprintln!("Axiusflow account client degraded: {error}");
+    }
     run_desktop(configured, lifecycle);
 }
 

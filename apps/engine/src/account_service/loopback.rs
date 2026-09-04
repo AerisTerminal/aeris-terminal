@@ -211,7 +211,12 @@ pub fn validate_callback_query(
 
 #[cfg(test)]
 mod tests {
-    use super::{callback_query_from_request, validate_callback_query};
+    use super::{LoopbackListener, callback_query_from_request, validate_callback_query};
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::Duration,
+    };
 
     #[test]
     fn callback_path_parses_its_query() {
@@ -244,5 +249,33 @@ mod tests {
         let validated =
             validate_callback_query("code=abc123&state=s3", "s3").expect("valid callback passes");
         assert_eq!(validated.code, "abc123");
+    }
+
+    #[test]
+    fn bound_listener_accepts_one_browser_callback_over_loopback() {
+        let listener = LoopbackListener::bind().expect("loopback binds");
+        let port = listener.port();
+        assert!(listener.redirect_uri().contains(&port.to_string()));
+        let sender = std::thread::spawn(move || {
+            let mut stream =
+                TcpStream::connect(format!("127.0.0.1:{port}")).expect("loopback connects");
+            stream
+                .write_all(
+                    b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                )
+                .expect("callback writes");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .expect("callback response reads");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+        let query = listener
+            .accept_one(Duration::from_secs(5))
+            .expect("callback arrives");
+        let validated = validate_callback_query(&query, "live-state").expect("callback validates");
+        assert_eq!(validated.code, "live-code");
+        let response = sender.join().expect("sender joins");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
     }
 }

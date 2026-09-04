@@ -18,8 +18,8 @@ use serde::Deserialize;
 
 /// Authorization URL parameters for one login transaction.
 pub struct AuthorizationRequest<'a> {
-    /// Control-plane issuer origin (https).
-    pub issuer: &'a str,
+    /// Discovered OIDC endpoints for the configured issuer.
+    pub endpoints: &'a OidcEndpoints,
     /// Native public client identifier (no secret).
     pub client_id: &'a str,
     /// Loopback redirect URI for the bound listener.
@@ -32,18 +32,102 @@ pub struct AuthorizationRequest<'a> {
     pub code_challenge: &'a str,
 }
 
+/// OIDC endpoints resolved from discovery plus the Axiusflow link route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OidcEndpoints {
+    /// Verified issuer identity.
+    pub issuer: String,
+    /// Authorization endpoint from discovery metadata.
+    pub authorization_endpoint: String,
+    /// Token endpoint from discovery metadata.
+    pub token_endpoint: String,
+    /// JWKS URI from discovery metadata.
+    pub jwks_uri: String,
+    /// Axiusflow subject-link route on the control-plane origin.
+    pub link_endpoint: String,
+}
+
+/// Resolves OIDC endpoints from discovery metadata.
+///
+/// Fetches `{issuer}/.well-known/openid-configuration`, requires the echoed
+/// issuer to match the configured value exactly, requires every endpoint to
+/// stay on the issuer origin, and derives the Axiusflow link route from the
+/// control-plane origin.
+///
+/// # Errors
+///
+/// Returns a redacted actionable error when discovery, issuer matching, or
+/// endpoint validation fails.
+pub fn discover(issuer: &str) -> Result<OidcEndpoints, String> {
+    if !issuer.starts_with("https://") || issuer.contains([' ', '?', '#']) {
+        return Err("account control plane issuer is invalid".to_string());
+    }
+    let agent = oidc_agent();
+    let mut response = agent
+        .get(&format!("{issuer}/.well-known/openid-configuration"))
+        .header("Accept", "application/json")
+        .call()
+        .map_err(|_| "account service is unreachable; retry sign-in".to_string())?;
+    let metadata: DiscoveryMetadata = response
+        .body_mut()
+        .with_config()
+        .limit(32_768)
+        .read_json()
+        .map_err(|_| "account service is unreachable; retry sign-in".to_string())?;
+    if metadata.issuer != issuer {
+        return Err("sign-in verification failed; retry sign-in".to_string());
+    }
+    let origin = control_plane_origin(issuer)?;
+    for endpoint in [
+        &metadata.authorization_endpoint,
+        &metadata.token_endpoint,
+        &metadata.jwks_uri,
+    ] {
+        if !endpoint.starts_with(&origin) {
+            return Err("sign-in verification failed; retry sign-in".to_string());
+        }
+    }
+    Ok(OidcEndpoints {
+        issuer: metadata.issuer,
+        authorization_endpoint: metadata.authorization_endpoint,
+        token_endpoint: metadata.token_endpoint,
+        jwks_uri: metadata.jwks_uri,
+        link_endpoint: format!("{origin}/api/axiusflow/link"),
+    })
+}
+
+/// Derives the control-plane origin from the OIDC issuer.
+///
+/// The Axiusflow issuer is the Better Auth mount (`{origin}/api/auth`); the
+/// Axiusflow-owned link route lives on the origin beside it.
+///
+/// # Errors
+///
+/// Returns an error when the issuer does not carry the expected mount.
+pub fn control_plane_origin(issuer: &str) -> Result<String, String> {
+    issuer
+        .strip_suffix("/api/auth")
+        .filter(|origin| origin.starts_with("https://") && !origin.contains([' ', '?', '#']))
+        .map(str::to_string)
+        .ok_or_else(|| "account control plane issuer is invalid".to_string())
+}
+
 /// Builds the system-browser authorization URL for one transaction.
 ///
 /// # Errors
 ///
-/// Returns an error when the issuer is not a valid `https` origin.
+/// Returns an error when the discovered authorization endpoint is invalid.
 pub fn authorization_url(request: &AuthorizationRequest<'_>) -> Result<String, String> {
-    if !request.issuer.starts_with("https://") || request.issuer.contains([' ', '?', '#']) {
+    if !request
+        .endpoints
+        .authorization_endpoint
+        .starts_with("https://")
+    {
         return Err("account control plane issuer is invalid".to_string());
     }
     Ok(format!(
-        "{issuer}/authorize?response_type=code&client_id={client}&redirect_uri={redirect}&scope=openid&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
-        issuer = request.issuer,
+        "{endpoint}?response_type=code&client_id={client}&redirect_uri={redirect}&scope=openid&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
+        endpoint = request.endpoints.authorization_endpoint,
         client = url_encode(request.client_id),
         redirect = url_encode(request.redirect_uri),
         state = url_encode(request.state),
@@ -78,8 +162,8 @@ pub struct VerifiedTokens {
 
 /// Exchanges one authorization code and validates the ID token.
 ///
-/// Posts to `{issuer}/oauth/token`, verifies the Ed25519 ID-token signature
-/// against `{issuer}/.well-known/jwks.json`, and checks issuer, audience,
+/// Posts to the discovered token endpoint, verifies the Ed25519 ID-token
+/// signature against the discovered JWKS URI, and checks issuer, audience,
 /// expiry, and nonce before returning the subject.
 ///
 /// # Errors
@@ -88,7 +172,7 @@ pub struct VerifiedTokens {
 /// claims, or link lookup fails. Raw provider payloads never enter the detail.
 #[allow(clippy::too_many_lines)]
 pub fn exchange_code(
-    issuer: &str,
+    endpoints: &OidcEndpoints,
     client_id: &str,
     redirect_uri: &str,
     code: &str,
@@ -104,7 +188,7 @@ pub fn exchange_code(
         url_encode(code_verifier),
     );
     let mut response = agent
-        .post(&format!("{issuer}/oauth/token"))
+        .post(&endpoints.token_endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
         .send(body)
@@ -121,7 +205,14 @@ pub fn exchange_code(
     if token.bearer.is_empty() || token.bearer.len() > 16_384 {
         return Err("sign-in exchange failed; retry sign-in".to_string());
     }
-    let subject = verify_id_token(issuer, client_id, expected_nonce, &agent, &token.identity)?;
+    let subject = verify_id_token(
+        &endpoints.issuer,
+        client_id,
+        expected_nonce,
+        &agent,
+        &endpoints.jwks_uri,
+        &token.identity,
+    )?;
     Ok(VerifiedTokens {
         subject,
         access: token.bearer,
@@ -136,7 +227,7 @@ pub fn exchange_code(
 /// Returns a redacted actionable error when the control plane cannot link
 /// the subject or returns an unknown plan.
 pub fn link_subject(
-    issuer: &str,
+    endpoints: &OidcEndpoints,
     access_token: &str,
     subject: &str,
 ) -> Result<(AccountId, PlanId), String> {
@@ -146,7 +237,7 @@ pub fn link_subject(
         subject.replace('\\', "\\\\").replace('"', "\\\"")
     );
     let mut response = agent
-        .post(&format!("{issuer}/api/axiusflow/link"))
+        .post(&endpoints.link_endpoint)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -189,11 +280,24 @@ struct LinkResponse {
     plan: String,
 }
 
+#[derive(Deserialize)]
+struct DiscoveryMetadata {
+    #[serde(default)]
+    issuer: String,
+    #[serde(default)]
+    authorization_endpoint: String,
+    #[serde(default)]
+    token_endpoint: String,
+    #[serde(default)]
+    jwks_uri: String,
+}
+
 fn verify_id_token(
     issuer: &str,
     client_id: &str,
     expected_nonce: &str,
     agent: &ureq::Agent,
+    jwks_uri: &str,
     id_token: &str,
 ) -> Result<String, String> {
     let (header, payload, signature) = split_jwt(id_token)?;
@@ -202,7 +306,7 @@ fn verify_id_token(
     if header_json.alg != "EdDSA" {
         return Err(claim_failure());
     }
-    let key = fetch_verifying_key(agent, issuer, header_json.kid.as_deref())?;
+    let key = fetch_verifying_key(agent, jwks_uri, header_json.kid.as_deref())?;
     let signature = Signature::from_slice(&decode_part(signature)?).map_err(|_| claim_failure())?;
     key.verify(format!("{header}.{payload}").as_bytes(), &signature)
         .map_err(|_| claim_failure())?;
@@ -246,11 +350,11 @@ fn audience_matches(audience: &serde_json::Value, client_id: &str) -> bool {
 
 fn fetch_verifying_key(
     agent: &ureq::Agent,
-    issuer: &str,
+    jwks_uri: &str,
     kid: Option<&str>,
 ) -> Result<VerifyingKey, String> {
     let mut response = agent
-        .get(&format!("{issuer}/.well-known/jwks.json"))
+        .get(jwks_uri)
         .header("Accept", "application/json")
         .call()
         .map_err(|_| claim_failure())?;
@@ -321,12 +425,27 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthorizationRequest, audience_matches, authorization_url, split_jwt, url_encode};
+    use super::{
+        AuthorizationRequest, OidcEndpoints, audience_matches, authorization_url,
+        control_plane_origin, split_jwt, url_encode,
+    };
+
+    fn endpoints() -> OidcEndpoints {
+        OidcEndpoints {
+            issuer: "https://auth.axiusflow.com/api/auth".to_string(),
+            authorization_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/authorize"
+                .to_string(),
+            token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
+            jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
+            link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
+        }
+    }
 
     #[test]
     fn authorization_url_carries_pkce_and_loopback() {
+        let endpoints = endpoints();
         let request = AuthorizationRequest {
-            issuer: "https://auth.axiusflow.com",
+            endpoints: &endpoints,
             client_id: "axiusflow-desktop",
             redirect_uri: "http://127.0.0.1:43129/callback",
             state: "state-value",
@@ -334,16 +453,28 @@ mod tests {
             code_challenge: "challenge-value",
         };
         let url = authorization_url(&request).expect("URL builds");
-        assert!(url.starts_with("https://auth.axiusflow.com/authorize?"));
+        assert!(url.starts_with("https://auth.axiusflow.com/api/auth/oauth2/authorize?"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback"));
+        let mut plain = endpoints.clone();
+        plain.authorization_endpoint = "http://auth.axiusflow.com/oauth2/authorize".to_string();
         assert!(
             authorization_url(&AuthorizationRequest {
-                issuer: "http://auth.axiusflow.com",
+                endpoints: &plain,
                 ..request
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn control_plane_origin_requires_the_expected_mount() {
+        assert_eq!(
+            control_plane_origin("https://auth.axiusflow.com/api/auth"),
+            Ok("https://auth.axiusflow.com".to_string())
+        );
+        assert!(control_plane_origin("https://auth.axiusflow.com").is_err());
+        assert!(control_plane_origin("http://auth.axiusflow.com/api/auth").is_err());
     }
 
     #[test]
