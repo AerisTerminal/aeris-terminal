@@ -51,6 +51,27 @@ $resolvedHistoryRoot = [IO.Path]::GetFullPath($HistoryRoot)
 $resolvedReportPath = [IO.Path]::GetFullPath($ReportPath)
 $manifestPath = "$resolvedReportPath.manifest.json"
 $cargoLockPath = Join-Path $repoRoot "Cargo.lock"
+
+# Fail fast before any physical step if this shell cannot serialize evidence.
+foreach ($required in @('ConvertTo-Json')) {
+    if ($null -eq (Get-Command $required -ErrorAction SilentlyContinue)) {
+        throw "Evidence capture requires the $required cmdlet in this shell."
+    }
+}
+
+function Get-Sha256Hex {
+    param([string]$Path)
+    # Pure .NET on purpose: Get-FileHash is unavailable in some locked-down
+    # shells, and evidence tooling must not depend on it.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '')
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
 if ((Test-Path -LiteralPath $resolvedReportPath) -or (Test-Path -LiteralPath $manifestPath)) {
     throw "Native-transition report and manifest paths must both be new."
 }
@@ -82,9 +103,9 @@ $manifest = [ordered]@{
     source_revision = $sourceRevision
     clean_worktree = $true
     cargo_lock_path = $cargoLockPath
-    cargo_lock_sha256 = (Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash
+    cargo_lock_sha256 = Get-Sha256Hex $cargoLockPath
     executable_path = $executablePath
-    executable_sha256 = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash
+    executable_sha256 = Get-Sha256Hex $executablePath
     report_path = $resolvedReportPath
     started_utc = [DateTimeOffset]::UtcNow.ToString("O")
     finalized = $false
@@ -116,8 +137,8 @@ $manifest.process_exit_code = $processExitCode
 $manifest.finalized_utc = [DateTimeOffset]::UtcNow.ToString("O")
 $finalStatus = @(git -C $repoRoot status --porcelain=v1 --untracked-files=all)
 $finalRevision = (git -C $repoRoot rev-parse HEAD).Trim()
-$finalCargoLockHash = (Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash
-$finalExecutableHash = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash
+$finalCargoLockHash = Get-Sha256Hex $cargoLockPath
+$finalExecutableHash = Get-Sha256Hex $executablePath
 $provenanceStable = $LASTEXITCODE -eq 0 `
     -and $finalStatus.Count -eq 0 `
     -and $finalRevision -eq $sourceRevision `
@@ -129,8 +150,7 @@ if ($processExitCode -ne 0 `
     Write-JsonAtomically $manifestPath $manifest
     throw "Native-transition capture did not finish with stable provenance and a clean process exit."
 }
-$manifest.final_report_sha256 =
-    (Get-FileHash -LiteralPath $resolvedReportPath -Algorithm SHA256).Hash
+$manifest.final_report_sha256 = Get-Sha256Hex $resolvedReportPath
 $manifest.finalized = $true
 Write-JsonAtomically $manifestPath $manifest
 

@@ -26,6 +26,20 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Get-Sha256Hex {
+    param([string]$Path)
+    # Pure .NET on purpose: Get-FileHash is unavailable in some locked-down
+    # shells, and evidence tooling must not depend on it.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '')
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) {
@@ -152,14 +166,14 @@ $manifestReportPath = [IO.Path]::GetFullPath([string](Get-RequiredProperty $mani
 Assert-True ($manifestReportPath -eq $resolvedPath) "Manifest report_path does not match ArtifactPath."
 $expectedReportHash = [string](Get-RequiredProperty $manifest "final_report_sha256")
 Assert-True ($expectedReportHash -match '^[0-9a-fA-F]{64}$') "Manifest final_report_sha256 is invalid."
-$actualHash = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash
+$actualHash = Get-Sha256Hex $resolvedPath
 Assert-True ($actualHash -ieq $expectedReportHash) "Native-transition artifact SHA-256 does not match its finalized manifest."
 $cargoLockPath = [IO.Path]::GetFullPath([string](Get-RequiredProperty $manifest "cargo_lock_path"))
 $executablePath = [IO.Path]::GetFullPath([string](Get-RequiredProperty $manifest "executable_path"))
 Assert-True (Test-Path -LiteralPath $cargoLockPath -PathType Leaf) "Manifest Cargo.lock does not exist."
 Assert-True (Test-Path -LiteralPath $executablePath -PathType Leaf) "Manifest executable does not exist."
-$cargoLockHash = (Get-FileHash -LiteralPath $cargoLockPath -Algorithm SHA256).Hash
-$executableHash = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash
+$cargoLockHash = Get-Sha256Hex $cargoLockPath
+$executableHash = Get-Sha256Hex $executablePath
 Assert-True ($cargoLockHash -ieq [string](Get-RequiredProperty $manifest "cargo_lock_sha256")) "Cargo.lock SHA-256 does not match the manifest."
 Assert-True ($executableHash -ieq [string](Get-RequiredProperty $manifest "executable_sha256")) "Executable SHA-256 does not match the manifest."
 try {
