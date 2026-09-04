@@ -190,8 +190,23 @@ fn run_catalog_session(
         ) {
             Ok(true) => {
                 generation = next_generation(generation, generation);
-                searches.clear();
-                selections.clear();
+                if searches.is_empty() && selections.is_empty() {
+                    continue;
+                }
+                // Pending catalog demand cannot survive a generation
+                // advance: fail it fast with an actionable rejection so the
+                // consumer re-demands on the fresh generation instead of
+                // hanging, then restart the session so a connection is
+                // actually established (a session that starts offline never
+                // dials on its own).
+                reject_pending_catalog(
+                    channels.catalog_publications,
+                    generation,
+                    &mut searches,
+                    &mut selections,
+                );
+                let _ = runtime.stop();
+                return CatalogSessionExit::Retry(generation);
             }
             Ok(false) => {}
             Err(()) => {
@@ -518,6 +533,37 @@ fn reject_catalog_generation(
         },
         selection,
     });
+}
+
+/// Fails every pending catalog search and selection with an actionable
+/// rejection when their generation is retired. Callers restart the session
+/// afterwards so re-demand lands on a generation that can actually connect.
+fn reject_pending_catalog(
+    publications: &SyncSender<RithmicCatalogEvent>,
+    provider_generation: u64,
+    searches: &mut BTreeMap<usize, u64>,
+    selections: &mut BTreeMap<usize, u64>,
+) {
+    for (command_generation, consumer_id) in searches.iter() {
+        reject_catalog_generation(
+            publications,
+            *consumer_id,
+            Some(provider_generation),
+            u64::try_from(*command_generation).unwrap_or(u64::MAX),
+            false,
+        );
+    }
+    for (command_generation, consumer_id) in selections.iter() {
+        reject_catalog_generation(
+            publications,
+            *consumer_id,
+            Some(provider_generation),
+            u64::try_from(*command_generation).unwrap_or(u64::MAX),
+            true,
+        );
+    }
+    searches.clear();
+    selections.clear();
 }
 
 fn reject_deferred_selection(
@@ -1258,7 +1304,7 @@ mod tests {
 
     use super::{
         EnvironmentState, RithmicCatalogEvent, next_generation, publish_catalog_callback,
-        reject_deferred_selection,
+        reject_deferred_selection, reject_pending_catalog,
     };
     use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
     use axiusflow_rithmic_protocol_adapter::{
@@ -1336,6 +1382,45 @@ mod tests {
                 && rejection.provider_generation == Some(7)
                 && rejection.command_generation == 3
         ));
+    }
+
+    #[test]
+    fn retired_generation_rejects_pending_searches_and_selections() {
+        let (publications, published) = mpsc::sync_channel(4);
+        let mut searches = BTreeMap::from([(2, 41)]);
+        let mut selections = BTreeMap::from([(3, 42)]);
+
+        reject_pending_catalog(&publications, 9, &mut searches, &mut selections);
+
+        assert!(searches.is_empty());
+        assert!(selections.is_empty());
+        let mut rejections = [
+            published.recv().expect("search rejection is published"),
+            published.recv().expect("selection rejection is published"),
+        ];
+        rejections.sort_by_key(|event| match event {
+            RithmicCatalogEvent::Rejected { selection, .. } => *selection,
+            _ => true,
+        });
+        assert!(matches!(
+            &rejections[0],
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: false,
+            } if rejection.consumer_id == 41
+                && rejection.provider_generation == Some(9)
+                && rejection.command_generation == 2
+        ));
+        assert!(matches!(
+            &rejections[1],
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection: true,
+            } if rejection.consumer_id == 42
+                && rejection.provider_generation == Some(9)
+                && rejection.command_generation == 3
+        ));
+        assert!(published.try_recv().is_err());
     }
 
     #[test]

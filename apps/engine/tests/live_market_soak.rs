@@ -234,6 +234,36 @@ fn terminal_failure(event: &envelope::Payload) -> Option<String> {
     }
 }
 
+/// Polls like [`poll_until`], but a catalog rejection re-issues the demand
+/// instead of running out the deadline: the engine retires catalog demand
+/// on generation advances, and the recovery is to re-demand, not to wait.
+fn poll_catalog(
+    service: &MarketService,
+    deadline: Duration,
+    what: &str,
+    resend: impl Fn(),
+    mut accept: impl FnMut(&envelope::Payload) -> bool,
+) -> envelope::Payload {
+    let expiry = Instant::now() + deadline;
+    loop {
+        if let Some(event) = service
+            .poll_event(CLIENT_ID, CONSUMER_ID)
+            .expect("market poll succeeds")
+        {
+            if let Some(failure) = terminal_failure(&event) {
+                panic!("{what} failed terminally: {failure}");
+            }
+            if matches!(event, envelope::Payload::ProviderCatalogRejected(_)) {
+                resend();
+            } else if accept(&event) {
+                return event;
+            }
+        }
+        assert!(Instant::now() < expiry, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Resolves one product through the engine's own catalog.
 fn install_symbol(
     service: &MarketService,
@@ -241,22 +271,26 @@ fn install_symbol(
     symbol: &str,
     generation: u64,
 ) -> InstallProviderInstrument {
-    service
-        .search_provider_instruments(
-            CLIENT_ID,
-            SearchProviderInstruments {
-                consumer_id: CONSUMER_ID,
-                search_generation: generation,
-                provider: provider.to_string(),
-                query: symbol.to_string(),
-                maximum_results: 32,
-            },
-        )
-        .expect("catalog search is accepted");
-    let found = poll_until(
+    let send_search = || {
+        service
+            .search_provider_instruments(
+                CLIENT_ID,
+                SearchProviderInstruments {
+                    consumer_id: CONSUMER_ID,
+                    search_generation: generation,
+                    provider: provider.to_string(),
+                    query: symbol.to_string(),
+                    maximum_results: 32,
+                },
+            )
+            .expect("catalog search is accepted");
+    };
+    send_search();
+    let found = poll_catalog(
         service,
         Duration::from_secs(45),
         "catalog search",
+        send_search,
         |event| {
             matches!(event, envelope::Payload::ProviderInstrumentSearchResult(result)
             if result.search_generation == generation)
@@ -276,27 +310,31 @@ fn install_symbol(
     } else {
         COINBASE_ENTITLEMENT_ID.to_string()
     };
-    service
-        .select_provider_instrument(
-            CLIENT_ID,
-            SelectProviderInstrument {
-                consumer_id: CONSUMER_ID,
-                selection_generation: generation,
-                search_generation: generation,
-                provider: provider.to_string(),
-                symbol: summary.symbol.clone(),
-                exchange: summary.exchange.clone(),
-                entitlement_id,
-            },
-        )
-        .expect("catalog selection is accepted");
-    let selected = poll_until(
+    let send_selection = || {
+        service
+            .select_provider_instrument(
+                CLIENT_ID,
+                SelectProviderInstrument {
+                    consumer_id: CONSUMER_ID,
+                    selection_generation: generation,
+                    search_generation: generation,
+                    provider: provider.to_string(),
+                    symbol: summary.symbol.clone(),
+                    exchange: summary.exchange.clone(),
+                    entitlement_id: entitlement_id.clone(),
+                },
+            )
+            .expect("catalog selection is accepted");
+    };
+    send_selection();
+    let selected = poll_catalog(
         service,
         Duration::from_secs(45),
         "catalog selection",
+        send_selection,
         |event| {
             matches!(event, envelope::Payload::ProviderInstrumentSelection(selection)
-                if selection.instrument.is_some())
+            if selection.instrument.is_some())
         },
     );
     let envelope::Payload::ProviderInstrumentSelection(selection) = selected else {

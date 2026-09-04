@@ -1369,6 +1369,14 @@ impl CaptureDriver {
                 Ok(Some((_, envelope::Payload::DemandError(error)))) => {
                     return Err(format!("Rithmic catalog demand failed: {}", error.detail));
                 }
+                Ok(Some((_, envelope::Payload::ProviderCatalogRejected(_)))) => {
+                    // Generation advance retired this attempt engine-side:
+                    // re-demand immediately instead of running out the
+                    // deadline. A short breath avoids hammering a session
+                    // that is still restarting.
+                    std::thread::sleep(Duration::from_secs(2));
+                    return Ok(None);
+                }
                 Ok(_) | Err(_) => {}
             }
         }
@@ -1413,6 +1421,10 @@ impl CaptureDriver {
                 }
                 Ok(Some((_, envelope::Payload::DemandError(error)))) => {
                     return Err(format!("Rithmic selection failed: {}", error.detail));
+                }
+                Ok(Some((_, envelope::Payload::ProviderCatalogRejected(_)))) => {
+                    std::thread::sleep(Duration::from_secs(2));
+                    return Ok(false);
                 }
                 Ok(_) | Err(_) => {}
             }
