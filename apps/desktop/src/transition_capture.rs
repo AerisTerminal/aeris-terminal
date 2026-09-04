@@ -1055,6 +1055,9 @@ const CAPTURE_DEADLINE: Duration = Duration::from_mins(30);
 const OBSERVER_QUEUE: usize = 64;
 /// Silence window proving the retired generation stopped producing.
 const RETIRED_SILENCE: Duration = Duration::from_secs(5);
+/// Consecutive demand attempts before the capture concludes the venue or
+/// account is not serving tonight instead of hammering the plant.
+const MAXIMUM_DEMAND_ATTEMPTS: u32 = 8;
 
 /// Outcome of one monitor observer step.
 enum MonitorOutcome {
@@ -1452,6 +1455,10 @@ impl CaptureDriver {
     ) -> Result<(), String> {
         use std::sync::atomic::Ordering::Relaxed;
         let mut demanded = false;
+        // Consecutive demand attempts are capped: a capture that cannot
+        // establish demand is evidence of a venue/account outage, not a
+        // license to hammer the plant indefinitely.
+        let mut attempts: u32 = 0;
         let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             if Instant::now() >= deadline {
@@ -1484,6 +1491,13 @@ impl CaptureDriver {
                 // Demand retries across the offline window with fresh
                 // generations; only a stall online at both entry and expiry
                 // is fatal.
+                attempts = attempts.saturating_add(1);
+                if attempts > MAXIMUM_DEMAND_ATTEMPTS {
+                    return Err(
+                        "Rithmic demand could not be established; the venue or account is not serving tonight"
+                            .to_string(),
+                    );
+                }
                 demanded = self.demand(&online)?;
                 continue;
             }
