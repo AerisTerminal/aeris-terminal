@@ -1333,7 +1333,7 @@ impl Drop for LifecycleLock {
 fn process_is_live(pid: usize) -> bool {
     let mut system = System::new();
     let pid = Pid::from(pid);
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     system.process(pid).is_some()
 }
 

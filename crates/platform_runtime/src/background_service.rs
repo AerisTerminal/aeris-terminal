@@ -76,7 +76,7 @@ impl BackgroundService {
     #[must_use]
     pub fn is_running(&self) -> bool {
         let mut system = System::new();
-        system.refresh_processes(ProcessesToUpdate::All);
+        system.refresh_processes(ProcessesToUpdate::All, true);
         system
             .processes()
             .values()

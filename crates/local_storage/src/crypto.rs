@@ -100,7 +100,7 @@ pub(crate) fn catalog_key_verifier(key: &CatalogKey) -> Result<[u8; 32], LocalSt
 pub(crate) fn segment_key_verifier(
     key: &SegmentEncryptionKey,
 ) -> Result<[u8; 32], LocalStorageError> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes()).map_err(|_| {
+    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key.bytes()).map_err(|_| {
         LocalStorageError::InvalidConfiguration("segment HMAC initialization failed")
     })?;
     mac.update(b"segment_key_verifier_v1");
@@ -155,7 +155,7 @@ fn keyed_token(
     domain: &[u8],
     values: &[&[u8]],
 ) -> Result<[u8; 32], LocalStorageError> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.bytes()).map_err(|_| {
+    let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key.bytes()).map_err(|_| {
         LocalStorageError::InvalidConfiguration("catalog HMAC initialization failed")
     })?;
     mac.update(domain);

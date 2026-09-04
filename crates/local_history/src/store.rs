@@ -750,8 +750,9 @@ fn decode_legacy_coinbase_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, Loca
     }
     let mut bars = Vec::with_capacity(count);
     let mut previous = None;
-    for payload in
-        encoded[LEGACY_COINBASE_HEADER_BYTES..].chunks_exact(LEGACY_COINBASE_PAYLOAD_BYTES)
+    for payload in encoded[LEGACY_COINBASE_HEADER_BYTES..]
+        .as_chunks::<LEGACY_COINBASE_PAYLOAD_BYTES>()
+        .0
     {
         if !payload.starts_with(LEGACY_COINBASE_PAYLOAD_MAGIC) {
             return Err(LocalHistoryError::InvalidSegment);

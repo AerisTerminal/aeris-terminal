@@ -305,9 +305,7 @@ fn compact_quantity_text(value: i64, scale: u8) -> String {
 
 fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
     let fixed = fixed_point_text(value, scale);
-    let (whole, fraction) = fixed
-        .split_once('.')
-        .map_or((fixed.as_str(), ""), |parts| parts);
+    let (whole, fraction) = fixed.split_once('.').unwrap_or((fixed.as_str(), ""));
     let (sign, digits) = whole
         .strip_prefix('-')
         .map_or(("", whole), |digits| ("-", digits));

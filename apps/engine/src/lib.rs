@@ -2606,7 +2606,7 @@ mod tests {
     }
 
     fn process_memory(system: &mut System, pid: Pid) -> u64 {
-        system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         system
             .process(pid)
             .expect("benchmark process remains observable")

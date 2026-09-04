@@ -402,7 +402,7 @@ fn active_from_root(root: &Path) -> Result<Option<ActiveRelease>, String> {
 
 fn process_is_running(executable: &Path) -> bool {
     let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All);
+    system.refresh_processes(ProcessesToUpdate::All, true);
     system
         .processes()
         .values()
@@ -414,7 +414,7 @@ fn owned_process_is_running(install_root: &Path) -> bool {
     let desktop = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
     let engine = format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX);
     let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All);
+    system.refresh_processes(ProcessesToUpdate::All, true);
     system.processes().values().any(|process| {
         process.exe().is_some_and(|executable| {
             executable.starts_with(&versions)

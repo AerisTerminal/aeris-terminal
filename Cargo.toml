@@ -29,24 +29,24 @@ resolver = "3"
 edition = "2024"
 license = "Proprietary"
 publish = false
-rust-version = "1.97.1"
+rust-version = "1.98.1"
 version = "0.1.0"
 
 [workspace.dependencies]
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 display-info = "=0.5.9"
-ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "=0.4.3"
-interprocess = { version = "=2.4.3", default-features = false }
-keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
+interprocess = { version = "=2.4.4", default-features = false }
+keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.43"
 serde_json = "=1.0.151"
 semver = "=1.0.28"
 webpki-roots = "=1.0.9"
-sha2 = "=0.10.9"
-sysinfo = { version = "=0.31.4", default-features = false, features = ["system"] }
+sha2 = "=0.11.0"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
 wayland-client = { version = "=0.31.15", default-features = false, features = ["dlopen"] }
 wayland-protocols = { version = "=0.32.13", default-features = false, features = [
     "client",
@@ -63,21 +63,21 @@ zbus = { version = "=5.19.0", default-features = false, features = ["async-io", 
 zeroize = { version = "=1.9.0", default-features = false }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 prost = "=0.14.4"
-rcgen = { version = "=0.14.9", default-features = false, features = ["ring"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring"] }
 rpassword = "=7.5.4"
-hmac = "=0.12.1"
+hmac = "=0.13.0"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "a66fb6aebdee68ee5ae7d191d9dff0d61a42b834", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "a66fb6aebdee68ee5ae7d191d9dff0d61a42b834", default-features = false, features = ["wayland", "x11"] }
-nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "6a3ac948be93cae0a8b712a493fc73f9291a2b69", version = "=0.1.0" }
-nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "6a3ac948be93cae0a8b712a493fc73f9291a2b69", version = "=0.1.0" }
-nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "6a3ac948be93cae0a8b712a493fc73f9291a2b69", version = "=0.1.0", features = ["gpui-backend"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
+nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69", version = "=0.1.0" }
+nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69", version = "=0.1.0" }
+nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69", version = "=0.1.0", features = ["gpui-backend"] }
 
 [patch.crates-io]
 # Nucleus Charts pins the published `gpui = 0.2.2`; replace it with the exact same reviewed Git
 # revision used by the desktop so GPUI types cannot split across sources.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "a66fb6aebdee68ee5ae7d191d9dff0d61a42b834", version = "=0.2.2" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2" }
 
 [profile.release]
 codegen-units = 1

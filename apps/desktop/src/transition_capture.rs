@@ -1046,7 +1046,18 @@ fn git_output(repository: &std::path::Path, args: &[&str]) -> Result<String, Str
 fn file_sha256_hex(path: &std::path::Path) -> Result<String, String> {
     use sha2::Digest as _;
     let bytes = std::fs::read(path).map_err(|_| "capture input file is unreadable".to_string())?;
-    Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+    Ok(lower_hex(sha2::Sha256::digest(&bytes)))
+}
+
+fn lower_hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.into_iter();
+    let mut encoded = String::with_capacity(bytes.size_hint().0.saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 // ---------------------------------------------------------------------------

@@ -526,7 +526,10 @@ pub fn decode_history_segment(encoded: &[u8]) -> Result<Vec<SequencedHistory<Mar
     let count = history_segment_item_count(encoded)?;
     let mut values = Vec::with_capacity(count);
     let mut previous_sequence: Option<u64> = None;
-    for payload in encoded[HISTORY_SEGMENT_HEADER_BYTES..].chunks_exact(HISTORY_PAYLOAD_BYTES) {
+    for payload in encoded[HISTORY_SEGMENT_HEADER_BYTES..]
+        .as_chunks::<HISTORY_PAYLOAD_BYTES>()
+        .0
+    {
         let mut offset = HISTORY_PAYLOAD_MAGIC.len();
         let sequence = read_u64(payload, &mut offset)?;
         let timestamp = read_i64(payload, &mut offset)?;

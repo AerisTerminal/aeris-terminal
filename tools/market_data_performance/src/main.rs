@@ -460,7 +460,7 @@ fn update_process_peaks(
     peak_cpu_percent: &mut f32,
 ) -> Result<(), Box<dyn Error>> {
     let pid = Pid::from_u32(process::id());
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     let process = system
         .process(pid)
         .ok_or("benchmark process metrics unavailable")?;

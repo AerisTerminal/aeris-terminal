@@ -435,7 +435,18 @@ fn hash_file_sha256(path: &Path) -> Result<String, String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(lower_hex(digest.finalize()))
+}
+
+fn lower_hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.into_iter();
+    let mut encoded = String::with_capacity(bytes.size_hint().0.saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn valid_lower_hex(value: &str, length: usize) -> bool {

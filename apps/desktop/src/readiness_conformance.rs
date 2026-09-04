@@ -226,7 +226,7 @@ impl ProcessMemoryProbe {
 
     pub(super) fn sample(&mut self) -> Result<(), Box<dyn Error>> {
         self.system
-            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]));
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
         self.current_bytes = self
             .system
             .process(self.pid)
