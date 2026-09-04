@@ -6,6 +6,7 @@ members = [
     "crates/adapters/rithmic_protocol",
     "crates/application",
     "crates/market_engine",
+    "crates/domain/account",
     "crates/domain/instruments",
     "crates/domain/market_data",
     "crates/local_storage",

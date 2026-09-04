@@ -244,6 +244,9 @@ struct NativeHooks {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+// Wire mirror of the desktop readiness JSON: the flat boolean shape is the
+// cross-binary contract, not internal state.
+#[allow(clippy::struct_excessive_bools)]
 struct DesktopReadinessReport {
     schema_version: u32,
     release_identity: String,
@@ -254,6 +257,7 @@ struct DesktopReadinessReport {
     authenticated_ipc_ready: bool,
     workspace_restored: bool,
     market_service_ready: bool,
+    account_ipc_ready: bool,
 }
 
 impl NativeHooks {
@@ -345,6 +349,7 @@ impl LifecycleHooks for NativeHooks {
                 || !readiness.authenticated_ipc_ready
                 || !readiness.workspace_restored
                 || !readiness.market_service_ready
+                || !readiness.account_ipc_ready
             {
                 return Err("candidate desktop readiness report is invalid".to_string());
             }

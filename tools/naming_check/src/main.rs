@@ -1216,8 +1216,12 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 17"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 18"),
             "incompatible IPC revisions require a deliberate protocol-version change"
+        );
+        assert!(
+            protocol.contains("Revision 18 adds the phase 5 account boundary"),
+            "protocol version 18 must document the account boundary"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");
         assert!(
@@ -1692,44 +1696,74 @@ mod tests {
     }
 
     #[test]
-    fn phase_five_authentication_surface_stays_out_until_phase_four_passes() {
-        const FORBIDDEN: &[&str] = &[
-            "better_auth",
-            "better-auth",
-            "stripe",
-            "Stripe",
-            "dodo",
-            "Dodo",
-            "cloudflare",
-            "Cloudflare",
-            "passkey",
-            "Passkey",
-            "webauthn",
-            "openid",
-            "oidc",
-            "OIDC",
-            "pkce",
-            "PKCE",
-            "refresh_token",
-            "billing",
-            "Billing",
+    fn phase_five_account_surface_remains_bounded() {
+        // Phase 4 is maintainer-approved closed, so the phase 5 account
+        // boundary is now allowed exactly in its owning modules. Better Auth,
+        // billing SDKs, passkeys, and cloud identity networking stay out of
+        // native Rust: the desktop and engine depend only on standard OIDC
+        // concepts validated inside `account_service`.
+        const ACCOUNT_ALLOWED_PREFIXES: &[&str] = &[
+            "crates/domain/account/src/",
+            "crates/engine_protocol/src/account.rs",
+            "crates/engine_protocol/src/lib.rs",
+            "crates/engine_protocol/src/messages.rs",
+            "crates/engine_protocol/tests/",
+            "crates/local_engine_client/src/",
+            "crates/platform_runtime/src/browser.rs",
+            "apps/engine/src/account_service/",
+            "apps/engine/src/lib.rs",
+            "apps/desktop/src/account.rs",
+        ];
+        const ACCOUNT_IDENTIFIERS: &[&str] = &[
             "AccountId",
             "PlanId",
             "FeatureId",
             "FeatureSet",
             "BeginLogin",
             "AccountView",
+            "LoginAuthorization",
+            "AccountSessionState",
         ];
 
         for path in production_rust_sources() {
+            let relative = relative_string(&path);
             let contents = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
             let production = production_prefix(&contents);
-            for forbidden in FORBIDDEN {
+            let allowed = ACCOUNT_ALLOWED_PREFIXES
+                .iter()
+                .any(|prefix| relative.starts_with(prefix));
+            // OIDC/PKCE mechanics live only in the engine account service,
+            // the protocol boundary, and the desktop account presenter.
+            if !allowed {
+                for identifier in ACCOUNT_IDENTIFIERS
+                    .iter()
+                    .chain(["pkce", "PKCE", "openid", "oidc", "OIDC"].iter())
+                {
+                    assert!(
+                        !production.contains(identifier),
+                        "{relative} owns phase-5 account surface {identifier} outside its boundary"
+                    );
+                }
+            }
+            // Native Rust never depends on cloud identity or billing vendors:
+            // the Worker owns Better Auth, Stripe, Dodo, and Cloudflare.
+            for forbidden in [
+                "better_auth",
+                "better-auth",
+                "passkey",
+                "Passkey",
+                "webauthn",
+                "Stripe",
+                "stripe::",
+                "Dodo",
+                "dodo::",
+                "cloudflare",
+                "Cloudflare",
+            ] {
                 assert!(
                     !production.contains(forbidden),
-                    "{} adds dormant phase-5 authentication surface {forbidden} before phase 4 passes",
-                    relative_string(&path)
+                    "{relative} adds cloud identity/billing surface {forbidden} to native code"
                 );
             }
         }
@@ -1749,10 +1783,69 @@ mod tests {
             ] {
                 assert!(
                     !contents.contains(forbidden),
-                    "{} adds a phase-5 identity/billing dependency {forbidden} before phase 4 passes",
+                    "{} adds a phase-5 identity/billing dependency {forbidden}",
                     relative_string(&path)
                 );
             }
+        }
+
+        // Account state must not leak into the market coordinator: the
+        // market service owns demand and provider generations only.
+        let coordinator = manifest("apps/engine/src/market_service/coordinator.rs");
+        for identifier in ["BeginLogin", "AccountView", "LoginAuthorization"] {
+            assert!(
+                !production_prefix(&coordinator).contains(identifier),
+                "market coordinator must not own account state {identifier}"
+            );
+        }
+        // The desktop stays provider-neutral and storage-free: it renders the
+        // sanitized protocol view and never touches the account domain crate.
+        for relative in [
+            "apps/desktop/Cargo.toml",
+            "crates/ui/chart_integration/Cargo.toml",
+        ] {
+            assert!(
+                !manifest(relative).contains("axiusflow_account"),
+                "{relative} must not depend on axiusflow_account"
+            );
+        }
+    }
+
+    #[test]
+    fn account_protocol_versions_and_tags_remain_pinned() {
+        let messages = manifest("crates/engine_protocol/src/messages.rs");
+        assert!(
+            messages.contains("55, 56, 57, 58, 59"),
+            "phase 5 account envelope tags 55-59 must remain pinned"
+        );
+        let account = manifest("crates/engine_protocol/src/account.rs");
+        for contract in [
+            "pub struct BeginLogin",
+            "pub struct CancelLogin",
+            "pub struct GetAccountStatus",
+            "pub struct LoginAuthorization",
+            "pub struct AccountView",
+            "pub enum AccountSessionState",
+        ] {
+            assert!(
+                account.contains(contract),
+                "account protocol boundary lost {contract}"
+            );
+        }
+        for secret in [
+            "refresh_token",
+            "access_token",
+            "id_token",
+            "Bearer",
+            "customer_id",
+            "payment",
+            "Stripe",
+            "Dodo",
+        ] {
+            assert!(
+                !account.contains(secret),
+                "account protocol must carry no tokens or vendor payloads ({secret})"
+            );
         }
     }
 }

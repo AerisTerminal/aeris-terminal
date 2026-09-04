@@ -599,6 +599,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiusflow_account"
+version = "0.1.0"
+
+[[package]]
 name = "axiusflow_application"
 version = "0.1.0"
 dependencies = [
@@ -677,6 +681,7 @@ dependencies = [
 name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_account",
  "axiusflow_coinbase_market_adapter",
  "axiusflow_engine_protocol",
  "axiusflow_local_engine_client",
@@ -686,9 +691,15 @@ dependencies = [
  "axiusflow_platform_runtime",
  "axiusflow_provider_history",
  "axiusflow_rithmic_protocol_adapter",
+ "base64 0.23.1",
+ "ed25519-dalek",
  "getrandom 0.4.3",
  "interprocess",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "sysinfo 0.39.6",
+ "ureq",
  "zeroize",
 ]
 

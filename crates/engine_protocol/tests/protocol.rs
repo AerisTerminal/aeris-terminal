@@ -1,10 +1,11 @@
 use std::num::NonZeroUsize;
 
 use axiusflow_engine_protocol::{
-    AttachClient, ClientHello, ClientKind, DemandError, DetachClient, EngineFaultCode,
-    EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder,
-    Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument,
-    LIFECYCLE_CONTRACT_REVISION, MAX_FRAME_BYTES, MarketBar, OrderBookLevel, OrderBookSnapshot,
+    AccountSessionState, AccountView, AttachClient, BeginLogin, CancelLogin, ClientHello,
+    ClientKind, DemandError, DetachClient, EngineFaultCode, EngineLifetimeMode, EngineReady,
+    EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder, Fault, GetAccountStatus,
+    GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION,
+    LoginAuthorization, MAX_FRAME_BYTES, MarketBar, OrderBookLevel, OrderBookSnapshot,
     OrderBookState, OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot, OrderFlowTrade,
     OrderFlowUpdate, PROTOCOL_VERSION, PersistenceState, ProtocolError, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
@@ -21,6 +22,7 @@ use axiusflow_transport::encode_binary_frame;
 fn payloads() -> Vec<envelope::Payload> {
     let mut payloads = workspace_payloads();
     payloads.extend(market_payloads());
+    payloads.extend(account_payloads());
     payloads
 }
 
@@ -32,7 +34,43 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 17);
+    assert_eq!(PROTOCOL_VERSION, 18);
+}
+
+fn account_payloads() -> Vec<envelope::Payload> {
+    vec![
+        envelope::Payload::BeginLogin(BeginLogin {
+            client_id: 11,
+            request_generation: 3,
+        }),
+        envelope::Payload::CancelLogin(CancelLogin {
+            request_generation: 3,
+        }),
+        envelope::Payload::GetAccountStatus(GetAccountStatus {}),
+        envelope::Payload::LoginAuthorization(LoginAuthorization {
+            request_generation: 3,
+            authorization_url: "https://auth.axiusflow.com/authorize?request=3".into(),
+            expires_unix_seconds: 1_800_000_003,
+        }),
+        envelope::Payload::AccountView(AccountView {
+            state: AccountSessionState::Active as i32,
+            account_id: "acct_01".into(),
+            plan_id: "pro".into(),
+            detail: "active".into(),
+            request_generation: 3,
+        }),
+    ]
+}
+
+#[test]
+fn account_session_states_have_stable_wire_values() {
+    assert_eq!(AccountSessionState::SignedOut as i32, 0);
+    assert_eq!(AccountSessionState::Authorizing as i32, 1);
+    assert_eq!(AccountSessionState::Active as i32, 2);
+    assert_eq!(AccountSessionState::OfflineLease as i32, 3);
+    assert_eq!(AccountSessionState::ReauthenticationRequired as i32, 4);
+    assert_eq!(AccountSessionState::LeaseExpired as i32, 5);
+    assert_eq!(AccountSessionState::TerminalError as i32, 6);
 }
 
 fn workspace_payloads() -> Vec<envelope::Payload> {

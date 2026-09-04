@@ -1189,7 +1189,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54"
+        tags = "2, 3, 4, 5, 6, 7, 15, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1310,5 +1310,20 @@ pub mod envelope {
         /// Incremental order-flow update. Tag 54.
         #[prost(message, tag = "54")]
         OrderFlowUpdate(super::OrderFlowUpdate),
+        /// Native login start. Tag 55.
+        #[prost(message, tag = "55")]
+        BeginLogin(super::super::account::BeginLogin),
+        /// Pending login cancellation. Tag 56.
+        #[prost(message, tag = "56")]
+        CancelLogin(super::super::account::CancelLogin),
+        /// Sanitized account status request. Tag 57.
+        #[prost(message, tag = "57")]
+        GetAccountStatus(super::super::account::GetAccountStatus),
+        /// Browser authorization address. Tag 58.
+        #[prost(message, tag = "58")]
+        LoginAuthorization(super::super::account::LoginAuthorization),
+        /// Sanitized account view. Tag 59.
+        #[prost(message, tag = "59")]
+        AccountView(super::super::account::AccountView),
     }
 }

@@ -1,11 +1,13 @@
 //! Resident engine process boundary and authenticated local sessions.
 
+pub mod account_service;
 mod coinbase_catalog;
 mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
 mod workspace_layout;
 
+pub use account_service::{AccountService, AccountServiceConfig};
 pub use market_service::{MarketService, MarketServiceStatus};
 
 use std::{
@@ -78,6 +80,7 @@ pub struct EngineState {
     shutting_down: Arc<AtomicBool>,
     background_service: Arc<Mutex<Option<BackgroundService>>>,
     hot_set: Arc<Mutex<HotSetState>>,
+    account: AccountService,
 }
 
 #[derive(Clone)]
@@ -116,6 +119,7 @@ impl Default for EngineState {
             selection_generation: Arc::new(AtomicU64::new(0)),
             shutting_down: Arc::new(AtomicBool::new(false)),
             background_service: Arc::new(Mutex::new(None)),
+            account: AccountService::new(AccountServiceConfig::from_environment()),
         }
     }
 }
@@ -148,11 +152,18 @@ impl EngineState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             background_service: Arc::new(Mutex::new(None)),
             hot_set: Arc::new(Mutex::new(hot_set)),
+            account: AccountService::new(AccountServiceConfig::from_environment()),
         };
         if state.workspace().workspace_revision == 0 || migrated {
             state.persist(&state.workspace())?;
         }
         Ok(state)
+    }
+
+    /// Returns the engine-owned account session shared by all desktop windows.
+    #[must_use]
+    pub fn account(&self) -> &AccountService {
+        &self.account
     }
 
     /// Returns a consistent copy of the current workspace state.
@@ -2002,6 +2013,11 @@ fn serve_authenticated_messages(
                     return Ok(());
                 }
             }
+            payload @ (envelope::Payload::BeginLogin(_)
+            | envelope::Payload::CancelLogin(_)
+            | envelope::Payload::GetAccountStatus(_)) => {
+                handle_account_message(connection, state, &payload)?;
+            }
             envelope::Payload::Goodbye(_) => {
                 connection.send(envelope::Payload::Goodbye(Goodbye {
                     reason: "client session closed".to_string(),
@@ -2113,6 +2129,35 @@ fn handle_engine_control_message(
         _ => unreachable!("only engine control messages reach engine control dispatch"),
     }
     Ok(false)
+}
+
+fn handle_account_message(
+    connection: &mut FramedConnection,
+    state: &EngineState,
+    payload: &envelope::Payload,
+) -> Result<(), String> {
+    match payload {
+        envelope::Payload::BeginLogin(command) => {
+            match state.account().begin_login(command.request_generation) {
+                Ok(authorization) => {
+                    connection.send(envelope::Payload::LoginAuthorization(authorization))
+                }
+                Err(error) => send_market_fault(connection, error),
+            }
+        }
+        envelope::Payload::CancelLogin(command) => {
+            match state.account().cancel_login(command.request_generation) {
+                Ok(()) => connection.send(envelope::Payload::AccountView(
+                    state.account().account_status(),
+                )),
+                Err(error) => send_market_fault(connection, error),
+            }
+        }
+        envelope::Payload::GetAccountStatus(_) => connection.send(envelope::Payload::AccountView(
+            state.account().account_status(),
+        )),
+        _ => unreachable!("only account messages reach account dispatch"),
+    }
 }
 
 fn apply_engine_lifecycle(

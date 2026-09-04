@@ -971,6 +971,18 @@ pub fn native_installation_inventory(
                 service: "com.axiusflow.terminal".to_string(),
                 key: "provider-rithmic-test-default-v1".to_string(),
             },
+            VaultEntry {
+                service: "com.axiusflow.account".to_string(),
+                key: "account-refresh-default-v1".to_string(),
+            },
+            VaultEntry {
+                service: "com.axiusflow.account".to_string(),
+                key: "account-entitlement-lease-v1".to_string(),
+            },
+            VaultEntry {
+                service: "com.axiusflow.account".to_string(),
+                key: "account-device-key-v1".to_string(),
+            },
         ],
         registrations,
     })
@@ -1976,6 +1988,27 @@ mod tests {
             installer.recover(&Hooks::default()),
             Err(LifecycleError::UninstallPendingCleanup)
         );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn native_inventory_registers_account_vault_keys_for_complete_uninstall() {
+        let root = temporary_root("inventory-account-keys");
+        let inventory =
+            native_installation_inventory(root.join("install")).expect("native inventory builds");
+        for key in [
+            "account-refresh-default-v1",
+            "account-entitlement-lease-v1",
+            "account-device-key-v1",
+        ] {
+            assert!(
+                inventory
+                    .vault_entries
+                    .iter()
+                    .any(|entry| entry.service == "com.axiusflow.account" && entry.key == key),
+                "native inventory lost account vault key {key}"
+            );
+        }
         let _ = remove_owned_path(&root);
     }
 

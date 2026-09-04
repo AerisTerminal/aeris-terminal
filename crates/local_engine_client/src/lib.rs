@@ -18,14 +18,14 @@ use std::{
 };
 
 use axiusflow_engine_protocol::{
-    AttachClient, ClientHello, ClientKind, ConsumerResourceClass, DetachClient, EngineLifetimeMode,
-    EngineReady, EngineStatus, Envelope, EnvelopeDecoder, GetEngineStatus,
-    InstallProviderInstrument, LIFECYCLE_CONTRACT_REVISION, PROTOCOL_VERSION,
-    ProviderInstrumentInstalled, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesDemand, SeriesKey,
-    SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWorkspaceLayout,
-    ShutdownEngine, StreamRole, ViewportDemand, VisibilityDemand, WorkspaceState,
-    WorkspaceTabState, encode_envelope, envelope,
+    AccountView, AttachClient, BeginLogin, CancelLogin, ClientHello, ClientKind,
+    ConsumerResourceClass, DetachClient, EngineLifetimeMode, EngineReady, EngineStatus, Envelope,
+    EnvelopeDecoder, GetAccountStatus, GetEngineStatus, InstallProviderInstrument,
+    LIFECYCLE_CONTRACT_REVISION, LoginAuthorization, PROTOCOL_VERSION, ProviderInstrumentInstalled,
+    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineLifecycle, SetEngineResourceMode,
+    SetSelection, SetViewport, SetWorkspaceLayout, ShutdownEngine, StreamRole, ViewportDemand,
+    VisibilityDemand, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{
     BackgroundService, CredentialVault, NativeCredentialVault, current_release_identity,
@@ -647,6 +647,58 @@ impl EngineClient {
     pub fn detach_client(&mut self, client_id: u64) -> Result<(), String> {
         self.connection
             .send(envelope::Payload::DetachClient(DetachClient { client_id }))
+    }
+
+    /// Starts one engine-owned login transaction and returns the browser
+    /// authorization address for the desktop to open in the system browser.
+    ///
+    /// # Errors
+    /// Returns an error when the transaction cannot start or the reply is invalid.
+    pub fn begin_login(
+        &mut self,
+        client_id: u64,
+        request_generation: u64,
+    ) -> Result<LoginAuthorization, String> {
+        self.connection
+            .send(envelope::Payload::BeginLogin(BeginLogin {
+                client_id,
+                request_generation,
+            }))?;
+        match self.receive_reply()? {
+            envelope::Payload::LoginAuthorization(authorization) => Ok(authorization),
+            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+            _ => Err("engine returned an unexpected login reply".to_string()),
+        }
+    }
+
+    /// Cancels one pending engine-owned login transaction.
+    ///
+    /// # Errors
+    /// Returns an error when no matching transaction is pending or the reply is invalid.
+    pub fn cancel_login(&mut self, request_generation: u64) -> Result<AccountView, String> {
+        self.connection
+            .send(envelope::Payload::CancelLogin(CancelLogin {
+                request_generation,
+            }))?;
+        self.receive_account_view()
+    }
+
+    /// Returns the current sanitized engine-owned account view.
+    ///
+    /// # Errors
+    /// Returns an error when the request fails or the reply is invalid.
+    pub fn account_status(&mut self) -> Result<AccountView, String> {
+        self.connection
+            .send(envelope::Payload::GetAccountStatus(GetAccountStatus {}))?;
+        self.receive_account_view()
+    }
+
+    fn receive_account_view(&mut self) -> Result<AccountView, String> {
+        match self.receive_reply()? {
+            envelope::Payload::AccountView(view) => Ok(view),
+            envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
+            _ => Err("engine returned an unexpected account reply".to_string()),
+        }
     }
 }
 

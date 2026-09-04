@@ -3951,6 +3951,8 @@ fn run_desktop_readiness_command(
     {
         return Err("candidate market service did not reach readiness".to_string());
     }
+    let account = axiusflow_desktop::account::fetch_account_status(&mut client)?;
+    axiusflow_desktop::account::verify_account_readiness(&account)?;
     let release = axiusflow_platform_runtime::current_release_identity();
     if ready.release_identity != release.release_identity
         || ready.install_generation != release.install_generation
@@ -3967,6 +3969,7 @@ fn run_desktop_readiness_command(
         authenticated_ipc_ready: true,
         workspace_restored: true,
         market_service_ready: true,
+        account_ipc_ready: true,
     };
     client.shutdown_engine()?;
     let mut encoded = serde_json::to_vec(&report)
@@ -3977,6 +3980,9 @@ fn run_desktop_readiness_command(
 }
 
 #[derive(serde::Serialize)]
+// Wire mirror of the launcher readiness JSON: the flat boolean shape is the
+// cross-binary contract, not internal state.
+#[allow(clippy::struct_excessive_bools)]
 struct LifecycleReadinessReport {
     schema_version: u32,
     release_identity: String,
@@ -3987,6 +3993,7 @@ struct LifecycleReadinessReport {
     authenticated_ipc_ready: bool,
     workspace_restored: bool,
     market_service_ready: bool,
+    account_ipc_ready: bool,
 }
 
 #[cfg(feature = "diagnostics")]
