@@ -14,9 +14,9 @@ use axiusflow_application::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
-    FontFeatures, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent,
-    SharedString, Task, Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task,
+    Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
@@ -46,8 +46,6 @@ const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
-/// Keeps each live OHLC field in one stable slot while proportional prices change.
-const LEGEND_OHLC_VALUE_WIDTH: f32 = 96.0;
 const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
 const TEXT_EDIT_PAD: f32 = 4.0;
 
@@ -481,13 +479,6 @@ impl LegendItem {
             Self::Volume => 1,
             Self::Indicator(binding) => u64::from(binding) + 2,
         }
-    }
-}
-
-const fn legend_value_slot_width(item: LegendItem) -> Option<f32> {
-    match item {
-        LegendItem::Asset => Some(LEGEND_OHLC_VALUE_WIDTH),
-        LegendItem::Volume | LegendItem::Indicator(_) => None,
     }
 }
 
@@ -3379,11 +3370,7 @@ fn chart_legend_row(
     } else {
         Vec::new()
     };
-    let value_slot_width = legend_value_slot_width(row.item);
-    let ohlc_font_features = value_slot_width
-        .is_some()
-        .then(|| FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)])));
-    let values = values.into_iter().map(move |value| {
+    let values = values.into_iter().map(|value| {
         let color = value
             .color
             .as_deref()
@@ -3395,10 +3382,6 @@ fn chart_legend_row(
             .flex()
             .items_center()
             .text_color(color)
-            .when_some(value_slot_width, |value, width| value.w(px(width)))
-            .when_some(ohlc_font_features.clone(), |value, font_features| {
-                value.font_features(font_features)
-            })
             .child(value.text)
             .into_any_element()
     });
@@ -4691,16 +4674,6 @@ mod tests {
         chart.set_chart_type(ChartType::Candles);
         assert!(asset_values(&chart).contains("O "));
         assert!(asset_values(&chart).contains("C "));
-    }
-
-    #[test]
-    fn asset_ohlc_values_keep_fixed_slots_while_prices_update() {
-        assert_eq!(
-            legend_value_slot_width(LegendItem::Asset),
-            Some(LEGEND_OHLC_VALUE_WIDTH)
-        );
-        assert_eq!(legend_value_slot_width(LegendItem::Volume), None);
-        assert_eq!(legend_value_slot_width(LegendItem::Indicator(7)), None);
     }
 
     #[test]
