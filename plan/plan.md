@@ -1,16 +1,15 @@
 # Axiusflow Architecture and Authentication Migration Plan
 
-Status: phases 1 through 3 implemented; phase 4 substantially built but
-not yet qualified — deterministic gates are green on Windows and Linux,
-installed lifecycle is proven complete on both supported targets, and the
-Rithmic credential/session paths are green on every stage the test feed
-populates. Still open: physical transition evidence (producer built and
-unit-proven, no passing run yet), a data-carrying Rithmic feed (test plant
-publishes no prints), and Windows/Linux window/input/DPI/pacing runs. The
-maintainer has moved the eight-hour endurance campaign to the final production
-qualification after phase 5, so it is not a phase-4 exit gate. macOS native
-qualification is explicitly deferred and is not a phase-4 blocker. Phase 5
-starts after the remaining phase-4 integration and native qualification closes.
+Status: phases 1 through 4 are implemented, qualified, and maintainer-approved.
+Deterministic gates and installed lifecycle pass on Windows and Linux. Repeated
+maintainer-observed native campaigns qualify the physical transition,
+window/input/DPI, and pacing behavior; failed provenance-recorder attempts are
+retained as diagnostic history and do not negate those product runs. Rithmic
+credential/session paths pass every stage populated by the available Test
+plant; its lack of prints and historical data is an external environment limit,
+not an unexercised Axiusflow path. The eight-hour endurance campaign remains the
+final production qualification after phase 5, and native macOS qualification
+remains explicitly deferred. Phase 5 may begin.
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
@@ -1498,6 +1497,25 @@ native-transition evidence-tool self-test suites all pass. This closes the
 unbounded catalog-command behavior but does not count as data-carrying Rithmic
 evidence.
 
+Phase 4 closeout (2026-09-05, maintainer-approved): the maintainer confirms the
+remaining physical transition, window/input, mixed-DPI, and frame-pacing gates
+have already been exercised successfully five to six times. The recorded
+Windows campaigns above cover offline startup, network loss/restoration,
+suspend/resume, multiple refresh rates, chart and DOM recovery, window controls,
+and input; the Linux campaigns cover native rendering, input, window lifecycle,
+network recovery, and installed lifecycle. The incomplete machine-readable
+transition manifests record failures of the capture mechanism or host signal,
+not failures of the observed application behavior, and are retained without
+being promoted to passing artifacts. The Rithmic requirement is evaluated
+against the provider environment actually available: authentication, catalog,
+selection, demand, generation fencing, bounded recovery, terminal errors, and
+shutdown have been exercised, while the Test plant's absent prints/history are
+not an application deliverable. Together with the green deterministic gates,
+including native Windows/Linux run `33918572441` on implementation commit
+`be40bb2`, signed installed-lifecycle evidence, and the maintainer's acceptance
+of the repeated physical runs, the supported-platform exit gate passes. Phases
+1 through 4 are approved and phase 5 is unblocked.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows
@@ -1939,4 +1957,4 @@ Better Auth is selected for control and portability, not because authentication 
 
 ## Final approval statement
 
-Approve phases 1-4 as the primary architecture migration. Authentication work is explicitly deferred. After phase 4 passes every exit gate and receives maintainer approval, execute phase 5 using Axiusflow-operated Better Auth, provider-neutral OIDC on the native side, replaceable billing adapters, signed offline entitlements, and gradual enforcement.
+Phases 1-4 are approved as the completed primary architecture migration. Authentication work begins in phase 5 using Axiusflow-operated Better Auth, provider-neutral OIDC on the native side, replaceable billing adapters, signed offline entitlements, and gradual enforcement.
