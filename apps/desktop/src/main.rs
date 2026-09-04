@@ -30,6 +30,8 @@ mod symbol_menu;
 mod terminal_chrome;
 #[path = "components/terminal_view.rs"]
 mod terminal_view;
+#[cfg(any(test, feature = "diagnostics"))]
+mod transition_capture;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
 
@@ -5860,6 +5862,18 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-endurance" {
             run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
+            return Ok(None);
+        }
+        #[cfg(feature = "diagnostics")]
+        if argument == "--capture-native-transitions" {
+            transition_capture::run_transition_capture_command(arguments)
+                .expect("transition capture completes");
+            return Ok(None);
+        }
+        #[cfg(feature = "diagnostics")]
+        if argument == "--capture-native-transitions" {
+            transition_capture::run_transition_capture_command(arguments)
+                .expect("transition capture completes");
             return Ok(None);
         }
         if argument == "--rithmic-test" {

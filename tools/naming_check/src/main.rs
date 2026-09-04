@@ -1576,6 +1576,34 @@ mod tests {
     }
 
     #[test]
+    fn desktop_transition_capture_command_matches_tool_contract() {
+        // The physical-transition tool once invoked a capture mode the
+        // desktop never implemented. The command, its producer module, and
+        // the tool invocation are pinned together so they cannot drift
+        // apart again.
+        let desktop = manifest("apps/desktop/src/main.rs");
+        assert!(
+            desktop.contains("--capture-native-transitions")
+                && desktop.contains("transition_capture::run_transition_capture_command"),
+            "desktop lost the transition capture command wiring"
+        );
+        let producer = manifest("apps/desktop/src/transition_capture.rs");
+        assert!(
+            producer.contains("pub fn run_transition_capture_command"),
+            "transition capture producer lost its command entry point"
+        );
+        let tool = manifest("tools/run_native_transition_capture.ps1");
+        assert!(
+            tool.contains("--capture-native-transitions"),
+            "transition capture tool lost its desktop contract"
+        );
+        assert!(
+            !tool.contains("\"--rithmic-test\","),
+            "transition capture tool must not pass stray mode flags"
+        );
+    }
+
+    #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
         let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
         // The launcher runs from inside the tree uninstall deletes, and

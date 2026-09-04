@@ -22,6 +22,7 @@ axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sysinfo.workspace = true
 axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true

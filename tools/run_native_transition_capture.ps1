@@ -96,11 +96,15 @@ Write-JsonAtomically $manifestPath $manifest
 
 Write-Output "native_transition_operator_step=launching_offline reconnect only after the application shows its offline startup state"
 Write-Output "native_transition_operator_step=after_first_ready perform a separate network loss/recovery, then suspend/resume, waiting for full chart and DOM recovery after each"
+# The capture command takes its paths explicitly: the binary cannot
+# reliably discover the repository it was built from, while the lock file
+# lives at the repository root by definition.
 $arguments = @(
-    "--rithmic-test",
-    $resolvedHistoryRoot,
     "--capture-native-transitions",
-    $resolvedReportPath
+    $resolvedHistoryRoot,
+    $resolvedReportPath,
+    $cargoLockPath,
+    $executablePath
 )
 if ($DetailedDiagnostics) {
     $arguments += "--detailed-diagnostics"
