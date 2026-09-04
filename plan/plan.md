@@ -1208,6 +1208,21 @@ the soak output, then re-run in a quiet window. No product defect is
 evidenced; the engine path stays green on every populated stage. The
 exit gate stays closed and phase 5 remains blocked.
 
+Catalog generation-advance wedge fixed (same day): an engine whose
+Rithmic catalog session starts offline never dials (the only
+`request_connection` runs once at startup), and pending searches were
+dropped silently on every retry. On environment advance with pending
+demand the session now rejects each waiter with an actionable
+dispatch-unavailable event and restarts, so re-demand lands on a
+generation that can connect; consumers (soak, capture runner) retry on
+rejection instead of timing out. Regression cover: pending searches and
+selections are rejected with identity on advance. The capture runner
+additionally caps demand attempts instead of hammering the plant.
+Throttle postscript: tonight's search timeouts fit plant-side throttling
+after login churn as well as the wedge; a 45-minute quiet period with a
+single recovery probe distinguishes them. The exit gate stays closed
+and phase 5 remains blocked.
+
 Empty-token gitconfig pollution, second occurrence (same day): push
 failed with `Invalid username or token` again — global
 `url.https://x-access-token:@github.com/.insteadOf` (EMPTY token) plus
