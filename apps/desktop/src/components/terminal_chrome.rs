@@ -1005,6 +1005,26 @@ pub(super) fn connection_presentation(
         TerminalProvider::Coinbase => "Coinbase",
         TerminalProvider::Rithmic => "Test",
     };
+    // Provider connectivity outranks chart readiness. Buffered publications and
+    // history transitions can continue while the transport is offline; letting
+    // those states choose the label makes the status oscillate and can paint an
+    // offline feed green.
+    match state {
+        FeedConnectionState::Disconnected => {
+            return ("Offline".to_string(), |theme| theme.colors.danger);
+        }
+        FeedConnectionState::Recovering => {
+            return (format!("{provider} · Reconnecting"), |theme| {
+                theme.colors.bearish
+            });
+        }
+        FeedConnectionState::Stopped => {
+            return ("Stopped".to_string(), |theme| theme.colors.danger);
+        }
+        FeedConnectionState::Discovering
+        | FeedConnectionState::Authenticating
+        | FeedConnectionState::Streaming => {}
+    }
     if chart_state == ChartState::Stale {
         return (format!("{provider} · Stale"), |theme| theme.colors.bearish);
     }
@@ -1023,6 +1043,11 @@ pub(super) fn connection_presentation(
             FeedConnectionState::Disconnected | FeedConnectionState::Stopped
         )
     {
+        if state == FeedConnectionState::Recovering {
+            return (format!("{provider} · Reconnecting"), |theme| {
+                theme.colors.bearish
+            });
+        }
         return (format!("{provider} · Loading"), |theme| {
             theme.colors.primary
         });
@@ -1038,7 +1063,9 @@ pub(super) fn connection_presentation(
         });
     }
     match state {
-        FeedConnectionState::Disconnected => ("Offline".to_string(), |theme| theme.colors.danger),
+        FeedConnectionState::Disconnected
+        | FeedConnectionState::Recovering
+        | FeedConnectionState::Stopped => unreachable!("terminal connectivity handled above"),
         FeedConnectionState::Discovering => (format!("{provider} · Discovering"), |theme| {
             theme.colors.primary
         }),
@@ -1048,10 +1075,6 @@ pub(super) fn connection_presentation(
         FeedConnectionState::Streaming => {
             (format!("{provider} · Live"), |theme| theme.colors.bullish)
         }
-        FeedConnectionState::Recovering => (format!("{provider} · Reconnecting"), |theme| {
-            theme.colors.bearish
-        }),
-        FeedConnectionState::Stopped => ("Stopped".to_string(), |theme| theme.colors.danger),
     }
 }
 

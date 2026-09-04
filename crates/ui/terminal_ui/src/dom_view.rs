@@ -28,6 +28,14 @@ pub enum DomColumn {
     Volume,
 }
 
+/// Provider connectivity shown independently from the last valid book frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DomConnectionState {
+    Online,
+    Offline,
+    Recovering,
+}
+
 impl DomColumn {
     pub const ALL: [Self; 6] = [
         Self::ProfitLoss,
@@ -129,6 +137,7 @@ pub struct ReadOnlyDomView {
     frame: Option<DomFrame>,
     pending_frame: Option<DomFrame>,
     unavailable: bool,
+    connection_state: DomConnectionState,
     last_presented: Option<Instant>,
     presentation_task: Option<Task<()>>,
     theme: AxiusflowTheme,
@@ -143,6 +152,7 @@ impl ReadOnlyDomView {
             frame: None,
             pending_frame: None,
             unavailable: false,
+            connection_state: DomConnectionState::Online,
             last_presented: None,
             presentation_task: None,
             theme,
@@ -206,6 +216,14 @@ impl ReadOnlyDomView {
             self.unavailable = true;
             self.last_presented = None;
             self.presentation_task = None;
+            cx.notify();
+        }
+    }
+
+    /// Updates the connectivity banner without discarding the last valid book.
+    pub fn set_connection_state(&mut self, state: DomConnectionState, cx: &mut Context<Self>) {
+        if self.connection_state != state {
+            self.connection_state = state;
             cx.notify();
         }
     }
@@ -301,7 +319,14 @@ impl Render for ReadOnlyDomView {
                     .relative()
                     .overflow_hidden()
                     .child(render_header(columns, &self.theme))
-                    .children(state.and_then(|state| status_banner(state, watermark, &self.theme)))
+                    .children(connection_status_banner(self.connection_state, &self.theme))
+                    .children(
+                        (self.connection_state == DomConnectionState::Online)
+                            .then(|| {
+                                state.and_then(|state| status_banner(state, watermark, &self.theme))
+                            })
+                            .flatten(),
+                    )
                     .child(render_ladder(
                         rows,
                         empty_copy,
@@ -312,6 +337,37 @@ impl Render for ReadOnlyDomView {
                     .children(column_rails(columns, &self.theme)),
             )
     }
+}
+
+fn connection_status_banner(
+    state: DomConnectionState,
+    theme: &AxiusflowTheme,
+) -> Option<impl IntoElement + use<>> {
+    let (label, color): (&str, StatusColor) = match state {
+        DomConnectionState::Online => return None,
+        DomConnectionState::Offline => ("Depth offline · internet disconnected", |theme| {
+            theme.colors.danger
+        }),
+        DomConnectionState::Recovering => {
+            ("Depth reconnecting · awaiting fresh snapshot", |theme| {
+                theme.colors.bearish
+            })
+        }
+    };
+    Some(
+        div()
+            .h(px(ROW_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px_2()
+            .border_b_1()
+            .border_color(gpui_color(theme.colors.border))
+            .bg(gpui_color(color(theme).with_alpha(0.12)))
+            .text_size(px(TEXT_SIZE))
+            .text_color(gpui_color(color(theme)))
+            .child(label),
+    )
 }
 
 fn render_header(columns: DomColumnVisibility, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -746,6 +802,14 @@ mod tests {
     #[test]
     fn ready_state_has_no_banner() {
         assert!(status_presentation(OrderBookState::Ready, 12).is_none());
+    }
+
+    #[test]
+    fn provider_connectivity_has_stable_actionable_book_feedback() {
+        let theme = AxiusflowTheme::default();
+        assert!(connection_status_banner(DomConnectionState::Online, &theme).is_none());
+        assert!(connection_status_banner(DomConnectionState::Offline, &theme).is_some());
+        assert!(connection_status_banner(DomConnectionState::Recovering, &theme).is_some());
     }
 
     #[test]

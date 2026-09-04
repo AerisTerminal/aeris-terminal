@@ -784,6 +784,38 @@ fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> Chart
     }
 }
 
+/// Once recovery begins, transient retry states stay in one stable recovering
+/// presentation until the provider is either streaming or terminally stopped.
+const fn stabilized_connection_state(
+    previous: Option<FeedConnectionState>,
+    incoming: FeedConnectionState,
+) -> FeedConnectionState {
+    match (previous, incoming) {
+        (
+            Some(FeedConnectionState::Disconnected),
+            FeedConnectionState::Discovering
+            | FeedConnectionState::Authenticating
+            | FeedConnectionState::Recovering,
+        )
+        | (
+            Some(FeedConnectionState::Recovering),
+            FeedConnectionState::Disconnected
+            | FeedConnectionState::Discovering
+            | FeedConnectionState::Authenticating
+            | FeedConnectionState::Recovering,
+        ) => FeedConnectionState::Recovering,
+        _ => incoming,
+    }
+}
+
+fn stable_connection_message(state: FeedConnectionState, incoming: String) -> String {
+    match state {
+        FeedConnectionState::Disconnected => "Market data offline".to_string(),
+        FeedConnectionState::Recovering => "Reconnecting market data".to_string(),
+        _ => incoming,
+    }
+}
+
 const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
 
 /// The instrument menu should open with a default provider listing instead of
@@ -1438,6 +1470,19 @@ fn chart_status_detail<'a>(
         connection_message.unwrap_or(chart_message)
     } else {
         chart_message
+    }
+}
+
+const fn connectivity_chart_state(
+    chart_state: ChartState,
+    connection_state: FeedConnectionState,
+    has_market_data: bool,
+) -> ChartState {
+    match connection_state {
+        FeedConnectionState::Disconnected if has_market_data => ChartState::Stale,
+        FeedConnectionState::Recovering if has_market_data => ChartState::Recovering,
+        FeedConnectionState::Stopped => ChartState::Error,
+        _ => chart_state,
     }
 }
 
@@ -2509,8 +2554,6 @@ impl WorkspaceSurface {
                     || "Coinbase market ready".to_string(),
                     |product| format!("{} · Coinbase spot", product.provider_symbol),
                 );
-                self.connection_state = Some(FeedConnectionState::Streaming);
-                self.connection_message = Some("Coinbase market data is current".to_string());
             }
         } else {
             self.set_chart_state(
@@ -2681,21 +2724,11 @@ impl WorkspaceSurface {
                     self.coinbase_pending_product = None;
                     self.coinbase_pending_sequence = None;
                     self.market_state.symbol_selection_pending = false;
-                    self.connection_state = Some(FeedConnectionState::Disconnected);
-                    self.connection_message = Some(message.clone());
-                    self.dom.update(cx, |dom, dom_cx| {
-                        dom.mark_unavailable(dom_cx);
-                    });
                     if swapping {
                         self.restore_coinbase_selection_after_failure(&message, cx);
                     } else {
                         self.coinbase_previous_selection = None;
                     }
-                } else if self.provider == TerminalProvider::Coinbase
-                    && state == ChartState::Recovering
-                {
-                    self.connection_state = Some(FeedConnectionState::Recovering);
-                    self.connection_message = Some(message.clone());
                 } else if self.provider == TerminalProvider::Coinbase && state == ChartState::Ready
                 {
                     self.coinbase_switch = CoinbaseSwitchState::Idle;
@@ -2705,8 +2738,6 @@ impl WorkspaceSurface {
                         || "Coinbase market ready".to_string(),
                         |product| format!("{} · Coinbase spot", product.provider_symbol),
                     );
-                    self.connection_state = Some(FeedConnectionState::Streaming);
-                    self.connection_message = Some("Coinbase market data is current".to_string());
                 }
                 self.set_chart_state(state, message, cx);
             }
@@ -2945,6 +2976,7 @@ impl WorkspaceSurface {
         message: String,
         cx: &mut Context<Self>,
     ) {
+        let state = stabilized_connection_state(self.connection_state, state);
         let retirement = RithmicSessionRetirement::from_connection(state);
         let retained_market_data = self
             .chart
@@ -2971,19 +3003,40 @@ impl WorkspaceSurface {
         // from the dead incarnation, whose reset generations would fence
         // every new frame out forever.
         match state {
+            FeedConnectionState::Disconnected => {
+                self.dom.update(cx, |dom, dom_cx| {
+                    dom.set_connection_state(
+                        axiusflow_terminal_ui::DomConnectionState::Offline,
+                        dom_cx,
+                    );
+                });
+            }
+            FeedConnectionState::Discovering
+            | FeedConnectionState::Authenticating
+            | FeedConnectionState::Recovering => {
+                self.dom.update(cx, |dom, dom_cx| {
+                    if message == engine_market_worker::ENGINE_RESTARTED_MESSAGE {
+                        dom.clear(dom_cx);
+                    }
+                    dom.set_connection_state(
+                        axiusflow_terminal_ui::DomConnectionState::Recovering,
+                        dom_cx,
+                    );
+                });
+            }
+            FeedConnectionState::Streaming => {
+                self.dom.update(cx, |dom, dom_cx| {
+                    dom.set_connection_state(
+                        axiusflow_terminal_ui::DomConnectionState::Online,
+                        dom_cx,
+                    );
+                });
+            }
             FeedConnectionState::Stopped => {
                 self.dom.update(cx, |dom, dom_cx| {
                     dom.mark_unavailable(dom_cx);
                 });
             }
-            FeedConnectionState::Recovering
-                if message == engine_market_worker::ENGINE_RESTARTED_MESSAGE =>
-            {
-                self.dom.update(cx, |dom, dom_cx| {
-                    dom.clear(dom_cx);
-                });
-            }
-            _ => {}
         }
         let ready_action = rithmic_ready_action(
             state,
@@ -2991,7 +3044,7 @@ impl WorkspaceSurface {
             &self.rithmic_reconnect,
             self.market_state.rithmic_autoload_started,
         );
-        self.connection_message = Some(message);
+        self.connection_message = Some(stable_connection_message(state, message));
         match ready_action {
             RithmicReadyAction::Reconnect(symbol) => {
                 if self.search_symbol_query(&symbol, cx)
@@ -3437,8 +3490,6 @@ impl WorkspaceSurface {
         self.subscription_id = format!("{} · {}", instrument.display_symbol, instrument.venue_id);
         self.symbol_message = format!("Selected {}", instrument.display_symbol);
         self.series_message = "Choose a chart series".to_string();
-        self.connection_state = Some(FeedConnectionState::Streaming);
-        self.connection_message = Some("Rithmic Test market subscription active".to_string());
         self.select_rithmic_series(recovered_series, cx);
     }
 
@@ -6065,19 +6116,20 @@ mod tests {
         chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
         chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
         clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
-        current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
-        finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+        connectivity_chart_state, current_instrument_menu_index, default_rithmic_contract_index,
+        durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
         instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
         nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
         reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
         resized_side_panel_width, rithmic_ready_action, series_selector_label,
-        should_finish_chrome_overlay_close, split_lifetime_mode, symbol_input_action,
-        symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
-        timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
-        timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
-        timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
-        workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
-        workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
+        should_finish_chrome_overlay_close, split_lifetime_mode, stabilized_connection_state,
+        stable_connection_message, symbol_input_action, symbol_submit_decision,
+        timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
+        timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
+        timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
+        window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+        workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
+        workspace_title_bar_visible, wrapped_workspace_index,
     };
     #[cfg(feature = "diagnostics")]
     use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -7187,7 +7239,8 @@ mod tests {
             .0,
             "Coinbase · Loading"
         );
-        // It outranks a recovering feed: the trader is waiting on this chart.
+        // A recovery in flight stays explicitly reconnecting and uses the
+        // positive progress treatment instead of looking like a red failure.
         assert_eq!(
             connection_presentation(
                 TerminalProvider::Rithmic,
@@ -7196,7 +7249,7 @@ mod tests {
                 false,
             )
             .0,
-            "Test · Loading"
+            "Test · Reconnecting"
         );
         // It never outranks a feed that is down, because then the load is not
         // going to finish.
@@ -7204,7 +7257,7 @@ mod tests {
             connection_presentation(
                 TerminalProvider::Rithmic,
                 FeedConnectionState::Disconnected,
-                ChartState::Loading,
+                ChartState::Recovering,
                 false,
             )
             .0,
@@ -7219,6 +7272,63 @@ mod tests {
             )
             .0,
             "Test · Reconnecting"
+        );
+        assert_eq!(
+            connection_presentation(
+                TerminalProvider::Rithmic,
+                FeedConnectionState::Recovering,
+                ChartState::Stale,
+                false,
+            )
+            .0,
+            "Test · Reconnecting"
+        );
+    }
+
+    #[test]
+    fn reconnect_retry_states_do_not_flicker_back_to_offline() {
+        assert_eq!(
+            stabilized_connection_state(
+                Some(FeedConnectionState::Streaming),
+                FeedConnectionState::Disconnected,
+            ),
+            FeedConnectionState::Disconnected
+        );
+        assert_eq!(
+            stabilized_connection_state(
+                Some(FeedConnectionState::Disconnected),
+                FeedConnectionState::Discovering,
+            ),
+            FeedConnectionState::Recovering
+        );
+        assert_eq!(
+            stabilized_connection_state(
+                Some(FeedConnectionState::Recovering),
+                FeedConnectionState::Disconnected,
+            ),
+            FeedConnectionState::Recovering
+        );
+        assert_eq!(
+            stabilized_connection_state(
+                Some(FeedConnectionState::Recovering),
+                FeedConnectionState::Streaming,
+            ),
+            FeedConnectionState::Streaming
+        );
+        assert_eq!(
+            stable_connection_message(
+                FeedConnectionState::Recovering,
+                "Coinbase realtime disconnected".to_string(),
+            ),
+            "Reconnecting market data"
+        );
+        assert_eq!(
+            connectivity_chart_state(ChartState::Ready, FeedConnectionState::Recovering, true,),
+            ChartState::Recovering
+        );
+        assert_eq!(
+            connectivity_chart_state(ChartState::Error, FeedConnectionState::Disconnected, true,),
+            ChartState::Stale
         );
     }
 

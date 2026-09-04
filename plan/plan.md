@@ -1386,6 +1386,27 @@ seven switches and continued publishing, then failed because the new
 one-minute bucket was still absent six seconds after its boundary; this is
 recorded as live timing evidence, not a deterministic-gate regression.
 
+Windows recovery UX qualification (same day, maintainer-observed): an exact
+local release pair was exercised through live Coinbase startup, internet loss,
+and internet restoration on the physical Windows host. The first pass exposed
+three presentation defects: buffered chart readiness could overwrite provider
+connectivity and flicker the chart notice, the header dot remained visually
+green during recovery, and the DOM retained a stale book without an explicit
+offline state. Connection events now exclusively own feed truth; offline and
+reconnecting presentations use stable bounded copy, green is reserved for a
+fully streaming feed, and the DOM retains its last valid book under explicit
+offline/reconnecting banners until a fresh snapshot arrives. A subsequent
+fresh launch exposed a separate one-shot startup race: a transient initial
+Coinbase demand failure became terminal until the same symbol was manually
+reselected. Startup now retries that demand four times on monotonically
+advanced generations with a bounded 250 ms delay, while exhausting the budget
+still produces the original actionable error. The maintainer confirmed the
+generation-293 release desktop starts BTC/USD without reselection and that the
+disconnect/reconnect, chart notice, header indication, and DOM recovery UI are
+clean. This is interactive Windows product evidence; the formal offline-first
+transition recorder, suspend/resume, mixed-DPI, and frame-pacing evidence remain
+separate exit-gate work.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows

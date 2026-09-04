@@ -13,7 +13,7 @@ mod dom_view;
 pub use axiusflow_market_data::{DomColumnLevel, DomFrame, DomRow};
 pub use dom::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
 #[cfg(feature = "gpui")]
-pub use dom_view::{DomColumn, DomColumnVisibility, ReadOnlyDomView};
+pub use dom_view::{DomColumn, DomColumnVisibility, DomConnectionState, ReadOnlyDomView};
 
 /// A bounded queue that prevents background producers from growing UI work.
 #[derive(Debug)]

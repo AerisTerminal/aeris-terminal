@@ -196,6 +196,8 @@ pub(super) fn workspace_pane_element(
         .chart
         .as_ref()
         .is_some_and(|chart| chart.read(cx).has_market_data());
+    let chart_state =
+        connectivity_chart_state(surface.chart_state, connection_state, chart_has_market_data);
     let dom_columns = surface.dom.read(cx).columns();
     let content = market_workspace(MarketWorkspaceState {
         app: pane.surface.clone(),
@@ -208,9 +210,9 @@ pub(super) fn workspace_pane_element(
         side_panel_width: surface.side_panel_width,
         dom_column_menu_open: surface.menu_state.dom_column_open,
         dom_columns,
-        chart_state: surface.chart_state,
+        chart_state,
         chart_status_detail: chart_status_detail(
-            surface.chart_state,
+            chart_state,
             connection_state,
             &surface.chart_state_message,
             surface.connection_message.as_deref(),
