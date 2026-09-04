@@ -1434,6 +1434,18 @@ reproduced product recovery failure. Native callback evidence remains open
 until the recorder uses the available public provider path and a truthful
 Windows signal without synthesizing callbacks from provider success.
 
+Windows release qualification follow-up (same day, maintainer-observed): the
+normal matching release pair at local revision `3fb8f45`, install generation
+294, was relaunched cleanly after a complete host shutdown with no stale
+Axiusflow process present. The maintainer exercised Windows sleep/resume,
+internet disconnect/restoration, and multiple configured screen refresh rates
+through the real interactive desktop and confirmed chart, DOM, connectivity
+feedback, resident-engine recovery, and rendering remained clean. This closes
+the maintainer-visible Windows recovery and refresh-rate behavior for this
+pair. The failed headless recorder attempts remain excluded from formal
+artifact claims, and exact mixed-DPI/monitor configuration metadata still must
+be recorded separately if it was not part of this campaign.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows
