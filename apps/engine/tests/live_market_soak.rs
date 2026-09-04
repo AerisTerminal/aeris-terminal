@@ -24,8 +24,8 @@ use std::{
 use axiusflow_coinbase_market_adapter::CoinbaseInterval;
 use axiusflow_engine::MarketService;
 use axiusflow_engine_protocol::{
-    InstallProviderInstrument, MarketBar, SearchProviderInstruments, SelectProviderInstrument,
-    SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceState, envelope,
+    InstallProviderInstrument, MarketBar, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceState, envelope,
 };
 
 const CLIENT_ID: u64 = 1;
@@ -299,11 +299,12 @@ fn install_symbol(
     let envelope::Payload::ProviderInstrumentSearchResult(result) = found else {
         unreachable!("poll_until matched a search result");
     };
-    let summary = result
-        .instruments
-        .iter()
-        .find(|candidate| candidate.symbol == symbol)
-        .unwrap_or_else(|| panic!("{symbol} is listed; got {:?}", result.instruments.len()));
+    let summary = catalog_candidate(provider, symbol, &result.instruments).unwrap_or_else(|| {
+        panic!(
+            "{symbol} has a selectable listing; got {:?}",
+            result.instruments.len()
+        )
+    });
 
     let entitlement_id = if provider == "rithmic" {
         format!("rithmic-test:{}:{}", summary.exchange, summary.symbol)
@@ -327,10 +328,14 @@ fn install_symbol(
             .expect("catalog selection is accepted");
     };
     send_selection();
+    let selection_description = format!(
+        "catalog selection for {} on {}",
+        summary.symbol, summary.exchange
+    );
     let selected = poll_catalog(
         service,
         Duration::from_secs(45),
-        "catalog selection",
+        &selection_description,
         send_selection,
         |event| {
             matches!(event, envelope::Payload::ProviderInstrumentSelection(selection)
@@ -351,6 +356,53 @@ fn install_symbol(
         .install_provider_instrument(&instrument)
         .expect("instrument installs");
     instrument
+}
+
+/// Selects the actual front-month future behind a Rithmic product root. The
+/// catalog also returns the root itself and calendar spreads; neither is a
+/// referenceable outright contract. Other providers use their exact listing.
+fn catalog_candidate<'a>(
+    provider: &str,
+    query: &str,
+    instruments: &'a [ProviderInstrumentSummary],
+) -> Option<&'a ProviderInstrumentSummary> {
+    if provider != "rithmic" {
+        return instruments
+            .iter()
+            .find(|candidate| candidate.symbol == query);
+    }
+    instruments
+        .iter()
+        .filter(|candidate| {
+            candidate.symbol.starts_with(query)
+                && candidate.symbol != query
+                && !candidate.symbol.contains('-')
+                && candidate.expiration_date.is_some()
+        })
+        .min_by_key(|candidate| candidate.expiration_date.as_deref())
+}
+
+#[test]
+fn rithmic_gate_selects_the_front_month_outright_instead_of_the_product_root() {
+    let listing = |symbol: &str, expiration_date: Option<&str>| ProviderInstrumentSummary {
+        symbol: symbol.to_string(),
+        exchange: "CME-Delayed".to_string(),
+        name: None,
+        product_code: Some("MNQ".to_string()),
+        instrument_type: Some("FUTURE".to_string()),
+        expiration_date: expiration_date.map(str::to_string),
+    };
+    let instruments = [
+        listing("MNQ", None),
+        listing("MNQU6-MNQZ6", Some("20260918")),
+        listing("MNQZ6", Some("20261218")),
+        listing("MNQU6", Some("20260918")),
+    ];
+
+    assert_eq!(
+        catalog_candidate("rithmic", "MNQ", &instruments).map(|result| result.symbol.as_str()),
+        Some("MNQU6")
+    );
 }
 
 /// Starts one demand generation and waits for its covering history.

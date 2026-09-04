@@ -1367,6 +1367,25 @@ Windows workspace format/clippy/build/test gate passed, and
 `x86_64-apple-darwin`. That Apple-target check is source-portability evidence
 only, not native macOS qualification.
 
+Supported-target CI and Rithmic fixture follow-up (same day): commit
+`2739246` completed the new two-lane CI run `33888206226` successfully on
+both native runners. Each lane passed formatting, warnings-denied clippy,
+workspace build and tests, release desktop/engine provenance and artifact
+upload, and the market-data performance gate. A current-head live run
+(`33889321694`) exposed a separate defect in the Rithmic soak fixture: it
+selected the catalog's unreferenceable `MNQ` product root on `CME-Delayed`
+instead of an expiring outright contract. The gate now follows the desktop
+and smoke-probe rule—exclude the root and calendar spreads, require an
+expiration, and choose the earliest listed contract—with deterministic
+coverage. A local credentialed rerun selected `MNQU6`, completed engine-owned
+search/reference/selection/install immediately, then failed explicitly at
+the already-known external boundary, `Rithmic historical bars are
+unavailable`; the test plant still supplies no data with which to qualify
+bars. The parallel Coinbase run reached 251-bar covering history through
+seven switches and continued publishing, then failed because the new
+one-minute bucket was still absent six seconds after its boundary; this is
+recorded as live timing evidence, not a deterministic-gate regression.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows
