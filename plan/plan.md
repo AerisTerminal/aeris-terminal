@@ -1,6 +1,14 @@
 # Axiusflow Architecture and Authentication Migration Plan
 
-Status: phases 1 through 3 implemented; cross-platform release qualification and phases 4 through 5 remain incomplete
+Status: phases 1 through 3 implemented; phase 4 substantially built but
+not yet qualified — deterministic gates green on Windows and Linux,
+installed lifecycle proven complete on Windows, Rithmic credential and
+session paths green on every stage the test feed populates. Still open:
+physical transition evidence (producer built and unit-proven, no passing
+run yet), 8-hour endurance (started, incomplete), macOS lane (no Apple
+hardware), a data-carrying Rithmic feed (test plant publishes no prints),
+Linux installed-lifecycle campaign, window/input/DPI/pacing runs, and
+maintainer approval for phase 5. Phase 5 remains blocked.
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
@@ -1242,6 +1250,36 @@ manual command accounts for it. Next time: check
 runner jobs before touching anything; candidate suspects are a stale
 checkout auth step and IDE Git integration. The exit gate stays closed
 and phase 5 remains blocked.
+
+Stopping point, end of session (same day): coding pauses here with the
+tree committed and the record current. Confirmed state:
+- Transition capture producer (`--capture-native-transitions`, headless
+  recorder + report schema + unit cover) is implemented and warning-free,
+  but has NO passing physical run. Five attempts failed at the operator
+  boundary, not in product logic: stale manifests, Enter-while-online,
+  silent 45s waits (fixed with narrated retries), and one reconnect held
+  too briefly for session establishment. The last attempt logged a clean
+  offline start, then exited before reconnecting. Next attempt needs the
+  operator to hold each network state until the console confirms it.
+- 8-hour endurance started but did NOT complete (`completion=incomplete`);
+  no endurance evidence may be cited.
+- Rithmic wedge fix is implemented, unit-covered, and proven live (fresh
+  fixed engine passes search/select/demand; stale engines hang search).
+- Rithmic credential reprovisioned and live-verified on the engine path;
+  bars remain blocked on the printless test feed.
+- Installed lifecycle (install/update/complete-uninstall) proven on
+  Windows with real binaries, including the self-relocation fix.
+- Deterministic gates green on Windows and Linux runners, including
+  the wedge fix and capture producer (macOS queues with no runner).
+- The scheduled Coinbase live gate just passed the full 600s soak on the
+  vault-fixed VM; the scheduled Rithmic gate is queued behind it.
+- No Axiusflow desktop, engine, or runner-driven job is running now; the
+  resident session was left stopped.
+- Two commits are committed locally but UNPUSHED (wedge live-proof note,
+  tool-offender note); pushing retriggers both CI lanes (~40 min cook).
+Open external blockers unchanged: Apple hardware, data-carrying Rithmic
+feed, Linux lifecycle campaign, window/input/DPI/pacing runs, phase 5
+approval. The exit gate stays closed and phase 5 remains blocked.
 
 ### Cross-platform exit gate
 
