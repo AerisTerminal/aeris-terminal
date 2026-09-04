@@ -1265,16 +1265,32 @@ impl CaptureDriver {
     }
 
     /// Demands the capture series, waiting through offline windows.
-    /// Returns whether demand is fully installed. Stage stalls while the
-    /// monitors report offline are not fatal: the operator reconnects when
-    /// the application shows its offline startup state, and demand retries
-    /// then with a fresh generation. The same stall online fails fast with
-    /// an actionable error.
-    fn demand(&mut self, online: bool) -> Result<bool, String> {
-        let Some(instrument) = self.search_contract(online)? else {
+    /// Returns whether demand is fully installed. A stall is fatal only
+    /// when the monitors reported online both when the attempt started and
+    /// when it expired: anything else means the physical network moved
+    /// mid-attempt, and the next attempt retries with a fresh generation.
+    /// Every attempt and outcome is printed: the operator watches this
+    /// console while performing the physical sequence.
+    fn demand(
+        &mut self,
+        online_now: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<bool, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let online_at_entry = online_now.load(Relaxed);
+        eprintln!(
+            "[demand] attempt {} ({} at entry)",
+            self.demand_cycle.saturating_add(1),
+            if online_at_entry { "online" } else { "offline" }
+        );
+        // Fatal only when online both at entry and at expiry: any physical
+        // move mid-attempt retries instead.
+        let online = || online_at_entry && online_now.load(Relaxed);
+        let Some(instrument) = self.search_contract(&online)? else {
+            eprintln!("[demand] search stalled while offline; waiting for reconnect");
             return Ok(false);
         };
-        if !self.select_contract(online, &instrument)? {
+        if !self.select_contract(&online, &instrument)? {
+            eprintln!("[demand] selection stalled while offline; waiting for reconnect");
             return Ok(false);
         }
         self.client.install_provider_instrument(instrument)?;
@@ -1296,7 +1312,7 @@ impl CaptureDriver {
 
     fn search_contract(
         &mut self,
-        online: bool,
+        online: &impl Fn() -> bool,
     ) -> Result<Option<InstallProviderInstrument>, String> {
         self.demand_cycle = self.demand_cycle.saturating_add(1);
         self.client
@@ -1310,7 +1326,7 @@ impl CaptureDriver {
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if Instant::now() >= deadline {
-                if online {
+                if online() {
                     return Err(format!(
                         "Rithmic catalog search returned no {CAPTURE_SYMBOL} contract"
                     ));
@@ -1360,7 +1376,7 @@ impl CaptureDriver {
 
     fn select_contract(
         &mut self,
-        online: bool,
+        online: &impl Fn() -> bool,
         instrument: &InstallProviderInstrument,
     ) -> Result<bool, String> {
         self.client.select_provider_instrument(
@@ -1381,7 +1397,7 @@ impl CaptureDriver {
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if Instant::now() >= deadline {
-                if online {
+                if online() {
                     return Err(format!("Rithmic selection never resolved {CAPTURE_SYMBOL}"));
                 }
                 return Ok(false);
@@ -1422,8 +1438,9 @@ impl CaptureDriver {
         dropped: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         deadline: Instant,
     ) -> Result<(), String> {
+        use std::sync::atomic::Ordering::Relaxed;
         let mut demanded = false;
-        let mut online = false;
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             if Instant::now() >= deadline {
                 return Err(
@@ -1434,8 +1451,12 @@ impl CaptureDriver {
                 match outcome {
                     MonitorOutcome::Observation(observation, at_ms) => {
                         match observation {
-                            MonitorObservation::NetworkUnavailable => online = false,
-                            MonitorObservation::NetworkAvailable => online = true,
+                            MonitorObservation::NetworkUnavailable => {
+                                online.store(false, Relaxed);
+                            }
+                            MonitorObservation::NetworkAvailable => {
+                                online.store(true, Relaxed);
+                            }
                             MonitorObservation::PowerSuspending
                             | MonitorObservation::PowerResumed => {}
                         }
@@ -1449,8 +1470,9 @@ impl CaptureDriver {
             }
             if !demanded {
                 // Demand retries across the offline window with fresh
-                // generations; only an online stall is fatal.
-                demanded = self.demand(online)?;
+                // generations; only a stall online at both entry and expiry
+                // is fatal.
+                demanded = self.demand(&online)?;
                 continue;
             }
             if let Ok(Some((_, payload))) = self
