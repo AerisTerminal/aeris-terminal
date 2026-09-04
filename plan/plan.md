@@ -1474,6 +1474,27 @@ or compositor process survived. This is retained as an honest Hyper-V guest
 suspend/resume failure; it is not attributed to application recovery and does
 not satisfy the Linux power-transition item.
 
+Rithmic catalog deadline closeout (2026-09-05, this batch): a current release
+probe found a distinct boundedness gap while the Test plant was accepting the
+ticker login but not returning the symbol-search response. The adapter's
+transport and heartbeat silence were bounded, but an individual catalog
+search, instrument-reference request, or subscription acknowledgement had no
+response deadline; continuing heartbeats could therefore leave the command
+pending until the client's outer timeout and delay engine shutdown. Each
+catalog operation now carries the negotiated 15-second provider response
+deadline. Expiry invalidates the exact provider generation through the
+existing transient-recovery path, rejects every pending engine command, and
+allows immediate bounded shutdown. The credentialed engine probe now resolves
+the plant's missing search reply as `DispatchUnavailable` after 17.84 seconds
+instead of timing out silently, and the subsequent authenticated shutdown
+completed in approximately 16 ms with no resident process. The standalone
+smoke independently reached `rithmic_ticker_login=passed` and then reported
+`symbol_search_read_failed=Rithmic session deadline expired`, confirming the
+current external boundary. Adapter tests pass 112/112, warnings-denied clippy
+passes, the workspace build passes, and the complete workspace test rerun
+passes. This closes the unbounded catalog-command behavior but does not count
+as data-carrying Rithmic evidence.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows

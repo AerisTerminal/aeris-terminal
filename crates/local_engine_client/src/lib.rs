@@ -1168,9 +1168,9 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     use axiusflow_engine_protocol::{
-        EngineLifetimeMode, InstallProviderInstrument, OrderBookState, ResourceMode,
-        SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-        WorkspaceState,
+        EngineLifetimeMode, InstallProviderInstrument, OrderBookState,
+        ProviderCatalogRejectionReason, ResourceMode, SearchProviderInstruments,
+        SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceState,
     };
     use axiusflow_engine_protocol::{
         EngineReady, Envelope, EnvelopeDecoder, PROTOCOL_VERSION, StreamRole, encode_envelope,
@@ -1759,17 +1759,26 @@ mod tests {
             if Instant::now() >= search_deadline {
                 return Err("Rithmic native search timed out".to_string());
             }
-            if let Some(envelope::Payload::ProviderInstrumentSearchResult(result)) =
-                receive_native_event(client, consumer_id)?
-                && result.search_generation == SEARCH_GENERATION
-            {
-                break result
-                    .instruments
-                    .into_iter()
-                    .find(|instrument| instrument.symbol == requested_symbol)
-                    .ok_or_else(|| {
-                        "Rithmic native search returned no exact requested contract".to_string()
-                    })?;
+            match receive_native_event(client, consumer_id)? {
+                Some(envelope::Payload::ProviderInstrumentSearchResult(result))
+                    if result.search_generation == SEARCH_GENERATION =>
+                {
+                    break result
+                        .instruments
+                        .into_iter()
+                        .find(|instrument| instrument.symbol == requested_symbol)
+                        .ok_or_else(|| {
+                            "Rithmic native search returned no exact requested contract".to_string()
+                        })?;
+                }
+                Some(envelope::Payload::ProviderCatalogRejected(rejection))
+                    if rejection.command_generation == SEARCH_GENERATION =>
+                {
+                    let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
+                        .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
+                    return Err(format!("Rithmic native search was rejected: {reason:?}"));
+                }
+                _ => {}
             }
             thread::sleep(Duration::from_millis(20));
         };
@@ -1787,13 +1796,22 @@ mod tests {
             if Instant::now() >= selection_deadline {
                 return Err("Rithmic native selection timed out".to_string());
             }
-            if let Some(envelope::Payload::ProviderInstrumentSelection(selection)) =
-                receive_native_event(client, consumer_id)?
-                && selection.consumer_id == consumer_id
-            {
-                return selection
-                    .instrument
-                    .ok_or_else(|| "Rithmic native selection omitted identity".to_string());
+            match receive_native_event(client, consumer_id)? {
+                Some(envelope::Payload::ProviderInstrumentSelection(selection))
+                    if selection.consumer_id == consumer_id =>
+                {
+                    return selection
+                        .instrument
+                        .ok_or_else(|| "Rithmic native selection omitted identity".to_string());
+                }
+                Some(envelope::Payload::ProviderCatalogRejected(rejection))
+                    if rejection.command_generation == SELECTION_GENERATION =>
+                {
+                    let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
+                        .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
+                    return Err(format!("Rithmic native selection was rejected: {reason:?}"));
+                }
+                _ => {}
             }
             thread::sleep(Duration::from_millis(20));
         }

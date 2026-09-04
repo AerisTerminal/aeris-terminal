@@ -1849,8 +1849,12 @@ enum PendingCatalogCommand {
     Search {
         generation: NonZeroUsize,
         collector: SymbolSearchCollector,
+        deadline: Instant,
     },
-    Reference(RithmicInstrumentSelection),
+    Reference {
+        selection: RithmicInstrumentSelection,
+        deadline: Instant,
+    },
 }
 
 enum SubscriptionPhase {
@@ -1863,6 +1867,7 @@ struct PendingSubscription {
     instrument: RithmicProviderInstrument,
     previous: Vec<RithmicProviderInstrument>,
     phase: SubscriptionPhase,
+    deadline: Instant,
 }
 
 type SymbolKey = (String, String);
@@ -1875,10 +1880,28 @@ struct CatalogCommandState {
     latest_search: Option<LatestSymbolSearch>,
 }
 
+fn catalog_command_deadline(state: &CatalogCommandState) -> Option<Instant> {
+    match state.pending_catalog.as_ref() {
+        Some(
+            PendingCatalogCommand::Search { deadline, .. }
+            | PendingCatalogCommand::Reference { deadline, .. },
+        ) => Some(*deadline),
+        None => state
+            .pending_subscription
+            .as_ref()
+            .map(|subscription| subscription.deadline),
+    }
+}
+
+fn catalog_command_timed_out(state: &CatalogCommandState, now: Instant) -> bool {
+    catalog_command_deadline(state).is_some_and(|deadline| now >= deadline)
+}
+
 struct DirectSessionState {
     last_message: Instant,
     next_heartbeat: Instant,
     heartbeat_deadline: Option<Instant>,
+    response_timeout: Duration,
     source_ordinal: u64,
     catalog: CatalogCommandState,
 }
@@ -1903,6 +1926,7 @@ fn collect_market(
         last_message: started,
         next_heartbeat: started + heartbeat_interval,
         heartbeat_deadline: None,
+        response_timeout: config.session_limits.response_timeout,
         source_ordinal: 0,
         catalog: CatalogCommandState::default(),
     };
@@ -1918,9 +1942,13 @@ fn collect_market(
                 emitter,
                 &mut state.catalog.pending_catalog,
                 state.catalog.latest_search.as_ref(),
+                config.session_limits.response_timeout,
             )?;
         }
         let now = Instant::now();
+        if catalog_command_timed_out(&state.catalog, now) {
+            return Err(session_failure(RithmicSessionError::Deadline));
+        }
         if let Some(invalidation) = silence_invalidation(&state, config, now) {
             return Err(invalidation);
         }
@@ -1975,6 +2003,7 @@ fn collect_authorized_silence_evidence(
         last_message: started,
         next_heartbeat: started + config.message_silence_timeout,
         heartbeat_deadline: None,
+        response_timeout: config.session_limits.response_timeout,
         source_ordinal: 0,
         catalog: CatalogCommandState::default(),
     };
@@ -2033,6 +2062,7 @@ fn handle_session_message(
     canonical: &mut CanonicalSessionState,
     stop: &AtomicBool,
 ) -> Result<bool, (ProviderInvalidationReason, RetryDisposition)> {
+    let response_timeout = state.response_timeout;
     match message {
         RithmicSessionMessage::Catalog(message) => {
             handle_catalog_message(
@@ -2042,6 +2072,7 @@ fn handle_session_message(
                 emitter,
                 &mut state.catalog,
                 canonical,
+                response_timeout,
             )?;
         }
         RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
@@ -2054,6 +2085,7 @@ fn handle_session_message(
                 accepted,
                 &mut state.catalog.pending_subscription,
                 canonical,
+                response_timeout,
             )?;
         }
         RithmicSessionMessage::Market(message) => {
@@ -2096,6 +2128,7 @@ fn process_session_commands(
     emitter: &SessionEmitter,
     pending: &mut Option<PendingCatalogCommand>,
     latest_search: Option<&LatestSymbolSearch>,
+    response_timeout: Duration,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     for _ in 0..SESSION_COMMAND_BATCH {
         let command = match commands.try_recv() {
@@ -2124,6 +2157,7 @@ fn process_session_commands(
                 *pending = Some(PendingCatalogCommand::Search {
                     generation: request.search_generation,
                     collector,
+                    deadline: Instant::now() + response_timeout,
                 });
                 return Ok(());
             }
@@ -2160,7 +2194,10 @@ fn process_session_commands(
                         exchange: market_data_exchange(&selection.exchange),
                     })
                     .map_err(session_failure)?;
-                *pending = Some(PendingCatalogCommand::Reference(selection));
+                *pending = Some(PendingCatalogCommand::Reference {
+                    selection,
+                    deadline: Instant::now() + response_timeout,
+                });
                 return Ok(());
             }
         }
@@ -2185,6 +2222,7 @@ fn handle_catalog_message(
     emitter: &SessionEmitter,
     state: &mut CatalogCommandState,
     canonical: &mut CanonicalSessionState,
+    response_timeout: Duration,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let Some(pending) = state.pending_catalog.as_mut() else {
         return Err(malformed());
@@ -2193,6 +2231,7 @@ fn handle_catalog_message(
         PendingCatalogCommand::Search {
             generation,
             collector,
+            ..
         } => match collector.accept(message) {
             Ok(CollectionProgress::Pending) => Ok(()),
             Ok(CollectionProgress::Complete(symbols)) => {
@@ -2232,7 +2271,7 @@ fn handle_catalog_message(
             }
             Ok(CollectionProgress::Unhandled(_)) | Err(_) => Err(malformed()),
         },
-        PendingCatalogCommand::Reference(selection) => {
+        PendingCatalogCommand::Reference { selection, .. } => {
             let DecodedCatalogMessage::InstrumentReference(reference) = message else {
                 return Err(malformed());
             };
@@ -2266,6 +2305,7 @@ fn handle_catalog_message(
                 instrument,
                 previous,
                 phase,
+                deadline: Instant::now() + response_timeout,
             });
             Ok(())
         }
@@ -2293,6 +2333,7 @@ fn advance_subscription(
     accepted: bool,
     pending: &mut Option<PendingSubscription>,
     canonical: &mut CanonicalSessionState,
+    response_timeout: Duration,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let Some(plan) = pending.as_mut() else {
         return Err(malformed());
@@ -2320,9 +2361,11 @@ fn advance_subscription(
                     ))
                     .map_err(session_failure)?;
                 plan.phase = SubscriptionPhase::Unsubscribe(next);
+                plan.deadline = Instant::now() + response_timeout;
             } else {
                 begin_subscription(connection, &plan.instrument, canonical)?;
                 plan.phase = SubscriptionPhase::Subscribe;
+                plan.deadline = Instant::now() + response_timeout;
             }
             Ok(())
         }
@@ -2988,6 +3031,7 @@ mod tests {
             last_message: started,
             next_heartbeat: started + Duration::from_secs(10),
             heartbeat_deadline: Some(started + Duration::from_secs(5)),
+            response_timeout: Duration::from_secs(5),
             source_ordinal: 0,
             catalog: CatalogCommandState::default(),
         };
@@ -3005,6 +3049,37 @@ mod tests {
                 RetryDisposition::Transient
             ))
         );
+    }
+
+    #[test]
+    fn catalog_commands_expire_at_the_provider_response_deadline() {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(15);
+        let selection = RithmicInstrumentSelection::try_new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            "MNQU6",
+            "CME",
+            "rithmic-test:CME:MNQU6",
+            RithmicReadOnlySubscription::try_new(true, true, true)
+                .expect("read-only selection validates"),
+        )
+        .expect("selection validates");
+        let state = CatalogCommandState {
+            pending_catalog: Some(PendingCatalogCommand::Reference {
+                selection,
+                deadline,
+            }),
+            ..CatalogCommandState::default()
+        };
+
+        assert!(!catalog_command_timed_out(
+            &state,
+            deadline
+                .checked_sub(Duration::from_nanos(1))
+                .expect("deadline has a preceding instant")
+        ));
+        assert!(catalog_command_timed_out(&state, deadline));
     }
 
     #[test]
