@@ -1167,7 +1167,6 @@ pub fn run_capture(inputs: CaptureInputs) -> Result<(), String> {
     // Handles join at finalize time for a clean worker stop.
 
     let mut driver = CaptureDriver::connect()?;
-    driver.demand()?;
     let deadline = Instant::now() + CAPTURE_DEADLINE;
     let outcome = driver.observe_until_complete(&mut recorder, &monitor_rx, &dropped, deadline);
     let _ = (network_handle, power_handle);
@@ -1221,6 +1220,7 @@ fn spawn_monitor(
 struct CaptureDriver {
     client: EngineClient,
     consumer_id: u64,
+    demand_cycle: u64,
     demand_instrument_id: String,
     demand_entitlement: String,
     installed: bool,
@@ -1248,6 +1248,7 @@ impl CaptureDriver {
         Ok(Self {
             client,
             consumer_id,
+            demand_cycle: 0,
             demand_instrument_id: String::new(),
             demand_entitlement: String::new(),
             installed: false,
@@ -1263,9 +1264,19 @@ impl CaptureDriver {
         })
     }
 
-    fn demand(&mut self) -> Result<(), String> {
-        let instrument = self.search_contract()?;
-        self.select_contract(&instrument)?;
+    /// Demands the capture series, waiting through offline windows.
+    /// Returns whether demand is fully installed. Stage stalls while the
+    /// monitors report offline are not fatal: the operator reconnects when
+    /// the application shows its offline startup state, and demand retries
+    /// then with a fresh generation. The same stall online fails fast with
+    /// an actionable error.
+    fn demand(&mut self, online: bool) -> Result<bool, String> {
+        let Some(instrument) = self.search_contract(online)? else {
+            return Ok(false);
+        };
+        if !self.select_contract(online, &instrument)? {
+            return Ok(false);
+        }
         self.client.install_provider_instrument(instrument)?;
         let series = SeriesKey {
             provider: "rithmic".to_string(),
@@ -1280,14 +1291,18 @@ impl CaptureDriver {
         self.client.set_market_visibility(self.consumer_id, true)?;
         self.history_open = true;
         self.live_open = true;
-        Ok(())
+        Ok(true)
     }
 
-    fn search_contract(&mut self) -> Result<InstallProviderInstrument, String> {
+    fn search_contract(
+        &mut self,
+        online: bool,
+    ) -> Result<Option<InstallProviderInstrument>, String> {
+        self.demand_cycle = self.demand_cycle.saturating_add(1);
         self.client
             .search_provider_instruments(SearchProviderInstruments {
                 consumer_id: self.consumer_id,
-                search_generation: 1,
+                search_generation: self.demand_cycle,
                 provider: "rithmic".to_string(),
                 query: CAPTURE_SYMBOL.to_string(),
                 maximum_results: 16,
@@ -1295,9 +1310,12 @@ impl CaptureDriver {
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if Instant::now() >= deadline {
-                return Err(format!(
-                    "Rithmic catalog search returned no {CAPTURE_SYMBOL} contract"
-                ));
+                if online {
+                    return Err(format!(
+                        "Rithmic catalog search returned no {CAPTURE_SYMBOL} contract"
+                    ));
+                }
+                return Ok(None);
             }
             match self
                 .client
@@ -1309,7 +1327,7 @@ impl CaptureDriver {
                         .iter()
                         .find(|candidate| candidate.symbol == CAPTURE_SYMBOL)
                     {
-                        break Ok(InstallProviderInstrument {
+                        break Ok(Some(InstallProviderInstrument {
                             provider: "rithmic".to_string(),
                             session_generation: result.provider_generation,
                             selection_generation: 1,
@@ -1326,7 +1344,7 @@ impl CaptureDriver {
                                 "rithmic-test:{}:{}",
                                 summary.exchange, summary.symbol
                             ),
-                        });
+                        }));
                     }
                     return Err(format!(
                         "Rithmic catalog lists no {CAPTURE_SYMBOL} contract tonight"
@@ -1340,12 +1358,16 @@ impl CaptureDriver {
         }
     }
 
-    fn select_contract(&mut self, instrument: &InstallProviderInstrument) -> Result<(), String> {
+    fn select_contract(
+        &mut self,
+        online: bool,
+        instrument: &InstallProviderInstrument,
+    ) -> Result<bool, String> {
         self.client.select_provider_instrument(
             axiusflow_engine_protocol::SelectProviderInstrument {
                 consumer_id: self.consumer_id,
-                selection_generation: 1,
-                search_generation: 1,
+                selection_generation: self.demand_cycle,
+                search_generation: self.demand_cycle,
                 provider: "rithmic".to_string(),
                 symbol: instrument.provider_symbol.clone(),
                 exchange: instrument.venue_id.clone(),
@@ -1359,7 +1381,10 @@ impl CaptureDriver {
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if Instant::now() >= deadline {
-                return Err(format!("Rithmic selection never resolved {CAPTURE_SYMBOL}"));
+                if online {
+                    return Err(format!("Rithmic selection never resolved {CAPTURE_SYMBOL}"));
+                }
+                return Ok(false);
             }
             match self
                 .client
@@ -1367,7 +1392,7 @@ impl CaptureDriver {
             {
                 Ok(Some((_, envelope::Payload::ProviderInstrumentSelection(selection)))) => {
                     if selection.instrument.is_some() {
-                        return Ok(());
+                        return Ok(true);
                     }
                 }
                 Ok(Some((_, envelope::Payload::DemandError(error)))) => {
@@ -1397,6 +1422,8 @@ impl CaptureDriver {
         dropped: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         deadline: Instant,
     ) -> Result<(), String> {
+        let mut demanded = false;
+        let mut online = false;
         loop {
             if Instant::now() >= deadline {
                 return Err(
@@ -1406,6 +1433,12 @@ impl CaptureDriver {
             while let Ok(outcome) = monitor_rx.try_recv() {
                 match outcome {
                     MonitorOutcome::Observation(observation, at_ms) => {
+                        match observation {
+                            MonitorObservation::NetworkUnavailable => online = false,
+                            MonitorObservation::NetworkAvailable => online = true,
+                            MonitorObservation::PowerSuspending
+                            | MonitorObservation::PowerResumed => {}
+                        }
                         recorder.apply_monitor_callback(observation, at_ms);
                     }
                     MonitorOutcome::Failed => recorder.note_failure(true),
@@ -1413,6 +1446,12 @@ impl CaptureDriver {
             }
             for _ in 0..dropped.swap(0, std::sync::atomic::Ordering::Relaxed) {
                 recorder.note_observer_overflow();
+            }
+            if !demanded {
+                // Demand retries across the offline window with fresh
+                // generations; only an online stall is fatal.
+                demanded = self.demand(online)?;
+                continue;
             }
             if let Ok(Some((_, payload))) = self
                 .client
