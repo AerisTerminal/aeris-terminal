@@ -109,6 +109,34 @@ Compilation is not proof for streaming, persistence, IPC, lifecycle, or renderin
 and run the release desktop, exercise the real path, and verify that the running desktop and engine
 are the intended binaries. If live verification is impossible, state exactly what remains untested.
 
+## Self-hosted CI (zero-cost; GitHub-hosted runners are forbidden)
+
+The account carries no paid Actions quota, so every lane runs on maintainer hardware. The
+`*-latest` ban, the three-lane matrix, and the job-scoped credential rule are pinned in
+`tools/naming_check`; the full saga lives in `plan/plan.md`. What a new session must know:
+
+- Windows lane: runner `axiusflow-windows` in `C:\actions-runner`, labels `axiusflow,windows`,
+  run interactively via `run.cmd` (never as a service; vault parity). Requires PowerShell 7
+  (`shell: pwsh` steps fail without it). Relaunch after every reboot or logoff.
+- Linux lane: Hyper-V VM `axiusflow-linux` (Ubuntu 24.04, static 16 GB RAM, 8 GB swap,
+  `jobs = 4` in the runner user's `~/.cargo/config.toml`), labels `axiusflow,linux`, running as
+  a systemd service that auto-starts with the VM. Key-only SSH with `~/.ssh/axiusflow_linux`;
+  the IP is DHCP-assigned, so resolve it per session (ARP scan for the `00-15-5d` NIC).
+  Hyper-V automatic checkpoints stay off; start the VM after host reboot.
+- macOS lane has no runner (Apple hardware required, none exists): it queues to timeout and
+  fails closed. macOS is not a supported target until a native lane runs.
+- Runner registration tokens expire after one hour and registration is case-sensitive on the
+  repo path; the maintainer issues them from Settings, Actions, Runners.
+- Validate workflow YAML with a real parser before push: a run with zero jobs is a parse
+  failure. Never `git config --global` in a workflow; scope credentials per job.
+- Do not push while lanes run: same-ref concurrency cancels them. Batch commits instead —
+  every push costs roughly 40 minutes of full-machine load on both runners.
+- Rithmic Test allows one concurrent session: drive the engine path or the smoke binary,
+  never both at once. The test feed publishes no prints, so tick bars cannot form there;
+  do not chase that absence as an adapter defect.
+- Secrets travel by environment only, never enter the repo, logs, or binaries; delete
+  throwaway provisioning helpers immediately after use.
+
 ## Rust conventions
 
 - Rust edition 2024; toolchain is pinned in `rust-toolchain.toml`.
