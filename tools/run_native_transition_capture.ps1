@@ -78,7 +78,8 @@ if ((Test-Path -LiteralPath $resolvedReportPath) -or (Test-Path -LiteralPath $ma
 
 $status = @(git -C $repoRoot status --porcelain=v1 --untracked-files=all)
 if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
-    throw "Native-transition evidence requires a clean Git worktree."
+    $offenders = ($status | Select-Object -First 5) -join '; '
+    throw "Native-transition evidence requires a clean Git worktree (found: $offenders)."
 }
 $sourceRevision = (git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
