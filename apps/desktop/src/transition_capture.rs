@@ -1042,8 +1042,6 @@ const CAPTURE_SYMBOL: &str = "BTC-USD";
 /// Sixty-second bars: a bucket rolls visibly inside the capture window, so
 /// handoff continuity is exercised by every transition.
 const CAPTURE_INTERVAL_SECONDS: u32 = 60;
-/// Fixed demand generation for the capture's single series demand.
-const DEMAND_GENERATION: u64 = 1;
 /// Overall capture deadline: three physical scenarios plus demand setup.
 const CAPTURE_DEADLINE: Duration = Duration::from_mins(30);
 /// Bounded observer intake per monitor; any drop fails the capture.
@@ -1215,6 +1213,7 @@ fn spawn_monitor(
 struct CaptureDriver {
     client: EngineClient,
     consumer_id: u64,
+    demand_generation: u64,
     installed: bool,
     snapshot_seen: bool,
     live_seen: bool,
@@ -1240,6 +1239,7 @@ impl CaptureDriver {
         Ok(Self {
             client,
             consumer_id,
+            demand_generation: 0,
             installed: false,
             snapshot_seen: false,
             live_seen: false,
@@ -1261,6 +1261,7 @@ impl CaptureDriver {
     /// Every attempt and outcome is printed: the operator watches this
     /// console while performing the physical sequence.
     fn demand(&mut self) -> Result<(), String> {
+        self.demand_generation = self.demand_generation.saturating_add(1);
         let instrument = InstallProviderInstrument {
             provider: "coinbase".to_string(),
             session_generation: 1,
@@ -1283,7 +1284,7 @@ impl CaptureDriver {
             cadence: SeriesCadence::FixedSeconds as i32,
         };
         self.client
-            .set_series_demand(self.consumer_id, DEMAND_GENERATION, series)?;
+            .set_series_demand(self.consumer_id, self.demand_generation, series)?;
         self.client.set_market_visibility(self.consumer_id, true)?;
         self.history_open = true;
         self.live_open = true;
@@ -1311,6 +1312,7 @@ impl CaptureDriver {
     ) -> Result<(), String> {
         use std::sync::atomic::Ordering::Relaxed;
         let mut demanded = false;
+        let mut initial_demand_sent = false;
         let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             if Instant::now() >= deadline {
@@ -1339,19 +1341,21 @@ impl CaptureDriver {
             for _ in 0..dropped.swap(0, std::sync::atomic::Ordering::Relaxed) {
                 recorder.note_observer_overflow();
             }
-            if !demanded {
+            if !demanded && (!initial_demand_sent || online.load(Relaxed)) {
                 // Coinbase demand is installed once while offline. The
                 // engine owns bounded provider recovery and carries this
                 // demand into the fresh session after connectivity returns.
                 self.demand()?;
                 demanded = true;
+                initial_demand_sent = true;
                 continue;
             }
             if let Ok(Some((_, payload))) = self
                 .client
                 .receive_market_event_timeout(Duration::from_millis(200))
+                && self.apply_publication(recorder, payload)?
             {
-                self.apply_publication(recorder, payload)?;
+                demanded = false;
             }
             if self.snapshot_seen {
                 self.history_open = false;
@@ -1385,7 +1389,7 @@ impl CaptureDriver {
         &mut self,
         recorder: &mut TransitionRecorder,
         payload: envelope::Payload,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         match payload {
             envelope::Payload::ProviderInstrumentInstalled(_) => {
                 self.installed = true;
@@ -1409,13 +1413,15 @@ impl CaptureDriver {
             envelope::Payload::OrderBookSnapshot(_) => {
                 self.depth_seen = true;
             }
-            envelope::Payload::DemandError(_) => {
-                // A terminal demand error before any chart data ever flowed
-                // fails fast: the feed cannot serve this contract tonight, so
-                // waiting out the deadline would prove nothing. Details stay
-                // engine-side; only the fact travels further.
+            envelope::Payload::DemandError(error) => {
                 if self.current_provider_generation == 0 {
-                    return Err("Coinbase demand failed before first chart data".to_string());
+                    return match axiusflow_engine_protocol::EngineFaultCode::try_from(error.code) {
+                        Ok(
+                            axiusflow_engine_protocol::EngineFaultCode::Offline
+                            | axiusflow_engine_protocol::EngineFaultCode::Retryable,
+                        ) => Ok(true),
+                        _ => Err("Coinbase demand failed before first chart data".to_string()),
+                    };
                 }
                 self.record_loss(recorder);
             }
@@ -1427,7 +1433,7 @@ impl CaptureDriver {
             }
             _ => {}
         }
-        Ok(())
+        Ok(false)
     }
 
     fn note_generation(&mut self, recorder: &mut TransitionRecorder, generation: u64) -> bool {
