@@ -1446,6 +1446,34 @@ pair. The failed headless recorder attempts remain excluded from formal
 artifact claims, and exact mixed-DPI/monitor configuration metadata still must
 be recorded separately if it was not part of this campaign.
 
+Linux VM transition qualification (same day, agent-observed): the clean
+self-hosted Ubuntu checkout at `4b65dea8e24e1ee69d5707edcaa774acfaac7800`
+(`Cargo.lock` SHA256
+`6d2ea4a49dc074c5bae676871acce737c21337f93bcadecc106424af02b6b83b`)
+ran the matching release desktop and resident engine under the application's
+native Wayland backend. The executable SHA256 values were
+`5257dc5a714daf0de1cc383ad897af5c9aaad6a868099ebc87a5d4a106567e4d`
+for the desktop and
+`496a553fe9d953462d147bb1a3c9476d5e726f5d58111fd26241b0644ea6d17b`
+for the engine. On Ubuntu 24.04.4 LTS, Linux 6.8.0-138, Microsoft Hyper-V,
+15 GiB guest memory, and a 1600x900 nested Wayland output, the live BTC/USD
+chart rendered and updated; pointer and keyboard input, workspace creation,
+window move/resize, and maximize transitions completed without a process
+failure. A bounded guest firewall interruption of outbound HTTPS produced the
+red global status and stable chart-reconnecting notice; automatic firewall
+removal restored the live chart and green status without manual redemand.
+This closes the VM-rendered Linux window/input/network-recovery portion, but
+does not claim physical scanout, mixed-DPI, or frame-pacing evidence.
+
+The subsequent real guest `mem` suspend with an RTC wake did not pass: after
+the wake deadline Hyper-V answered ICMP and accepted TCP connections but
+Linux userspace did not produce an SSH banner, so the VM required a maintainer
+restart. After restart the runner and boot-persistent Secret Service were both
+active, the runner checkout remained clean, 89 GB was free, and no Axiusflow
+or compositor process survived. This is retained as an honest Hyper-V guest
+suspend/resume failure; it is not attributed to application recovery and does
+not satisfy the Linux power-transition item.
+
 ### Supported-platform exit gate
 
 Supported-platform stabilization is complete only when all of the following are true for Windows
