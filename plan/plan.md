@@ -1195,6 +1195,19 @@ venue-timing legs (one history miss, one bucket-correction miss) across
 20+ clean switches; no systematic pattern. The exit gate stays closed
 and phase 5 remains blocked.
 
+First kitted Rithmic gate (same day, run `33830904833`): the restore
+step works — login and catalog search complete in CI for the first time
+(all prior search timeouts were kitless artifacts). New leg: selection
+times out after search passes. The soak searches literal roots (`MNQ`,
+`MES`) and selects the exact-symbol match, while the engine probe forces
+`MNQU6` and passes selection/reference minutes apart on the same
+credential. Open question, not yet root-caused: whether the plant lists
+an unreferenceable root entry tonight or reference is briefly out. Next
+step is observability, not guessing: log the selected symbol/exchange in
+the soak output, then re-run in a quiet window. No product defect is
+evidenced; the engine path stays green on every populated stage. The
+exit gate stays closed and phase 5 remains blocked.
+
 Empty-token gitconfig pollution, second occurrence (same day): push
 failed with `Invalid username or token` again — global
 `url.https://x-access-token:@github.com/.insteadOf` (EMPTY token) plus
