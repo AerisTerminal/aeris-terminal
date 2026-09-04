@@ -1563,6 +1563,16 @@ mod tests {
             2,
             "every live-market gate must delete its job-scoped credential file"
         );
+        assert_eq!(
+            workflow.matches("Restore licensed Rithmic kit").count(),
+            1,
+            "the credentialed Rithmic gate must restore the licensed kit before building"
+        );
+        assert_eq!(
+            workflow.matches("Require Rithmic provider kit").count(),
+            1,
+            "the credentialed Rithmic gate must fail fast when the kit is absent"
+        );
     }
 
     #[test]

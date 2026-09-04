@@ -1173,6 +1173,41 @@ Rithmic live work needs a provably session-free window (engine
 `rithmic:0:gen0` and no smoke in flight). The exit gate stays closed
 and phase 5 remains blocked.
 
+Rithmic gate kitless root cause (same day): all three catalog-search
+timeouts traced to a missing licensed kit, not the plant or credential.
+The runner checkout never had `provider_kit/current/proto` (gitignored,
+absent after every fresh checkout), so CI builds fell back to kitless
+Rithmic, which cannot speak R|Protocol — while the dev tree (156 proto
+files present) searched fine minutes apart on the same credential.
+Permanent copy preserved at `C:\axiusflow-deps\provider-kit` (hash
+verified); the Rithmic gate now restores it per run with a fail-fast
+absence check, pinned by architecture checks. Adjacent gap recorded but
+not changed: a terminal session death during a pending search resolves
+only at the consumer deadline (45s silence), since the failure is
+retried and waiters cleared silently. The exit gate stays closed and
+phase 5 remains blocked.
+
+Checkout wipes manual kit seeds (same day): `actions/checkout` runs
+`git clean -ffdx` by default, so hand-seeding the runner checkout is
+futile — the workflow restore step is the only durable path, and no
+kitted CI run has happened yet. Coinbase side note: two more transient
+venue-timing legs (one history miss, one bucket-correction miss) across
+20+ clean switches; no systematic pattern. The exit gate stays closed
+and phase 5 remains blocked.
+
+Empty-token gitconfig pollution, second occurrence (same day): push
+failed with `Invalid username or token` again — global
+`url.https://x-access-token:@github.com/.insteadOf` (EMPTY token) plus
+the dev remote rewritten to an empty-token URL. Cleaned the same way
+(`--unset-all` the full lowercase key path; `set-url` needs quoting)
+and the push went through. Writer still unidentified: no current lane
+writes `--global` (pinned absent by architecture checks), and no
+manual command accounts for it. Next time: check
+`~/.gitconfig` LastWriteTime immediately and correlate with active
+runner jobs before touching anything; candidate suspects are a stale
+checkout auth step and IDE Git integration. The exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,

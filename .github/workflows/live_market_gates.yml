@@ -74,6 +74,22 @@ jobs:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - uses: actions/checkout@v4
+      - name: Restore licensed Rithmic kit
+        # The kit is licensed material kept permanently outside Git. A
+        # self-hosted credentialed runner keeps a copy at the conventional
+        # path (overridable per runner); without it the build silently falls
+        # back to kitless Rithmic and no live path can work.
+        shell: pwsh
+        run: |
+          $kitRoot = if ($env:AXIUSFLOW_RITHMIC_KIT_ROOT) { $env:AXIUSFLOW_RITHMIC_KIT_ROOT } else { 'C:\axiusflow-deps\provider-kit' }
+          $proto = Join-Path $kitRoot 'proto'
+          $dest = Join-Path (Get-Location) 'provider_kit\current\proto'
+          if (-not (Test-Path $proto)) {
+            Write-Warning "licensed Rithmic kit absent at $proto; continuing kitless"
+          } else {
+            New-Item -ItemType Directory -Path $dest -Force | Out-Null
+            Copy-Item (Join-Path $proto '*') -Destination $dest -Force
+          }
       - name: Authenticate private chart dependency
         # Job-scoped credential rewrite (see ci.yml): per-job temp file via
         # GITHUB_ENV, never the runner owner's persistent global git config.
@@ -93,6 +109,13 @@ jobs:
           if ($response.StatusCode -ne 200) { throw "private chart credential returned HTTP $($response.StatusCode)" }
       - name: Install pinned Rust toolchain
         run: rustup show
+      - name: Require Rithmic provider kit
+        # A kitless build cannot speak R|Protocol: fail here in seconds with
+        # an actionable message instead of timing out the soak opaquely.
+        shell: pwsh
+        run: |
+          $schemas = @(Get-ChildItem provider_kit/current/proto/*.proto -ErrorAction SilentlyContinue)
+          if ($schemas.Count -eq 0) { throw 'Rithmic provider kit is unavailable on this runner' }
       - name: Soak the live Rithmic feed through the engine
         env:
           AXIUSFLOW_SOAK_SECONDS: "600"

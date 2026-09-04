@@ -62,11 +62,13 @@ integration lives in `crates/ui/chart_integration`; host chrome, pointer behavio
 layout belong there. When updating Nucleus, change only the `nucleuscharts_*` revisions and do not
 update GPUI incidentally.
 
-The licensed Rithmic Provider Kits are kept permanently outside Git in
-`/home/devraj/Downloads/provider-kits`. The ignored workspace copy can disappear when local Git
-changes are discarded. If `provider_kit/current/proto` is missing, restore the matching R|Protocol
-kit from that Downloads directory into `provider_kit/current` before building or concluding that
-Rithmic is unavailable. Keep the permanent Downloads copy unchanged.
+The licensed Rithmic Provider Kits are kept permanently outside Git. The maintainer's
+canonical copy currently lives at `C:\axiusflow-deps\provider-kit` (the Rithmic live gate
+restores `proto/` from there, overridable per runner via `AXIUSFLOW_RITHMIC_KIT_ROOT`). If
+`provider_kit/current/proto` is missing, restore it from the canonical copy before building
+or concluding that Rithmic is unavailable, and never treat a kitless build as live-path
+evidence: without the kit the adapter cannot speak R|Protocol. Keep the permanent copy
+unchanged.
 
 ## Repository map
 
