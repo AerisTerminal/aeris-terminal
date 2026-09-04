@@ -86,13 +86,37 @@ if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
     throw "Native-transition evidence requires a full source revision."
 }
 
-cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --locked --release --package axiusflow_desktop --all-features
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --locked --release --package axiusflow_desktop --package axiusflow_engine --all-features
 if ($LASTEXITCODE -ne 0) {
-    throw "Native-transition release build failed."
+    throw "Native-transition release-pair build failed."
 }
 $executablePath = Join-Path $repoRoot "target\release\axiusflow_desktop.exe"
 $executablePath = (Resolve-Path -LiteralPath $executablePath).Path
+$engineExecutablePath = Join-Path $repoRoot "target\release\axiusflow_engine.exe"
+$engineExecutablePath = (Resolve-Path -LiteralPath $engineExecutablePath).Path
 $cargoLockPath = (Resolve-Path -LiteralPath $cargoLockPath).Path
+
+# A transition capture must start from the release pair it just built. Refuse
+# to disrupt an open desktop, then retire a resident engine through its
+# authenticated shutdown command before the operator takes the machine
+# offline. This also prevents a stale release identity from invalidating the
+# capture after the physical sequence has begun.
+if ($null -ne (Get-Process -Name "axiusflow_desktop" -ErrorAction SilentlyContinue)) {
+    throw "Close every running Axiusflow desktop before native-transition capture."
+}
+$residentEngines = @(Get-Process -Name "axiusflow_engine" -ErrorAction SilentlyContinue)
+if ($residentEngines.Count -gt 0) {
+    & $engineExecutablePath --shutdown
+    if ($LASTEXITCODE -ne 0) {
+        throw "The resident engine could not be shut down before native-transition capture."
+    }
+    foreach ($residentEngine in $residentEngines) {
+        Wait-Process -Id $residentEngine.Id -Timeout 15 -ErrorAction SilentlyContinue
+    }
+    if ($null -ne (Get-Process -Name "axiusflow_engine" -ErrorAction SilentlyContinue)) {
+        throw "The resident engine did not stop before native-transition capture."
+    }
+}
 
 Write-Output "native_transition_operator_step=disconnect_network_before_start"
 Write-Output "native_transition_operator_sequence=launch_offline,reconnect_until_ready,separate_offline_recovery_until_ready,suspend_resume_until_ready,close_normally"
