@@ -1133,6 +1133,46 @@ from every prior feed characterization — adapter correct on every
 populated stage, engine healthy afterward. The exit gate stays closed
 and phase 5 remains blocked.
 
+Linux runner vault outage and fix (same day, this batch): the first
+manually-dispatched `coinbase` live gate failed in 6s with `demand
+error in filesystem_write` after loading 251 venue bars. Root-caused,
+not assumed: `LocalHistoryStore::open` needs catalog/segment keys from
+the native vault (Secret Service), and the minimal server VM ships no
+secret provider — the storage worker starts degraded and the first
+persist fails the demand honestly. Proven by a dummy-key probe that
+fails identically with and without a session bus (the earlier successful
+Rithmic provisioning ran on the Windows DPAPI vault, so it never
+contradicted this). Fix is environmental, not product: `gnome-keyring`
+installed, a boot-persistent login keyring with an auto-generated
+0600 password, a foreground `unlock-keyring.service` unit (`--daemonize`
+exits instantly on this box; foreground stays), linger enabled, and a
+runner drop-in injecting the user bus address. Proven across a reboot:
+both units active, secret store/lookup/clear passes. Stuck-queue
+postscript: jobs queued during runner downtime can stick indefinitely
+(cancel + fresh dispatch recovers); same-ref concurrency flips
+superseded runs to cancelled at run level while their green lane
+evidence stands. The exit gate stays closed and phase 5 remains blocked.
+
+Live-gate night, both venues (same day, run `33824909811`): the vault
+fix validated live — the coinbase soak ran 353s with 8 consecutive
+251-bar switches, open candle present every time, then missed covering
+history on the 9th demand inside 45s (transient venue miss after 8
+clean passes; no systematic pattern across runs, evidence artifact
+uploaded). Self-inflicted wound recorded honestly: an earlier coinbase
+attempt this night died by my own VM reboot mid-job — never reboot or
+restart a runner with a live job; verify idle first. The Rithmic gate
+failed twice at `timed out waiting for catalog search` (45s, zero
+results) while the engine path, minutes apart on the same vault
+credential, passes login/search/select/install and fails only on the
+known empty feed. First failure overlapped the resident engine's
+lingering reconnect loop (single-session churn); the second ran with no
+engine Rithmic runtime anywhere, pointing at plant-side throttling after
+churn or a brief search outage rather than product or credential —
+re-run in a quiet window before drawing conclusions. Operational rule:
+Rithmic live work needs a provably session-free window (engine
+`rithmic:0:gen0` and no smoke in flight). The exit gate stays closed
+and phase 5 remains blocked.
+
 ### Cross-platform exit gate
 
 Cross-platform stabilization is complete only when all of the following are true for Windows,
