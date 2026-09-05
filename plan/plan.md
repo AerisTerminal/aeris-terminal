@@ -2052,3 +2052,35 @@ direction while CI lanes run):
 - Full workspace gates pass locally with zero failures. Still maintainer
   actions before live sandbox login: D1 id, Google OAuth client, sender
   domain, DNS/TLS for the issuer origin. No push until approved.
+
+Batch 4 — Dodo billing plus webhook reconciliation (2026-09-05, unpushed;
+Stripe deferred indefinitely, Dodo is primary):
+
+- `migrations/0003_billing.sql`: `billing_customers`, `subscriptions`,
+  `webhook_inbox` under unique `(provider, event_id)`. Raw bodies are never
+  stored or logged — only extracted canonical fields.
+- `src/billing.ts`: `BillingAdapter` interface with the Dodo implementation
+  (`POST /checkouts` with explicit currency/country plus
+  `metadata.axiusflow_account_id`, `POST
+  /customers/{id}/customer-portal/session`). Vendor product IDs live only in
+  the `DODO_PLAN_PRODUCTS` env JSON; Starter/Enterprise have no product.
+  Customer join precedes checkout so webhooks reconcile on customer ID even
+  if metadata is ever dropped.
+- `src/webhooks.ts`: Standard Webhooks HMAC-SHA256 against the unmodified
+  raw body (tolerant secret parsing, ±5 min timestamp bound, constant-time
+  compare), ack after durable insert, idempotent async reconcile.
+  Subscription events drive canonical state plus monotonic entitlement
+  revisions; `subscription.failed` records without granting; payment and
+  unknown types are visible no-ops.
+- New routes: authenticated `/api/axiusflow/checkout` and
+  `/api/axiusflow/portal` (Better Auth session cookie → linked account),
+  `/webhooks/dodo`.
+- Local proof on this machine: `tsc --noEmit` clean, migrations applied to
+  local D1, dev server up, signed replay drill green — valid, duplicate
+  (deduped), out-of-order cancelled-then-renewed, unknown type all 200;
+  tampered signature and missing type 400. D1 confirms one inbox row per
+  identity, `sub_test_001` active on plan pro, entitlement revision 3.
+- Maintainer provisions for live billing: Dodo merchant account, test/live
+  API keys, webhook secret, four subscription products with their
+  `DODO_PLAN_PRODUCTS` values, live base-URL switch, sender domain. No push
+  until approved.
