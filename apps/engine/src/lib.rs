@@ -2690,7 +2690,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_account_gate_resumes_existing_ipc_demand_after_sign_in() {
+    fn twenty_account_gate_cycles_resume_ipc_demand_in_both_live_modes() {
         let socket_name = socket_name("account-gate-resume");
         let listener = bind_listener(&socket_name).expect("bind account-gated endpoint");
         let token = [43_u8; 32];
@@ -2751,24 +2751,27 @@ mod tests {
         poll_ipc_snapshot(&mut client, 501, 1, &series);
         publish_fixture_live_update(&harness, &mut client, 1, 2, "2.00", 1, 200);
 
-        state.account().set_authenticated_for_test(false);
-        assert_eq!(
-            harness
-                .stops
-                .recv_timeout(Duration::from_secs(1))
-                .expect("sign-out stops the active provider generation")
-                .0
-                .get(),
-            1
-        );
-        wait_for_resource_mode(&state, ResourceMode::OfflineSuspended);
-
-        state.account().set_authenticated_for_test(true);
-        wait_for_resource_mode(&state, ResourceMode::Warm);
-        publish_fixture_live_update(&harness, &mut client, 2, 3, "2.50", 2, 250);
+        for completed_cycles in 0..20 {
+            if completed_cycles == 10 {
+                permit_markets_live(&state, &mut client);
+            }
+            let stopped_generation = completed_cycles + 1;
+            let resumed_mode = if completed_cycles < 10 {
+                ResourceMode::Warm
+            } else {
+                ResourceMode::MarketsLive
+            };
+            cycle_account_market_gate(
+                &state,
+                &harness,
+                &mut client,
+                stopped_generation,
+                resumed_mode,
+            );
+        }
         assert!(
-            harness.history_fetches.load(Ordering::Acquire) >= 2,
-            "sign-in requests fresh covering history"
+            harness.history_fetches.load(Ordering::Acquire) >= 21,
+            "every sign-in requests fresh covering history"
         );
 
         drop(client);
@@ -2786,6 +2789,56 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn cycle_account_market_gate(
+        state: &EngineState,
+        harness: &FixtureRealtimeHarness,
+        client: &mut EngineClient,
+        stopped_generation: u64,
+        resumed_mode: ResourceMode,
+    ) {
+        state.account().set_authenticated_for_test(false);
+        assert_eq!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_secs(1))
+                .expect("sign-out stops the active provider generation")
+                .0
+                .get(),
+            stopped_generation
+        );
+        wait_for_resource_mode(state, ResourceMode::OfflineSuspended);
+
+        state.account().set_authenticated_for_test(true);
+        wait_for_resource_mode(state, resumed_mode);
+        let replacement_generation = stopped_generation + 1;
+        publish_fixture_live_update(
+            harness,
+            client,
+            replacement_generation,
+            i64::try_from(replacement_generation + 1).expect("fixture minute fits"),
+            "2.50",
+            replacement_generation,
+            250,
+        );
+    }
+
+    fn permit_markets_live(state: &EngineState, client: &mut EngineClient) {
+        let workspace = client
+            .set_engine_lifecycle(
+                state.workspace().workspace_revision,
+                EngineLifetimeMode::KeepMarketsLive,
+                false,
+                true,
+            )
+            .expect("persist permitted MarketsLive policy through IPC");
+        assert_eq!(
+            workspace.lifetime_mode,
+            EngineLifetimeMode::KeepMarketsLive as i32
+        );
+        assert!(workspace.markets_live_permitted);
+        wait_for_resource_mode(state, ResourceMode::MarketsLive);
     }
 
     fn publish_fixture_live_update(
