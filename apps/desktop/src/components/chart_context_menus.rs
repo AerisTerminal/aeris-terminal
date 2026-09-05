@@ -959,13 +959,7 @@ pub(super) fn account_menu_layer(
                                 .child(subtitle),
                         ),
                 )
-                .child(account_menu_action(
-                    action_terminal,
-                    account.authorizing(),
-                    account.signed_in(),
-                    account.presentation.pending,
-                    theme,
-                ))
+                .children(account_menu_actions(&action_terminal, account, theme))
                 .children(account.error.as_deref().map(|error| {
                     div()
                         .px_3()
@@ -978,22 +972,78 @@ pub(super) fn account_menu_layer(
         .into_any_element()
 }
 
-fn account_menu_action(
-    action_terminal: Entity<TerminalApp>,
-    authorizing: bool,
-    signed_in: bool,
-    pending: bool,
+#[derive(Clone, Copy)]
+enum AccountMenuClick {
+    SignIn,
+    Cancel,
+    SignOut,
+    Reopen,
+}
+
+fn account_menu_actions(
+    action_terminal: &Entity<TerminalApp>,
+    account: &axiusflow_desktop::account::AccountMenuState,
     theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let (id, label, danger) = if authorizing {
-        ("account_menu_cancel", "Cancel sign-in", false)
-    } else if signed_in {
-        ("account_menu_sign_out", "Sign out", true)
+) -> Vec<AnyElement> {
+    // While the browser holds the transaction there are two exits: reopen
+    // the lost page, or cancel the transaction outright. Every other state
+    // has exactly one action, so the panel can never strand the trader.
+    let rows: Vec<(&str, &str, bool, AccountMenuClick)> = if account.authorizing() {
+        vec![
+            (
+                "account_menu_reopen",
+                "Open browser page again",
+                false,
+                AccountMenuClick::Reopen,
+            ),
+            (
+                "account_menu_cancel",
+                "Cancel sign-in",
+                false,
+                AccountMenuClick::Cancel,
+            ),
+        ]
+    } else if account.signed_in() {
+        vec![(
+            "account_menu_sign_out",
+            "Sign out",
+            true,
+            AccountMenuClick::SignOut,
+        )]
     } else {
-        ("account_menu_sign_in", "Sign in", false)
+        vec![(
+            "account_menu_sign_in",
+            "Sign in",
+            false,
+            AccountMenuClick::SignIn,
+        )]
     };
-    let enabled = !pending;
+    let enabled = !account.presentation.pending;
+    rows.into_iter()
+        .map(|(id, label, danger, click)| {
+            account_menu_row(
+                action_terminal.clone(),
+                id,
+                label,
+                danger,
+                enabled,
+                click,
+                theme,
+            )
+        })
+        .collect()
+}
+
+fn account_menu_row(
+    action_terminal: Entity<TerminalApp>,
+    id: &'static str,
+    label: &'static str,
+    danger: bool,
+    enabled: bool,
+    click: AccountMenuClick,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    let colors = theme.colors;
     div()
         .id(id)
         .occlude()
@@ -1018,12 +1068,11 @@ fn account_menu_action(
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             if enabled {
                 action_terminal.update(cx, |terminal, terminal_cx| {
-                    if authorizing {
-                        TerminalApp::cancel_sign_in(terminal_cx);
-                    } else if signed_in {
-                        TerminalApp::sign_out(terminal_cx);
-                    } else {
-                        TerminalApp::request_sign_in(terminal_cx);
+                    match click {
+                        AccountMenuClick::SignIn => TerminalApp::request_sign_in(terminal_cx),
+                        AccountMenuClick::Cancel => TerminalApp::cancel_sign_in(terminal_cx),
+                        AccountMenuClick::SignOut => TerminalApp::sign_out(terminal_cx),
+                        AccountMenuClick::Reopen => TerminalApp::reopen_browser_page(terminal_cx),
                     }
                     terminal.close_account_menu(terminal_cx);
                 });
@@ -1031,6 +1080,7 @@ fn account_menu_action(
             cx.stop_propagation();
         })
         .child(label)
+        .into_any_element()
 }
 
 pub(super) fn settings_help_button(

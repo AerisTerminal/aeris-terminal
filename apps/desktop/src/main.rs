@@ -5636,6 +5636,17 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn reopen_browser_page(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.reopen_browser(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow browser reopen degraded: {error}");
+        }
+        cx.notify();
+    }
+
     fn cancel_sign_in(cx: &mut Context<Self>) {
         let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),

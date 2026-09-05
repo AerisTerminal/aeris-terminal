@@ -180,7 +180,7 @@ enum AccountRequest {
 /// Bounded account worker outcome.
 #[derive(Debug)]
 enum AccountResponse {
-    Authorized,
+    Authorized(LoginAuthorization),
     Status(AccountView),
     Cancelled(AccountView),
     SignedOut(AccountView),
@@ -211,6 +211,7 @@ struct AccountShared {
     last_status_poll: Mutex<Instant>,
     last_seen_version: Mutex<u64>,
     request_at: Mutex<Instant>,
+    authorization_url: Mutex<Option<String>>,
     requests: SyncSender<AccountRequest>,
 }
 
@@ -305,6 +306,7 @@ impl DesktopAccount {
             last_status_poll: Mutex::new(now),
             last_seen_version: Mutex::new(0),
             request_at: Mutex::new(now),
+            authorization_url: Mutex::new(None),
             requests: request_tx,
         });
         let poller = Arc::clone(&shared);
@@ -403,6 +405,33 @@ impl DesktopAccount {
         Ok(())
     }
 
+    /// Reopens the stored authorization URL when the browser window was
+    /// lost before approval. Never starts a new engine transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no authorization URL is retained or no system
+    /// browser can be launched.
+    pub fn reopen_browser(&self) -> Result<(), String> {
+        let url = self
+            .shared
+            .authorization_url
+            .lock()
+            .ok()
+            .and_then(|url| url.clone())
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| "no sign-in page to reopen; start sign-in again".to_string())?;
+        std::thread::Builder::new()
+            .name("axiusflow-open-browser".to_string())
+            .spawn(move || {
+                if let Err(error) = axiusflow_platform_runtime::open_system_browser(&url) {
+                    eprintln!("Axiusflow browser open degraded: {error}");
+                }
+            })
+            .map_err(|_| "system browser could not be opened".to_string())?;
+        Ok(())
+    }
+
     /// Signs out the shared engine-owned account session.
     ///
     /// # Errors
@@ -483,9 +512,14 @@ impl DesktopAccount {
 
 fn apply_account_response(shared: &AccountShared, response: Result<AccountResponse, String>) {
     match response {
-        Ok(AccountResponse::Authorized) => {
+        Ok(AccountResponse::Authorized(authorization)) => {
             // The engine holds the Authorizing view; the browser is open.
-            // Status polling picks up the outcome.
+            // The URL is retained so a lost browser window can be reopened
+            // without starting a second engine transaction. Status polling
+            // picks up the outcome.
+            if let Ok(mut url) = shared.authorization_url.lock() {
+                *url = Some(authorization.authorization_url);
+            }
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
         Ok(
@@ -494,6 +528,11 @@ fn apply_account_response(shared: &AccountShared, response: Result<AccountRespon
             | AccountResponse::SignedOut(view),
         ) => {
             shared.pending.store(false, Ordering::Release);
+            if !is_authorizing(&view)
+                && let Ok(mut url) = shared.authorization_url.lock()
+            {
+                url.take();
+            }
             if let Ok(mut current) = shared.view.lock() {
                 *current = view;
             }
@@ -510,6 +549,10 @@ fn apply_account_response(shared: &AccountShared, response: Result<AccountRespon
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
     }
+}
+
+fn is_authorizing(view: &AccountView) -> bool {
+    view.state == AccountSessionState::Authorizing as i32
 }
 
 fn run_account_client(requests: &Receiver<AccountRequest>, results: &SyncSender<AccountResult>) {
@@ -535,8 +578,8 @@ fn handle_account_request(request: AccountRequest) -> AccountResult {
         } => {
             // The engine holds the Authorizing view and expiry; the browser
             // is already open on this thread.
-            let _ = start_login(&mut client, client_id, generation)?;
-            Ok(AccountResponse::Authorized)
+            let authorization = start_login(&mut client, client_id, generation)?;
+            Ok(AccountResponse::Authorized(authorization))
         }
         AccountRequest::CancelLogin { generation } => {
             let view = cancel_login(&mut client, generation)?;
@@ -675,6 +718,34 @@ mod tests {
         assert!(unix_millis() > 0);
         let session = DesktopAccount::spawn(7).expect("isolated account session spawns");
         assert!(session.shared.generation.load(Ordering::Acquire) > 0);
+    }
+
+    #[test]
+    fn browser_reopen_uses_only_the_retained_authorization_url() {
+        use super::{AccountResponse, LoginAuthorization, apply_account_response};
+
+        let session = DesktopAccount::spawn(9).expect("isolated account session spawns");
+        // No transaction yet: nothing to reopen.
+        assert!(session.reopen_browser().is_err());
+        let authorization = LoginAuthorization {
+            request_generation: 3,
+            authorization_url: "https://auth.axiusflow.com/authorize?request=3".to_string(),
+            expires_unix_seconds: 1_800_000_003,
+        };
+        apply_account_response(
+            &session.shared,
+            Ok(AccountResponse::Authorized(authorization)),
+        );
+        let stored = session
+            .shared
+            .authorization_url
+            .lock()
+            .expect("url slot locks")
+            .clone();
+        assert_eq!(
+            stored.as_deref(),
+            Some("https://auth.axiusflow.com/authorize?request=3")
+        );
     }
 
     #[test]
