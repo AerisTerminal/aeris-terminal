@@ -2643,6 +2643,7 @@ fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         sync::atomic::{AtomicU64, Ordering},
         thread,
         time::{Duration, Instant},
@@ -2780,6 +2781,110 @@ mod tests {
         gate.join().expect("join account market gate");
     }
 
+    #[test]
+    fn account_gate_resumes_multiple_ipc_clients_and_consumers() {
+        let socket_name = socket_name("account-gate-multi-client");
+        let listener = bind_listener(&socket_name).expect("bind multi-client endpoint");
+        let token = [47_u8; 32];
+        let harness = MarketService::start_fixture_realtime(vec![MarketBar {
+            source_sequence: 2,
+            exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        }])
+        .expect("multi-client realtime fixture starts");
+        harness
+            .service
+            .set_resource_mode(ResourceMode::OfflineSuspended)
+            .expect("production startup suspension applies");
+        let state = EngineState::default();
+        state.set_resource_mode(ResourceMode::OfflineSuspended);
+        state.account().set_authenticated_for_test(true);
+        let shutdown = EngineShutdown::default();
+        let gate = start_account_market_gate(&state, &harness.service, &shutdown)
+            .expect("account market gate starts");
+        wait_for_resource_mode(&state, ResourceMode::Warm);
+        let server = serve_account_gated_test_clients(
+            listener,
+            token,
+            state.clone(),
+            harness.service.clone(),
+            shutdown.clone(),
+            2,
+        );
+
+        let mut first = EngineClient::connect(&socket_name, &token).expect("connect first window");
+        let mut second =
+            EngineClient::connect(&socket_name, &token).expect("connect second window");
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        attach_ipc_consumers(&mut first, 61, &[601, 603], &series);
+        attach_ipc_consumers(&mut second, 62, &[602], &series);
+        publish_fixture_multi_client_update(&harness, &mut first, &mut second, 1, "2.00", 200);
+
+        state.account().set_authenticated_for_test(false);
+        expect_fixture_stop(&harness, 1);
+        wait_for_resource_mode(&state, ResourceMode::OfflineSuspended);
+        state.account().set_authenticated_for_test(true);
+        wait_for_resource_mode(&state, ResourceMode::Warm);
+        publish_fixture_multi_client_update(&harness, &mut first, &mut second, 2, "2.50", 250);
+
+        drop(first);
+        drop(second);
+        server.join().expect("join multi-client IPC server");
+        shutdown.request();
+        gate.join().expect("join account market gate");
+    }
+
+    fn serve_account_gated_test_clients(
+        listener: LocalSocketListener,
+        token: [u8; 32],
+        state: EngineState,
+        market: MarketService,
+        shutdown: EngineShutdown,
+        client_count: usize,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut clients = Vec::with_capacity(client_count);
+            for _ in 0..client_count {
+                let pair = accept_session_pair(&listener, &token);
+                let state = state.clone();
+                let market = market.clone();
+                let shutdown = shutdown.clone();
+                clients.push(thread::spawn(move || {
+                    serve_client_with_account_gate(pair, 59, &state, &market, &shutdown)
+                        .expect("serve account-gated test client");
+                }));
+            }
+            for client in clients {
+                client.join().expect("join account-gated test client");
+            }
+        })
+    }
+
+    fn attach_ipc_consumers(
+        client: &mut EngineClient,
+        client_id: u64,
+        consumer_ids: &[u64],
+        series: &SeriesKey,
+    ) {
+        client
+            .attach_client(client_id)
+            .expect("IPC client attaches");
+        for &consumer_id in consumer_ids {
+            client
+                .register_consumer(client_id, 1, consumer_id)
+                .expect("IPC consumer registers");
+            client
+                .set_series_demand(consumer_id, 1, series.clone())
+                .expect("IPC consumer demand applies");
+            poll_ipc_snapshot(client, consumer_id, 1, series);
+        }
+    }
+
     fn wait_for_resource_mode(state: &EngineState, expected: ResourceMode) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while state.workspace().resource_mode != expected as i32 {
@@ -2881,6 +2986,82 @@ mod tests {
         poll_ipc_live_update(client, 501, 1, provider_generation, expected_close);
     }
 
+    fn publish_fixture_multi_client_update(
+        harness: &FixtureRealtimeHarness,
+        first: &mut EngineClient,
+        second: &mut EngineClient,
+        provider_generation: u64,
+        price: &str,
+        expected_close: i64,
+    ) {
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("shared realtime generation starts")
+                .0
+                .get(),
+            provider_generation
+        );
+        let configured = harness
+            .configured_products
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shared product set configures");
+        assert_eq!(configured, ["BTC-USD"]);
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("shared realtime connects");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(
+                i64::try_from(provider_generation + 1).expect("fixture minute fits"),
+                price,
+                provider_generation,
+            )))
+            .expect("shared trade arrives");
+        poll_ipc_live_updates(first, &[601, 603], provider_generation, expected_close);
+        poll_ipc_live_updates(second, &[602], provider_generation, expected_close);
+    }
+
+    fn expect_fixture_stop(harness: &FixtureRealtimeHarness, provider_generation: u64) {
+        assert_eq!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_secs(1))
+                .expect("account suspension stops shared realtime")
+                .0
+                .get(),
+            provider_generation
+        );
+    }
+
+    fn poll_ipc_live_updates(
+        client: &mut EngineClient,
+        consumer_ids: &[u64],
+        provider_generation: u64,
+        expected_close: i64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut pending = consumer_ids.iter().copied().collect::<BTreeSet<_>>();
+        while !pending.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = client
+                .receive_market_event_timeout(remaining.min(Duration::from_millis(50)))
+                .expect("receive multi-consumer IPC market event");
+            if let Some((consumer_id, payload)) = event
+                && pending.contains(&consumer_id)
+                && ipc_live_update_matches(&payload, 1, provider_generation, expected_close)
+            {
+                pending.remove(&consumer_id);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "live IPC update timed out for consumers {pending:?}"
+            );
+        }
+    }
+
     fn poll_ipc_live_update(
         client: &mut EngineClient,
         consumer_id: u64,
@@ -2890,26 +3071,34 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if let Some(event) = receive_ipc_event(client, consumer_id, Duration::from_millis(50)) {
-                let matched = matches!(
-                    &event,
-                    envelope::Payload::SeriesUpdate(update)
-                        if update.generation == generation
-                            && update.provider_generation == provider_generation
-                            && update.bar.as_ref().is_some_and(|bar| bar.close == close)
-                ) || matches!(
-                    &event,
-                    envelope::Payload::SeriesSnapshot(snapshot)
-                        if snapshot.generation == generation
-                            && snapshot.provider_generation == provider_generation
-                            && snapshot.bars.last().is_some_and(|bar| bar.close == close)
-                );
-                if matched {
-                    return;
-                }
+            if let Some(event) = receive_ipc_event(client, consumer_id, Duration::from_millis(50))
+                && ipc_live_update_matches(&event, generation, provider_generation, close)
+            {
+                return;
             }
             assert!(Instant::now() < deadline, "live IPC update timed out");
         }
+    }
+
+    fn ipc_live_update_matches(
+        event: &envelope::Payload,
+        generation: u64,
+        provider_generation: u64,
+        close: i64,
+    ) -> bool {
+        matches!(
+            event,
+            envelope::Payload::SeriesUpdate(update)
+                if update.generation == generation
+                    && update.provider_generation == provider_generation
+                    && update.bar.as_ref().is_some_and(|bar| bar.close == close)
+        ) || matches!(
+            event,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == generation
+                    && snapshot.provider_generation == provider_generation
+                    && snapshot.bars.last().is_some_and(|bar| bar.close == close)
+        )
     }
 
     fn socket_name(label: &str) -> String {
