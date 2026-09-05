@@ -53,15 +53,20 @@ impl LoopbackListener {
         format!("http://127.0.0.1:{}/callback", self.port)
     }
 
-    /// Accepts one callback and returns its raw query string.
+    /// Accepts one callback and returns its raw query with the connection
+    /// held open. The caller validates, completes the exchange, and then
+    /// answers on the same connection, so the browser page reflects the
+    /// engine outcome instead of mere receipt.
     ///
     /// Times out instead of blocking forever when the browser is closed
     /// without completing authorization.
     ///
     /// # Errors
     ///
-    /// Returns an error on timeout, oversized requests, or transport failure.
-    pub fn accept_one(&self, timeout: Duration) -> Result<String, String> {
+    /// Returns an error on timeout, oversized requests, or transport
+    /// failure. Transport failures answer the browser immediately; a
+    /// timeout means no browser ever connected, so nothing is answered.
+    pub fn accept_one(&self, timeout: Duration) -> Result<PendingCallback, String> {
         self.listener
             .set_nonblocking(false)
             .map_err(|_| "loopback callback listener failed".to_string())?;
@@ -71,7 +76,7 @@ impl LoopbackListener {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match self.listener.accept() {
-                Ok((mut stream, _)) => return read_callback_query(&mut stream),
+                Ok((stream, _)) => return read_callback_query(stream),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() >= deadline {
                         return Err(
@@ -88,7 +93,44 @@ impl LoopbackListener {
     }
 }
 
-fn read_callback_query(stream: &mut std::net::TcpStream) -> Result<String, String> {
+/// One authorization callback with its browser connection held open for
+/// the outcome response.
+pub struct PendingCallback {
+    stream: std::net::TcpStream,
+    query: String,
+}
+
+impl PendingCallback {
+    /// Returns the raw callback query for validation.
+    #[must_use]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Answers the waiting browser with the completed engine outcome.
+    /// Success reports only after exchange, link, and vault storage all
+    /// finished; failure carries the redacted engine detail so the page
+    /// never claims an unfinished sign-in succeeded.
+    pub fn respond_outcome(mut self, result: Result<(), &str>) {
+        match result {
+            Ok(()) => respond(&mut self.stream, 200, "Signed in. Return to Axiusflow."),
+            Err(detail) => respond(
+                &mut self.stream,
+                500,
+                &format!("Sign-in failed: {detail} Return to Axiusflow to try again."),
+            ),
+        }
+    }
+
+    /// Answers the waiting browser with a validation failure and releases
+    /// the connection.
+    pub fn respond_invalid(self, detail: &str) {
+        let mut this = self;
+        respond(&mut this.stream, 400, detail);
+    }
+}
+
+fn read_callback_query(mut stream: std::net::TcpStream) -> Result<PendingCallback, String> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 1024];
     stream
@@ -100,7 +142,7 @@ fn read_callback_query(stream: &mut std::net::TcpStream) -> Result<String, Strin
             Ok(read) => {
                 request.extend_from_slice(&chunk[..read]);
                 if request.len() > MAXIMUM_CALLBACK_BYTES {
-                    respond(stream, 413, "payload too large");
+                    respond(&mut stream, 413, "payload too large");
                     return Err("authorization callback is too large".to_string());
                 }
                 if request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -108,29 +150,25 @@ fn read_callback_query(stream: &mut std::net::TcpStream) -> Result<String, Strin
                 }
             }
             Err(_) => {
-                respond(stream, 400, "unreadable request");
+                respond(&mut stream, 400, "unreadable request");
                 return Err("loopback callback read failed".to_string());
             }
         }
     }
     let request = String::from_utf8_lossy(&request);
     let Some(query) = callback_query_from_request(&request) else {
-        respond(stream, 400, "invalid callback");
+        respond(&mut stream, 400, "invalid callback");
         return Err("authorization callback is invalid".to_string());
     };
-    // The callback only proves the browser returned: exchange, link, and
-    // vault storage still follow. The desktop reports success only after
-    // those complete, so this page must not claim the sign-in finished.
-    respond(
-        stream,
-        200,
-        "Authorization received. Return to Axiusflow to confirm sign-in.",
-    );
-    Ok(query)
+    Ok(PendingCallback { stream, query })
 }
 
 fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) {
-    let reason = if status == 200 { "OK" } else { "Bad Request" };
+    let reason = match status {
+        200 => "OK",
+        400 | 413 => "Bad Request",
+        _ => "Internal Server Error",
+    };
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -258,38 +296,84 @@ mod tests {
         assert_eq!(validated.code, "abc123");
     }
 
+    /// Drives one browser callback and returns the page it read.
+    fn browser_callback(port: u16, request: &[u8]) -> String {
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("loopback connects");
+        stream.write_all(request).expect("callback writes");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("callback response reads");
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
     #[test]
-    fn bound_listener_accepts_one_browser_callback_over_loopback() {
+    fn bound_listener_holds_the_connection_for_the_outcome() {
         let listener = LoopbackListener::bind().expect("loopback binds");
         let port = listener.port();
         assert!(listener.redirect_uri().contains(&port.to_string()));
         let sender = std::thread::spawn(move || {
-            let mut stream =
-                TcpStream::connect(format!("127.0.0.1:{port}")).expect("loopback connects");
-            stream
-                .write_all(
-                    b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-                )
-                .expect("callback writes");
-            let mut response = Vec::new();
-            stream
-                .read_to_end(&mut response)
-                .expect("callback response reads");
-            String::from_utf8_lossy(&response).into_owned()
+            browser_callback(
+                port,
+                b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
         });
-        let query = listener
+        // Receipt alone answers nothing: the browser waits while the engine
+        // exchanges, links, and stores.
+        let callback = listener
             .accept_one(Duration::from_secs(5))
             .expect("callback arrives");
-        let validated = validate_callback_query(&query, "live-state").expect("callback validates");
+        let validated =
+            validate_callback_query(callback.query(), "live-state").expect("callback validates");
         assert_eq!(validated.code, "live-code");
+        callback.respond_outcome(Ok(()));
         let response = sender.join().expect("sender joins");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
-        // The page reports receipt, never completion: exchange, link, and
-        // vault storage still follow on the worker.
         assert!(
-            response.contains("Authorization received. Return to Axiusflow to confirm sign-in."),
-            "callback page must not claim success: {response}"
+            response.contains("Signed in. Return to Axiusflow."),
+            "success page must reflect completion: {response}"
         );
-        assert!(!response.to_lowercase().contains("complete"));
+    }
+
+    #[test]
+    fn engine_failure_reaches_the_browser_truthfully() {
+        let listener = LoopbackListener::bind().expect("loopback binds");
+        let port = listener.port();
+        let sender = std::thread::spawn(move || {
+            browser_callback(
+                port,
+                b"GET /callback?code=live-code&state=live-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+        });
+        let callback = listener
+            .accept_one(Duration::from_secs(5))
+            .expect("callback arrives");
+        callback.respond_outcome(Err("account linking failed; retry sign-in"));
+        let response = sender.join().expect("sender joins");
+        // A received callback alone must never produce "fully
+        // authenticated": failures carry the redacted engine detail.
+        assert!(response.starts_with("HTTP/1.1 500"));
+        assert!(response.contains("Sign-in failed: account linking failed; retry sign-in"));
+        assert!(!response.contains("Signed in"));
+    }
+
+    #[test]
+    fn invalid_callbacks_answer_immediately() {
+        let listener = LoopbackListener::bind().expect("loopback binds");
+        let port = listener.port();
+        let sender = std::thread::spawn(move || {
+            browser_callback(
+                port,
+                b"GET /callback?code=live-code&state=wrong-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+        });
+        let callback = listener
+            .accept_one(Duration::from_secs(5))
+            .expect("callback arrives");
+        assert!(validate_callback_query(callback.query(), "live-state").is_err());
+        callback.respond_invalid("authorization state mismatch; retry sign-in");
+        let response = sender.join().expect("sender joins");
+        assert!(response.starts_with("HTTP/1.1 400"));
     }
 }

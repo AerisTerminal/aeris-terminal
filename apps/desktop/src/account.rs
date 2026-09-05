@@ -231,17 +231,29 @@ pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
 enum AccountRequest {
     BeginLogin { client_id: u64, generation: u64 },
     CancelLogin { generation: u64 },
-    RefreshStatus,
+    RefreshStatus { seq: u64, epoch: u64 },
     SignOut,
 }
 
-/// Bounded account worker outcome.
+/// Bounded account worker outcome. Status outcomes echo the fetch slot so
+/// cancellation, retries, and sign-out cannot be overwritten by stale
+/// results.
 #[derive(Debug)]
 enum AccountResponse {
     Authorized(LoginAuthorization),
-    Status(AccountView),
+    Status {
+        view: AccountView,
+        seq: u64,
+        epoch: u64,
+    },
+    StatusFailed {
+        seq: u64,
+        epoch: u64,
+        error: String,
+    },
     Cancelled(AccountView),
     SignedOut(AccountView),
+    Failed(String),
 }
 
 /// Presentation snapshot for account rendering.
@@ -276,6 +288,16 @@ struct AccountShared {
     last_seen_version: Mutex<u64>,
     request_at: Mutex<Instant>,
     authorization_url: Mutex<Option<String>>,
+    /// Bumped on every Begin/Cancel/SignOut submission. Status replies
+    /// from an older epoch are stale and drop without touching state.
+    epoch: AtomicU64,
+    /// Whether one status fetch owns the reply slot.
+    status_in_flight: AtomicBool,
+    /// Sequence of the latest status fetch.
+    status_seq: AtomicU64,
+    /// Whether a browser transaction is open. Set when the engine accepts
+    /// the login request, cleared when the view leaves Authorizing.
+    login_open: AtomicBool,
     requests: SyncSender<AccountRequest>,
 }
 
@@ -315,8 +337,10 @@ pub struct DesktopAccount {
 static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
-/// How often the UI refreshes the engine account view while authorizing.
+/// How often the engine view refreshes while a browser transaction is open.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Idle refresh so restored sessions and engine-side expiry reach the UI.
+const IDLE_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 impl DesktopAccount {
     /// Installs the shared account session once per desktop process.
@@ -352,11 +376,20 @@ impl DesktopAccount {
     }
 
     fn spawn(client_id: u64) -> Result<Self, String> {
+        Self::spawn_with(client_id, handle_account_request)
+    }
+
+    /// Spawns one isolated session with a scripted worker. Production uses
+    /// [`handle_account_request`]; tests inject a fake engine.
+    fn spawn_with(
+        client_id: u64,
+        handle: impl Fn(AccountRequest) -> AccountResponse + Send + 'static,
+    ) -> Result<Self, String> {
         let (request_tx, request_rx) = mpsc::sync_channel(2);
         let (result_tx, result_rx) = mpsc::sync_channel(2);
         std::thread::Builder::new()
             .name("axiusflow-account-client".to_string())
-            .spawn(move || run_account_client(&request_rx, &result_tx))
+            .spawn(move || run_account_client_with(&request_rx, &result_tx, handle))
             .map_err(|_| "desktop account client could not start".to_string())?;
         // Generations seed from the wall clock so a fresh desktop process
         // always supersedes generations from a previous process lifetime.
@@ -374,6 +407,10 @@ impl DesktopAccount {
             last_seen_version: Mutex::new(0),
             request_at: Mutex::new(now),
             authorization_url: Mutex::new(None),
+            epoch: AtomicU64::new(0),
+            status_in_flight: AtomicBool::new(false),
+            status_seq: AtomicU64::new(0),
+            login_open: AtomicBool::new(false),
             requests: request_tx,
         });
         let poller = Arc::clone(&shared);
@@ -385,7 +422,33 @@ impl DesktopAccount {
                 }
             })
             .map_err(|_| "desktop account client could not start".to_string())?;
-        Ok(Self { shared })
+        let session = Self { shared };
+        // Fetch engine state at startup so a restored session (or an
+        // engine-side expiry) reaches the UI on the first frames.
+        session.queue_status();
+        Ok(session)
+    }
+
+    /// Queues one generation-fenced status fetch when the reply slot is
+    /// free. Best-effort: a full queue retries on the next poll.
+    fn queue_status(&self) {
+        if self.shared.status_in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let seq = self.shared.status_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
+        if self
+            .shared
+            .requests
+            .try_send(AccountRequest::RefreshStatus { seq, epoch })
+            .is_err()
+        {
+            self.shared.status_in_flight.store(false, Ordering::Release);
+            return;
+        }
+        if let Ok(mut last) = self.shared.last_status_poll.lock() {
+            *last = Instant::now();
+        }
     }
 
     /// Returns the owned settings-menu state for rendering.
@@ -431,30 +494,58 @@ impl DesktopAccount {
 
     /// Starts one engine-owned login transaction and opens the browser URL.
     ///
+    /// Repeated clicks collapse into the in-flight request; a click while
+    /// a transaction is already open reopens the same browser page instead
+    /// of stacking a second transaction.
+    ///
     /// # Errors
     ///
-    /// Returns an error when a request is already in flight or the worker
-    /// cannot be reached. The browser opens on the worker thread.
+    /// Returns an error when the worker cannot be reached. The browser
+    /// opens on the worker thread.
     pub fn request_sign_in(&self) -> Result<(), String> {
         if self.shared.pending.load(Ordering::Acquire) {
             return Ok(());
         }
+        if self.shared.login_open.load(Ordering::Acquire) {
+            return self.reopen_browser();
+        }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.shared
-            .requests
-            .try_send(AccountRequest::BeginLogin {
+        self.begin_request(
+            AccountRequest::BeginLogin {
                 client_id: self.shared.client_id,
                 generation,
-            })
-            .map_err(|_| "sign-in request is already pending".to_string())?;
+            },
+            "sign-in request is already pending",
+        )
+    }
+
+    /// Marks one worker request in flight before queue submission and rolls
+    /// back when the queue is full, so a fast reply can never land first
+    /// and a failed submission never sticks the UI disabled. Failures land
+    /// in the menu error with retry enabled.
+    fn begin_request(&self, request: AccountRequest, busy: &str) -> Result<(), String> {
+        self.shared.epoch.fetch_add(1, Ordering::AcqRel);
         self.shared.pending.store(true, Ordering::Release);
         if let Ok(mut sent) = self.shared.request_at.lock() {
             *sent = Instant::now();
+        }
+        if self.shared.requests.try_send(request).is_err() {
+            self.shared.pending.store(false, Ordering::Release);
+            self.fail(busy);
+            return Err(busy.to_string());
         }
         if let Ok(mut error) = self.shared.error.lock() {
             error.take();
         }
         Ok(())
+    }
+
+    /// Records one actionable failure for the menu error row.
+    fn fail(&self, error: &str) {
+        if let Ok(mut slot) = self.shared.error.lock() {
+            *slot = Some(error.to_string());
+        }
+        self.shared.version.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Cancels the pending engine-owned login transaction.
@@ -467,12 +558,14 @@ impl DesktopAccount {
     ///
     /// Returns an error when the worker cannot be reached.
     pub fn request_cancel(&self) -> Result<(), String> {
+        if self.shared.pending.load(Ordering::Acquire) {
+            return Err("sign-in cancellation is already pending".to_string());
+        }
         let generation = self.shared.generation.load(Ordering::Acquire);
-        self.shared
-            .requests
-            .try_send(AccountRequest::CancelLogin { generation })
-            .map_err(|_| "sign-in cancellation is already pending".to_string())?;
-        Ok(())
+        self.begin_request(
+            AccountRequest::CancelLogin { generation },
+            "sign-in cancellation is already pending",
+        )
     }
 
     /// Reopens the stored authorization URL when the browser window was
@@ -512,22 +605,16 @@ impl DesktopAccount {
         if self.shared.pending.load(Ordering::Acquire) {
             return Err("another account request is already pending".to_string());
         }
-        self.shared
-            .requests
-            .try_send(AccountRequest::SignOut)
-            .map_err(|_| "an account request is already pending".to_string())?;
-        self.shared.pending.store(true, Ordering::Release);
-        if let Ok(mut sent) = self.shared.request_at.lock() {
-            *sent = Instant::now();
-        }
-        if let Ok(mut error) = self.shared.error.lock() {
-            error.take();
-        }
-        Ok(())
+        self.begin_request(
+            AccountRequest::SignOut,
+            "an account request is already pending",
+        )
     }
 
-    /// Applies worker results and refreshes the engine view while
-    /// authorizing. Returns whether presentation changed.
+    /// Applies worker results and keeps the engine view fresh. Status
+    /// polling runs fast while a browser transaction is open and slowly
+    /// when idle, so restored sessions and engine-side expiry reach the UI
+    /// without chatty IPC. Returns whether presentation changed.
     #[must_use]
     pub fn poll(&self) -> bool {
         let mut changed = false;
@@ -546,61 +633,103 @@ impl DesktopAccount {
                 .is_ok_and(|sent| sent.elapsed() >= REQUEST_TIMEOUT);
             if expired {
                 self.shared.pending.store(false, Ordering::Release);
-                if let Ok(mut slot) = self.shared.error.lock() {
-                    *slot = Some("account request timed out; try again".to_string());
-                }
-                self.shared.version.fetch_add(1, Ordering::AcqRel);
+                self.fail("account request timed out; try again");
                 changed = true;
             }
         }
-        let authorizing = self
-            .shared
-            .view
-            .lock()
-            .is_ok_and(|view| view.state == AccountSessionState::Authorizing as i32);
-        if authorizing && !self.shared.pending.load(Ordering::Acquire) {
+        if !self.shared.pending.load(Ordering::Acquire)
+            && !self.shared.status_in_flight.load(Ordering::Acquire)
+        {
+            // An open transaction polls fast even before the first status
+            // lands; otherwise polling would wait on the view it is meant
+            // to fetch. Idle sessions poll slowly for restore and expiry.
+            let transactional = self.shared.login_open.load(Ordering::Acquire)
+                || self
+                    .shared
+                    .view
+                    .lock()
+                    .is_ok_and(|view| is_authorizing(&view));
+            let interval = if transactional {
+                STATUS_POLL_INTERVAL
+            } else {
+                IDLE_STATUS_POLL_INTERVAL
+            };
             let due = self
                 .shared
                 .last_status_poll
                 .lock()
-                .map_or(true, |last| last.elapsed() >= STATUS_POLL_INTERVAL);
-            if due
-                && self
-                    .shared
-                    .requests
-                    .try_send(AccountRequest::RefreshStatus)
-                    .is_ok()
-                && let Ok(mut last) = self.shared.last_status_poll.lock()
-            {
-                *last = Instant::now();
-                changed = true;
+                .map_or(true, |last| last.elapsed() >= interval);
+            if due {
+                self.queue_status();
             }
         }
         changed
     }
 }
 
-fn apply_account_response(shared: &AccountShared, response: Result<AccountResponse, String>) {
+fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
     match response {
-        Ok(AccountResponse::Authorized(authorization)) => {
+        AccountResponse::Authorized(authorization) => {
             // The engine holds the Authorizing view; the browser is open.
             // The URL is retained so a lost browser window can be reopened
-            // without starting a second engine transaction. Status polling
-            // picks up the outcome.
+            // without starting a second engine transaction. The transaction
+            // opens at once and the next poll fetches immediately, so the
+            // outcome reaches the UI instead of waiting on an idle interval.
             if let Ok(mut url) = shared.authorization_url.lock() {
                 *url = Some(authorization.authorization_url);
             }
+            shared.login_open.store(true, Ordering::Release);
+            shared.pending.store(false, Ordering::Release);
+            if let Ok(mut error) = shared.error.lock() {
+                error.take();
+            }
+            rewind_status_poll(shared);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
-        Ok(
-            AccountResponse::Status(view)
-            | AccountResponse::Cancelled(view)
-            | AccountResponse::SignedOut(view),
-        ) => {
+        AccountResponse::Status { view, seq, epoch } => {
+            if seq != shared.status_seq.load(Ordering::Acquire) {
+                return;
+            }
+            shared.status_in_flight.store(false, Ordering::Release);
+            if epoch != shared.epoch.load(Ordering::Acquire) {
+                // Cancelled, retried, or signed out since the fetch: the
+                // stale result drops without touching current state.
+                return;
+            }
+            if !is_authorizing(&view) {
+                shared.login_open.store(false, Ordering::Release);
+                if let Ok(mut url) = shared.authorization_url.lock() {
+                    url.take();
+                }
+            }
+            if let Ok(mut current) = shared.view.lock() {
+                *current = view;
+            }
+            if let Ok(mut error) = shared.error.lock() {
+                error.take();
+            }
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::StatusFailed { seq, epoch, error } => {
+            if seq != shared.status_seq.load(Ordering::Acquire) {
+                return;
+            }
+            shared.status_in_flight.store(false, Ordering::Release);
+            if epoch != shared.epoch.load(Ordering::Acquire) {
+                return;
+            }
+            // The transaction stays open: polling continues as the automatic
+            // retry while Reopen and Cancel stay enabled. The error is
+            // actionable and clears on the next good fetch.
+            if let Ok(mut slot) = shared.error.lock() {
+                *slot = Some(error);
+            }
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::Cancelled(view) | AccountResponse::SignedOut(view) => {
             shared.pending.store(false, Ordering::Release);
-            if !is_authorizing(&view)
-                && let Ok(mut url) = shared.authorization_url.lock()
-            {
+            shared.login_open.store(false, Ordering::Release);
+            if let Ok(mut url) = shared.authorization_url.lock() {
                 url.take();
             }
             if let Ok(mut current) = shared.view.lock() {
@@ -611,7 +740,7 @@ fn apply_account_response(shared: &AccountShared, response: Result<AccountRespon
             }
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
-        Err(error) => {
+        AccountResponse::Failed(error) => {
             shared.pending.store(false, Ordering::Release);
             if let Ok(mut slot) = shared.error.lock() {
                 *slot = Some(error);
@@ -621,49 +750,87 @@ fn apply_account_response(shared: &AccountShared, response: Result<AccountRespon
     }
 }
 
+/// Forces the next poll to fetch immediately instead of waiting out the
+/// idle interval. Used when a transaction opens mid-idle-cycle.
+fn rewind_status_poll(shared: &AccountShared) {
+    if let Ok(mut last) = shared.last_status_poll.lock() {
+        *last = Instant::now()
+            .checked_sub(STATUS_POLL_INTERVAL)
+            .unwrap_or_else(Instant::now);
+    }
+}
+
 fn is_authorizing(view: &AccountView) -> bool {
     view.state == AccountSessionState::Authorizing as i32
 }
 
-fn run_account_client(requests: &Receiver<AccountRequest>, results: &SyncSender<AccountResult>) {
+fn run_account_client_with(
+    requests: &Receiver<AccountRequest>,
+    results: &SyncSender<AccountResponse>,
+    handle: impl Fn(AccountRequest) -> AccountResponse,
+) {
     while let Ok(request) = requests.recv() {
-        let response = handle_account_request(request);
-        if results.send(response).is_err() {
+        if results.send(handle(request)).is_err() {
             return;
         }
     }
 }
 
-type AccountResult = Result<AccountResponse, String>;
-
-fn handle_account_request(request: AccountRequest) -> AccountResult {
-    let mut client =
-        axiusflow_local_engine_client::sibling_engine_executable().and_then(|executable| {
-            axiusflow_local_engine_client::connect_or_start_engine(&executable)
-        })?;
+fn handle_account_request(request: AccountRequest) -> AccountResponse {
     match request {
         AccountRequest::BeginLogin {
             client_id,
             generation,
         } => {
+            let mut client = match connect_engine() {
+                Ok(client) => client,
+                Err(error) => return AccountResponse::Failed(error),
+            };
             // The engine holds the Authorizing view and expiry; the browser
             // is already open on this thread.
-            let authorization = start_login(&mut client, client_id, generation)?;
-            Ok(AccountResponse::Authorized(authorization))
+            match start_login(&mut client, client_id, generation) {
+                Ok(authorization) => AccountResponse::Authorized(authorization),
+                Err(error) => AccountResponse::Failed(error),
+            }
         }
         AccountRequest::CancelLogin { generation } => {
-            let view = cancel_login(&mut client, generation)?;
-            Ok(AccountResponse::Cancelled(view))
+            let mut client = match connect_engine() {
+                Ok(client) => client,
+                Err(error) => return AccountResponse::Failed(error),
+            };
+            match cancel_login(&mut client, generation) {
+                Ok(view) => AccountResponse::Cancelled(view),
+                Err(error) => AccountResponse::Failed(error),
+            }
         }
-        AccountRequest::RefreshStatus => {
-            let view = fetch_account_status(&mut client)?;
-            Ok(AccountResponse::Status(view))
+        AccountRequest::RefreshStatus { seq, epoch } => {
+            let mut client = match connect_engine() {
+                Ok(client) => client,
+                Err(error) => {
+                    return AccountResponse::StatusFailed { seq, epoch, error };
+                }
+            };
+            match fetch_account_status(&mut client) {
+                Ok(view) => AccountResponse::Status { view, seq, epoch },
+                Err(error) => AccountResponse::StatusFailed { seq, epoch, error },
+            }
         }
         AccountRequest::SignOut => {
-            let view = sign_out(&mut client)?;
-            Ok(AccountResponse::SignedOut(view))
+            let mut client = match connect_engine() {
+                Ok(client) => client,
+                Err(error) => return AccountResponse::Failed(error),
+            };
+            match sign_out(&mut client) {
+                Ok(view) => AccountResponse::SignedOut(view),
+                Err(error) => AccountResponse::Failed(error),
+            }
         }
     }
+}
+
+fn connect_engine() -> Result<EngineClient, String> {
+    let executable = axiusflow_local_engine_client::sibling_engine_executable()?;
+    axiusflow_local_engine_client::connect_or_start_engine(&executable)
 }
 
 /// Signs out the shared engine-owned session.
@@ -678,10 +845,145 @@ pub fn sign_out(client: &mut EngineClient) -> Result<AccountView, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DesktopAccount, account_action_label, account_state_label, sanitized_plan_label,
-        unavailable_menu_state,
+        AccountRequest, AccountResponse, DesktopAccount, account_action_label, account_state_label,
+        sanitized_plan_label, unavailable_menu_state,
     };
     use axiusflow_engine_protocol::{AccountSessionState, AccountView};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// Scripted fake engine behind an isolated desktop session. The worker
+    /// thread drives it exactly like production: Begin opens the browser
+    /// transaction, status polls serve the current fake view, and the test
+    /// flips the view to simulate callback arrival, completion, or expiry.
+    /// Handler for direct-apply tests: the worker never changes state on
+    /// its own, so scripted replies arrive in test order.
+    fn inert_engine(request: AccountRequest) -> AccountResponse {
+        match request {
+            AccountRequest::RefreshStatus { seq, epoch } => AccountResponse::StatusFailed {
+                seq,
+                epoch,
+                error: "inert test engine".to_string(),
+            },
+            _ => AccountResponse::Failed("inert test engine".to_string()),
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeEngine {
+        view: AccountView,
+        begins: usize,
+        begin_fails: bool,
+        fail_status: bool,
+        signed_out: AccountView,
+    }
+
+    impl FakeEngine {
+        fn authorizing() -> AccountView {
+            let mut view = view(AccountSessionState::Authorizing);
+            view.detail = "waiting for browser authorization".to_string();
+            view
+        }
+
+        fn handle(&mut self, request: AccountRequest) -> AccountResponse {
+            match request {
+                AccountRequest::BeginLogin {
+                    client_id: _,
+                    generation,
+                } => {
+                    self.begins += 1;
+                    if self.begin_fails {
+                        return AccountResponse::Failed("fake engine is unreachable".to_string());
+                    }
+                    self.view = Self::authorizing();
+                    self.view.request_generation = generation;
+                    AccountResponse::Authorized(super::LoginAuthorization {
+                        request_generation: generation,
+                        authorization_url: format!(
+                            "https://auth.axiusflow.com/authorize?request={generation}"
+                        ),
+                        expires_unix_seconds: 1_800_000_003,
+                    })
+                }
+                AccountRequest::RefreshStatus { seq, epoch } => {
+                    if self.fail_status {
+                        return AccountResponse::StatusFailed {
+                            seq,
+                            epoch,
+                            error: "fake status fetch failed".to_string(),
+                        };
+                    }
+                    AccountResponse::Status {
+                        view: self.view.clone(),
+                        seq,
+                        epoch,
+                    }
+                }
+                AccountRequest::CancelLogin { .. } => {
+                    self.view = self.signed_out.clone();
+                    AccountResponse::Cancelled(self.view.clone())
+                }
+                AccountRequest::SignOut => {
+                    self.view = self.signed_out.clone();
+                    AccountResponse::SignedOut(self.view.clone())
+                }
+            }
+        }
+
+        fn complete_active(&mut self, name: &str, email: &str) {
+            let mut view = view(AccountSessionState::Active);
+            view.account_id = "acct_01".to_string();
+            view.plan_id = "pro".to_string();
+            view.display_name = name.to_string();
+            view.email = email.to_string();
+            view.photo_url = "https://auth.axiusflow.com/photo/ada.png".to_string();
+            self.view = view;
+        }
+    }
+
+    /// Spawns one isolated session backed by a scripted fake engine,
+    /// returning the session plus the engine state for the test to drive.
+    fn scripted_session(client_id: u64) -> (DesktopAccount, Arc<Mutex<FakeEngine>>) {
+        let engine = Arc::new(Mutex::new(FakeEngine {
+            signed_out: view(AccountSessionState::SignedOut),
+            ..FakeEngine::default()
+        }));
+        engine.lock().expect("engine locks").view = view(AccountSessionState::SignedOut);
+        let worker = Arc::clone(&engine);
+        let session = DesktopAccount::spawn_with(client_id, move |request| {
+            worker.lock().expect("engine locks").handle(request)
+        })
+        .expect("isolated account session spawns");
+        (session, engine)
+    }
+
+    /// Polls until the condition holds or the test times out. The worker
+    /// round-trips in milliseconds; the timeout only fires on real stalls.
+    fn wait_for(session: &DesktopAccount, what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = session.poll();
+            if done() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Rewinds the status clock so the next poll fetches immediately
+    /// instead of waiting out the authorizing interval.
+    fn rewind_status(session: &DesktopAccount) {
+        use super::STATUS_POLL_INTERVAL;
+
+        *session
+            .shared
+            .last_status_poll
+            .lock()
+            .expect("status clock locks") = Instant::now()
+            .checked_sub(STATUS_POLL_INTERVAL + Duration::from_secs(1))
+            .expect("test clock rewinds");
+    }
 
     fn view(state: AccountSessionState) -> AccountView {
         AccountView {
@@ -859,15 +1161,27 @@ mod tests {
     #[test]
     fn status_profile_propagates_to_presentation_and_clears() {
         use super::{AccountResponse, apply_account_response};
+        use std::sync::atomic::Ordering;
 
-        let session = DesktopAccount::spawn(10).expect("isolated account session spawns");
+        // The startup fetch owns seq 1/epoch 0; the inert worker only ever
+        // reports failure, so scripted replies arrive in test order.
+        let session =
+            DesktopAccount::spawn_with(10, inert_engine).expect("isolated session spawns");
+        assert_eq!(session.shared.status_seq.load(Ordering::Acquire), 1);
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_01".to_string();
         active.plan_id = "pro".to_string();
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
         active.photo_url = "https://auth.axiusflow.com/photo/ada.png".to_string();
-        apply_account_response(&session.shared, Ok(AccountResponse::Status(active)));
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: active,
+                seq: 1,
+                epoch: 0,
+            },
+        );
         let presentation = session.presentation();
         assert_eq!(presentation.action, "Account");
         assert_eq!(presentation.display_name, "Ada Trader");
@@ -879,9 +1193,7 @@ mod tests {
         // Sign-out status wipes the profile: no stale identity survives.
         apply_account_response(
             &session.shared,
-            Ok(AccountResponse::SignedOut(view(
-                AccountSessionState::SignedOut,
-            ))),
+            AccountResponse::SignedOut(view(AccountSessionState::SignedOut)),
         );
         let signed_out = session.presentation();
         assert!(signed_out.display_name.is_empty());
@@ -890,15 +1202,15 @@ mod tests {
     }
 
     #[test]
-    fn installed_session_starts_signed_out_and_poll_is_quiet() {
-        // Install spawns worker threads but performs no IPC until requested.
+    fn installed_session_starts_signed_out() {
+        // Install uses the production worker, so only synchronous local
+        // state is asserted here: worker replies race the test thread and
+        // are covered by the scripted sessions below.
         let session = DesktopAccount::install(u64::from(std::process::id()))
             .expect("account session installs");
-        assert!(!session.poll());
         let presentation = session.presentation();
         assert_eq!(presentation.action, "Sign in");
         assert!(!presentation.pending);
-        assert!(session.error().is_none());
         let menu = session.menu_state();
         assert_eq!(menu.presentation.action, "Sign in");
     }
@@ -912,7 +1224,7 @@ mod tests {
         // lifetime: the resident engine outlives desktop restarts, and a
         // counter restarted at zero would read as retired.
         assert!(unix_millis() > 0);
-        let session = DesktopAccount::spawn(7).expect("isolated account session spawns");
+        let session = DesktopAccount::spawn_with(7, inert_engine).expect("isolated session spawns");
         assert!(session.shared.generation.load(Ordering::Acquire) > 0);
     }
 
@@ -920,7 +1232,7 @@ mod tests {
     fn browser_reopen_uses_only_the_retained_authorization_url() {
         use super::{AccountResponse, LoginAuthorization, apply_account_response};
 
-        let session = DesktopAccount::spawn(9).expect("isolated account session spawns");
+        let session = DesktopAccount::spawn_with(9, inert_engine).expect("isolated session spawns");
         // No transaction yet: nothing to reopen.
         assert!(session.reopen_browser().is_err());
         let authorization = LoginAuthorization {
@@ -928,10 +1240,7 @@ mod tests {
             authorization_url: "https://auth.axiusflow.com/authorize?request=3".to_string(),
             expires_unix_seconds: 1_800_000_003,
         };
-        apply_account_response(
-            &session.shared,
-            Ok(AccountResponse::Authorized(authorization)),
-        );
+        apply_account_response(&session.shared, AccountResponse::Authorized(authorization));
         let stored = session
             .shared
             .authorization_url
@@ -945,12 +1254,272 @@ mod tests {
     }
 
     #[test]
+    fn full_sign_in_sequence_reaches_verified_profile() {
+        use std::sync::atomic::Ordering;
+
+        // Click, browser confirmation, callback, engine completion, profile
+        // update: the exact production order through the worker thread.
+        let (session, engine) = scripted_session(20);
+        session.request_sign_in().expect("sign-in queues");
+        // The transaction opens and polling starts at once: pending clears
+        // while the browser holds the transaction, so Reopen and Cancel
+        // stay enabled instead of sticking disabled.
+        wait_for(&session, "transaction open", || {
+            session.shared.login_open.load(Ordering::Acquire)
+        });
+        assert!(!session.shared.pending.load(Ordering::Acquire));
+        assert!(
+            session
+                .shared
+                .authorization_url
+                .lock()
+                .expect("url slot locks")
+                .is_some()
+        );
+        wait_for(&session, "authorizing view", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        // The browser callback completes engine-side.
+        engine
+            .lock()
+            .expect("engine locks")
+            .complete_active("Ada Trader", "ada@example.com");
+        rewind_status(&session);
+        wait_for(&session, "active profile", || {
+            session.presentation().action == "Account"
+        });
+        let presentation = session.presentation();
+        assert_eq!(presentation.display_name, "Ada Trader");
+        assert_eq!(presentation.email, "ada@example.com");
+        assert!(!presentation.photo_url.is_empty());
+        assert!(session.error().is_none());
+        // Terminal state closes the transaction and drops the URL.
+        assert!(!session.shared.login_open.load(Ordering::Acquire));
+        assert!(
+            session
+                .shared
+                .authorization_url
+                .lock()
+                .expect("url slot locks")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn immediate_callback_completion_wins_cleanly() {
+        use std::sync::atomic::Ordering;
+
+        // The callback lands before the first status fetch: completion must
+        // still resolve instead of stranding pending state.
+        let (session, engine) = scripted_session(21);
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "transaction open", || {
+            session.shared.login_open.load(Ordering::Acquire)
+        });
+        engine
+            .lock()
+            .expect("engine locks")
+            .complete_active("Ada Trader", "ada@example.com");
+        rewind_status(&session);
+        wait_for(&session, "active profile", || {
+            session.presentation().action == "Account"
+        });
+        assert!(!session.shared.pending.load(Ordering::Acquire));
+        assert!(session.error().is_none());
+        assert_eq!(session.presentation().display_name, "Ada Trader");
+    }
+
+    #[test]
+    fn cancel_during_authorizing_resolves_signed_out() {
+        use std::sync::atomic::Ordering;
+
+        let (session, _) = scripted_session(22);
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "authorizing view", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        session.request_cancel().expect("cancel queues");
+        wait_for(&session, "cancelled", || {
+            !session.shared.login_open.load(Ordering::Acquire)
+                && session.presentation().action == "Sign in"
+        });
+        assert!(!session.shared.pending.load(Ordering::Acquire));
+        assert!(session.error().is_none());
+    }
+
+    #[test]
+    fn repeated_sign_in_clicks_start_one_transaction() {
+        use std::sync::atomic::Ordering;
+
+        let (session, engine) = scripted_session(23);
+        session.request_sign_in().expect("first click queues");
+        session.request_sign_in().expect("second click collapses");
+        session.request_sign_in().expect("third click collapses");
+        wait_for(&session, "transaction open", || {
+            session.shared.login_open.load(Ordering::Acquire)
+        });
+        // One BeginLogin reached the engine despite three clicks; the
+        // follow-ups collapsed into the in-flight request.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(engine.lock().expect("engine locks").begins, 1);
+    }
+
+    #[test]
+    fn dead_engine_reports_actionable_error_with_retry() {
+        use std::sync::atomic::Ordering;
+
+        let (session, engine) = scripted_session(24);
+        engine.lock().expect("engine locks").begin_fails = true;
+        session.request_sign_in().expect("sign-in queues");
+        // The failure resolves to an error with retry enabled, never a
+        // stuck disabled button.
+        wait_for(&session, "failure surfaces", || session.error().is_some());
+        assert!(!session.shared.pending.load(Ordering::Acquire));
+        assert!(!session.shared.login_open.load(Ordering::Acquire));
+        // Recovery: the retry starts a fresh generation.
+        engine.lock().expect("engine locks").begin_fails = false;
+        session.request_sign_in().expect("retry queues");
+        wait_for(&session, "retry opens", || {
+            session.shared.login_open.load(Ordering::Acquire)
+        });
+        assert_eq!(engine.lock().expect("engine locks").begins, 2);
+        assert!(session.error().is_none());
+    }
+
+    #[test]
+    fn stale_status_replies_cannot_overwrite_current_state() {
+        use super::apply_account_response;
+        use std::sync::atomic::Ordering;
+
+        let (session, _) = scripted_session(25);
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "authorizing view", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        // A superseded sequence number drops without touching the slot.
+        let bogus = view(AccountSessionState::Active);
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: bogus,
+                seq: 999_999,
+                epoch: 0,
+            },
+        );
+        assert_eq!(session.presentation().action, "Waiting for browser");
+        // A current-sequence reply from a retired epoch (cancelled,
+        // retried, or signed out since) drops without touching state.
+        let seq = session.shared.status_seq.load(Ordering::Acquire);
+        let mut active = view(AccountSessionState::Active);
+        active.display_name = "Mallory".to_string();
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: active,
+                seq,
+                epoch: 0,
+            },
+        );
+        assert_eq!(session.presentation().action, "Waiting for browser");
+        assert!(session.presentation().display_name.is_empty());
+    }
+
+    #[test]
+    fn status_failure_keeps_polling_and_clears_on_recovery() {
+        let (session, engine) = scripted_session(26);
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "authorizing view", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        // Failing fetches surface an actionable error while the
+        // transaction stays open: polling is the automatic retry and
+        // Reopen/Cancel stay enabled throughout.
+        engine.lock().expect("engine locks").fail_status = true;
+        rewind_status(&session);
+        wait_for(&session, "fetch error surfaces", || {
+            session.error().is_some()
+        });
+        assert!(
+            session
+                .shared
+                .login_open
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        engine.lock().expect("engine locks").fail_status = false;
+        rewind_status(&session);
+        wait_for(&session, "error clears", || session.error().is_none());
+        assert_eq!(session.presentation().action, "Waiting for browser");
+    }
+
+    #[test]
+    fn sign_out_clears_profile_and_allows_account_switch() {
+        let (session, engine) = scripted_session(27);
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "authorizing view", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        engine
+            .lock()
+            .expect("engine locks")
+            .complete_active("Ada Trader", "ada@example.com");
+        rewind_status(&session);
+        wait_for(&session, "active profile", || {
+            session.presentation().action == "Account"
+        });
+        session.request_sign_out().expect("sign-out queues");
+        wait_for(&session, "signed out", || {
+            session.presentation().action == "Sign in"
+        });
+        let cleared = session.presentation();
+        assert!(cleared.display_name.is_empty());
+        assert!(cleared.email.is_empty());
+        assert!(cleared.photo_url.is_empty());
+        // A second user signs in on a fresh generation with no carryover.
+        session.request_sign_in().expect("second sign-in queues");
+        wait_for(&session, "authorizing again", || {
+            session.presentation().action == "Waiting for browser"
+        });
+        engine
+            .lock()
+            .expect("engine locks")
+            .complete_active("Bobgnome", "bob@example.com");
+        rewind_status(&session);
+        wait_for(&session, "switched profile", || {
+            session.presentation().display_name == "Bobgnome"
+        });
+        assert_eq!(session.presentation().email, "bob@example.com");
+    }
+
+    #[test]
+    fn restart_restores_active_session_from_first_status() {
+        // A fresh desktop process against a resident signed-in engine
+        // learns the session from its startup fetch: no click needed.
+        let engine = Arc::new(Mutex::new(FakeEngine {
+            signed_out: view(AccountSessionState::SignedOut),
+            ..FakeEngine::default()
+        }));
+        engine
+            .lock()
+            .expect("engine locks")
+            .complete_active("Ada Trader", "ada@example.com");
+        let worker = Arc::clone(&engine);
+        let session = DesktopAccount::spawn_with(28, move |request| {
+            worker.lock().expect("engine locks").handle(request)
+        })
+        .expect("isolated session spawns");
+        wait_for(&session, "restored session", || {
+            session.presentation().action == "Account"
+        });
+        assert_eq!(session.presentation().display_name, "Ada Trader");
+    }
+
+    #[test]
     fn stuck_requests_time_out_instead_of_blocking_forever() {
         use super::REQUEST_TIMEOUT;
         use std::sync::atomic::Ordering;
         use std::time::{Duration, Instant};
 
-        let session = DesktopAccount::spawn(8).expect("isolated account session spawns");
+        let session = DesktopAccount::spawn_with(8, inert_engine).expect("isolated session spawns");
         session.shared.pending.store(true, Ordering::Release);
         *session
             .shared

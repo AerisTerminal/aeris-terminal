@@ -2230,3 +2230,42 @@ Batch 9 - first-login account creation plus verified profile (2026-09-05):
 - Still maintainer-side: one real browser login to verify first-login
   Starter creation, profile display, restart persistence, and sign-out;
   email OTP needs a real RESEND_API_KEY, Google needs the click.
+
+Batch 10 - complete sign-in journey repair (2026-09-05):
+
+- Desktop state machine fixed (the definite bug: BeginLogin left
+  pending=true with a SignedOut view, so Authorizing-gated polling never
+  started and every login died at the 30s timeout). Pending is now set
+  before queue submission with rollback; Authorized clears pending,
+  retains the generation-bound URL, opens the transaction, and forces an
+  immediate status fetch. One status in flight, replies fenced by
+  seq/epoch so cancel/retry/sign-out cannot be overwritten by stale
+  results. Startup fetch plus fast transactional (2s) and slow idle
+  (30s) polling bring restored sessions and engine-side expiry to the
+  UI. Reopen/Cancel stay enabled throughout; failures resolve to an
+  actionable error with retry. Profile renders only from engine-confirmed
+  views. Nine scripted sequence tests (full login, immediate callback,
+  cancel, triple-click, dead engine plus retry, stale replies, fetch
+  failure plus recovery, sign-out plus switch, restart restore).
+- Loopback holds the browser connection through exchange/link/vault and
+  answers the true outcome: 200 Signed in, 500 with the redacted detail,
+  400 for validation failures. Receipt alone never claims success.
+- Resend replaced by the native EMAIL send_email binding with the
+  structured send() API; sender stays noreply@auth.axiusflow.com on the
+  already-onboarded auth.axiusflow.com sending subdomain (verified
+  enabled with DNS records present; no onboarding needed). OTP expiry,
+  redacted errors preserved; no Resend key anywhere (remote secret
+  deleted). Worker typecheck clean; deployed; live get-session null,
+  INVALID_EMAIL on bad shape, and new page controls verified.
+- Login page: Continue-as plus Use-another-account over the supported
+  get-session/sign-out endpoints, provider continuation keeps the signed
+  query untouched through selection, Google, and OTP. OTP retry,
+  change-email, and 60s rate-limited resend; delivery failure restores
+  usable controls. Inline script parse-checked (caught a top-level await
+  that would have killed the whole script).
+- Gates: fmt, workspace clippy, build, and full tests green. Release
+  desktop+engine rebuilt from gated source and running from
+  target/release.
+- Still maintainer-side: one Google approval and one Cloudflare-email
+  OTP login to see the visible profile, recovery controls, and session
+  restoration end to end.

@@ -338,27 +338,45 @@ impl AccountService {
         view
     }
 
+    /// Runs one login transaction to a truthful browser page. The loopback
+    /// connection stays open while the engine exchanges, links, and stores;
+    /// the browser then reads the completed outcome, never mere receipt.
+    /// Processing is bounded by the endpoint timeouts plus local vault
+    /// work, and every path answers the waiting browser exactly once.
     fn run_login_transaction(&self, generation: u64, listener: &LoopbackListener) {
         let remaining = self.pending_remaining(generation);
         if remaining.is_zero() {
             self.fail_generation(generation, "sign-in timed out; retry sign-in");
             return;
         }
-        let query = match listener.accept_one(remaining) {
-            Ok(query) => query,
+        let callback = match listener.accept_one(remaining) {
+            Ok(callback) => callback,
             Err(detail) => {
                 self.fail_generation(generation, &detail);
                 return;
             }
         };
-        let code = match self.apply_callback_query(&query, generation) {
+        let code = match self.apply_callback_query(callback.query(), generation) {
             Ok(code) => code,
             Err(detail) => {
+                callback.respond_invalid(&detail);
                 self.fail_generation(generation, &detail);
                 return;
             }
         };
-        self.exchange_and_link(generation, &code);
+        match self.exchange_and_link(generation, &code) {
+            Ok(true) => callback.respond_outcome(Ok(())),
+            Ok(false) => {
+                // Vault failure or a retired generation: the view already
+                // carries the truth, so the page repeats it verbatim.
+                let detail = self.account_status().detail;
+                callback.respond_outcome(Err(detail.as_str()));
+            }
+            Err(detail) => {
+                callback.respond_outcome(Err(detail.as_str()));
+                self.fail_generation(generation, &detail);
+            }
+        }
     }
 
     fn pending_remaining(&self, generation: u64) -> Duration {
@@ -391,17 +409,22 @@ impl AccountService {
         Ok(validated.code)
     }
 
-    fn exchange_and_link(&self, generation: u64, code: &str) {
+    /// Exchanges, links, and stores one transaction. Returns whether the
+    /// Active session published: `Ok(true)` completes the sign-in,
+    /// `Ok(false)` leaves an already-recorded terminal failure (vault
+    /// failure) or a retired generation untouched, and `Err` carries the
+    /// redacted detail for the browser page and the engine view.
+    fn exchange_and_link(&self, generation: u64, code: &str) -> Result<bool, String> {
         let (redirect_uri, verifier, nonce) = {
             let Ok(state) = self.state.lock() else {
-                return;
+                return Ok(false);
             };
             let Some(pending) = state
                 .pending
                 .as_ref()
                 .filter(|pending| pending.generation == generation)
             else {
-                return;
+                return Ok(false);
             };
             (
                 pending.redirect_uri.clone(),
@@ -425,35 +448,37 @@ impl AccountService {
         });
         match outcome {
             Ok((account_id, plan, profile, tokens)) => {
-                let vault = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE);
-                match vault {
-                    Ok(vault) => {
-                        self.complete_with_tokens(
-                            generation,
-                            &account_id,
-                            plan,
-                            &profile,
-                            tokens.refresh.as_deref(),
-                            &vault,
-                        );
-                        // Best-effort initial lease for the shadow cache; a
-                        // failure never blocks the Active session.
-                        self.refresh_lease_once(generation, &tokens, &account_id, &vault);
-                    }
-                    Err(_) => self.fail_generation(
+                let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+                    self.fail_generation(
                         generation,
                         "credential storage is unavailable; retry sign-in",
-                    ),
+                    );
+                    return Ok(false);
+                };
+                let completed = self.complete_with_tokens(
+                    generation,
+                    &account_id,
+                    plan,
+                    &profile,
+                    tokens.refresh.as_deref(),
+                    &vault,
+                );
+                if completed {
+                    // Best-effort initial lease for the shadow cache; a
+                    // failure never blocks the Active session.
+                    self.refresh_lease_once(generation, &tokens, &account_id, &vault);
                 }
+                Ok(completed)
             }
-            Err(detail) => self.fail_generation(generation, &detail),
+            Err(detail) => Err(detail),
         }
     }
 
     /// Publishes the Active session only after the refresh material is
     /// stored: exchange, link, and vault all precede any success the
     /// desktop can render. A retired generation assigns nothing, so a late
-    /// callback can never restore another user's profile.
+    /// callback can never restore another user's profile. Returns whether
+    /// the Active session published.
     fn complete_with_tokens<V>(
         &self,
         generation: u64,
@@ -462,19 +487,20 @@ impl AccountService {
         profile: &AccountProfile,
         refresh_token: Option<&str>,
         vault: &V,
-    ) where
+    ) -> bool
+    where
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
         let Ok(mut state) = self.state.lock() else {
-            return;
+            return false;
         };
         if state
             .pending
             .as_ref()
             .is_none_or(|pending| pending.generation != generation)
         {
-            return;
+            return false;
         }
         let stored = store_refresh_material(vault, refresh_token).is_ok();
         if !stored {
@@ -485,7 +511,7 @@ impl AccountService {
                 generation,
                 "credential storage is unavailable; retry sign-in",
             );
-            return;
+            return false;
         }
         let generation = state.last_generation;
         state.pending = None;
@@ -504,6 +530,7 @@ impl AccountService {
             .name("axiusflow-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .ok();
+        true
     }
 
     /// Returns whether one generation still owns the shared session.
