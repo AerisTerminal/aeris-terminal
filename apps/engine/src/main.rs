@@ -216,6 +216,55 @@ fn finish_shutdown(
     }
 }
 
+const ACCOUNT_MARKET_GATE_POLL: Duration = Duration::from_millis(100);
+const ACCOUNT_MARKET_GATE_MAX_RETRY: Duration = Duration::from_secs(2);
+
+struct AccountMarketGateState {
+    applied_mode: ResourceMode,
+    pending_mode: ResourceMode,
+    retry_at: Instant,
+    retry_delay: Duration,
+}
+
+impl AccountMarketGateState {
+    fn new(applied_mode: ResourceMode, now: Instant) -> Self {
+        Self {
+            applied_mode,
+            pending_mode: applied_mode,
+            retry_at: now,
+            retry_delay: ACCOUNT_MARKET_GATE_POLL,
+        }
+    }
+
+    fn should_apply(&mut self, desired: ResourceMode, now: Instant) -> bool {
+        if desired != self.pending_mode {
+            self.pending_mode = desired;
+            self.retry_at = now;
+            self.retry_delay = ACCOUNT_MARKET_GATE_POLL;
+            return true;
+        }
+        if desired == self.applied_mode {
+            return false;
+        }
+        now >= self.retry_at
+    }
+
+    fn acknowledge(&mut self, applied: ResourceMode, now: Instant) {
+        self.applied_mode = applied;
+        self.pending_mode = applied;
+        self.retry_at = now;
+        self.retry_delay = ACCOUNT_MARKET_GATE_POLL;
+    }
+
+    fn retry(&mut self, now: Instant) {
+        self.retry_at = now + self.retry_delay;
+        self.retry_delay = self
+            .retry_delay
+            .saturating_mul(2)
+            .min(ACCOUNT_MARKET_GATE_MAX_RETRY);
+    }
+}
+
 fn start_account_market_gate(
     state: &EngineState,
     market: &MarketService,
@@ -227,26 +276,42 @@ fn start_account_market_gate(
     thread::Builder::new()
         .name("axiusflow-account-market-gate".to_string())
         .spawn(move || {
-            let mut was_authenticated = false;
+            let mut gate =
+                AccountMarketGateState::new(ResourceMode::OfflineSuspended, Instant::now());
             while !shutdown.is_requested() {
-                let authenticated = state.account().is_authenticated();
-                if authenticated != was_authenticated {
-                    let mode = if authenticated {
-                        lifetime_resource_mode(&state.workspace())
-                            .unwrap_or(ResourceMode::Interactive)
-                    } else {
-                        ResourceMode::OfflineSuspended
-                    };
-                    if let Err(error) = market.set_resource_mode(mode) {
+                let desired = account_market_resource_mode(&state);
+                let now = Instant::now();
+                if gate.should_apply(desired, now) {
+                    if let Err(error) = market.set_resource_mode(desired) {
                         eprintln!("Axiusflow account market gate degraded: {error}");
+                        gate.retry(now);
+                    } else {
+                        let current = account_market_resource_mode(&state);
+                        if current == desired {
+                            state.set_resource_mode(desired);
+                            gate.acknowledge(desired, now);
+                        } else {
+                            // Account/lifecycle state changed while the coordinator
+                            // handled the old target. Retire it without publishing
+                            // the stale mode; the newer target applies immediately.
+                            gate.pending_mode = current;
+                            gate.retry_at = now;
+                            continue;
+                        }
                     }
-                    state.set_resource_mode(mode);
-                    was_authenticated = authenticated;
                 }
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(ACCOUNT_MARKET_GATE_POLL);
             }
         })
         .map_err(|error| error.to_string())
+}
+
+fn account_market_resource_mode(state: &EngineState) -> ResourceMode {
+    if state.account().is_authenticated() {
+        lifetime_resource_mode(&state.workspace()).unwrap_or(ResourceMode::Interactive)
+    } else {
+        ResourceMode::OfflineSuspended
+    }
 }
 
 fn start_session_shutdown_monitor(
@@ -349,8 +414,11 @@ fn finish_named_worker(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::time::{Duration, Instant};
 
-    use super::{EngineCommand, parse_command};
+    use axiusflow_engine_protocol::ResourceMode;
+
+    use super::{ACCOUNT_MARKET_GATE_POLL, AccountMarketGateState, EngineCommand, parse_command};
 
     #[test]
     fn lifecycle_command_line_accepts_only_run_or_complete_shutdown() {
@@ -367,5 +435,41 @@ mod tests {
             parse_command(vec![OsString::from("--shutdown"), OsString::from("extra")].into_iter())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn account_market_gate_retries_failed_targets_without_acknowledging_them() {
+        let started = Instant::now();
+        let mut gate = AccountMarketGateState::new(ResourceMode::OfflineSuspended, started);
+
+        assert!(gate.should_apply(ResourceMode::Warm, started));
+        gate.retry(started);
+        assert_eq!(gate.applied_mode, ResourceMode::OfflineSuspended);
+        assert!(!gate.should_apply(ResourceMode::Warm, started));
+        assert!(gate.should_apply(ResourceMode::Warm, started + ACCOUNT_MARKET_GATE_POLL));
+
+        gate.acknowledge(ResourceMode::Warm, started + ACCOUNT_MARKET_GATE_POLL);
+        assert_eq!(gate.applied_mode, ResourceMode::Warm);
+        assert!(!gate.should_apply(ResourceMode::Warm, started + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn account_market_gate_newer_target_retires_an_older_retry() {
+        let started = Instant::now();
+        let mut gate = AccountMarketGateState::new(ResourceMode::OfflineSuspended, started);
+
+        assert!(gate.should_apply(ResourceMode::Warm, started));
+        gate.retry(started);
+        assert!(
+            gate.should_apply(ResourceMode::OfflineSuspended, started),
+            "a sign-out must undo a partially applied resume even though suspension was last acknowledged"
+        );
+        gate.acknowledge(ResourceMode::OfflineSuspended, started);
+
+        assert_eq!(gate.applied_mode, ResourceMode::OfflineSuspended);
+        assert!(!gate.should_apply(
+            ResourceMode::OfflineSuspended,
+            started + Duration::from_secs(10)
+        ));
     }
 }

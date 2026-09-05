@@ -311,6 +311,7 @@ fn retained_history_coordinator<'a>(
         history_inflight: BTreeMap::new(),
         pending_live_edge_repairs: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
+        suspended_history: BTreeSet::new(),
         history_coverage: BTreeMap::new(),
         viewport_history_ranges: BTreeMap::new(),
         active_viewports: BTreeMap::new(),
@@ -482,7 +483,9 @@ fn coordinator_eviction_retains_only_the_current_bounded_warm_priority() {
     );
     coordinator.hot_set_priority_count = 3;
     coordinator.warm_priority = series.clone();
-    coordinator.apply_resource_mode(ResourceMode::Constrained);
+    coordinator
+        .apply_resource_mode(ResourceMode::Constrained)
+        .expect("constrained mode applies");
 
     assert!(coordinator.engine.series_snapshot(&series[0]).is_some());
     assert!(coordinator.engine.series_snapshot(&series[1]).is_some());
@@ -602,7 +605,9 @@ fn constrained_policy_sets_the_real_provider_history_bound() {
         consumer_id,
         &series,
     );
-    coordinator.apply_resource_mode(ResourceMode::Constrained);
+    coordinator
+        .apply_resource_mode(ResourceMode::Constrained)
+        .expect("constrained mode applies");
     coordinator
         .enqueue_history(
             &series,
@@ -1156,13 +1161,15 @@ fn unrelated_hidden_consumer_cannot_evict_visible_rithmic_depth() {
     coordinator.refresh_resource_policy();
     assert!(coordinator.order_books.is_empty());
 
-    coordinator.apply_resource_mode(ResourceMode::MarketsLive);
+    coordinator
+        .apply_resource_mode(ResourceMode::MarketsLive)
+        .unwrap();
     assert!(
         coordinator
             .order_books
             .contains_key(&("rithmic".to_string(), series.instrument_id.clone()))
     );
-    coordinator.apply_resource_mode(ResourceMode::Warm);
+    coordinator.apply_resource_mode(ResourceMode::Warm).unwrap();
     assert!(coordinator.order_books.is_empty());
 
     coordinator
@@ -6303,6 +6310,178 @@ fn markets_live_retains_and_advances_the_hot_series_without_ui_consumers() {
             .get(),
         1
     );
+}
+
+#[test]
+fn existing_chart_demand_resumes_after_offline_account_suspension() {
+    let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+        .expect("realtime fixture starts");
+    harness.service.attach(1).expect("client attaches");
+    harness
+        .service
+        .register_consumer(1, 1, 1)
+        .expect("consumer registers");
+    harness
+        .service
+        .set_demand(1, 1, 1, &btc())
+        .expect("chart demand is accepted");
+    poll_until(&harness.service, 1, 1, |event| {
+        matches!(event, envelope::Payload::SeriesSnapshot(_))
+    });
+    expect_realtime_generation(&harness, "initial realtime starts", 1);
+    expect_configured_products(&harness, "initial product set configures", &["BTC-USD"]);
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Connected)
+        .expect("initial realtime connects");
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
+        .expect("initial trade arrives");
+    let initial = poll_until(&harness.service, 1, 1, |event| {
+        is_live_update(event, 1, 1, 200)
+    });
+    assert!(is_live_update(&initial, 1, 1, 200));
+
+    harness
+        .service
+        .set_resource_mode(ResourceMode::OfflineSuspended)
+        .expect("account suspension applies");
+    assert_eq!(
+        harness
+            .stops
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the established provider generation stops")
+            .0
+            .get(),
+        1
+    );
+    assert!(matches!(
+        poll_until(&harness.service, 1, 1, |event| matches!(
+            event,
+            envelope::Payload::SeriesState(state)
+                if state.state == SeriesLoadState::Partial as i32
+        )),
+        envelope::Payload::SeriesState(state)
+            if state.detail.as_deref() == Some("Market access is suspended until the account is ready")
+    ));
+
+    harness
+        .service
+        .set_resource_mode(ResourceMode::Warm)
+        .expect("authenticated warm mode resumes existing demand");
+    expect_realtime_generation(&harness, "replacement realtime starts", 2);
+    expect_configured_products(&harness, "replacement product set configures", &["BTC-USD"]);
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Connected)
+        .expect("replacement realtime connects");
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Trade(trade(3, "2.50", 2)))
+        .expect("post-login trade crosses the next candle boundary");
+    let resumed = poll_until(&harness.service, 1, 1, |event| {
+        is_live_update(event, 1, 2, 250)
+    });
+    assert!(is_live_update(&resumed, 1, 2, 250));
+    assert!(
+        harness.history_fetches.load(Ordering::Acquire) >= 2,
+        "resume requests fresh covering history"
+    );
+}
+
+#[test]
+fn history_completed_after_account_suspension_cannot_publish_into_restored_access() {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let (release_tx, release_rx) = mpsc::sync_channel(2);
+    let (action_tx, action_rx) = mpsc::sync_channel(2);
+    let (generation_tx, generation_rx) = mpsc::sync_channel(2);
+    let (stop_tx, stop_rx) = mpsc::sync_channel(2);
+    let service = MarketService::start_with_sources(
+        ControlledHistory {
+            fetches: Arc::clone(&fetches),
+            release: release_rx,
+        },
+        Some(Box::new(FixtureRealtime {
+            actions: action_rx,
+            generations: generation_tx,
+            stops: stop_tx,
+            configured_products: None,
+        })),
+        None,
+    )
+    .expect("controlled lifecycle fixture starts");
+    service.attach(1).expect("client attaches");
+    service
+        .register_consumer(1, 1, 1)
+        .expect("consumer registers");
+    service
+        .set_demand(1, 1, 1, &btc())
+        .expect("initial history starts");
+    assert_eq!(
+        generation_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("initial realtime starts")
+            .0
+            .get(),
+        1
+    );
+    action_tx
+        .send(FixtureRealtimeAction::Connected)
+        .expect("initial realtime connects");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while fetches.load(Ordering::Acquire) != 1 {
+        assert!(Instant::now() < deadline, "initial history did not start");
+        thread::yield_now();
+    }
+
+    service
+        .set_resource_mode(ResourceMode::OfflineSuspended)
+        .expect("account suspension applies");
+    stop_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("initial realtime stops");
+    service
+        .set_resource_mode(ResourceMode::Warm)
+        .expect("account access returns");
+    assert_eq!(
+        generation_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("replacement realtime starts")
+            .0
+            .get(),
+        2
+    );
+
+    release_tx
+        .send(())
+        .expect("pre-suspension history returns successfully");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while fetches.load(Ordering::Acquire) != 2 {
+        assert!(
+            Instant::now() < deadline,
+            "fresh post-suspension history did not start"
+        );
+        thread::yield_now();
+    }
+    while let Some(event) = service.poll_event(1, 1).expect("consumer polls") {
+        assert!(
+            !matches!(event, envelope::Payload::SeriesSnapshot(_)),
+            "pre-suspension history reached the restored consumer"
+        );
+    }
+
+    release_tx
+        .send(())
+        .expect("post-suspension history completes");
+    assert!(matches!(
+        poll_until(&service, 1, 1, |event| matches!(
+            event,
+            envelope::Payload::SeriesSnapshot(_)
+        )),
+        envelope::Payload::SeriesSnapshot(_)
+    ));
+    drop(action_tx);
 }
 
 #[test]

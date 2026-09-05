@@ -83,6 +83,7 @@ fn run_coordinator(
         history_inflight: BTreeMap::new(),
         pending_live_edge_repairs: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
+        suspended_history: BTreeSet::new(),
         history_coverage: BTreeMap::new(),
         viewport_history_ranges: BTreeMap::new(),
         active_viewports: BTreeMap::new(),
@@ -192,6 +193,9 @@ pub(super) struct Coordinator<'a> {
     pub(super) pending_live_edge_repairs:
         BTreeMap<(BarSeriesKey, ProviderGeneration), PendingLiveEdgeRepair>,
     pub(super) history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
+    /// Requests canceled by account/lifecycle suspension. Their response may be
+    /// internally valid but belongs to retired market access and cannot install.
+    pub(super) suspended_history: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     pub(super) history_coverage: BTreeMap<BarSeriesKey, Vec<HistoryRange>>,
     pub(super) viewport_history_ranges: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
     pub(super) active_viewports: BTreeMap<ConsumerId, ActiveViewport>,
@@ -315,8 +319,8 @@ impl Coordinator<'_> {
                 let _ = reply.send(Ok(()));
             }
             Command::SetResourceMode(mode, reply) => {
-                self.apply_resource_mode(mode);
-                let _ = reply.send(Ok(()));
+                let result = self.apply_resource_mode(mode);
+                let _ = reply.send(result);
             }
             Command::Status(reply) => {
                 let _ = reply.send(Ok(self.status()));
@@ -449,7 +453,7 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn apply_resource_mode(&mut self, mode: ResourceMode) {
+    pub(super) fn apply_resource_mode(&mut self, mode: ResourceMode) -> Result<(), String> {
         self.resource_mode = mode;
         self.refresh_resource_policy();
         if mode == ResourceMode::OfflineSuspended {
@@ -457,7 +461,57 @@ impl Coordinator<'_> {
         } else if mode == ResourceMode::MarketsLive {
             self.activate_markets_live_hot_set();
         }
+        if mode != ResourceMode::OfflineSuspended {
+            self.reconcile_authorized_demands()?;
+        }
         self.release_unused_live_market_data();
+        Ok(())
+    }
+
+    /// Rebuilds provider-owned work from the demand registry after policy has
+    /// allowed market access again. Suspension intentionally destroys live
+    /// handoffs and provider selections, while consumer demand remains the
+    /// authoritative record of the charts the user still has open.
+    fn reconcile_authorized_demands(&mut self) -> Result<(), String> {
+        let demanded = self
+            .events
+            .keys()
+            .filter_map(|consumer_id| self.engine.current_demand(*consumer_id))
+            .filter_map(|demand| demand.series.clone())
+            .filter(|series| self.engine.has_subscription(series))
+            .collect::<BTreeSet<_>>();
+        let mut failures = Vec::new();
+        for series in demanded {
+            let result = self
+                .provider_generation_for_series(&series)
+                .and_then(|generation| {
+                    self.ensure_realtime(&series)?;
+                    if let Some(snapshot) = self.engine.series_snapshot(&series) {
+                        self.prepare_cached_demand(&series, generation, &snapshot)?;
+                    } else {
+                        self.enqueue_history(&series, generation)
+                            .map_err(str::to_string)?;
+                    }
+                    Ok(())
+                });
+            if let Err(error) = result {
+                self.broadcast_demand_error_for(
+                    &series,
+                    FailureStage::ProviderRealtime,
+                    &error,
+                    None,
+                );
+                failures.push(format!("{}: {error}", series.instrument_id));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "market demand reconciliation failed: {}",
+                failures.join("; ")
+            ))
+        }
     }
 
     pub(super) fn refresh_resource_policy(&mut self) {
@@ -595,6 +649,23 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn suspend_provider_work(&mut self) {
+        for events in self.events.values_mut() {
+            events.clear_series();
+        }
+        let demanded = self
+            .events
+            .keys()
+            .filter_map(|consumer_id| self.engine.current_demand(*consumer_id))
+            .filter_map(|demand| demand.series.clone())
+            .collect::<BTreeSet<_>>();
+        for series in demanded {
+            self.broadcast_series_recovery_for(
+                &series,
+                "Market access is suspended until the account is ready",
+            );
+        }
+        self.suspended_history
+            .extend(self.history_cancellations.keys().cloned());
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
         }

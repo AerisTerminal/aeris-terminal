@@ -8,12 +8,12 @@ use super::{
     InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MarketBar, Mutex,
     NonZeroU64, NonZeroUsize, Ordering, PersistenceState, ProviderCatalogCommand,
     ProviderConnectionState, ProviderGeneration, ProviderRequest,
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RithmicHandoffSeed, SearchProviderInstruments,
-    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, StorageRequest, StoredHistory,
-    SyncSender, SystemTime, TrySendError, UNIX_EPOCH, VIEWPORT_BACKFILL_BARS,
-    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId, WorkspaceState,
-    engine_install_failure_stage, fail_waiters, ipc_series, publish_state, series_state, thread,
-    try_enqueue_history,
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, ResourceMode, RithmicHandoffSeed,
+    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    StorageRequest, StoredHistory, SyncSender, SystemTime, TrySendError, UNIX_EPOCH,
+    VIEWPORT_BACKFILL_BARS, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId,
+    WorkspaceState, engine_install_failure_stage, fail_waiters, ipc_series, publish_state,
+    series_state, thread, try_enqueue_history,
 };
 
 /// Merges a Coinbase repair page into the canonical series.
@@ -1423,6 +1423,7 @@ impl Coordinator<'_> {
             .history_cancellations
             .remove(&key)
             .is_some_and(|stop| stop.load(Ordering::Acquire));
+        let suspended = self.suspended_history.remove(&key);
         let current = self
             .engine
             .provider_status(&series.provider_id)
@@ -1439,6 +1440,23 @@ impl Coordinator<'_> {
                         .insert((series.clone(), current), range);
                 }
                 let _ = self.enqueue_history(series, current);
+            }
+            return None;
+        }
+        if suspended {
+            self.pending_live_edge_repairs.remove(&key);
+            if self.resource_mode != ResourceMode::OfflineSuspended
+                && self.engine.has_subscription(series)
+            {
+                if self.viewport_history_ranges.contains_key(&key) {
+                    let _ = self.schedule_coinbase_history(
+                        series,
+                        generation,
+                        HistoryRequestKind::ViewportBackfill,
+                    );
+                } else {
+                    let _ = self.enqueue_history(series, generation);
+                }
             }
             return None;
         }
