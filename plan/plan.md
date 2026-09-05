@@ -318,11 +318,14 @@ production qualification. Existing passing cases must survive every correction.
 
 ## Review, local gates and supported-target qualification
 
-Follow current maintainer instructions and AGENTS.md for branch/commit authority;
-this plan does not override them. At this refresh both checkouts are on
-`fix/auth-session-continuity`. Preserve unrelated work and never switch, merge
-or overwrite branches based only on this recorded snapshot. The earlier plan
-records linked PR review and maintainer acceptance; retain that acceptance gate.
+The maintainer has designated `development` as the native repository's standing
+working branch. The complete existing work and this findings/correction plan move
+there; `fix/auth-session-continuity` and its current PR to `main` are retired.
+Implement and push verified batches to `development`. Do not open a replacement
+PR to `main` until the maintainer requests release review; main is updated only
+through accepted review. Preserve unrelated work and verify each checkout before
+editing. The sibling website branch is unchanged by this native branch migration;
+coordinate its branch explicitly when the next cross-repository batch begins.
 
 - [ ] Implement a coherent correction batch in dependency order above. Capture
   failing regression evidence before the fix and final evidence afterward.
@@ -341,7 +344,8 @@ records linked PR review and maintainer acceptance; retain that acceptance gate.
 - [ ] Build release binaries for behavior changes; record paths/hashes/PIDs and
   release/install generation. Replace only the identified old pair through normal
   lifecycle. Verify both actual running binaries before any live/visual claim.
-- [ ] Produce linked native/Worker PRs where applicable with deployment order,
+- [ ] When the maintainer requests release review, produce linked native/Worker
+  PRs where applicable with deployment order,
   revisions, exact commands/results, before/after scenario evidence, limitations
   and open IDs. Independently review real call paths and reproduce relevant
   results; green CI or the implementer's summary alone is insufficient.
