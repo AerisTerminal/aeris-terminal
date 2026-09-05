@@ -6206,6 +6206,105 @@ fn an_overflowed_series_queue_is_replaced_by_a_covering_snapshot() {
     assert_eq!(events.series.len(), 1);
 }
 
+#[test]
+fn overload_recovery_survives_slow_consumer_history_pressure_and_reconnect_storms() {
+    let (history_tx, history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (mut coordinator, consumer_id, series) =
+        connected_coinbase_handoff_coordinator(&history_tx, &storage_tx, &realtime_tx, &stop);
+    let generation = coordinator.coinbase_provider_generation();
+    coordinator
+        .engine
+        .install_history(generation, &series, 2, 8, vec![history_bar()])
+        .expect("canonical recovery image installs");
+
+    let events = coordinator
+        .events
+        .get_mut(&consumer_id)
+        .expect("consumer outbox exists");
+    for sequence in 1..=u64::try_from(CONSUMER_SERIES_QUEUE_CAPACITY).expect("capacity fits") + 1 {
+        events.publish_series_update(envelope::Payload::SeriesUpdate(
+            axiusflow_engine_protocol::SeriesUpdate {
+                consumer_id: consumer_id.0.get(),
+                generation: 1,
+                series: Some(btc()),
+                provider_generation: generation.0.get(),
+                bar: Some(ipc_bar(MarketBar {
+                    source_sequence: sequence,
+                    exchange_timestamp_seconds: i64::try_from(sequence).expect("sequence fits"),
+                    exchange_timestamp_unix_nanos: i64::try_from(sequence).expect("sequence fits"),
+                    ..history_bar()
+                })),
+                publication_generation: sequence,
+                forming: false,
+                operation: SeriesUpdateOperation::AppendTail.into(),
+            },
+        ));
+    }
+    assert!(events.series_overflowed);
+
+    history_tx
+        .try_send(HistoryRequest {
+            series: series.clone(),
+            provider_generation: generation,
+            instrument: None,
+            maximum_bars: HISTORY_BARS_PER_SERIES,
+            range: None,
+            kind: HistoryRequestKind::Initial,
+            stop: Arc::new(AtomicBool::new(false)),
+        })
+        .expect("history lane is saturated");
+
+    for _ in 0..3 {
+        coordinator.realtime_interrupted(
+            FailureStage::Handoff,
+            "fixture reconnect recovery requires history",
+        );
+    }
+    let retry_key = (series.clone(), generation);
+    assert_eq!(
+        coordinator.history_retries.len(),
+        1,
+        "a reconnect storm retains one bounded retry per series"
+    );
+    assert_eq!(
+        coordinator
+            .history_retries
+            .get(&retry_key)
+            .map(|(_, attempts)| *attempts),
+        Some(0),
+        "queue pressure does not consume the provider failure budget"
+    );
+
+    history_rx
+        .try_recv()
+        .expect("saturated request is released");
+    coordinator
+        .history_retries
+        .get_mut(&retry_key)
+        .expect("capacity retry remains owned by the coordinator")
+        .0 = Instant::now();
+    coordinator.retry_history();
+    let recovery = history_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("coordinator tick delivers recovery without a provider heartbeat");
+    assert_eq!(recovery.series, series);
+    assert_eq!(recovery.provider_generation, generation);
+    assert!(coordinator.history_inflight.contains_key(&retry_key));
+
+    coordinator.recover_overflowed_series_queues();
+    let events = &coordinator.events[&consumer_id];
+    assert!(!events.series_overflowed);
+    assert_eq!(events.series.len(), 1);
+    assert!(matches!(
+        events.series.front(),
+        Some(envelope::Payload::SeriesSnapshot(snapshot))
+            if snapshot.bars.last().is_some_and(|bar| bar.close == history_bar().close)
+    ));
+}
+
 /// Trades that arrive while Rithmic history is in flight belong to the open
 /// candle, not to the floor.
 ///

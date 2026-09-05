@@ -761,7 +761,7 @@ impl Coordinator<'_> {
                 .history_inflight
                 .contains_key(&(series.clone(), generation))
             {
-                let _ = self.enqueue_history(&series, generation);
+                let _ = self.enqueue_history_recovery(&series, generation);
             }
         }
     }
@@ -873,7 +873,7 @@ impl Coordinator<'_> {
             .history_inflight
             .contains_key(&(series.clone(), generation))
         {
-            let _ = self.enqueue_history(series, generation);
+            let _ = self.enqueue_history_recovery(series, generation);
         }
     }
 
@@ -1117,7 +1117,7 @@ impl Coordinator<'_> {
             }
         }
         for series in missing {
-            let _ = self.enqueue_history(&series, generation);
+            let _ = self.enqueue_history_recovery(&series, generation);
         }
         self.provider_online_if_all_series_ready();
     }
@@ -1344,7 +1344,7 @@ impl Coordinator<'_> {
             .map(|(series, _)| series.clone())
             .collect::<Vec<_>>();
         for series in missing {
-            let _ = self.enqueue_history(&series, generation);
+            let _ = self.enqueue_history_recovery(&series, generation);
         }
     }
 
@@ -1370,7 +1370,7 @@ impl Coordinator<'_> {
                 PersistenceState::Durable,
                 Some(detail),
             );
-            if let Err(error) = self.enqueue_history(&series, generation) {
+            if let Err(error) = self.enqueue_history_recovery(&series, generation) {
                 self.broadcast_demand_error_for(&series, FailureStage::Handoff, error, None);
             }
         }
@@ -1569,7 +1569,7 @@ impl Coordinator<'_> {
             PersistenceState::Durable,
             Some(detail),
         );
-        if let Err(error) = self.enqueue_history(series, generation) {
+        if let Err(error) = self.enqueue_history_recovery(series, generation) {
             self.broadcast_demand_error_for(series, FailureStage::Handoff, error, None);
         }
     }

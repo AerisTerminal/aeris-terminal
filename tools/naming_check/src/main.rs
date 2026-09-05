@@ -1071,6 +1071,7 @@ mod tests {
             "newer_demand_cancels_history_without_waiting_for_cleanup",
             "symbol_and_interval_switch_reuses_the_shared_realtime_session",
             "workspace_tab_and_layout_changes_keep_one_live_provider_session",
+            "overload_recovery_survives_slow_consumer_history_pressure_and_reconnect_storms",
         ] {
             assert!(
                 coordinator.contains(regression),

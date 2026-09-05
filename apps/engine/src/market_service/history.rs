@@ -3,18 +3,18 @@ use super::{
     BarSeriesKey, COINBASE_PROVIDER_GENERATION, COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseBarAggregator,
     CoinbaseBarAggregatorConfig, CoinbaseHistoryReadiness, CoinbaseInterval, Command, ConsumerId,
     Coordinator, CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, Entry, FailureStage,
-    FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_RETRY_DELAY, HistoryRange,
-    HistoryRequest, HistoryRequestKind, HistorySnapshot, HistorySource, HotSeries, HotSetManager,
-    HotSetTier, InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES,
-    MAXIMUM_VIEWPORT_HISTORY_RETRIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering,
-    PendingViewportHistoryRetry, PersistenceState, ProviderCatalogCommand, ProviderConnectionState,
-    ProviderGeneration, ProviderRequest, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver,
-    ResourceMode, RithmicHandoffSeed, SearchProviderInstruments, SeriesCadence, SeriesKey,
-    SeriesLoadState, SeriesSnapshot, StorageRequest, StoredHistory, SyncSender, SystemTime,
-    TrySendError, UNIX_EPOCH, VIEWPORT_BACKFILL_BARS, VIEWPORT_HISTORY_RETRY_DELAY,
-    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId, WorkspaceState,
-    engine_install_failure_stage, fail_waiters, ipc_series, publish_state, series_state, thread,
-    try_enqueue_history,
+    FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED,
+    HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest, HistoryRequestKind, HistorySnapshot,
+    HistorySource, HotSeries, HotSetManager, HotSetTier, InstallProviderInstrument, Instant,
+    MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MAXIMUM_VIEWPORT_HISTORY_RETRIES, MarketBar, Mutex,
+    NonZeroU64, NonZeroUsize, Ordering, PendingViewportHistoryRetry, PersistenceState,
+    ProviderCatalogCommand, ProviderConnectionState, ProviderGeneration, ProviderRequest,
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, ResourceMode, RithmicHandoffSeed,
+    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    StorageRequest, StoredHistory, SyncSender, SystemTime, TrySendError, UNIX_EPOCH,
+    VIEWPORT_BACKFILL_BARS, VIEWPORT_HISTORY_RETRY_DELAY, VIEWPORT_LIVE_TAIL_RESERVE, Viewport,
+    WarmSeries, WorkspaceId, WorkspaceState, engine_install_failure_stage, fail_waiters,
+    ipc_series, publish_state, series_state, thread, try_enqueue_history,
 };
 
 /// Merges a Coinbase repair page into the canonical series.
@@ -655,6 +655,28 @@ pub(super) fn run_history_worker(
 }
 
 impl Coordinator<'_> {
+    /// Enqueues history required to recover an already accepted live series.
+    ///
+    /// Queue pressure retains one coordinator-tick-driven retry per series. A
+    /// reconnect or publication failure must not depend on a later provider
+    /// heartbeat to retry the covering request, and repeated recovery signals
+    /// must not grow duplicate work.
+    pub(super) fn enqueue_history_recovery(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> Result<(), &'static str> {
+        match self.enqueue_history(series, generation) {
+            Err(HISTORY_CAPACITY_EXHAUSTED) => {
+                self.history_retries
+                    .entry((series.clone(), generation))
+                    .or_insert((Instant::now() + HISTORY_RETRY_DELAY, 0));
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
     pub(super) fn restore_hot_series(&mut self, series: Vec<WarmSeries>) {
         for warm in series
             .into_iter()

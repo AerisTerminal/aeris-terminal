@@ -74,6 +74,7 @@ const COORDINATOR_TICK: Duration = Duration::from_millis(16);
 const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
+const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporarily exhausted";
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const VIEWPORT_HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAXIMUM_VIEWPORT_HISTORY_RETRIES: u8 = 3;
@@ -729,7 +730,7 @@ fn try_enqueue_history(
 ) -> Result<(), &'static str> {
     match history.try_send(request) {
         Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err("provider history capacity is temporarily exhausted"),
+        Err(TrySendError::Full(_)) => Err(HISTORY_CAPACITY_EXHAUSTED),
         Err(TrySendError::Disconnected(_)) => Err("provider history worker is unavailable"),
     }
 }
