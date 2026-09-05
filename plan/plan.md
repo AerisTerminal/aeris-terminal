@@ -2269,3 +2269,36 @@ Batch 10 - complete sign-in journey repair (2026-09-05):
 - Still maintainer-side: one Google approval and one Cloudflare-email
   OTP login to see the visible profile, recovery controls, and session
   restoration end to end.
+
+Batch 11 - account choice on every sign-in plus web account hub (2026-09-05):
+
+- Root cause of the forced auto-approval: with a browser session, the
+  provider skipped the login page entirely, so the Continue-as bar never
+  rendered. Fixed with the provider's own mechanism: the engine requests
+  prompt=select_account, the Worker registers selectAccount page
+  /sign-in, and Continue-as runs through POST /oauth2/continue
+  (selected:true) to the loopback code. Verified the plugin flow in its
+  shipped source before wiring.
+- /sign-in Continue-as now uses provider continuation instead of a raw
+  resume navigation; Use-another-account signs out into the same forms
+  with the signed query preserved for the next attempt.
+- New /account hub on the auth origin (same-origin session, no
+  cross-origin plumbing): web sign-in via Google plus OTP, verified
+  identity plus canonical plan via POST /api/axiusflow/ensure (Starter
+  provisioning for web-first users, plans never overwritten), Upgrade
+  Plan checkout with plan/interval/currency/country, avatar dropdown
+  with Upgrade Plan plus Sign out, and Sign out. Marketing header Sign
+  in now points at the hub. Marketing stays a dumb link by design:
+  session cookies are host-bound to auth.axiusflow.com and are never
+  exposed cross-origin.
+- Live on the deployed Worker: /account serves with upgrade/sign-out/
+  avatar menu, /ensure is 401 without a session, and an unsigned
+  authorize with prompt=select_account 302s to /sign-in with the signed
+  query (prompt preserved, no unsupported-prompt error).
+- Gates: worker typecheck, marketing typecheck, account-page script
+  parse check, fmt, workspace clippy, full tests green. Release engine
+  rebuilt (desktop unchanged) and the pair relaunched from
+  target/release.
+- Still maintainer-side: one desktop sign-in must now land on the
+  choice page (Continue-as or switch), then loopback code, profile,
+  restart, and sign-out; plus one web OTP login and one upgrade click.
