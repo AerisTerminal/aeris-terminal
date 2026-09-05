@@ -3959,6 +3959,18 @@ fn catalog_rejection_message(
         ProviderCatalogRejectionReason::DispatchUnavailable => {
             "The Rithmic selection could not be scheduled"
         }
+        ProviderCatalogRejectionReason::SearchTimedOut if coinbase => {
+            "The Coinbase market search timed out; try again"
+        }
+        ProviderCatalogRejectionReason::SearchTimedOut => {
+            "The Rithmic symbol search timed out; try again"
+        }
+        ProviderCatalogRejectionReason::SelectionTimedOut if coinbase => {
+            "The Coinbase market selection timed out; try again"
+        }
+        ProviderCatalogRejectionReason::SelectionTimedOut => {
+            "The Rithmic symbol selection timed out; try again"
+        }
         ProviderCatalogRejectionReason::Unspecified if coinbase => {
             "The Coinbase catalog request failed"
         }
@@ -7254,6 +7266,8 @@ mod tests {
             ProviderCatalogRejectionReason::InstrumentUnavailable,
             ProviderCatalogRejectionReason::SubscriptionRejected,
             ProviderCatalogRejectionReason::DispatchUnavailable,
+            ProviderCatalogRejectionReason::SearchTimedOut,
+            ProviderCatalogRejectionReason::SelectionTimedOut,
             ProviderCatalogRejectionReason::Unspecified,
         ] {
             for command in [
@@ -7264,6 +7278,22 @@ mod tests {
                 assert!(!message.contains("Rithmic"), "{message}");
             }
         }
+        assert_eq!(
+            catalog_rejection_message(
+                ProviderCatalogRejectionReason::SearchTimedOut,
+                ProviderCatalogCommand::Search,
+                false,
+            ),
+            "The Rithmic symbol search timed out; try again"
+        );
+        assert_eq!(
+            catalog_rejection_message(
+                ProviderCatalogRejectionReason::SelectionTimedOut,
+                ProviderCatalogCommand::Selection,
+                false,
+            ),
+            "The Rithmic symbol selection timed out; try again"
+        );
     }
 
     #[test]

@@ -31,6 +31,8 @@ const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
+const CATALOG_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const INITIAL_SERIES_TIMEOUT: Duration = Duration::from_secs(15);
 const MAXIMUM_INITIAL_CONNECT_ATTEMPTS: NonZeroU8 = match NonZeroU8::new(3) {
     Some(attempts) => attempts,
     None => NonZeroU8::MIN,
@@ -46,12 +48,34 @@ struct WorkerState {
     catalog: EngineCatalogSession,
     installed: Option<InstallProviderInstrument>,
     active_series: Option<ActiveSeries>,
+    pending_search: Option<PendingOperation>,
+    pending_selection: Option<PendingOperation>,
 }
 
 struct ActiveSeries {
     request: RithmicSeriesRequest,
     instrument: InstallProviderInstrument,
     key: SeriesKey,
+    initial_snapshot_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingOperation {
+    generation: u64,
+    deadline: Instant,
+}
+
+impl PendingOperation {
+    fn new(generation: u64, now: Instant, timeout: Duration) -> Self {
+        Self {
+            generation,
+            deadline: now.checked_add(timeout).unwrap_or(now),
+        }
+    }
+
+    fn expired(self, now: Instant) -> bool {
+        now >= self.deadline
+    }
 }
 
 enum InitialConnection<T> {
@@ -119,6 +143,8 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
         catalog,
         installed: None,
         active_series: None,
+        pending_search: None,
+        pending_selection: None,
     };
     send_connection(
         messages,
@@ -161,6 +187,7 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
                 );
             }
         }
+        expire_silent_operations(messages, &mut state, Instant::now());
     }
     send_connection(
         messages,
@@ -242,6 +269,12 @@ fn process_command(
             let generation = search.search_generation;
             if state.catalog.search(search).is_err() {
                 publish_dispatch_rejection(messages, generation, ProviderCatalogCommand::Search);
+            } else {
+                state.pending_search = Some(PendingOperation::new(
+                    generation,
+                    Instant::now(),
+                    CATALOG_RESPONSE_TIMEOUT,
+                ));
             }
         }
         MarketWorkerCommand::ProviderSelect(selection) => {
@@ -249,6 +282,12 @@ fn process_command(
             state.active_series = None;
             if state.catalog.select(selection).is_err() {
                 publish_dispatch_rejection(messages, generation, ProviderCatalogCommand::Selection);
+            } else {
+                state.pending_selection = Some(PendingOperation::new(
+                    generation,
+                    Instant::now(),
+                    CATALOG_RESPONSE_TIMEOUT,
+                ));
             }
         }
         MarketWorkerCommand::EngineSeries(EngineSeriesRequest {
@@ -282,6 +321,11 @@ fn process_command(
                         request,
                         instrument,
                         key,
+                        initial_snapshot_deadline: Some(
+                            Instant::now()
+                                .checked_add(INITIAL_SERIES_TIMEOUT)
+                                .unwrap_or_else(Instant::now),
+                        ),
                     });
                     Ok(())
                 });
@@ -325,11 +369,17 @@ fn handle_engine_event(
         envelope::Payload::SeriesSnapshot(snapshot)
             if series_identity_matches(state.catalog.consumer_id, active, &snapshot) =>
         {
-            let result =
-                snapshot_bootstrap(active.request, &active.instrument, &snapshot).map(Box::new);
+            if active.initial_snapshot_deadline.is_none() {
+                return;
+            }
+            let request = active.request;
+            let result = snapshot_bootstrap(request, &active.instrument, &snapshot).map(Box::new);
+            if let Some(active) = state.active_series.as_mut() {
+                active.initial_snapshot_deadline = None;
+            }
             let _ = messages.send(MarketWorkerMessage::RithmicHistory {
-                selection_generation: active.request.selection_generation,
-                series_generation: active.request.series_generation,
+                selection_generation: request.selection_generation,
+                series_generation: request.series_generation,
                 result,
             });
         }
@@ -371,9 +421,13 @@ fn handle_engine_event(
                 SeriesLoadState::try_from(series_state.state),
                 Ok(SeriesLoadState::Failed | SeriesLoadState::Superseded)
             ) {
+                let request = active.request;
+                if let Some(active) = state.active_series.as_mut() {
+                    active.initial_snapshot_deadline = None;
+                }
                 publish_series_error(
                     messages,
-                    active.request,
+                    request,
                     series_state
                         .detail
                         .unwrap_or_else(|| "Rithmic series is unavailable".to_string()),
@@ -381,7 +435,11 @@ fn handle_engine_event(
             }
         }
         envelope::Payload::DemandError(error) => {
-            publish_series_error(messages, active.request, demand_error_message(&error));
+            let request = active.request;
+            if let Some(active) = state.active_series.as_mut() {
+                active.initial_snapshot_deadline = None;
+            }
+            publish_series_error(messages, request, demand_error_message(&error));
         }
         envelope::Payload::Fault(fault) => {
             send_connection(
@@ -403,13 +461,36 @@ fn handle_catalog_event(
         classify_provider_catalog_event(event, "rithmic", state.catalog.consumer_id);
     match catalog {
         Some(ProviderCatalogEvent::SearchCompleted(result)) => {
+            if !take_current_operation(&mut state.pending_search, result.search_generation) {
+                return None;
+            }
             publish_search_result(messages, result);
         }
         Some(ProviderCatalogEvent::SelectionInstalled(instrument)) => {
+            if !take_current_operation(
+                &mut state.pending_selection,
+                instrument.selection_generation,
+            ) {
+                return None;
+            }
             publish_selection(messages, state, instrument);
         }
-        Some(event @ ProviderCatalogEvent::CommandRejected { .. }) => {
-            let _ = messages.send(MarketWorkerMessage::ProviderCatalog(event));
+        Some(ProviderCatalogEvent::CommandRejected { rejection, command }) => {
+            let current = match command {
+                ProviderCatalogCommand::Search => {
+                    take_current_operation(&mut state.pending_search, rejection.command_generation)
+                }
+                ProviderCatalogCommand::Selection => take_current_operation(
+                    &mut state.pending_selection,
+                    rejection.command_generation,
+                ),
+            };
+            if !current {
+                return None;
+            }
+            let _ = messages.send(MarketWorkerMessage::ProviderCatalog(
+                ProviderCatalogEvent::CommandRejected { rejection, command },
+            ));
             send_connection(
                 messages,
                 FeedConnectionState::Recovering,
@@ -419,6 +500,75 @@ fn handle_catalog_event(
         None => {}
     }
     passthrough
+}
+
+fn take_current_operation(pending: &mut Option<PendingOperation>, generation: u64) -> bool {
+    if pending.is_some_and(|operation| operation.generation == generation) {
+        *pending = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn take_expired_operation(pending: &mut Option<PendingOperation>, now: Instant) -> Option<u64> {
+    if pending.is_some_and(|operation| operation.expired(now)) {
+        pending.take().map(|operation| operation.generation)
+    } else {
+        None
+    }
+}
+
+fn take_expired_deadline(deadline: &mut Option<Instant>, now: Instant) -> bool {
+    if deadline.is_some_and(|deadline| now >= deadline) {
+        *deadline = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn expire_silent_operations(messages: &MarketWorkerSender, state: &mut WorkerState, now: Instant) {
+    if let Some(generation) = take_expired_operation(&mut state.pending_search, now) {
+        state.catalog.abandon_search("rithmic", generation);
+        publish_catalog_timeout(messages, generation, ProviderCatalogCommand::Search);
+    }
+    if let Some(generation) = take_expired_operation(&mut state.pending_selection, now) {
+        state.catalog.abandon_selection("rithmic", generation);
+        publish_catalog_timeout(messages, generation, ProviderCatalogCommand::Selection);
+    }
+    if let Some(active) = state.active_series.as_mut()
+        && take_expired_deadline(&mut active.initial_snapshot_deadline, now)
+    {
+        publish_series_error(
+            messages,
+            active.request,
+            "Rithmic history timed out; choose the series to retry".to_string(),
+        );
+    }
+}
+
+fn publish_catalog_timeout(
+    messages: &MarketWorkerSender,
+    generation: u64,
+    command: ProviderCatalogCommand,
+) {
+    let reason = match command {
+        ProviderCatalogCommand::Search => ProviderCatalogRejectionReason::SearchTimedOut,
+        ProviderCatalogCommand::Selection => ProviderCatalogRejectionReason::SelectionTimedOut,
+    };
+    let _ = messages.send(MarketWorkerMessage::ProviderCatalog(
+        ProviderCatalogEvent::CommandRejected {
+            rejection: ProviderCatalogRejected {
+                consumer_id: 0,
+                provider: "rithmic".to_string(),
+                provider_generation: None,
+                command_generation: generation,
+                reason: reason as i32,
+            },
+            command,
+        },
+    ));
 }
 
 fn series_identity_matches(
@@ -536,6 +686,16 @@ impl EngineCatalogSession {
     fn select(&mut self, mut selection: SelectProviderInstrument) -> Result<(), String> {
         selection.consumer_id = self.consumer_id;
         self.client.select_provider_instrument(selection)
+    }
+
+    fn abandon_search(&mut self, provider: &str, generation: u64) {
+        self.client
+            .abandon_provider_search(self.consumer_id, provider, generation);
+    }
+
+    fn abandon_selection(&mut self, provider: &str, generation: u64) {
+        self.client
+            .abandon_provider_selection(self.consumer_id, provider, generation);
     }
 
     fn install_series(
@@ -716,5 +876,69 @@ mod tests {
 
         assert!(matches!(result, InitialConnection::Shutdown));
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn silent_operation_deadline_is_generation_fenced_and_one_shot() {
+        let now = Instant::now();
+        let mut pending = Some(PendingOperation::new(7, now, Duration::from_secs(1)));
+
+        assert_eq!(take_expired_operation(&mut pending, now), None);
+        assert!(!take_current_operation(&mut pending, 6));
+        assert_eq!(
+            take_expired_operation(&mut pending, now + Duration::from_secs(1)),
+            Some(7)
+        );
+        assert_eq!(
+            take_expired_operation(&mut pending, now + Duration::from_secs(2)),
+            None
+        );
+    }
+
+    #[test]
+    fn initial_series_deadline_resolves_once_without_a_market_event() {
+        let now = Instant::now();
+        let mut deadline = now.checked_add(Duration::from_secs(1));
+
+        assert!(!take_expired_deadline(&mut deadline, now));
+        assert!(take_expired_deadline(
+            &mut deadline,
+            now + Duration::from_secs(1)
+        ));
+        assert!(!take_expired_deadline(
+            &mut deadline,
+            now + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn catalog_timeouts_are_actionable_for_search_and_selection() {
+        let (messages, receiver) = market_worker_channel(nonzero(4));
+        publish_catalog_timeout(&messages, 11, ProviderCatalogCommand::Search);
+        publish_catalog_timeout(&messages, 12, ProviderCatalogCommand::Selection);
+
+        let (events, _) = receiver.drain();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                MarketWorkerMessage::ProviderCatalog(ProviderCatalogEvent::CommandRejected {
+                    rejection: ProviderCatalogRejected {
+                        command_generation: 11,
+                        reason,
+                        ..
+                    },
+                    command: ProviderCatalogCommand::Search,
+                }),
+                MarketWorkerMessage::ProviderCatalog(ProviderCatalogEvent::CommandRejected {
+                    rejection: ProviderCatalogRejected {
+                        command_generation: 12,
+                        reason: selection_reason,
+                        ..
+                    },
+                    command: ProviderCatalogCommand::Selection,
+                })
+            ] if *reason == ProviderCatalogRejectionReason::SearchTimedOut as i32
+                && *selection_reason == ProviderCatalogRejectionReason::SelectionTimedOut as i32
+        ));
     }
 }

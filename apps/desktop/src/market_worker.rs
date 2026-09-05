@@ -181,6 +181,7 @@ pub fn classify_provider_catalog_event(
 pub const fn provider_catalog_command(reason: i32) -> ProviderCatalogCommand {
     if reason == ProviderCatalogRejectionReason::SearchRejected as i32
         || reason == ProviderCatalogRejectionReason::SupersededSearch as i32
+        || reason == ProviderCatalogRejectionReason::SearchTimedOut as i32
     {
         ProviderCatalogCommand::Search
     } else {

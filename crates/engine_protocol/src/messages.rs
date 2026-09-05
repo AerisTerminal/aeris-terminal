@@ -765,6 +765,8 @@ pub enum ProviderCatalogRejectionReason {
     InstrumentUnavailable = 3,
     SubscriptionRejected = 4,
     DispatchUnavailable = 5,
+    SearchTimedOut = 6,
+    SelectionTimedOut = 7,
 }
 
 /// Generation-fenced provider catalog command rejection.

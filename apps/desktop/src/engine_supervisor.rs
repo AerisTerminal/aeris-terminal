@@ -169,6 +169,23 @@ impl EngineSupervisor {
         Ok(())
     }
 
+    pub fn abandon_provider_search(&mut self, consumer_id: u64, provider: &str, generation: u64) {
+        if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
+            abandon_matching_search(consumer, provider, generation);
+        }
+    }
+
+    pub fn abandon_provider_selection(
+        &mut self,
+        consumer_id: u64,
+        provider: &str,
+        generation: u64,
+    ) {
+        if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
+            abandon_matching_selection(consumer, provider, generation);
+        }
+    }
+
     pub fn receive_market_event(&mut self, timeout: Duration) -> Result<SupervisedEvent, String> {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(self.finish_event(event));
@@ -536,6 +553,22 @@ impl EngineSupervisor {
     }
 }
 
+fn abandon_matching_search(consumer: &mut ConsumerRestore, provider: &str, generation: u64) {
+    if consumer.pending_search.as_ref().is_some_and(|request| {
+        request.provider == provider && request.search_generation == generation
+    }) {
+        consumer.pending_search = None;
+    }
+}
+
+fn abandon_matching_selection(consumer: &mut ConsumerRestore, provider: &str, generation: u64) {
+    if consumer.pending_selection.as_ref().is_some_and(|request| {
+        request.provider == provider && request.selection_generation == generation
+    }) {
+        consumer.pending_selection = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -561,10 +594,48 @@ mod tests {
         GenericNamespaced, ListenerOptions, ToNsName as _, prelude::*,
     };
 
-    use super::EngineSupervisor;
+    use super::{
+        ConsumerRestore, EngineSupervisor, abandon_matching_search, abandon_matching_selection,
+    };
     use axiusflow_engine_protocol::ConsumerResourceClass;
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn catalog_timeout_cleanup_is_generation_fenced() {
+        let mut consumer = ConsumerRestore {
+            workspace_id: 1,
+            demand: None,
+            viewport: None,
+            resource_class: ConsumerResourceClass::Foreground,
+            pending_search: Some(SearchProviderInstruments {
+                consumer_id: 9,
+                search_generation: 4,
+                provider: "rithmic".to_string(),
+                query: "ES".to_string(),
+                maximum_results: 20,
+            }),
+            pending_selection: Some(SelectProviderInstrument {
+                consumer_id: 9,
+                selection_generation: 8,
+                search_generation: 4,
+                provider: "rithmic".to_string(),
+                symbol: "ESZ6".to_string(),
+                exchange: "CME".to_string(),
+                entitlement_id: "fixture".to_string(),
+            }),
+        };
+
+        abandon_matching_search(&mut consumer, "rithmic", 3);
+        abandon_matching_selection(&mut consumer, "rithmic", 7);
+        assert!(consumer.pending_search.is_some());
+        assert!(consumer.pending_selection.is_some());
+
+        abandon_matching_search(&mut consumer, "rithmic", 4);
+        abandon_matching_selection(&mut consumer, "rithmic", 8);
+        assert!(consumer.pending_search.is_none());
+        assert!(consumer.pending_selection.is_none());
+    }
 
     struct FixtureServer {
         command: LocalSocketStream,
