@@ -62,6 +62,37 @@ integration lives in `crates/ui/chart_integration`; host chrome, pointer behavio
 layout belong there. When updating Nucleus, change only the `nucleuscharts_*` revisions and do not
 update GPUI incidentally.
 
+## Authentication control plane (cross-repository)
+
+Authentication is one end-to-end system split across this repository and the sibling website
+repository at `C:\Users\devraj\Downloads\axiusflow-website`. Any authentication, signup, account,
+profile, subscription, entitlement, checkout, portal, email OTP, OAuth/OIDC, or browser-callback
+change must inspect and verify both repositories. Do not conclude that authentication is fixed from
+only the desktop or only the browser page.
+
+- This repository owns the native side: `apps/desktop/src/account.rs` presents account state and
+  initiates IPC; `apps/engine/src/account_service` owns PKCE, the loopback callback, token exchange
+  and verification, refresh material, native vault storage, account linking, and entitlement leases;
+  `crates/engine_protocol/src/account.rs` is the bounded sanitized IPC contract.
+- The website repository owns the Cloudflare control plane under `workers/auth`: Better Auth and its
+  OAuth/OIDC provider, browser sign-in and account pages, D1 identity/account/billing state, Google
+  and email-OTP entry points, the Axiusflow link and lease routes, checkout/portal routes, and Dodo
+  webhook reconciliation. The marketing site only links into that Worker.
+- The deployed issuer is `https://auth.axiusflow.com/api/auth`; the registered native public client
+  is `axiusflow-desktop`, using Authorization Code with S256 PKCE and an ephemeral literal
+  `127.0.0.1` callback. Keep provider tokens and cookies out of desktop UI and logs.
+- Transactional OTP mail uses Cloudflare Email Service through the Worker's `EMAIL` `send_email`
+  binding. Do not request or reintroduce a Resend key or another mail provider unless the maintainer
+  explicitly changes that decision. Verify the Cloudflare sending domain and real delivery before
+  claiming email signup works.
+- Browser success is not native success. End-to-end proof requires the callback, code exchange,
+  issuer/audience/signature/nonce checks, canonical account link, vault commit, sanitized IPC update,
+  and the correct profile in the running desktop. Also verify full engine restart restoration,
+  account switching, cancellation, timeout recovery, and sign-out during refresh.
+- Billing and entitlement changes must keep the website account view, desktop plan, subscription
+  status, and signed lease consistent. Test duplicate, delayed, interrupted, and out-of-order
+  webhooks before production.
+
 The licensed Rithmic Provider Kits are kept permanently outside Git. The maintainer's
 canonical copy currently lives at `C:\axiusflow-deps\provider-kit` (the Rithmic live gate
 restores `proto/` from there, overridable per runner via `AXIUSFLOW_RITHMIC_KIT_ROOT`). If
@@ -116,9 +147,12 @@ Compilation is not proof for streaming, persistence, IPC, lifecycle, or renderin
 and run the release desktop, exercise the real path, and verify that the running desktop and engine
 are the intended binaries. If live verification is impossible, state exactly what remains untested.
 
-## Self-hosted CI (zero-cost; GitHub-hosted runners are forbidden)
+## Self-hosted CI (manual, zero-cost; GitHub-hosted runners are forbidden)
 
-The account carries no paid Actions quota, so every lane runs on maintainer hardware. The
+The account carries no paid Actions quota, so every lane runs on maintainer hardware. CI is a final
+qualification step after local implementation and verification, not a feedback loop for partial
+work. Both workflows are manual-only (`workflow_dispatch`) and currently disabled in GitHub; enable
+only the workflow needed for one deliberate run, then disable it again after completion. The
 `*-latest` ban, the two supported-target lanes, and the job-scoped credential rule are pinned in
 `tools/naming_check`; the full saga lives in `plan/plan.md`. What a new session must know:
 
@@ -129,7 +163,9 @@ The account carries no paid Actions quota, so every lane runs on maintainer hard
   `jobs = 4` in the runner user's `~/.cargo/config.toml`), labels `axiusflow,linux`, running as
   a systemd service that auto-starts with the VM. Key-only SSH with `~/.ssh/axiusflow_linux`;
   the IP is DHCP-assigned, so resolve it per session (ARP scan for the `00-15-5d` NIC).
-  Hyper-V automatic checkpoints stay off; start the VM after host reboot.
+  Hyper-V automatic checkpoints stay off. The VM consumes 16 GB of the maintainer's workstation:
+  keep it shut down during development, start it only for an intentional Linux qualification run,
+  and shut it down gracefully immediately afterward.
 - macOS native qualification is explicitly deferred because no Apple hardware exists. Keep
   macOS-specific code guarded, warning-clean where cross-target tooling permits, and free of known
   source defects, but do not add an unserviceable required CI lane or claim native support until an
@@ -138,8 +174,15 @@ The account carries no paid Actions quota, so every lane runs on maintainer hard
   repo path; the maintainer issues them from Settings, Actions, Runners.
 - Validate workflow YAML with a real parser before push: a run with zero jobs is a parse
   failure. Never `git config --global` in a workflow; scope credentials per job.
-- Do not push while lanes run: same-ref concurrency cancels them. Batch commits instead —
-  every push costs roughly 40 minutes of full-machine load on both runners.
+- Never change CI or live gates back to automatic `push`, `pull_request`, or `schedule` triggers
+  without the maintainer's explicit request. Do not start runners, enable workflows, or dispatch a
+  run while implementation is still changing.
+- Finish focused checks, the local workspace gates, release-binary verification, and the real
+  behavior path first. Then batch the completed commits, push once, start only the required runners,
+  enable and dispatch one CI run, wait for it to finish, and shut the runners down. Run live-market
+  gates separately only when their deterministic prerequisites pass and live evidence is required.
+- Do not push while lanes run: same-ref concurrency cancels them. Avoid repeated pushes; a complete
+  two-runner qualification costs roughly 40 minutes of full-machine load.
 - Rithmic Test allows one concurrent session: drive the engine path or the smoke binary,
   never both at once. The test feed publishes no prints, so tick bars cannot form there;
   do not chase that absence as an adapter defect.
@@ -167,7 +210,8 @@ document that can drift.
 
 - Never use destructive Git commands, force-push, or broad path deletion.
 - Commit one completed batch using the existing `type(scope): outcome` style.
-- Push `main` to `origin` without force.
+- Push a locally verified completed batch to `main` once, without force; do not use pushes as CI
+  probes or push after every intermediate commit.
 - Report the outcome, verification performed, running binary state when relevant, and any remaining
   maintainer validation.
 

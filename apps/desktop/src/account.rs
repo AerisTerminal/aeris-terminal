@@ -383,7 +383,7 @@ impl DesktopAccount {
         self.shared.view.lock().is_ok_and(|view| {
             matches!(
                 AccountSessionState::try_from(view.state),
-                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+                Ok(AccountSessionState::Active)
             )
         })
     }
@@ -1542,6 +1542,21 @@ mod tests {
             session.presentation().action == "Account"
         });
         assert_eq!(session.presentation().display_name, "Ada Trader");
+    }
+
+    #[test]
+    fn cached_offline_lease_does_not_open_the_platform() {
+        let (session, engine) = scripted_session(29);
+        let mut offline = view(AccountSessionState::OfflineLease);
+        offline.account_id = "acct_01".to_string();
+        offline.plan_id = "pro".to_string();
+        engine.lock().expect("engine locks").view = offline;
+        rewind_status(&session);
+        wait_for(&session, "offline lease", || {
+            session.presentation().state == account_state_label(AccountSessionState::OfflineLease)
+        });
+
+        assert!(!session.authenticated());
     }
 
     #[test]

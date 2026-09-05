@@ -113,12 +113,8 @@ impl PendingCallback {
     /// never claims an unfinished sign-in succeeded.
     pub fn respond_outcome(mut self, result: Result<(), &str>) {
         match result {
-            Ok(()) => respond(&mut self.stream, 200, "Signed in. Return to Axiusflow."),
-            Err(detail) => respond(
-                &mut self.stream,
-                500,
-                &format!("Sign-in failed: {detail} Return to Axiusflow to try again."),
-            ),
+            Ok(()) => respond(&mut self.stream, 200, &outcome_page(true, "")),
+            Err(detail) => respond(&mut self.stream, 500, &outcome_page(false, detail)),
         }
     }
 
@@ -126,7 +122,7 @@ impl PendingCallback {
     /// the connection.
     pub fn respond_invalid(self, detail: &str) {
         let mut this = self;
-        respond(&mut this.stream, 400, detail);
+        respond(&mut this.stream, 400, &outcome_page(false, detail));
     }
 }
 
@@ -170,11 +166,49 @@ fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) {
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+fn outcome_page(success: bool, detail: &str) -> String {
+    let (title, heading, copy, mark) = if success {
+        (
+            "Sign-in confirmed — Axiusflow",
+            "You’re signed in",
+            "Authentication is complete. Return to Axiusflow to continue.",
+            r#"<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.8 12.4 3.2 3.2 7.2-7.2"/></svg>"#.to_string(),
+        )
+    } else {
+        (
+            "Sign-in failed — Axiusflow",
+            "Sign-in wasn’t completed",
+            "Return to Axiusflow and try again.",
+            "!".to_string(),
+        )
+    };
+    let detail = if success {
+        String::new()
+    } else {
+        format!("<p class=\"detail\">{}</p>", escape_html(detail))
+    };
+    let state = if success { "success" } else { "failure" };
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>{title}</title><style>
+*{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}}body{{min-height:100vh;display:grid;place-items:center;background:#090b0f;color:#f4f5f7;padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{margin-bottom:40px;font-size:12px;font-weight:700;letter-spacing:.22em;color:#9299a6}}.mark{{width:72px;height:72px;margin:0 auto 24px;display:grid;place-items:center;border-radius:50%;font-size:30px;font-weight:600;animation:arrive .42s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{background:#163a2b;color:#70e0a7;box-shadow:0 0 0 1px #285940}}.failure .mark{{background:#3a1b1d;color:#ff9a9f;box-shadow:0 0 0 1px #633034}}svg{{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .45s .24s ease-out forwards}}h1{{margin:0 0 10px;font-size:26px;letter-spacing:-.03em}}p{{margin:0;color:#9ea5b1;font-size:14px;line-height:1.6}}.detail{{margin:16px auto 0;max-width:360px;color:#ff9a9f;font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.7)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,svg path{{animation:none}}svg path{{stroke-dashoffset:0}}}}
+</style></head><body><main class="{state}"><div class="brand">AXIUSFLOW</div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn callback_query_from_request(request: &str) -> Option<String> {
@@ -256,7 +290,9 @@ pub fn validate_callback_query(
 
 #[cfg(test)]
 mod tests {
-    use super::{LoopbackListener, callback_query_from_request, validate_callback_query};
+    use super::{
+        LoopbackListener, callback_query_from_request, outcome_page, validate_callback_query,
+    };
     use std::{
         io::{Read, Write},
         net::TcpStream,
@@ -331,9 +367,10 @@ mod tests {
         let response = sender.join().expect("sender joins");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(
-            response.contains("Signed in. Return to Axiusflow."),
+            response.contains("You’re signed in") && response.contains("@keyframes draw"),
             "success page must reflect completion: {response}"
         );
+        assert!(response.contains("Content-Type: text/html; charset=utf-8"));
     }
 
     #[test]
@@ -354,8 +391,8 @@ mod tests {
         // A received callback alone must never produce "fully
         // authenticated": failures carry the redacted engine detail.
         assert!(response.starts_with("HTTP/1.1 500"));
-        assert!(response.contains("Sign-in failed: account linking failed; retry sign-in"));
-        assert!(!response.contains("Signed in"));
+        assert!(response.contains("account linking failed; retry sign-in"));
+        assert!(!response.contains("You’re signed in"));
     }
 
     #[test]
@@ -375,5 +412,12 @@ mod tests {
         callback.respond_invalid("authorization state mismatch; retry sign-in");
         let response = sender.join().expect("sender joins");
         assert!(response.starts_with("HTTP/1.1 400"));
+    }
+
+    #[test]
+    fn failure_page_escapes_detail() {
+        let page = outcome_page(false, "failed <script>alert('x')</script>");
+        assert!(page.contains("&lt;script&gt;"));
+        assert!(!page.contains("<script>"));
     }
 }

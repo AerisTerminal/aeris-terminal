@@ -1,11 +1,9 @@
 name: Live market gates
 
 # The deterministic suite in `ci.yml` proves the rules hold against fixtures.
-# Only these jobs prove they hold against a venue, so they run every night and
-# publish the result each conformance report reads back.
+# Only these jobs prove they hold against a venue. Dispatch them after local
+# verification, when the maintainer's hardware is available.
 on:
-  schedule:
-    - cron: "0 5 * * *"
   workflow_dispatch:
 
 permissions:

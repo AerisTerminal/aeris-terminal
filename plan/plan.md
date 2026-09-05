@@ -1,25 +1,62 @@
 # Axiusflow Architecture and Authentication Migration Plan
 
-Status: phases 1 through 4 are implemented, qualified, and maintainer-approved.
-Deterministic gates and installed lifecycle pass on Windows and Linux. Repeated
-maintainer-observed native campaigns qualify the physical transition,
-window/input/DPI, and pacing behavior; failed provenance-recorder attempts are
-retained as diagnostic history and do not negate those product runs. Rithmic
-credential/session paths pass every stage populated by the available Test
-plant; its lack of prints and historical data is an external environment limit,
-not an unexercised Axiusflow path. The eight-hour endurance campaign remains the
-final production qualification after phase 5, and native macOS qualification
-remains explicitly deferred. Phase 5 may begin.
+Status: phases 1 through 3 are structurally implemented. Phase 4's local
+lifecycle primitives are implemented and covered by focused tests, but the
+production installer and end-to-end update pipeline are deliberately deferred.
+Phase 5 authentication, billing, and entitlement work is in progress and has
+not passed its exit gate. Current market-history, order-book, authentication,
+account-session, and other maintainer-observed product failures remain release
+blockers. The product is not approved for production delivery.
+
+The maintainer has placed an explicit release hold on the installer and update
+pipeline. Do not publish, enable, or claim a production installer, automatic
+update path, signed release-discovery endpoint, or rollout until the complete
+login journey and the wider desktop, engine, website, Worker, market-data,
+history, persistence, and account behavior have been exercised successfully in
+release binaries with no known blocking defect. Local implementation and tests
+may continue without publishing or activating the pipeline. Native macOS
+qualification remains explicitly deferred.
 
 Baseline: `main` at `d04ce9a` when this plan was consolidated
 
-Scope: one ordered migration with five phases; authentication is the final phase
+Scope: one migration with five workstreams; production delivery is the final
+release gate after authentication and platform validation
 
 ## Decision
 
-Complete the resident-engine and provider-coordination cleanup before adding accounts or authentication. After the primary architecture is stable and verified, add an Axiusflow-operated Better Auth control plane on Cloudflare Workers and D1. The native applications depend only on standard OpenID Connect, while Axiusflow owns identity data, account identifiers, billing state, entitlements, and the migration path.
+Complete the resident-engine and provider-coordination cleanup, then add an Axiusflow-operated Better Auth control plane on Cloudflare Workers and D1. The native applications depend only on standard OpenID Connect, while Axiusflow owns identity data, account identifiers, billing state, entitlements, and the migration path. Keep release lifecycle mechanics independent from account authentication, but withhold their production packaging and activation until authentication and the complete platform have passed the maintainer's release validation.
 
-Phase 5 must not begin until the phase 4 exit gate passes. Earlier phases must not add dormant authentication types, temporary account state, login UI, cloud identity networking, or feature checks.
+Phase 5 may proceed against the implemented lifecycle boundary. The production
+portion of the phase 4 exit gate is intentionally evaluated after phase 5 so
+that the installer and update system ship only with a verified authentication
+journey and a stable product. Earlier historical prohibitions on authentication
+were migration sequencing rules; they no longer describe the current state.
+
+## Current completion audit - 2026-09-05
+
+- Phase 1 is complete as a historical behavior and migration-boundary baseline.
+- Phase 2 is structurally complete. Its product acceptance remains subject to
+  resolving and re-verifying provider session, symbol-switch, and order-book
+  behavior in release binaries.
+- Phase 3 is structurally complete. Its product acceptance remains subject to
+  resolving and re-verifying viewport backfill, deep history, history/live
+  continuity, persistence, and the other market-data paths in its exit gate.
+- Phase 4 is partial. Signed-manifest validation, transactional local install,
+  recovery, rollback, release identity, launcher, and uninstall primitives
+  exist and have focused test coverage. Production packaging and publication
+  are not complete: CI currently emits a desktop/engine pair rather than a
+  production installer; the public download is a fixed manual ZIP; and the
+  product has no deployed signed-manifest discovery plus automatic
+  check/download/install path. Phase 4 remains open until the release hold is
+  lifted and the complete failure campaign passes through installed binaries.
+- Phase 5 is in progress. Source implementation or green unit/workspace tests
+  do not complete its exit gate. Real browser-to-desktop login, verified
+  profile, refresh and restart restoration, account switching, sign-out,
+  billing lifecycle, entitlement behavior, key rotation, backup/restore, and
+  supported-target release validation must still be proven as applicable.
+- No historical execution-record entry overrides this current audit. A batch
+  record describes evidence obtained at that time; it does not waive a current
+  exit gate or a later maintainer-observed regression.
 
 ## Product outcome
 
@@ -1740,7 +1777,34 @@ Turn `market_service` into a small composition and command boundary while retain
 
 ### Goal
 
-Finish and prove the primary architecture migration before any authentication work begins.
+Stabilize the primary architecture and implement the local signed-lifecycle
+boundary. Package, publish, and activate the installer and end-to-end update
+pipeline only after phase 5 and the wider platform pass the release hold below.
+
+### Production release hold
+
+- The lifecycle library and stable-launcher code may be developed, reviewed,
+  and tested locally while the hold is active.
+- Do not publish an installer or updater, expose a production release-manifest
+  discovery endpoint, enable automatic update checks, sign a production
+  rollout, or direct normal downloads through the transactional installer.
+- The current fixed early-access ZIP is a manual development distribution. It
+  is not evidence of a completed installer or update pipeline.
+- Lift the hold only after the maintainer verifies the complete desktop login
+  journey: account choice, Google and Cloudflare email OTP, truthful callback,
+  verified profile display, token refresh, restart restoration, cancellation,
+  timeout and retry, account switching, sign-out, and vault cleanup.
+- The same release candidate must also pass symbol and timeframe switching,
+  order-book recovery, viewport backfill and deep-history loading, live/history
+  handoff, persistence and restart, multi-window behavior, resource-pressure
+  recovery, engine shutdown, and the supported provider paths.
+- Batch commits and run the self-hosted lanes only after local verification.
+  Do not continuously push speculative fixes or keep the runners and Linux VM
+  active while interactive debugging is still in progress.
+- Once those prerequisites pass, complete and verify the immutable package,
+  offline signing, release metadata publication, update discovery/download,
+  launcher activation, rollback, reconciliation, cleanup, and uninstall flow
+  as one production-delivery batch.
 
 ### Work
 
@@ -1794,7 +1858,7 @@ Finish and prove the primary architecture migration before any authentication wo
   - `cargo test --workspace --all-features`
 - Build and run the release desktop and resident engine and verify that they are the intended binaries.
 
-### Exit gate - hard prerequisite for phase 5
+### Exit gate - hard prerequisite for production installer and update rollout
 
 - All workspace gates pass without suppressing warnings.
 - Coinbase and available Rithmic release paths pass live verification.
@@ -1804,7 +1868,10 @@ Finish and prove the primary architecture migration before any authentication wo
 - Interrupted download, invalid signature, corrupt file, disk-full, crash at every transaction boundary, locked executable, stale socket owner, mismatched desktop/engine release, failed health check, rollback, and reboot-required update cases fail safely.
 - A successful update leaves exactly one active release, one matching desktop/engine generation, no superseded binary or staging artifact, and an autostart entry resolving through the stable launcher to that release.
 - Fresh-install, multi-version-upgrade, interrupted-update, interrupted-uninstall, and repeated-uninstall tests leave no Axiusflow-owned local data, market history, credentials, processes, service entries, or update artifacts after uninstall reports success.
-- The maintainer explicitly approves starting the account platform.
+- Phase 5's release-binary login, account, billing, entitlement, restart, and
+  sign-out validation passes.
+- The maintainer explicitly approves lifting the release hold and publishing
+  the installer and update pipeline.
 
 ## Phase 5 - Add Better Auth, accounts, billing, and entitlements
 
@@ -1957,7 +2024,15 @@ Better Auth is selected for control and portability, not because authentication 
 
 ## Final approval statement
 
-Phases 1-4 are approved as the completed primary architecture migration. Authentication work begins in phase 5 using Axiusflow-operated Better Auth, provider-neutral OIDC on the native side, replaceable billing adapters, signed offline entitlements, and gradual enforcement.
+Phases 1-3 and the local phase-4 lifecycle boundary are approved as implemented
+architecture work. This is not approval of the production installer or
+end-to-end update pipeline. Phase 5 continues with Axiusflow-operated Better
+Auth, provider-neutral OIDC on the native side, replaceable billing adapters,
+signed offline entitlements, and gradual enforcement. Production delivery stays
+on hold until the maintainer verifies a smooth, defect-free login journey and
+the wider platform acceptance paths, after which the remaining phase-4
+packaging, publication, update, rollback, and uninstall campaign must pass and
+receive explicit maintainer approval.
 
 ## Phase 5 execution record
 

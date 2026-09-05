@@ -166,14 +166,11 @@ pub fn authorization_url(request: &AuthorizationRequest<'_>) -> Result<String, S
     {
         return Err("account control plane issuer is invalid".to_string());
     }
-    // `offline_access` keeps the refresh-token persistence path fed: the
-    // engine stores the returned refresh grant in the vault and rotates the
-    // session without another browser round-trip. `prompt=select_account`
-    // forces the provider's account-choice page on every sign-in, even when
-    // the browser already holds a session: silent auto-approval would strand
-    // the trader on the wrong account with no way to switch.
+    // Every desktop sign-in requires an explicit browser confirmation even
+    // when the website already has a session. Without a website session the
+    // provider first redirects through the configured login page.
     Ok(format!(
-        "{endpoint}?response_type=code&client_id={client}&redirect_uri={redirect}&scope=openid%20offline_access&prompt=select_account&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
+        "{endpoint}?response_type=code&client_id={client}&redirect_uri={redirect}&scope=openid%20offline_access&prompt=consent&state={state}&nonce={nonce}&code_challenge={challenge}&code_challenge_method=S256",
         endpoint = request.endpoints.authorization_endpoint,
         client = url_encode(request.client_id),
         redirect = url_encode(request.redirect_uri),
@@ -657,7 +654,7 @@ mod tests {
         let url = authorization_url(&request).expect("URL builds");
         assert!(url.starts_with("https://auth.axiusflow.com/api/auth/oauth2/authorize?"));
         assert!(url.contains("scope=openid%20offline_access"));
-        assert!(url.contains("prompt=select_account"));
+        assert!(url.contains("prompt=consent"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback"));
         let mut plain = endpoints.clone();

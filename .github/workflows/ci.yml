@@ -6,15 +6,15 @@ name: CI
 # `axiusflow` label plus its OS label; a lane with no registered runner
 # queues until its timeout and fails closed — never silently green.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # Dispatch one completed, locally verified batch; routine pushes must not
+  # start heavy builds on the maintainer's workstation.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# One maintainer machine serves the lanes, so a newer push on the same ref
-# cancels the older queued run instead of piling up behind it.
+# One maintainer machine serves the lanes. Keep manual runs for the same
+# ref from overlapping.
 concurrency:
   group: axiusflow-ci-${{ github.ref }}
   cancel-in-progress: true
