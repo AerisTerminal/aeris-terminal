@@ -5808,6 +5808,81 @@ fn connected_coinbase_handoff_coordinator<'a>(
     (coordinator, consumer_id, series)
 }
 
+#[test]
+fn coinbase_live_edge_retry_exhaustion_stays_partial_and_rearms_next_close() {
+    let (history_tx, history_rx) = mpsc::sync_channel(4);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (mut coordinator, consumer_id, series) =
+        connected_coinbase_handoff_coordinator(&history_tx, &storage_tx, &realtime_tx, &stop);
+    let generation = coordinator.coinbase_provider_generation();
+    coordinator.live.get_mut(&series).expect("handoff").history =
+        CoinbaseHistoryReadiness::Authoritative;
+    let completed = history_bar();
+    let current = MarketBar {
+        source_sequence: completed.source_sequence + 1,
+        exchange_timestamp_seconds: 120,
+        exchange_timestamp_unix_nanos: 120_000_000_000,
+        ..completed
+    };
+
+    coordinator.schedule_coinbase_live_edge_repair(&series, generation, &completed, &current);
+    assert_eq!(
+        coordinator.live[&series].history,
+        CoinbaseHistoryReadiness::Provisional
+    );
+    assert!(matches!(
+        coordinator.events[&consumer_id].series_state,
+        Some(envelope::Payload::SeriesState(ref state))
+            if state.state == SeriesLoadState::Partial as i32
+    ));
+
+    for attempt in 0..=MAXIMUM_LIVE_EDGE_REPAIR_RETRIES {
+        let request = history_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bounded repair attempt");
+        assert_eq!(request.kind, HistoryRequestKind::LiveEdgeRepair(attempt));
+        coordinator.history_completed(
+            &series,
+            generation,
+            request.range,
+            request.kind,
+            Err("fixture repair unavailable".to_string()),
+        );
+        if attempt < MAXIMUM_LIVE_EDGE_REPAIR_RETRIES {
+            coordinator
+                .pending_live_edge_repairs
+                .get_mut(&(series.clone(), generation))
+                .expect("retry remains pending")
+                .ready_at = Instant::now();
+            coordinator.flush_coinbase_live_edge_repair(&series, generation);
+        }
+    }
+
+    assert!(coordinator.pending_live_edge_repairs.is_empty());
+    assert!(matches!(
+        coordinator.events[&consumer_id].demand_error,
+        Some(envelope::Payload::DemandError(ref error))
+            if error.stage_code == FailureStage::ProviderHistory as i32
+                && error.detail.contains("bounded retries")
+    ));
+    let next = MarketBar {
+        source_sequence: current.source_sequence + 1,
+        exchange_timestamp_seconds: 180,
+        exchange_timestamp_unix_nanos: 180_000_000_000,
+        ..current
+    };
+    coordinator.schedule_coinbase_live_edge_repair(&series, generation, &current, &next);
+    assert!(matches!(
+        history_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(HistoryRequest {
+            kind: HistoryRequestKind::LiveEdgeRepair(0),
+            ..
+        })
+    ));
+}
+
 /// A not-yet-delivered append remains an append after same-candle coalescing.
 #[test]
 fn queued_append_keeps_its_operation_when_the_same_candle_is_revised() {

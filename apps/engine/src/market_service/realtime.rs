@@ -1214,6 +1214,18 @@ impl Coordinator<'_> {
         let Ok(range) = coinbase_live_edge_repair_range(series, completed, current) else {
             return;
         };
+        if let Some(live) = self.live.get_mut(series)
+            && live.generation == generation
+            && live.history.is_ready()
+        {
+            live.history = CoinbaseHistoryReadiness::Provisional;
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Partial,
+                PersistenceState::Durable,
+                Some("The closed Coinbase candle is awaiting authoritative verification"),
+            );
+        }
         self.pending_live_edge_repairs
             .entry(key)
             .and_modify(|pending| {
@@ -1240,12 +1252,15 @@ impl Coordinator<'_> {
         attempt: u8,
     ) {
         let Some(range) = range else {
+            self.coinbase_live_edge_repair_exhausted(series);
             return;
         };
         let Some(next_attempt) = attempt.checked_add(1) else {
+            self.coinbase_live_edge_repair_exhausted(series);
             return;
         };
         if next_attempt > MAXIMUM_LIVE_EDGE_REPAIR_RETRIES {
+            self.coinbase_live_edge_repair_exhausted(series);
             return;
         }
         let delay =
@@ -1266,6 +1281,17 @@ impl Coordinator<'_> {
                 pending.ready_at = pending.ready_at.min(retry.ready_at);
             })
             .or_insert(retry);
+    }
+
+    fn coinbase_live_edge_repair_exhausted(&mut self, series: &BarSeriesKey) {
+        const DETAIL: &str = "Coinbase could not verify the closed candle after bounded retries; retrying at the next candle close";
+        self.broadcast_series_resolution_for(
+            series,
+            SeriesLoadState::Partial,
+            PersistenceState::Durable,
+            Some(DETAIL),
+        );
+        self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, DETAIL, None);
     }
 
     pub(super) fn flush_coinbase_live_edge_repair(
