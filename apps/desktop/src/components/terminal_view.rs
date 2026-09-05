@@ -91,7 +91,7 @@ impl Render for TerminalApp {
         if !axiusflow_desktop::account::DesktopAccount::shared()
             .is_some_and(|account| account.authenticated())
         {
-            return onboarding::onboarding_surface(&self.theme, None);
+            return onboarding::onboarding_surface(window, &self.theme, None);
         }
         if self.workspace_drag.is_some() && !cx.has_active_drag() {
             self.workspace_drag = None;

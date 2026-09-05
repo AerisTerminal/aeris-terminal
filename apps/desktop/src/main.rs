@@ -6216,8 +6216,7 @@ fn run_onboarding() {
                 }
             })
             .detach();
-            let mut options = desktop_window_options(0, cx);
-            options.app_owns_titlebar_drag = false;
+            let options = desktop_window_options(0, cx);
             cx.open_window(options, |_, cx| {
                 cx.new(|_| onboarding::OnboardingApp::new())
             })

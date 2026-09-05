@@ -3,7 +3,7 @@ use std::time::Duration;
 use axiusflow_design_system::AxiusflowTheme;
 use gpui::{App, Context, FontWeight, Render, Window, div, prelude::*, px};
 
-use crate::terminal_chrome::{brand_mark_sized, gpui_color};
+use crate::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
 
 pub(super) struct OnboardingApp {
     theme: AxiusflowTheme,
@@ -97,7 +97,7 @@ fn onboarding_button(
     div()
         .id(id)
         .w_full()
-        .h(px(48.0))
+        .h(px(40.0))
         .flex()
         .items_center()
         .justify_center()
@@ -110,7 +110,7 @@ fn onboarding_button(
         }))
         .bg(gpui_color(fill))
         .text_color(gpui_color(foreground))
-        .text_base()
+        .text_sm()
         .font_weight(FontWeight::MEDIUM)
         .when(!pending, |button| {
             button
@@ -125,11 +125,12 @@ fn onboarding_button(
 impl Render for OnboardingApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_account_poll(window, cx);
-        onboarding_surface(&self.theme, self.launch_error.as_ref())
+        onboarding_surface(window, &self.theme, self.launch_error.as_ref())
     }
 }
 
 pub(super) fn onboarding_surface(
+    window: &Window,
     theme: &AxiusflowTheme,
     launch_error: Option<&String>,
 ) -> gpui::Div {
@@ -148,15 +149,17 @@ pub(super) fn onboarding_surface(
         .or_else(|| pending.then(|| "Complete sign-in in your browser.".to_string()));
 
     div()
+            .relative()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
             .bg(gpui_color(colors.surface))
             .text_color(gpui_color(colors.text_primary))
+            .child(onboarding_title_bar(window, theme))
             .child(
                 div()
-                    .w(px(408.0))
+                    .w(px(384.0))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -184,11 +187,11 @@ pub(super) fn onboarding_surface(
                     )
                     .child(
                         div()
-                            .mt_12()
+                            .mt(px(56.0))
                             .w_full()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap(px(10.0))
                             .child(onboarding_button(
                                 "onboarding_sign_in",
                                 if pending { "Waiting for browser…" } else { "Sign In" },

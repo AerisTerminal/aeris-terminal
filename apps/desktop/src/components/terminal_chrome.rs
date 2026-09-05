@@ -75,15 +75,19 @@ impl CaptionCommand {
         }
     }
 
-    fn execute(self, terminal: &Entity<TerminalApp>, window: &mut Window, cx: &mut App) {
+    fn execute(self, terminal: Option<&Entity<TerminalApp>>, window: &mut Window, cx: &mut App) {
         match self {
             Self::Minimize => window.minimize_window(),
             Self::MaximizeOrRestore => window.zoom_window(),
-            Self::Close => {
+            Self::Close if terminal.is_some() => {
+                let Some(terminal) = terminal else {
+                    return;
+                };
                 terminal.update(cx, |terminal, terminal_cx| {
                     terminal.close_window(&CloseWindow, window, terminal_cx);
                 });
             }
+            Self::Close => cx.quit(),
         }
     }
 }
@@ -281,7 +285,7 @@ struct CaptionControlSpec {
 }
 
 fn workspace_caption_control(
-    terminal: &Entity<TerminalApp>,
+    terminal: Option<&Entity<TerminalApp>>,
     spec: CaptionControlSpec,
     pointer_owner: CaptionPointerOwner,
     theme: &AxiusflowTheme,
@@ -320,8 +324,8 @@ fn workspace_caption_control(
             .occlude()
             .window_control_area(command.window_control_area()),
         CaptionPointerOwner::Application => {
-            let pointer_terminal = terminal.clone();
-            let key_terminal = terminal.clone();
+            let pointer_terminal = terminal.cloned();
+            let key_terminal = terminal.cloned();
             control
                 .role(Role::Button)
                 .aria_label(label)
@@ -331,7 +335,7 @@ fn workspace_caption_control(
                 })
                 .on_key_down(move |event, window, cx| {
                     if caption_keyboard_activates(event.keystroke.key.as_str()) {
-                        command.execute(&key_terminal, window, cx);
+                        command.execute(key_terminal.as_ref(), window, cx);
                         cx.stop_propagation();
                     }
                 })
@@ -340,7 +344,7 @@ fn workspace_caption_control(
                     cx.stop_propagation();
                 })
                 .on_click(move |_, window, cx| {
-                    command.execute(&pointer_terminal, window, cx);
+                    command.execute(pointer_terminal.as_ref(), window, cx);
                     cx.stop_propagation();
                 })
         }
@@ -359,7 +363,7 @@ pub(super) fn workspace_window_controls(
     }
     let supported = window.window_controls();
     let minimize = workspace_caption_control(
-        terminal,
+        Some(terminal),
         CaptionControlSpec {
             id: "workspace_window_minimize",
             icon: HugeIcon::WindowMinimize,
@@ -372,7 +376,7 @@ pub(super) fn workspace_window_controls(
         theme,
     );
     let maximize = workspace_caption_control(
-        terminal,
+        Some(terminal),
         CaptionControlSpec {
             id: "workspace_window_maximize",
             icon: if window.is_maximized() {
@@ -393,7 +397,7 @@ pub(super) fn workspace_window_controls(
         theme,
     );
     let close = workspace_caption_control(
-        terminal,
+        Some(terminal),
         CaptionControlSpec {
             id: "workspace_window_close",
             icon: HugeIcon::WindowClose,
@@ -414,6 +418,99 @@ pub(super) fn workspace_window_controls(
         .children(supported.minimize.then_some(minimize))
         .children(supported.maximize.then_some(maximize))
         .child(close)
+}
+
+pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> Div {
+    let pointer_owner = caption_pointer_owner(current_caption_platform());
+    let drag_region = div().id("onboarding_window_drag_region").h_full().flex_1();
+    let drag_region = if current_caption_platform() == CaptionPlatform::Windows {
+        drag_region.window_control_area(WindowControlArea::Drag)
+    } else {
+        drag_region
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.start_window_move();
+                cx.stop_propagation();
+            })
+            .on_click(|event, window, _| {
+                if event.click_count() > 1 {
+                    window.titlebar_double_click();
+                }
+            })
+    };
+    let controls = if pointer_owner == CaptionPointerOwner::System {
+        div().h_full()
+    } else {
+        let supported = window.window_controls();
+        let minimize = workspace_caption_control(
+            None,
+            CaptionControlSpec {
+                id: "onboarding_window_minimize",
+                icon: HugeIcon::WindowMinimize,
+                label: "Minimize window",
+                command: CaptionCommand::Minimize,
+                tab_index: 0,
+                close: false,
+            },
+            pointer_owner,
+            theme,
+        );
+        let maximize = workspace_caption_control(
+            None,
+            CaptionControlSpec {
+                id: "onboarding_window_maximize",
+                icon: if window.is_maximized() {
+                    HugeIcon::WindowRestore
+                } else {
+                    HugeIcon::WindowMaximize
+                },
+                label: if window.is_maximized() {
+                    "Restore window"
+                } else {
+                    "Maximize window"
+                },
+                command: CaptionCommand::MaximizeOrRestore,
+                tab_index: 1,
+                close: false,
+            },
+            pointer_owner,
+            theme,
+        );
+        let close = workspace_caption_control(
+            None,
+            CaptionControlSpec {
+                id: "onboarding_window_close",
+                icon: HugeIcon::WindowClose,
+                label: "Close window",
+                command: CaptionCommand::Close,
+                tab_index: 2,
+                close: true,
+            },
+            pointer_owner,
+            theme,
+        );
+        div()
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .tab_group()
+            .children(supported.minimize.then_some(minimize))
+            .children(supported.maximize.then_some(maximize))
+            .child(close)
+    };
+
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h(px(WORKSPACE_TITLE_BAR_HEIGHT))
+        .flex()
+        .items_center()
+        .bg(gpui_color(theme.colors.surface))
+        .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
+        .child(drag_region)
+        .child(controls)
 }
 
 pub(super) fn header_controls(
