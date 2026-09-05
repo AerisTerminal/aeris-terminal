@@ -2144,3 +2144,24 @@ Batch 6 — remote backend live (2026-09-05, unpushed):
 - Still maintainer-side: Google OAuth client, sender domain, DNS/TLS for
   the issuer origin (full login unblocks then), plus rotating the two
   chat-transited test values at convenience. No git push until approved.
+
+Batch 7 — waitlist removal plus end-to-end downloads (2026-09-05, website
+pushed and live; gpui unpushed):
+
+- Bare `/sign-in` (no OAuth context) rendered broken buttons that ended on
+  an `invalid_request` error page. The page now detects the missing context
+  and guides to the desktop app download instead. Deployed and verified live.
+- Website waitlist fully removed from user-facing content: page, dialog,
+  form, API endpoint, header/hero/pricing/footer/sitemap/SEO/FAQ/comparison
+  references. Header has Download plus Sign in; new `/download` page with
+  setup steps, hash verification, and honest early-access notes. Leads stay
+  in D1 with the export script intact. Site typechecks and builds green
+  (19 pages); one pre-existing `d840b18` Pages build failed remotely and was
+  superseded by green runs — no action.
+- Downloads end to end: release desktop+engine zip (11.9 MB) uploaded to
+  the private R2 bucket, served through the worker's allowlisted
+  `/files/` route (traversal 404s), downloaded bytes hash-identical to the
+  published SHA-256. No R2 dashboard step was needed after all.
+- `axiusflow.com/download` live with the build; `/waitlist` 404s fresh
+  (one stale edge-cached 200 observed mid-deploy, aged out). gpui tree
+  untouched by this batch; its 7 local commits still await approved push.
