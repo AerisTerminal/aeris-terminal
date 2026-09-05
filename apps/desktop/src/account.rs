@@ -482,6 +482,25 @@ impl DesktopAccount {
         }
     }
 
+    /// Returns the current verified internal plan identity. Signed-out and
+    /// unavailable sessions receive the Starter limits.
+    #[must_use]
+    pub fn plan_id(&self) -> String {
+        self.shared.view.lock().map_or_else(
+            |_| "starter".to_string(),
+            |view| {
+                match AccountSessionState::try_from(view.state) {
+                    Ok(AccountSessionState::Active | AccountSessionState::OfflineLease) => {}
+                    _ => return "starter".to_string(),
+                }
+                match view.plan_id.as_str() {
+                    "pro" | "elite" | "enterprise" => view.plan_id.clone(),
+                    _ => "starter".to_string(),
+                }
+            },
+        )
+    }
+
     /// Returns the latest redacted account error, if any.
     #[must_use]
     pub fn error(&self) -> Option<String> {

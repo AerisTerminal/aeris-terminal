@@ -39,6 +39,7 @@ pub const DEFAULT_AUTH_ISSUER: &str = "https://auth.axiusflow.com/api/auth";
 const ACCOUNT_VAULT_SERVICE: &str = "com.axiusflow.account";
 const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
+const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
 const DEVICE_VAULT_KEY: &str = "account-device-key-v1";
 
 /// Control-plane configuration for one account service.
@@ -99,6 +100,7 @@ struct ServiceState {
     view: AccountView,
     pending: Option<PendingLogin>,
     last_generation: u64,
+    restore_allowed: bool,
 }
 
 type LeaseKey = (String, [u8; 32]);
@@ -122,10 +124,152 @@ impl AccountService {
                 view: cleared_view(AccountSessionState::SignedOut, 0, "signed out"),
                 pending: None,
                 last_generation: 0,
+                restore_allowed: true,
             })),
             endpoints: Arc::new(Mutex::new(None)),
             lease_keys: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Creates the production account service and restores vault-backed
+    /// session material on a bounded background worker.
+    #[must_use]
+    pub fn new_restoring(config: AccountServiceConfig) -> Self {
+        let service = Self::new(config);
+        let restoring = service.clone();
+        std::thread::Builder::new()
+            .name("axiusflow-account-restore".to_string())
+            .spawn(move || restoring.restore_session())
+            .ok();
+        service
+    }
+
+    fn restore_session(&self) {
+        let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+            return;
+        };
+        let Some(refresh_token) = vault
+            .load(REFRESH_VAULT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|token| !token.is_empty())
+        else {
+            return;
+        };
+        restore_lease_keys(self, &vault);
+        let outcome = self.oidc_endpoints().and_then(|endpoints| {
+            refresh_grant(&endpoints, &self.config.client_id, &refresh_token).and_then(|tokens| {
+                link_subject(&endpoints, &tokens.id_token, &tokens.subject)
+                    .map(|(account, plan, profile)| (account, plan, profile, tokens))
+            })
+        });
+        let Ok((account_id, plan, profile, tokens)) = outcome else {
+            if self.restore_cached_lease(&vault) {
+                return;
+            }
+            if let Ok(mut state) = self.state.lock()
+                && state.last_generation == 0
+                && state.pending.is_none()
+                && state.restore_allowed
+            {
+                state.restore_allowed = false;
+                state.view = cleared_view(
+                    AccountSessionState::ReauthenticationRequired,
+                    0,
+                    "saved sign-in expired; sign in again",
+                );
+            }
+            return;
+        };
+        let restored = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+                false
+            } else {
+                if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
+                    let secret = Zeroizing::new(rotated.as_bytes().to_vec());
+                    if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
+                        return;
+                    }
+                }
+                state.view = AccountView {
+                    state: AccountSessionState::Active as i32,
+                    account_id: account_id.as_str().to_string(),
+                    plan_id: plan.as_str().to_string(),
+                    detail: "signed in".to_string(),
+                    request_generation: 0,
+                    display_name: profile.display_name.clone(),
+                    email: profile.email.clone(),
+                    photo_url: profile.photo_url.clone(),
+                };
+                true
+            }
+        };
+        if restored {
+            self.refresh_lease_once(0, &tokens, &account_id, &vault);
+            let service = self.clone();
+            std::thread::Builder::new()
+                .name("axiusflow-account-lease".to_string())
+                .spawn(move || service.run_lease_worker(0))
+                .ok();
+        }
+    }
+
+    fn restore_cached_lease<V>(&self, vault: &V) -> bool
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let Some(compact) = lease::load_cached(vault, LEASE_VAULT_KEY) else {
+            return false;
+        };
+        let Some(device_id) = vault
+            .load(DEVICE_VAULT_KEY)
+            .ok()
+            .flatten()
+            .map(|key| device_id_for_key(&key))
+        else {
+            return false;
+        };
+        let Ok(account_id) = lease::untrusted_account_id(&compact) else {
+            return false;
+        };
+        let keys = self
+            .lease_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Ok(claims) =
+            lease::validate_compact(&compact, &keys, &account_id, &device_id, unix_now())
+        else {
+            return false;
+        };
+        drop(keys);
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return false;
+        }
+        state.view = AccountView {
+            state: AccountSessionState::OfflineLease as i32,
+            account_id: account_id.as_str().to_string(),
+            plan_id: claims.plan().as_str().to_string(),
+            detail: "signed in with a cached subscription; reconnect to refresh".to_string(),
+            request_generation: 0,
+            display_name: String::new(),
+            email: String::new(),
+            photo_url: String::new(),
+        };
+        drop(state);
+        let service = self.clone();
+        std::thread::Builder::new()
+            .name("axiusflow-account-lease".to_string())
+            .spawn(move || service.run_lease_worker(0))
+            .ok();
+        true
     }
 
     /// Resolves cached OIDC endpoints, refreshing them from discovery once.
@@ -189,6 +333,7 @@ impl AccountService {
         })?;
         let expires_at = Instant::now() + LOGIN_TIMEOUT;
         state.last_generation = request_generation;
+        state.restore_allowed = false;
         state.pending = Some(PendingLogin {
             generation: request_generation,
             oauth_state,
@@ -287,6 +432,14 @@ impl AccountService {
             .load(REFRESH_VAULT_KEY)
             .unwrap_or_default()
             .filter(|token| !token.is_empty());
+        // Retire every background completion before deleting credentials.
+        // Workers take the same state lock while committing vault writes.
+        if let Ok(mut state) = self.state.lock() {
+            let generation = state.last_generation;
+            state.restore_allowed = false;
+            state.pending = None;
+            state.view = cleared_view(AccountSessionState::SignedOut, generation, "signed out");
+        }
         let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
         let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
         // Revocation reuses already-cached endpoints only: sign-out never
@@ -310,13 +463,11 @@ impl AccountService {
                     "account state is unavailable",
                 );
             };
-            let generation = state.last_generation;
-            state.pending = None;
             // Profile leaves with the session: a later sign-in as another
             // user never inherits these fields, even briefly.
             state.view = cleared_view(
                 AccountSessionState::SignedOut,
-                generation,
+                state.last_generation,
                 if deleted {
                     "signed out"
                 } else {
@@ -464,7 +615,7 @@ impl AccountService {
                     &vault,
                 );
                 if completed {
-                    // Best-effort initial lease for the shadow cache; a
+                    // Best-effort initial lease cache warmup; a
                     // failure never blocks the Active session.
                     self.refresh_lease_once(generation, &tokens, &account_id, &vault);
                 }
@@ -556,14 +707,14 @@ impl AccountService {
 
     fn lease_round(&self, generation: u64) {
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
-            note_lease_shadow("vault-unavailable");
+            note_lease("vault-unavailable");
             return;
         };
         let outcome = refresh_lease_round(self, generation, &vault);
         self.apply_lease_outcome(generation, outcome);
     }
 
-    /// Best-effort initial lease right after sign-in (shadow cache warmup).
+    /// Best-effort initial lease right after sign-in.
     fn refresh_lease_once<V>(
         &self,
         generation: u64,
@@ -595,25 +746,28 @@ impl AccountService {
             return;
         }
         match outcome {
-            lease::RefreshOutcome::Refreshed | lease::RefreshOutcome::Current => {
+            lease::RefreshOutcome::Refreshed(plan) | lease::RefreshOutcome::Current(Some(plan)) => {
+                state.view.plan_id = plan.as_str().to_string();
                 if current != active {
                     state.view.state = active;
                     state.view.detail = "signed in".to_string();
                 }
-                note_lease_shadow("valid");
+                note_lease("valid");
             }
-            lease::RefreshOutcome::OfflineCovered => {
+            lease::RefreshOutcome::Current(None) => note_lease("valid"),
+            lease::RefreshOutcome::OfflineCovered(plan) => {
+                state.view.plan_id = plan.as_str().to_string();
                 if current != offline {
                     state.view.state = offline;
                     state.view.detail =
                         "signed in with a cached subscription; reconnect to refresh".to_string();
                 }
-                note_lease_shadow("offline-covered");
+                note_lease("offline-covered");
             }
             lease::RefreshOutcome::Unavailable => {
                 state.view.state = AccountSessionState::ReauthenticationRequired as i32;
                 state.view.detail = "sign-in expired; sign in again".to_string();
-                note_lease_shadow("unavailable");
+                note_lease("unavailable");
             }
         }
     }
@@ -682,9 +836,9 @@ fn lock_state(
         .map_err(|_| "account state is unavailable".to_string())
 }
 
-/// Redacted shadow observation: outcome class only, never identities.
-fn note_lease_shadow(outcome: &str) {
-    eprintln!("Axiusflow lease shadow: {outcome}");
+/// Redacted lease observation: outcome class only, never identities.
+fn note_lease(outcome: &str) {
+    eprintln!("Axiusflow lease: {outcome}");
 }
 
 /// Sleeps until the next lease round in interruptible slices. Returns false
@@ -753,6 +907,7 @@ where
 
 fn validate_and_cache<V>(
     service: &AccountService,
+    generation: u64,
     session: &LeaseSession,
     compact: &str,
     vault: &V,
@@ -762,46 +917,90 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let keys = lease::fetch_directory(&session.origin).unwrap_or_default();
-    if !keys.is_empty()
-        && let Ok(mut cached) = service.lease_keys.lock()
-    {
-        *cached = keys;
-    }
-    let keys = service
-        .lease_keys
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Ok(claims) = lease::validate_compact(
-        compact,
-        &keys,
-        &session.account_id,
-        &session.device_id,
-        now_unix_seconds,
-    ) else {
-        return lease::RefreshOutcome::Unavailable;
-    };
-    let cached_revision = lease::load_cached(vault, LEASE_VAULT_KEY)
-        .and_then(|cached| {
+    let fetched_keys = lease::fetch_directory(&session.origin).unwrap_or_default();
+    let (claims, cached_claims) = {
+        let cached_keys = service
+            .lease_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let validation_keys = if fetched_keys.is_empty() {
+            cached_keys.as_slice()
+        } else {
+            fetched_keys.as_slice()
+        };
+        let Ok(claims) = lease::validate_compact(
+            compact,
+            validation_keys,
+            &session.account_id,
+            &session.device_id,
+            now_unix_seconds,
+        ) else {
+            return lease::RefreshOutcome::Unavailable;
+        };
+        let cached_claims = lease::load_cached(vault, LEASE_VAULT_KEY).and_then(|cached| {
             lease::validate_compact(
                 &cached,
-                &keys,
+                validation_keys,
                 &session.account_id,
                 &session.device_id,
                 now_unix_seconds,
             )
             .ok()
-        })
-        .map(|cached| cached.revision());
-    match cached_revision {
-        Some(cached) if cached >= claims.revision() => lease::RefreshOutcome::Current,
+        });
+        (claims, cached_claims)
+    };
+    // Persist a rotated directory only after it validates a lease from the
+    // same response path. A malformed lease cannot poison offline restart.
+    if !fetched_keys.is_empty()
+        && let Ok(mut cached) = service.lease_keys.lock()
+    {
+        cached.clone_from(&fetched_keys);
+        if let Ok(encoded) = serde_json::to_vec(&fetched_keys) {
+            let _ = vault.store(LEASE_DIRECTORY_VAULT_KEY, &encoded);
+        }
+    }
+    match cached_claims {
+        Some(cached) if cached.revision() >= claims.revision() => {
+            lease::RefreshOutcome::Current(Some(cached.plan()))
+        }
         _ => {
             let secret = Zeroizing::new(compact.as_bytes().to_vec());
-            match vault.store(LEASE_VAULT_KEY, secret.as_slice()) {
-                Ok(()) => lease::RefreshOutcome::Refreshed,
-                Err(_) => lease::RefreshOutcome::Unavailable,
+            let current = service.state.lock().is_ok_and(|state| {
+                state.last_generation == generation
+                    && (state.view.state == AccountSessionState::Active as i32
+                        || state.view.state == AccountSessionState::OfflineLease as i32)
+                    && vault.store(LEASE_VAULT_KEY, secret.as_slice()).is_ok()
+            });
+            if current {
+                lease::RefreshOutcome::Refreshed(claims.plan())
+            } else {
+                lease::RefreshOutcome::Unavailable
             }
         }
+    }
+}
+
+fn restore_lease_keys<V>(service: &AccountService, vault: &V)
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Some(encoded) = vault.load(LEASE_DIRECTORY_VAULT_KEY).ok().flatten() else {
+        return;
+    };
+    let Ok(keys) = serde_json::from_slice::<Vec<(String, [u8; 32])>>(&encoded) else {
+        return;
+    };
+    if keys.is_empty()
+        || keys.len() > 16
+        || keys
+            .iter()
+            .any(|(key_id, _)| key_id.is_empty() || key_id.len() > 64)
+    {
+        return;
+    }
+    if let Ok(mut cached) = service.lease_keys.lock() {
+        *cached = keys;
     }
 }
 
@@ -810,7 +1009,7 @@ fn cached_lease_covers<V>(
     session: &LeaseSession,
     vault: &V,
     now_unix_seconds: u64,
-) -> bool
+) -> Option<PlanId>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
@@ -833,9 +1032,10 @@ where
             )
             .ok()
         })
-        .is_some_and(|claims| {
+        .filter(|claims| {
             claims.expires_at().saturating_sub(now_unix_seconds) <= LEASE_OFFLINE_VALIDITY_SECONDS
         })
+        .map(|claims| claims.plan())
 }
 
 /// One background lease round: refresh grant, lease fetch, monotonic cache.
@@ -861,7 +1061,27 @@ where
     };
     if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
         let secret = Zeroizing::new(rotated.as_bytes().to_vec());
-        let _ = vault.store(REFRESH_VAULT_KEY, secret.as_slice());
+        let _ = service.state.lock().map(|state| {
+            if state.last_generation == generation
+                && (state.view.state == AccountSessionState::Active as i32
+                    || state.view.state == AccountSessionState::OfflineLease as i32)
+            {
+                let _ = vault.store(REFRESH_VAULT_KEY, secret.as_slice());
+            }
+        });
+    }
+    if let Ok((account_id, plan, profile)) =
+        link_subject(&session.endpoints, &tokens.id_token, &tokens.subject)
+        && account_id == session.account_id
+        && let Ok(mut state) = service.state.lock()
+        && state.last_generation == generation
+        && (state.view.state == AccountSessionState::Active as i32
+            || state.view.state == AccountSessionState::OfflineLease as i32)
+    {
+        state.view.plan_id = plan.as_str().to_string();
+        state.view.display_name = profile.display_name;
+        state.view.email = profile.email;
+        state.view.photo_url = profile.photo_url;
     }
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
@@ -871,7 +1091,7 @@ where
     ) else {
         return cached_outcome(service, &session, vault, now);
     };
-    validate_and_cache(service, &session, &compact, vault, now)
+    validate_and_cache(service, generation, &session, &compact, vault, now)
 }
 
 fn cached_outcome<V>(
@@ -884,8 +1104,8 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    if cached_lease_covers(service, session, vault, now_unix_seconds) {
-        lease::RefreshOutcome::OfflineCovered
+    if let Some(plan) = cached_lease_covers(service, session, vault, now_unix_seconds) {
+        lease::RefreshOutcome::OfflineCovered(plan)
     } else {
         lease::RefreshOutcome::Unavailable
     }
@@ -915,11 +1135,11 @@ where
         &tokens.subject,
         &session.device_id,
     ) else {
-        return lease::RefreshOutcome::Current;
+        return lease::RefreshOutcome::Current(None);
     };
     // A failed initial fetch leaves the fresh Active session untouched.
-    match validate_and_cache(service, &session, &compact, vault, unix_now()) {
-        lease::RefreshOutcome::Unavailable => lease::RefreshOutcome::Current,
+    match validate_and_cache(service, generation, &session, &compact, vault, unix_now()) {
+        lease::RefreshOutcome::Unavailable => lease::RefreshOutcome::Current(None),
         outcome => outcome,
     }
 }
@@ -956,10 +1176,6 @@ where
             .store(REFRESH_VAULT_KEY, secret.as_slice())
             .map_err(|_| "credential storage is unavailable".to_string())?;
     }
-    // The newest valid entitlement lease uses its own account-specific key;
-    // batch 1 records the lease slot without cached content until the
-    // control plane issues signed leases.
-    let _ = LEASE_VAULT_KEY;
     Ok(())
 }
 
@@ -990,10 +1206,15 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountService, AccountServiceConfig, LOGIN_TIMEOUT};
+    use super::{
+        AccountService, AccountServiceConfig, DEVICE_VAULT_KEY, LEASE_DIRECTORY_VAULT_KEY,
+        LEASE_VAULT_KEY, LOGIN_TIMEOUT, restore_lease_keys, unix_now,
+    };
     use axiusflow_account::{AccountId, PlanId};
     use axiusflow_engine_protocol::AccountSessionState;
     use axiusflow_platform_runtime::CredentialVault;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer as _, SigningKey};
     use std::{collections::HashMap, sync::Mutex};
 
     #[derive(Default)]
@@ -1246,6 +1467,60 @@ mod tests {
         assert_eq!(view.display_name, "bob");
         assert_eq!(view.email, "bob@example.com");
         assert!(view.photo_url.contains("bob"));
+    }
+
+    #[test]
+    fn engine_restart_restores_a_valid_offline_lease() {
+        let vault = MemoryVault::default();
+        let device_key = [3_u8; 32];
+        let device_id = super::device_id_for_key(&device_key);
+        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+        let now = unix_now();
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": "ent1", "typ": "JWT" });
+        let payload = serde_json::json!({
+            "ver": 1,
+            "aid": "acct_offline",
+            "did": device_id,
+            "plan": "pro",
+            "feat": 7,
+            "rev": 2,
+            "iat": now.saturating_sub(1),
+            "nbf": now.saturating_sub(1),
+            "exp": now + 3600,
+            "aud": "axiusflow-engine",
+            "kid": "ent1",
+        });
+        let encoded_header = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).expect("lease header fixture encodes"));
+        let encoded_payload = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("lease payload fixture encodes"));
+        let signing_input = format!("{encoded_header}.{encoded_payload}");
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let compact = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        );
+        let directory = vec![("ent1".to_string(), signing_key.verifying_key().to_bytes())];
+        vault
+            .store(DEVICE_VAULT_KEY, &device_key)
+            .expect("device key stores");
+        vault
+            .store(LEASE_VAULT_KEY, compact.as_bytes())
+            .expect("lease stores");
+        vault
+            .store(
+                LEASE_DIRECTORY_VAULT_KEY,
+                &serde_json::to_vec(&directory).expect("directory fixture encodes"),
+            )
+            .expect("directory stores");
+
+        let restarted = service();
+        restore_lease_keys(&restarted, &vault);
+        assert!(restarted.restore_cached_lease(&vault));
+        let view = restarted.account_status();
+        assert_eq!(view.state, AccountSessionState::OfflineLease as i32);
+        assert_eq!(view.account_id, "acct_offline");
+        assert_eq!(view.plan_id, "pro");
     }
 
     #[test]

@@ -152,7 +152,7 @@ impl EngineState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             background_service: Arc::new(Mutex::new(None)),
             hot_set: Arc::new(Mutex::new(hot_set)),
-            account: AccountService::new(AccountServiceConfig::from_environment()),
+            account: AccountService::new_restoring(AccountServiceConfig::from_environment()),
         };
         if state.workspace().workspace_revision == 0 || migrated {
             state.persist(&state.workspace())?;

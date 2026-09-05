@@ -981,6 +981,10 @@ pub fn native_installation_inventory(
             },
             VaultEntry {
                 service: "com.axiusflow.account".to_string(),
+                key: "account-entitlement-directory-v1".to_string(),
+            },
+            VaultEntry {
+                service: "com.axiusflow.account".to_string(),
                 key: "account-device-key-v1".to_string(),
             },
         ],
@@ -1999,6 +2003,7 @@ mod tests {
         for key in [
             "account-refresh-default-v1",
             "account-entitlement-lease-v1",
+            "account-entitlement-directory-v1",
             "account-device-key-v1",
         ] {
             assert!(

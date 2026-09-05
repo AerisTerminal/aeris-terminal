@@ -216,6 +216,39 @@ const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
+
+#[derive(Clone, Copy)]
+struct PlanLimits {
+    workspaces: usize,
+    panes_per_workspace: usize,
+    indicators_per_chart: usize,
+    extended_timeframes: bool,
+}
+
+fn current_plan_limits() -> PlanLimits {
+    let plan = axiusflow_desktop::account::DesktopAccount::shared()
+        .map_or_else(|| "starter".to_string(), |account| account.plan_id());
+    match plan.as_str() {
+        "pro" => PlanLimits {
+            workspaces: 3,
+            panes_per_workspace: MAXIMUM_PANES_PER_WORKSPACE,
+            indicators_per_chart: 5,
+            extended_timeframes: true,
+        },
+        "elite" | "enterprise" => PlanLimits {
+            workspaces: MAXIMUM_OPEN_WORKSPACES,
+            panes_per_workspace: MAXIMUM_PANES_PER_WORKSPACE,
+            indicators_per_chart: usize::MAX,
+            extended_timeframes: true,
+        },
+        _ => PlanLimits {
+            workspaces: 1,
+            panes_per_workspace: 2,
+            indicators_per_chart: 2,
+            extended_timeframes: false,
+        },
+    }
+}
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
@@ -1932,6 +1965,25 @@ impl WorkspaceSurface {
     }
 
     fn select_interval(&mut self, interval: ChartInterval, cx: &mut Context<Self>) -> bool {
+        let starter_interval = matches!(
+            interval,
+            ChartInterval::Minute1
+                | ChartInterval::Minute3
+                | ChartInterval::Minute5
+                | ChartInterval::Minute15
+                | ChartInterval::Minute30
+                | ChartInterval::Hour1
+                | ChartInterval::Hour2
+                | ChartInterval::Hour4
+                | ChartInterval::Hour8
+                | ChartInterval::Hour12
+                | ChartInterval::Day1
+        );
+        if !current_plan_limits().extended_timeframes && !starter_interval {
+            self.series_message = "This timeframe requires a paid plan".to_string();
+            cx.notify();
+            return false;
+        }
         #[cfg(feature = "diagnostics")]
         let started = Instant::now();
         let selected = (|| {
@@ -3830,6 +3882,14 @@ impl WorkspaceSurface {
             cx.notify();
             return false;
         };
+        let maximum = current_plan_limits().indicators_per_chart;
+        if chart.read(cx).indicator_states().len() >= maximum {
+            self.indicator_message = Some(format!(
+                "Your plan supports at most {maximum} indicators per chart"
+            ));
+            cx.notify();
+            return false;
+        }
         let result = chart.update(cx, |chart, chart_cx| {
             let result = chart.add_indicator(indicator);
             if result.is_ok() {
@@ -5374,9 +5434,10 @@ impl TerminalApp {
     }
 
     fn add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspaces.len() >= MAXIMUM_OPEN_WORKSPACES {
+        let maximum = current_plan_limits().workspaces;
+        if self.workspaces.len() >= maximum {
             self.workspace_error = Some(format!(
-                "Axiusflow supports at most {MAXIMUM_OPEN_WORKSPACES} open workspaces"
+                "Your plan supports at most {maximum} open workspaces"
             ));
             cx.notify();
             return;
@@ -5457,9 +5518,10 @@ impl TerminalApp {
             return;
         };
         let workspace = &self.workspaces[self.active];
-        if workspace.panes.len() >= MAXIMUM_PANES_PER_WORKSPACE {
+        let maximum = current_plan_limits().panes_per_workspace;
+        if workspace.panes.len() >= maximum {
             self.workspace_error = Some(format!(
-                "A workspace supports at most {MAXIMUM_PANES_PER_WORKSPACE} panes"
+                "Your plan supports at most {maximum} charts per workspace"
             ));
             cx.notify();
             return;

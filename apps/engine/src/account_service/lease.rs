@@ -1,11 +1,11 @@
-//! Offline entitlement lease fetch, validation, and cache for shadow mode.
+//! Offline entitlement lease fetch, validation, and cache.
 //!
 //! The worker refreshes the lease from the control plane, verifies the
 //! Ed25519 signature against the entitlement JWKS directory, validates
 //! claims through the pure account domain, and caches only progressively
-//! newer revisions in the native vault. Shadow mode observes: validation
-//! outcomes are logged in redacted form and surfaced as session state, but
-//! no market demand is ever gated on a lease.
+//! newer revisions in the native vault. Validation outcomes are logged in
+//! redacted form and surfaced as session state; the verified plan is the
+//! desktop capability source.
 
 use axiusflow_account::{AccountId, LeaseClaims, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -17,8 +17,8 @@ use axiusflow_platform_runtime::CredentialVault;
 
 /// Approved default: online lease refresh cadence.
 pub const LEASE_REFRESH_INTERVAL_SECONDS: u64 = 6 * 3600;
-/// Approved default: cached leases stay valid offline for 72 hours.
-pub const LEASE_OFFLINE_VALIDITY_SECONDS: u64 = 72 * 3600;
+/// Approved default: cached leases stay valid offline for 24 hours.
+pub const LEASE_OFFLINE_VALIDITY_SECONDS: u64 = 24 * 3600;
 /// Maximum compact lease size accepted before validation.
 pub const MAXIMUM_LEASE_BYTES: usize = 2048;
 
@@ -26,11 +26,11 @@ pub const MAXIMUM_LEASE_BYTES: usize = 2048;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefreshOutcome {
     /// A newer valid lease was cached.
-    Refreshed,
+    Refreshed(PlanId),
     /// The cached lease is unchanged and still valid.
-    Current,
+    Current(Option<PlanId>),
     /// The network failed but a valid cached lease covers the outage.
-    OfflineCovered,
+    OfflineCovered(PlanId),
     /// No valid lease is available.
     Unavailable,
 }
@@ -100,6 +100,29 @@ pub fn validate_compact(
         now_unix_seconds,
     )
     .map_err(|_| lease_failure())
+}
+
+/// Extracts the account identity needed to select the expected binding before
+/// full signature validation. Callers must never trust the returned identity
+/// until [`validate_compact`] succeeds with it.
+///
+/// # Errors
+///
+/// Returns a redacted error when the compact value or account identity is
+/// malformed or exceeds its bounds.
+pub fn untrusted_account_id(compact: &str) -> Result<AccountId, String> {
+    if compact.is_empty() || compact.len() > MAXIMUM_LEASE_BYTES {
+        return Err(lease_failure());
+    }
+    let mut parts = compact.split('.');
+    let (Some(_), Some(payload), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(lease_failure());
+    };
+    let claims: LeasePayload =
+        serde_json::from_slice(&decode_part(payload)?).map_err(|_| lease_failure())?;
+    AccountId::try_new(claims.aid).map_err(|_| lease_failure())
 }
 
 fn lease_failure() -> String {
@@ -257,7 +280,7 @@ struct LeaseReply {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_id_for_key, validate_compact};
+    use super::{device_id_for_key, untrusted_account_id, validate_compact};
     use axiusflow_account::AccountId;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
@@ -291,6 +314,10 @@ mod tests {
         let claims = validate_compact(&compact, &keys, &account, "device-01", 1_700_000_100)
             .expect("valid lease verifies");
         assert_eq!(claims.revision(), 7);
+        assert_eq!(
+            untrusted_account_id(&compact).expect("bounded account hint parses"),
+            account
+        );
     }
 
     #[test]
