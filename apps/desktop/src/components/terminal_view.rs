@@ -53,6 +53,10 @@ fn active_header_state(
         chart_state: workspace.chart_state,
         delayed: false,
         instrument_scroll: workspace.scrolls.instrument.clone(),
+        account: axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            axiusflow_desktop::account::unavailable_menu_state,
+            |account| account.menu_state(),
+        ),
     }
 }
 
@@ -119,6 +123,7 @@ impl Render for TerminalApp {
             window.viewport_size(),
             cx,
         );
+        let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
         let header = terminal_header(
             &terminal,
@@ -173,6 +178,7 @@ impl Render for TerminalApp {
             .children(overlay)
             .children(context_menu)
             .children(settings_menu)
+            .children(account_menu)
     }
 }
 

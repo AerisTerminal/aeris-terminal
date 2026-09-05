@@ -131,6 +131,20 @@ pub struct AccountMenuState {
     pub error: Option<String>,
 }
 
+impl AccountMenuState {
+    /// Returns whether the session is signed in.
+    #[must_use]
+    pub fn signed_in(&self) -> bool {
+        self.presentation.action == "Account"
+    }
+
+    /// Returns whether the session is waiting on the browser.
+    #[must_use]
+    pub fn authorizing(&self) -> bool {
+        self.presentation.action == "Waiting for browser"
+    }
+}
+
 /// Menu state used when no account session is installed.
 #[must_use]
 pub fn unavailable_menu_state() -> AccountMenuState {

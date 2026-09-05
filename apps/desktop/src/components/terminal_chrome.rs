@@ -1,3 +1,4 @@
+use super::chart_context_menus::account_avatar_button;
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -501,6 +502,12 @@ pub(super) fn header_controls(
         ))
         .child(dom_toggle)
         .child(theme_toggle(terminal.clone(), &state.theme))
+        .child(div().flex_1())
+        .child(account_avatar_button(
+            terminal,
+            &state.account,
+            &state.theme,
+        ))
 }
 
 pub(super) fn side_panel_toggle(

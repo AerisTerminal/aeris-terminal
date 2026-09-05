@@ -66,7 +66,8 @@ use chart_context_menus::{
     clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
 };
 use chart_context_menus::{
-    chart_context_menu_layer, chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
+    account_menu_layer, chart_context_menu_layer, chart_settings_menu_layer, overlay_height,
+    price_axis_menu_layer,
 };
 use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
@@ -1333,6 +1334,7 @@ struct HeaderState {
     chart_state: ChartState,
     delayed: bool,
     instrument_scroll: ScrollHandle,
+    account: axiusflow_desktop::account::AccountMenuState,
 }
 
 /// Whether the active chart's drawing history has an edit to step back to or forward to.
@@ -4372,6 +4374,9 @@ enum WorkspaceShellKind {
     Tabs,
 }
 
+/// Shell menus are small booleans by design; the account dropdown joins the
+/// two chart-menu options rather than growing a separate menu stack.
+#[allow(clippy::struct_excessive_bools)]
 struct TerminalApp {
     workspaces: Vec<WorkspaceTab>,
     active: usize,
@@ -4391,6 +4396,7 @@ struct TerminalApp {
     workspace_drag: Option<WorkspaceDragState>,
     chart_context_menu: Option<ChartContextMenu>,
     chart_settings_menu: Option<ChartContextMenu>,
+    account_menu_open: bool,
     chart_chrome: chart_chrome::ChartChromePreferences,
     window_move_pending: bool,
     closing: bool,
@@ -4702,6 +4708,7 @@ impl TerminalApp {
             workspace_drag: None,
             chart_context_menu: None,
             chart_settings_menu: None,
+            account_menu_open: false,
             chart_chrome: init.chart_chrome,
             window_move_pending: false,
             closing: false,
@@ -4839,6 +4846,38 @@ impl TerminalApp {
         if self.chart_settings_menu.take().is_some() {
             cx.notify();
         }
+    }
+
+    fn toggle_account_menu(&mut self, cx: &mut Context<Self>) {
+        self.account_menu_open = !self.account_menu_open;
+        cx.notify();
+    }
+
+    fn close_account_menu(&mut self, cx: &mut Context<Self>) {
+        if self.account_menu_open {
+            self.account_menu_open = false;
+            cx.notify();
+        }
+    }
+
+    fn account_menu_overlay(
+        &self,
+        terminal: &Entity<Self>,
+        viewport: gpui::Size<Pixels>,
+    ) -> Option<AnyElement> {
+        if !self.account_menu_open {
+            return None;
+        }
+        let account = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            axiusflow_desktop::account::unavailable_menu_state,
+            |account| account.menu_state(),
+        );
+        Some(account_menu_layer(
+            terminal,
+            &account,
+            viewport,
+            &self.theme,
+        ))
     }
 
     fn finish_chart_context_menu(
@@ -5869,17 +5908,12 @@ impl TerminalApp {
             )
         });
         let preference_error = self.lifecycle.preference_error();
-        let account_menu = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
-            axiusflow_desktop::account::unavailable_menu_state,
-            |account| account.menu_state(),
-        );
         let settings_menu = self.chart_settings_menu.clone().map(|menu| {
             chart_settings_menu_layer(
                 terminal,
                 &menu,
                 self.lifecycle.presentation(),
                 preference_error.as_deref(),
-                &account_menu,
                 viewport,
                 &self.theme,
             )
