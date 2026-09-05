@@ -397,6 +397,9 @@ fn spawn_group(
     mut endpoints: Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
+    // One supervisor owns every pane in this workspace group. Tab selection and
+    // layout edits only change endpoint resource classes or membership; provider
+    // sessions remain resident-engine owned and are never created per pane.
     thread::Builder::new()
         .name("axiusflow-engine-market-client".to_string())
         .spawn(move || {

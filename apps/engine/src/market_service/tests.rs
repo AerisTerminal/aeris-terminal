@@ -3583,6 +3583,85 @@ fn split_pane_attaches_to_an_already_live_series_without_staying_at_ready() {
 }
 
 #[test]
+fn workspace_tab_and_layout_changes_keep_one_live_provider_session() {
+    let harness = MarketService::start_fixture_realtime(vec![history_bar()])
+        .expect("realtime fixture starts");
+    attach_fixture_consumers(&harness);
+    expect_realtime_generation(&harness, "shared realtime starts", 1);
+    expect_configured_products(&harness, "shared product configures", &["BTC-USD"]);
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Connected)
+        .expect("shared realtime connects");
+    for consumer_id in 1..=2 {
+        poll_until(&harness.service, consumer_id, consumer_id, |event| {
+            matches!(
+                event,
+                envelope::Payload::ProviderState(state)
+                    if state.state == ProviderConnectionState::Online as i32
+                        && state.generation == 1
+            )
+        });
+        while harness
+            .service
+            .poll_event(consumer_id, consumer_id)
+            .expect("consumer remains registered")
+            .is_some()
+        {}
+    }
+
+    harness
+        .service
+        .set_resource_class(1, 1, ConsumerResourceClass::Background)
+        .expect("inactive workspace moves to background");
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Trade(trade(2, "2.00", 1)))
+        .expect("shared trade streams");
+    let foreground = poll_until(&harness.service, 2, 2, |event| {
+        is_live_update(event, 1, 1, 200)
+    });
+    assert!(is_live_update(&foreground, 1, 1, 200));
+
+    harness
+        .service
+        .set_resource_class(1, 1, ConsumerResourceClass::Foreground)
+        .expect("returning workspace moves to foreground");
+    assert!(matches!(
+        poll_until(&harness.service, 1, 1, |event| matches!(
+            event,
+            envelope::Payload::SeriesSnapshot(snapshot)
+                if snapshot.generation == 1 && snapshot.provider_generation == 1
+        )),
+        envelope::Payload::SeriesSnapshot(snapshot)
+            if snapshot.bars.last().is_some_and(|bar| bar.close == 200)
+    ));
+
+    harness
+        .service
+        .set_resource_class(2, 2, ConsumerResourceClass::Detached)
+        .expect("closing pane detaches its market work");
+    harness
+        .service
+        .remove_consumer(2, 2)
+        .expect("closing pane removes its consumer");
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Trade(trade(2, "2.10", 2)))
+        .expect("remaining workspace keeps streaming");
+    let remaining = poll_until(&harness.service, 1, 1, |event| {
+        is_live_update(event, 1, 1, 210)
+    });
+    assert!(is_live_update(&remaining, 1, 1, 210));
+    assert!(harness.service.poll_event(2, 2).is_err());
+    assert!(matches!(
+        harness.generations.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
+    assert!(matches!(harness.stops.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
 fn realtime_capacity_rejects_a_new_product_but_allows_an_exact_replacement() {
     let (history_tx, _history_rx) = mpsc::sync_channel(1);
     let (storage_tx, _storage_rx) = mpsc::sync_channel(1);

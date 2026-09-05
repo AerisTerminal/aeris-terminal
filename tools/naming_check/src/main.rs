@@ -1070,6 +1070,7 @@ mod tests {
             "timeframe_switch_waits_for_its_own_current_provider_history",
             "newer_demand_cancels_history_without_waiting_for_cleanup",
             "symbol_and_interval_switch_reuses_the_shared_realtime_session",
+            "workspace_tab_and_layout_changes_keep_one_live_provider_session",
         ] {
             assert!(
                 coordinator.contains(regression),
