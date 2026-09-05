@@ -2655,8 +2655,8 @@ mod tests {
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
     use axiusflow_engine_protocol::{
         EngineLifetimeMode, EngineShutdownState, GetAccountStatus, InstallProviderInstrument,
-        ProviderInstrumentSelection, ResourceMode, RestoreWorkspace, SeriesCadence, SeriesKey,
-        envelope,
+        MarketBar as IpcMarketBar, ProviderInstrumentSelection, ResourceMode, RestoreWorkspace,
+        SeriesCadence, SeriesKey, envelope,
     };
     use axiusflow_local_engine_client::EngineClient;
     use axiusflow_market_data::MarketBar;
@@ -2750,7 +2750,7 @@ mod tests {
             .set_series_demand(501, 1, series.clone())
             .expect("chart demand crosses production IPC");
         poll_ipc_snapshot(&mut client, 501, 1, &series);
-        publish_fixture_live_update(&harness, &mut client, 1, 2, "2.00", 1, 200);
+        publish_fixture_live_ohlcv(&harness, &mut client, 1, 2);
 
         for completed_cycles in 0..20 {
             if completed_cycles == 10 {
@@ -2823,15 +2823,7 @@ mod tests {
         let series = cached_series(BTC_INSTRUMENT, 60);
         attach_ipc_consumers(&mut first, 61, &[601, 603], &series);
         attach_ipc_consumers(&mut second, 62, &[602], &series);
-        publish_fixture_multi_client_update(
-            &harness,
-            &mut first,
-            &mut second,
-            1,
-            "2.00",
-            200,
-            &[602],
-        );
+        publish_fixture_multi_client_ohlcv(&harness, &mut first, &mut second, 1, 2, &[602]);
         second
             .set_market_visibility(602, false)
             .expect("second window moves to background");
@@ -2844,11 +2836,11 @@ mod tests {
         wait_for_resource_mode(&state, ResourceMode::OfflineSuspended);
         state.account().set_authenticated_for_test(true);
         wait_for_resource_mode(&state, ResourceMode::Warm);
-        publish_fixture_multi_client_update(&harness, &mut first, &mut second, 2, "2.50", 250, &[]);
+        publish_fixture_multi_client_ohlcv(&harness, &mut first, &mut second, 2, 3, &[]);
         second
             .set_market_visibility(602, true)
             .expect("second window returns to foreground");
-        poll_ipc_live_updates(&mut second, &[602], 2, 250);
+        poll_ipc_live_updates(&mut second, &[602], 2, &expected_fixture_ohlcv(3));
 
         drop(first);
         drop(second);
@@ -2936,14 +2928,11 @@ mod tests {
         state.account().set_authenticated_for_test(true);
         wait_for_resource_mode(state, resumed_mode);
         let replacement_generation = stopped_generation + 1;
-        publish_fixture_live_update(
+        publish_fixture_live_ohlcv(
             harness,
             client,
             replacement_generation,
             i64::try_from(replacement_generation + 1).expect("fixture minute fits"),
-            "2.50",
-            replacement_generation,
-            250,
         );
     }
 
@@ -2964,14 +2953,11 @@ mod tests {
         wait_for_resource_mode(state, ResourceMode::MarketsLive);
     }
 
-    fn publish_fixture_live_update(
+    fn publish_fixture_live_ohlcv(
         harness: &FixtureRealtimeHarness,
         client: &mut EngineClient,
         provider_generation: u64,
         minute: i64,
-        price: &str,
-        provider_sequence: u64,
-        expected_close: i64,
     ) {
         assert_eq!(
             harness
@@ -2993,24 +2979,22 @@ mod tests {
             .actions
             .send(FixtureRealtimeAction::Connected)
             .expect("realtime fixture connects");
-        harness
-            .actions
-            .send(FixtureRealtimeAction::Trade(trade(
-                minute,
-                price,
-                provider_sequence,
-            )))
-            .expect("fixture trade arrives");
-        poll_ipc_live_update(client, 501, 1, provider_generation, expected_close);
+        send_fixture_ohlcv(harness, provider_generation, minute);
+        poll_ipc_live_update(
+            client,
+            501,
+            1,
+            provider_generation,
+            &expected_fixture_ohlcv(minute),
+        );
     }
 
-    fn publish_fixture_multi_client_update(
+    fn publish_fixture_multi_client_ohlcv(
         harness: &FixtureRealtimeHarness,
         first: &mut EngineClient,
         second: &mut EngineClient,
         provider_generation: u64,
-        price: &str,
-        expected_close: i64,
+        minute: i64,
         second_consumers: &[u64],
     ) {
         assert_eq!(
@@ -3031,21 +3015,45 @@ mod tests {
             .actions
             .send(FixtureRealtimeAction::Connected)
             .expect("shared realtime connects");
-        harness
-            .actions
-            .send(FixtureRealtimeAction::Trade(trade(
-                i64::try_from(provider_generation + 1).expect("fixture minute fits"),
-                price,
-                provider_generation,
-            )))
-            .expect("shared trade arrives");
-        poll_ipc_live_updates(first, &[601, 603], provider_generation, expected_close);
-        poll_ipc_live_updates(
-            second,
-            second_consumers,
-            provider_generation,
-            expected_close,
-        );
+        send_fixture_ohlcv(harness, provider_generation, minute);
+        let expected = expected_fixture_ohlcv(minute);
+        poll_ipc_live_updates(first, &[601, 603], provider_generation, &expected);
+        poll_ipc_live_updates(second, second_consumers, provider_generation, &expected);
+    }
+
+    fn send_fixture_ohlcv(harness: &FixtureRealtimeHarness, provider_generation: u64, minute: i64) {
+        let sequence_base = provider_generation
+            .checked_mul(10)
+            .expect("fixture sequence fits");
+        for (offset, price) in ["2.50", "3.25", "1.75", "2.75"].into_iter().enumerate() {
+            let provider_sequence = sequence_base
+                .checked_add(u64::try_from(offset).expect("fixture offset fits"))
+                .expect("fixture sequence fits");
+            harness
+                .actions
+                .send(FixtureRealtimeAction::Trade(trade(
+                    minute,
+                    price,
+                    provider_sequence,
+                )))
+                .expect("fixture OHLCV trade arrives");
+        }
+    }
+
+    fn expected_fixture_ohlcv(minute: i64) -> IpcMarketBar {
+        // This oracle is deliberately written from the input trades rather than
+        // calling the production aggregator: open is first, close is last, high
+        // and low are extrema, and four exact base-quantity units contribute.
+        IpcMarketBar {
+            source_sequence: u64::try_from(minute).expect("fixture minute fits") + 1,
+            exchange_timestamp_seconds: minute * 60,
+            exchange_timestamp_unix_nanos: minute * 60_000_000_000,
+            open: 250,
+            high: 325,
+            low: 175,
+            close: 275,
+            volume: 4,
+        }
     }
 
     fn expect_fixture_stop(harness: &FixtureRealtimeHarness, provider_generation: u64) {
@@ -3064,7 +3072,7 @@ mod tests {
         client: &mut EngineClient,
         consumer_ids: &[u64],
         provider_generation: u64,
-        expected_close: i64,
+        expected_bar: &IpcMarketBar,
     ) {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut pending = consumer_ids.iter().copied().collect::<BTreeSet<_>>();
@@ -3075,7 +3083,7 @@ mod tests {
                 .expect("receive multi-consumer IPC market event");
             if let Some((consumer_id, payload)) = event
                 && pending.contains(&consumer_id)
-                && ipc_live_update_matches(&payload, 1, provider_generation, expected_close)
+                && ipc_live_update_matches(&payload, 1, provider_generation, expected_bar)
             {
                 pending.remove(&consumer_id);
             }
@@ -3091,12 +3099,12 @@ mod tests {
         consumer_id: u64,
         generation: u64,
         provider_generation: u64,
-        close: i64,
+        expected_bar: &IpcMarketBar,
     ) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Some(event) = receive_ipc_event(client, consumer_id, Duration::from_millis(50))
-                && ipc_live_update_matches(&event, generation, provider_generation, close)
+                && ipc_live_update_matches(&event, generation, provider_generation, expected_bar)
             {
                 return;
             }
@@ -3108,20 +3116,20 @@ mod tests {
         event: &envelope::Payload,
         generation: u64,
         provider_generation: u64,
-        close: i64,
+        expected_bar: &IpcMarketBar,
     ) -> bool {
         matches!(
             event,
             envelope::Payload::SeriesUpdate(update)
                 if update.generation == generation
                     && update.provider_generation == provider_generation
-                    && update.bar.as_ref().is_some_and(|bar| bar.close == close)
+                    && update.bar.as_ref() == Some(expected_bar)
         ) || matches!(
             event,
             envelope::Payload::SeriesSnapshot(snapshot)
                 if snapshot.generation == generation
                     && snapshot.provider_generation == provider_generation
-                    && snapshot.bars.last().is_some_and(|bar| bar.close == close)
+                    && snapshot.bars.last() == Some(expected_bar)
         )
     }
 
