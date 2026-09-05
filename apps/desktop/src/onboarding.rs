@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axiusflow_design_system::AxiusflowTheme;
-use gpui::{App, Context, FontWeight, Render, Window, div, prelude::*, px};
+use gpui::{App, Context, FontWeight, Render, Role, Window, div, prelude::*, px};
 
 use crate::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
 
@@ -25,6 +25,15 @@ impl OnboardingApp {
             && let Err(error) = account.request_sign_in()
         {
             eprintln!("Axiusflow sign-in degraded: {error}");
+        }
+        cx.refresh_windows();
+    }
+
+    fn reopen_sign_in(cx: &mut App) {
+        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+            && let Err(error) = account.reopen_browser()
+        {
+            eprintln!("Axiusflow sign-in browser reopen degraded: {error}");
         }
         cx.refresh_windows();
     }
@@ -129,6 +138,63 @@ impl Render for OnboardingApp {
     }
 }
 
+fn onboarding_status(
+    theme: &AxiusflowTheme,
+    launch_error: Option<&String>,
+    account_error: Option<&str>,
+    request_pending: bool,
+    authorizing: bool,
+) -> gpui::Div {
+    let colors = theme.colors;
+    let detail = launch_error
+        .cloned()
+        .or_else(|| account_error.map(str::to_string))
+        .or_else(|| {
+            (request_pending && !authorizing).then(|| "Opening secure sign-in…".to_string())
+        });
+    let can_reopen = authorizing && launch_error.is_none() && account_error.is_none();
+    let content = if can_reopen {
+        div()
+            .id("onboarding_reopen_sign_in")
+            .role(Role::Button)
+            .aria_label("Open the browser to complete sign-in")
+            .tab_index(0)
+            .cursor_pointer()
+            .text_color(gpui_color(colors.primary))
+            .hover(move |status| status.text_color(gpui_color(colors.text_primary)))
+            .on_key_down(|event, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    OnboardingApp::reopen_sign_in(cx);
+                    cx.stop_propagation();
+                }
+            })
+            .on_click(|_, _, cx| OnboardingApp::reopen_sign_in(cx))
+            .child("Complete sign-in in your browser ↗")
+            .into_any_element()
+    } else {
+        div()
+            .text_color(gpui_color(
+                if launch_error.is_some() || account_error.is_some() {
+                    colors.danger
+                } else {
+                    colors.text_secondary
+                },
+            ))
+            .child(detail.unwrap_or_default())
+            .into_any_element()
+    };
+    div()
+        .mt_3()
+        .h(px(28.0))
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .text_center()
+        .child(content)
+}
+
 pub(super) fn onboarding_surface(
     window: &Window,
     theme: &AxiusflowTheme,
@@ -139,14 +205,21 @@ pub(super) fn onboarding_surface(
     let presentation = account
         .as_ref()
         .map(axiusflow_desktop::account::DesktopAccount::presentation);
-    let pending = presentation.as_ref().is_some_and(|view| view.pending)
-        || presentation
-            .as_ref()
-            .is_some_and(|view| view.action == "Waiting for browser");
-    let detail = launch_error
-        .cloned()
-        .or_else(|| account.and_then(|account| account.error()))
-        .or_else(|| pending.then(|| "Complete sign-in in your browser.".to_string()));
+    let authorizing = presentation
+        .as_ref()
+        .is_some_and(|view| view.action == "Waiting for browser");
+    let request_pending = presentation.as_ref().is_some_and(|view| view.pending);
+    let pending = request_pending || authorizing;
+    let account_error = account
+        .as_ref()
+        .and_then(axiusflow_desktop::account::DesktopAccount::error);
+    let status = onboarding_status(
+        theme,
+        launch_error,
+        account_error.as_deref(),
+        request_pending,
+        authorizing,
+    );
 
     div()
             .relative()
@@ -156,6 +229,7 @@ pub(super) fn onboarding_surface(
             .justify_center()
             .bg(gpui_color(colors.surface))
             .text_color(gpui_color(colors.text_primary))
+            .font_family("HK Grotesk")
             .child(onboarding_title_bar(window, theme))
             .child(
                 div()
@@ -194,7 +268,7 @@ pub(super) fn onboarding_surface(
                             .gap(px(10.0))
                             .child(onboarding_button(
                                 "onboarding_sign_in",
-                                if pending { "Waiting for browser…" } else { "Sign In" },
+                                "Sign In",
                                 true,
                                 pending,
                                 theme,
@@ -207,21 +281,10 @@ pub(super) fn onboarding_surface(
                                 theme,
                             )),
                     )
-                    .children(detail.map(|detail| {
-                        div()
-                            .mt_4()
-                            .text_sm()
-                            .text_center()
-                            .text_color(gpui_color(if launch_error.is_some() {
-                                colors.danger
-                            } else {
-                                colors.text_secondary
-                            }))
-                            .child(detail)
-                    }))
+                    .child(status)
                     .child(
                         div()
-                            .mt_8()
+                            .mt_4()
                             .text_xs()
                             .text_center()
                             .text_color(gpui_color(colors.text_muted))
