@@ -18,10 +18,11 @@ use axiusflow_engine_protocol::{
 };
 use axiusflow_observability::FeedConnectionState;
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    collections::VecDeque,
+    num::{NonZeroU8, NonZeroU64, NonZeroUsize},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::engine_supervisor::EngineSupervisor;
@@ -29,6 +30,11 @@ use crate::engine_supervisor::EngineSupervisor;
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
+const INITIAL_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAXIMUM_INITIAL_CONNECT_ATTEMPTS: NonZeroU8 = match NonZeroU8::new(3) {
+    Some(attempts) => attempts,
+    None => NonZeroU8::MIN,
+};
 const ENGINE_WORKSPACE_ID: u64 = 1;
 
 /// Connection message contract that arms the desktop autoload and
@@ -46,6 +52,15 @@ struct ActiveSeries {
     request: RithmicSeriesRequest,
     instrument: InstallProviderInstrument,
     key: SeriesKey,
+}
+
+enum InitialConnection<T> {
+    Connected {
+        session: T,
+        pending: VecDeque<MarketWorkerCommand>,
+    },
+    Shutdown,
+    Exhausted,
 }
 
 /// Starts the bounded Rithmic UI bridge backed exclusively by the resident engine.
@@ -82,25 +97,37 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
         FeedConnectionState::Discovering,
         "connecting to the resident Rithmic engine",
     );
-    let state = EngineCatalogSession::connect().map(|catalog| WorkerState {
+    let (catalog, pending) = match connect_initial(
+        messages,
+        commands,
+        MAXIMUM_INITIAL_CONNECT_ATTEMPTS,
+        INITIAL_CONNECT_RETRY_DELAY,
+        EngineCatalogSession::connect,
+    ) {
+        InitialConnection::Connected { session, pending } => (session, pending),
+        InitialConnection::Shutdown => {
+            send_connection(
+                messages,
+                FeedConnectionState::Stopped,
+                "Rithmic engine client stopped",
+            );
+            return;
+        }
+        InitialConnection::Exhausted => return,
+    };
+    let mut state = WorkerState {
         catalog,
         installed: None,
         active_series: None,
-    });
-    let Ok(mut state) = state else {
-        send_connection(
-            messages,
-            FeedConnectionState::Recovering,
-            "resident Rithmic engine is unavailable",
-        );
-        wait_for_shutdown(commands);
-        return;
     };
     send_connection(
         messages,
         FeedConnectionState::Authenticating,
         RITHMIC_CATALOG_READY_MESSAGE,
     );
+    for command in pending {
+        process_command(messages, &mut state, command);
+    }
 
     loop {
         match commands.recv_timeout(POLL_INTERVAL) {
@@ -140,6 +167,69 @@ fn run(messages: &MarketWorkerSender, commands: &Receiver<MarketWorkerCommand>) 
         FeedConnectionState::Stopped,
         "Rithmic engine client stopped",
     );
+}
+
+fn connect_initial<T>(
+    messages: &MarketWorkerSender,
+    commands: &Receiver<MarketWorkerCommand>,
+    maximum_attempts: NonZeroU8,
+    retry_delay: Duration,
+    mut connect: impl FnMut() -> Result<T, String>,
+) -> InitialConnection<T> {
+    let mut pending = VecDeque::with_capacity(COMMAND_CAPACITY);
+    for attempt in 1..=maximum_attempts.get() {
+        match connect() {
+            Ok(session) => return InitialConnection::Connected { session, pending },
+            Err(_) if attempt < maximum_attempts.get() => {
+                send_connection(
+                    messages,
+                    FeedConnectionState::Recovering,
+                    "resident Rithmic engine is unavailable; retrying startup",
+                );
+                if !wait_for_initial_retry(commands, retry_delay, &mut pending) {
+                    return InitialConnection::Shutdown;
+                }
+            }
+            Err(_) => {
+                send_connection(
+                    messages,
+                    FeedConnectionState::Stopped,
+                    "resident Rithmic engine is unavailable after bounded startup retries",
+                );
+                return InitialConnection::Exhausted;
+            }
+        }
+    }
+    InitialConnection::Exhausted
+}
+
+fn wait_for_initial_retry(
+    commands: &Receiver<MarketWorkerCommand>,
+    delay: Duration,
+    pending: &mut VecDeque<MarketWorkerCommand>,
+) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        if pending.len() == COMMAND_CAPACITY {
+            thread::sleep(remaining);
+            return true;
+        }
+        match commands.recv_timeout(remaining) {
+            Ok(MarketWorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                return false;
+            }
+            Ok(command) => {
+                if pending.len() < COMMAND_CAPACITY {
+                    pending.push_back(command);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => return true,
+        }
+    }
 }
 
 fn process_command(
@@ -501,14 +591,6 @@ fn send_connection(messages: &MarketWorkerSender, state: FeedConnectionState, me
     });
 }
 
-fn wait_for_shutdown(commands: &Receiver<MarketWorkerCommand>) {
-    while let Ok(command) = commands.recv() {
-        if matches!(command, MarketWorkerCommand::Shutdown) {
-            break;
-        }
-    }
-}
-
 const fn nonzero(value: usize) -> NonZeroUsize {
     match NonZeroUsize::new(value) {
         Some(value) => value,
@@ -518,4 +600,121 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 
 fn usize_generation(generation: u64) -> Option<NonZeroUsize> {
     usize::try_from(generation).ok().and_then(NonZeroUsize::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiusflow_engine_protocol::ConsumerResourceClass;
+
+    #[test]
+    fn initial_connection_recovers_after_engine_and_ipc_failures() {
+        let (messages, receiver) = market_worker_channel(nonzero(8));
+        let (commands, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        commands
+            .send(MarketWorkerCommand::ResourceClass(
+                ConsumerResourceClass::Background,
+            ))
+            .expect("startup command queues");
+        let mut attempts = 0;
+
+        let result = connect_initial(
+            &messages,
+            &command_rx,
+            MAXIMUM_INITIAL_CONNECT_ATTEMPTS,
+            Duration::from_millis(1),
+            || {
+                attempts += 1;
+                match attempts {
+                    1 => Err("fixture engine absent".to_string()),
+                    2 => Err("fixture IPC registration failure".to_string()),
+                    _ => Ok(7_u8),
+                }
+            },
+        );
+
+        let InitialConnection::Connected {
+            session,
+            mut pending,
+        } = result
+        else {
+            panic!("delayed startup connects");
+        };
+        assert_eq!(session, 7);
+        assert_eq!(attempts, 3);
+        assert!(matches!(
+            pending.pop_front(),
+            Some(MarketWorkerCommand::ResourceClass(
+                ConsumerResourceClass::Background
+            ))
+        ));
+        assert!(pending.is_empty());
+        let (events, _) = receiver.drain();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    MarketWorkerMessage::Connection {
+                        state: FeedConnectionState::Recovering,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn initial_connection_exhaustion_is_terminal_and_bounded() {
+        let (messages, receiver) = market_worker_channel(nonzero(8));
+        let (_commands, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let mut attempts = 0;
+
+        let result = connect_initial(
+            &messages,
+            &command_rx,
+            MAXIMUM_INITIAL_CONNECT_ATTEMPTS,
+            Duration::ZERO,
+            || {
+                attempts += 1;
+                Err::<(), _>("fixture engine absent".to_string())
+            },
+        );
+
+        assert!(matches!(result, InitialConnection::Exhausted));
+        assert_eq!(attempts, MAXIMUM_INITIAL_CONNECT_ATTEMPTS.get());
+        let (events, _) = receiver.drain();
+        assert!(matches!(
+            events.last(),
+            Some(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Stopped,
+                message,
+            }) if message == "resident Rithmic engine is unavailable after bounded startup retries"
+        ));
+    }
+
+    #[test]
+    fn initial_connection_cancels_while_waiting_to_retry() {
+        let (messages, _receiver) = market_worker_channel(nonzero(8));
+        let (commands, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        commands
+            .send(MarketWorkerCommand::Shutdown)
+            .expect("shutdown queues");
+        let mut attempts = 0;
+
+        let result = connect_initial(
+            &messages,
+            &command_rx,
+            MAXIMUM_INITIAL_CONNECT_ATTEMPTS,
+            Duration::from_secs(1),
+            || {
+                attempts += 1;
+                Err::<(), _>("fixture engine absent".to_string())
+            },
+        );
+
+        assert!(matches!(result, InitialConnection::Shutdown));
+        assert_eq!(attempts, 1);
+    }
 }
