@@ -2782,7 +2782,7 @@ mod tests {
     }
 
     #[test]
-    fn account_gate_resumes_multiple_ipc_clients_and_consumers() {
+    fn account_gate_resumes_foreground_and_background_ipc_consumers() {
         let socket_name = socket_name("account-gate-multi-client");
         let listener = bind_listener(&socket_name).expect("bind multi-client endpoint");
         let token = [47_u8; 32];
@@ -2823,14 +2823,32 @@ mod tests {
         let series = cached_series(BTC_INSTRUMENT, 60);
         attach_ipc_consumers(&mut first, 61, &[601, 603], &series);
         attach_ipc_consumers(&mut second, 62, &[602], &series);
-        publish_fixture_multi_client_update(&harness, &mut first, &mut second, 1, "2.00", 200);
+        publish_fixture_multi_client_update(
+            &harness,
+            &mut first,
+            &mut second,
+            1,
+            "2.00",
+            200,
+            &[602],
+        );
+        second
+            .set_market_visibility(602, false)
+            .expect("second window moves to background");
+        second
+            .restore_workspace()
+            .expect("background transition synchronization fence");
 
         state.account().set_authenticated_for_test(false);
         expect_fixture_stop(&harness, 1);
         wait_for_resource_mode(&state, ResourceMode::OfflineSuspended);
         state.account().set_authenticated_for_test(true);
         wait_for_resource_mode(&state, ResourceMode::Warm);
-        publish_fixture_multi_client_update(&harness, &mut first, &mut second, 2, "2.50", 250);
+        publish_fixture_multi_client_update(&harness, &mut first, &mut second, 2, "2.50", 250, &[]);
+        second
+            .set_market_visibility(602, true)
+            .expect("second window returns to foreground");
+        poll_ipc_live_updates(&mut second, &[602], 2, 250);
 
         drop(first);
         drop(second);
@@ -2993,6 +3011,7 @@ mod tests {
         provider_generation: u64,
         price: &str,
         expected_close: i64,
+        second_consumers: &[u64],
     ) {
         assert_eq!(
             harness
@@ -3021,7 +3040,12 @@ mod tests {
             )))
             .expect("shared trade arrives");
         poll_ipc_live_updates(first, &[601, 603], provider_generation, expected_close);
-        poll_ipc_live_updates(second, &[602], provider_generation, expected_close);
+        poll_ipc_live_updates(
+            second,
+            second_consumers,
+            provider_generation,
+            expected_close,
+        );
     }
 
     fn expect_fixture_stop(harness: &FixtureRealtimeHarness, provider_generation: u64) {
