@@ -903,8 +903,11 @@ pub(super) fn account_menu_layer(
     let dismiss = terminal.clone();
     let action_terminal = terminal.clone();
     let presentation = &account.presentation;
-    let status = if presentation.detail.is_empty() {
-        format!("{} · {}", presentation.state, presentation.plan)
+    // The header names the session state; the single action row below owns
+    // the verb. Showing the action twice read as two sign-in buttons.
+    let title = presentation.state;
+    let subtitle = if presentation.detail.is_empty() {
+        presentation.plan.to_string()
     } else {
         presentation.detail.clone()
     };
@@ -947,13 +950,13 @@ pub(super) fn account_menu_layer(
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(gpui_color(colors.text_primary))
-                                .child(presentation.action),
+                                .child(title),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(gpui_color(colors.text_muted))
-                                .child(status),
+                                .child(subtitle),
                         ),
                 )
                 .child(account_menu_action(

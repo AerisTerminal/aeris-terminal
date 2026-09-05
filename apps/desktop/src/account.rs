@@ -210,7 +210,22 @@ struct AccountShared {
     error: Mutex<Option<String>>,
     last_status_poll: Mutex<Instant>,
     last_seen_version: Mutex<u64>,
+    request_at: Mutex<Instant>,
     requests: SyncSender<AccountRequest>,
+}
+
+/// Bounds how long one request may stay in flight. The engine answers every
+/// account command in about a second (discovery, bind, and reply are all
+/// bounded); the ten-minute browser wait happens engine-side afterwards.
+/// Anything longer is a wedged transport, never a slow login.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            elapsed.as_millis().try_into().unwrap_or(u64::MAX)
+        })
 }
 
 fn signed_out_view() -> AccountView {
@@ -275,15 +290,21 @@ impl DesktopAccount {
             .name("axiusflow-account-client".to_string())
             .spawn(move || run_account_client(&request_rx, &result_tx))
             .map_err(|_| "desktop account client could not start".to_string())?;
+        // Generations seed from the wall clock so a fresh desktop process
+        // always supersedes generations from a previous process lifetime.
+        // The resident engine outlives desktop restarts; restarting the
+        // counter at zero would make every first sign-in look retired.
+        let now = Instant::now();
         let shared = Arc::new(AccountShared {
             client_id,
-            generation: AtomicU64::new(0),
+            generation: AtomicU64::new(unix_millis()),
             pending: AtomicBool::new(false),
             version: AtomicU64::new(0),
             view: Mutex::new(signed_out_view()),
             error: Mutex::new(None),
-            last_status_poll: Mutex::new(Instant::now()),
+            last_status_poll: Mutex::new(now),
             last_seen_version: Mutex::new(0),
+            request_at: Mutex::new(now),
             requests: request_tx,
         });
         let poller = Arc::clone(&shared);
@@ -355,6 +376,9 @@ impl DesktopAccount {
             })
             .map_err(|_| "sign-in request is already pending".to_string())?;
         self.shared.pending.store(true, Ordering::Release);
+        if let Ok(mut sent) = self.shared.request_at.lock() {
+            *sent = Instant::now();
+        }
         if let Ok(mut error) = self.shared.error.lock() {
             error.take();
         }
@@ -394,6 +418,9 @@ impl DesktopAccount {
             .try_send(AccountRequest::SignOut)
             .map_err(|_| "an account request is already pending".to_string())?;
         self.shared.pending.store(true, Ordering::Release);
+        if let Ok(mut sent) = self.shared.request_at.lock() {
+            *sent = Instant::now();
+        }
         if let Ok(mut error) = self.shared.error.lock() {
             error.take();
         }
@@ -411,6 +438,21 @@ impl DesktopAccount {
         {
             *seen = version;
             changed = true;
+        }
+        if self.shared.pending.load(Ordering::Acquire) {
+            let expired = self
+                .shared
+                .request_at
+                .lock()
+                .is_ok_and(|sent| sent.elapsed() >= REQUEST_TIMEOUT);
+            if expired {
+                self.shared.pending.store(false, Ordering::Release);
+                if let Ok(mut slot) = self.shared.error.lock() {
+                    *slot = Some("account request timed out; try again".to_string());
+                }
+                self.shared.version.fetch_add(1, Ordering::AcqRel);
+                changed = true;
+            }
         }
         let authorizing = self
             .shared
@@ -620,5 +662,41 @@ mod tests {
         assert!(session.error().is_none());
         let menu = session.menu_state();
         assert_eq!(menu.presentation.action, "Sign in");
+    }
+
+    #[test]
+    fn generations_seed_from_the_wall_clock_for_engine_fencing() {
+        use super::unix_millis;
+        use std::sync::atomic::Ordering;
+
+        // A fresh process must supersede generations from a previous process
+        // lifetime: the resident engine outlives desktop restarts, and a
+        // counter restarted at zero would read as retired.
+        assert!(unix_millis() > 0);
+        let session = DesktopAccount::spawn(7).expect("isolated account session spawns");
+        assert!(session.shared.generation.load(Ordering::Acquire) > 0);
+    }
+
+    #[test]
+    fn stuck_requests_time_out_instead_of_blocking_forever() {
+        use super::REQUEST_TIMEOUT;
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let session = DesktopAccount::spawn(8).expect("isolated account session spawns");
+        session.shared.pending.store(true, Ordering::Release);
+        *session
+            .shared
+            .request_at
+            .lock()
+            .expect("request clock locks") = Instant::now()
+            .checked_sub(REQUEST_TIMEOUT + Duration::from_secs(1))
+            .expect("test clock rewinds");
+        assert!(session.poll());
+        assert!(!session.shared.pending.load(Ordering::Acquire));
+        assert_eq!(
+            session.error().as_deref(),
+            Some("account request timed out; try again")
+        );
     }
 }
