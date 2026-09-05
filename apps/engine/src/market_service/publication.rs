@@ -3,12 +3,12 @@ use super::{
     ClientId, ConsumerEvents, ConsumerId, Coordinator, DemandError, DemandWaiter, DepthLevel,
     EngineError, EngineFaultCode, FailureStage, GenerationId, IpcOrderBookLevel,
     IpcOrderBookSnapshot, IpcOrderBookState, IpcOrderFlowLevel, IpcOrderFlowSnapshot,
-    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, LocalHistoryError, MarketStream,
-    NonZeroU64, OrderBookRecoveryReason, OrderFlowAggressor, OrderFlowPublicationKind,
-    PersistenceState, ProviderConnectionState, ProviderGeneration, ProviderOrderBook,
-    ProviderState, REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState, SeriesState,
-    SeriesTailOperation, SeriesUpdateOperation, SyncSender, TrySendError, authorize_consumer,
-    chart_stream_requirements, envelope, ipc_bar, ipc_series,
+    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, LocalHistoryError, NonZeroU64,
+    OrderBookRecoveryReason, OrderFlowAggressor, OrderFlowPublicationKind, PersistenceState,
+    ProviderConnectionState, ProviderGeneration, ProviderOrderBook, ProviderState,
+    REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState, SeriesState, SeriesTailOperation,
+    SeriesUpdateOperation, SyncSender, TrySendError, authorize_consumer, envelope, ipc_bar,
+    ipc_series,
 };
 
 pub(super) fn fail_waiters(
@@ -637,7 +637,7 @@ impl Coordinator<'_> {
                     SeriesLoadState::Partial
                 } else if live
                     .get(series)
-                    .is_some_and(|live| live.connected && live.history_ready)
+                    .is_some_and(|live| live.connected && live.history.is_authoritative())
                 {
                     SeriesLoadState::Live
                 } else if engine.has_publication(*consumer_id) {
@@ -852,30 +852,6 @@ impl Coordinator<'_> {
         detail: Option<&str>,
     ) {
         self.broadcast_provider_for("rithmic", state, generation, detail);
-    }
-
-    pub(super) fn broadcast_series_state(&mut self, state: SeriesLoadState) {
-        for (consumer_id, events) in &mut self.events {
-            let Some(demand) = self.engine.current_demand(*consumer_id) else {
-                continue;
-            };
-            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
-            else {
-                continue;
-            };
-            if series.provider_id != "coinbase"
-                || !chart_stream_requirements(series).contains(MarketStream::Trades)
-            {
-                continue;
-            }
-            events.series_state = Some(series_state(
-                *consumer_id,
-                generation,
-                ipc_series(series),
-                state,
-                None,
-            ));
-        }
     }
 
     pub(super) fn broadcast_series_state_for(

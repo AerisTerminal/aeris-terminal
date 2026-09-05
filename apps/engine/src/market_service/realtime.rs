@@ -1,19 +1,19 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey,
     COINBASE_PROVIDER_GENERATION, CanonicalOrderBookState, CanonicalTrade,
-    CoinbaseRealtimeWorkerState, ConsumerId, Coordinator, DepthSnapshot, DepthSnapshotWatch,
-    Duration, FailureStage, FormingBar, HISTORY_BARS_PER_SERIES, HistoryRange, HistoryRequestKind,
-    InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, LIVE_EDGE_REPAIR_RETRY_DELAY,
-    LiveHandoff, LiveSeriesPublication, MAXIMUM_LIVE_EDGE_REPAIR_RETRIES,
-    MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream,
-    MarketTrade, NonZeroU64, NonZeroUsize, OrderBook, OrderBookApplyOutcome,
-    OrderBookRecoveryReason, Ordering, PendingLiveEdgeRepair, PersistenceState,
-    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderOrderBook,
-    ProviderRequest, ProviderRuntimeLifecycle, PublishedTailState, RealtimeControl, RealtimeEvent,
-    RealtimeProduct, RealtimeSource, Receiver, ResourceMode, RithmicCalendarPeriod,
-    RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff, RithmicRealtimeControl,
-    RithmicRealtimeEvent, RithmicSelection, SeriesLoadState, SyncSender, TrySendError, VecDeque,
-    chart_stream_requirements, coinbase_aggregator, coinbase_instrument_id,
+    CoinbaseHistoryReadiness, CoinbaseRealtimeWorkerState, ConsumerId, Coordinator, DepthSnapshot,
+    DepthSnapshotWatch, Duration, FailureStage, FormingBar, HISTORY_BARS_PER_SERIES, HistoryRange,
+    HistoryRequestKind, InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY,
+    LIVE_EDGE_REPAIR_RETRY_DELAY, LiveHandoff, LiveSeriesPublication,
+    MAXIMUM_LIVE_EDGE_REPAIR_RETRIES, MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS,
+    MarketBar, MarketStream, MarketTrade, NonZeroU64, NonZeroUsize, OrderBook,
+    OrderBookApplyOutcome, OrderBookRecoveryReason, Ordering, PendingLiveEdgeRepair,
+    PersistenceState, ProviderConnectionState, ProviderGeneration, ProviderHealth,
+    ProviderOrderBook, ProviderRequest, ProviderRuntimeLifecycle, PublishedTailState,
+    RealtimeControl, RealtimeEvent, RealtimeProduct, RealtimeSource, Receiver, ResourceMode,
+    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff,
+    RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection, SeriesLoadState, SyncSender,
+    TrySendError, VecDeque, chart_stream_requirements, coinbase_aggregator, coinbase_instrument_id,
     coinbase_live_edge_repair_range, coinbase_series_profile, current_unix_nanos, id, ipc_series,
     order_flow_payload, publish_state, series_state_with_persistence, series_update_message,
     snapshot_message, thread,
@@ -378,7 +378,7 @@ impl LiveHandoff {
             aggregator: coinbase_aggregator(profile)?,
             buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
             connected: false,
-            history_ready: false,
+            history: CoinbaseHistoryReadiness::Pending,
             dirty: false,
             published_completed: None,
         })
@@ -389,7 +389,7 @@ impl LiveHandoff {
         self.aggregator.reset();
         self.buffered.clear();
         self.connected = false;
-        self.history_ready = false;
+        self.history = CoinbaseHistoryReadiness::Pending;
         self.dirty = false;
         self.published_completed = None;
     }
@@ -401,7 +401,7 @@ impl LiveHandoff {
     /// the engine holds — including after a repair reseeded this aggregator from
     /// a longer window.
     pub(super) fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
-        if !self.connected || !self.history_ready || !self.dirty {
+        if !self.connected || !self.history.is_ready() || !self.dirty {
             return None;
         }
         let mut bars = self
@@ -1112,7 +1112,7 @@ impl Coordinator<'_> {
         let mut missing = Vec::new();
         for (series, live) in &mut self.live {
             live.connected = true;
-            if !live.history_ready {
+            if !live.history.is_ready() {
                 missing.push(series.clone());
             }
         }
@@ -1167,7 +1167,7 @@ impl Coordinator<'_> {
                 && live.connected
                 && live.aggregator.product_id() == trade.product_id
         }) {
-            if live.history_ready {
+            if live.history.is_ready() {
                 match live.aggregator.apply_trade(trade) {
                     Ok(Some(completed)) => {
                         if let Some(current) = live.aggregator.in_flight() {
@@ -1313,7 +1313,7 @@ impl Coordinator<'_> {
             .live
             .iter()
             .filter(|(_, live)| {
-                live.generation == generation && live.connected && !live.history_ready
+                live.generation == generation && live.connected && !live.history.is_ready()
             })
             .map(|(series, _)| series.clone())
             .collect::<Vec<_>>();
@@ -1370,7 +1370,7 @@ impl Coordinator<'_> {
             .engine
             .set_provider_health("coinbase", generation, ProviderHealth::Recovering);
         for live in self.live.values_mut() {
-            live.history_ready = false;
+            live.history = CoinbaseHistoryReadiness::Pending;
             live.dirty = false;
             live.published_completed = None;
             live.buffered.clear();
@@ -1387,7 +1387,7 @@ impl Coordinator<'_> {
     pub(super) fn provider_online_if_all_series_ready(&mut self) {
         if !self.realtime_connected
             || self.live.is_empty()
-            || self.live.values().any(|live| !live.history_ready)
+            || self.live.values().any(|live| !live.history.is_ready())
         {
             return;
         }
@@ -1396,14 +1396,32 @@ impl Coordinator<'_> {
             .engine
             .set_provider_health("coinbase", generation, ProviderHealth::Online);
         self.broadcast_provider(ProviderConnectionState::Online, generation, None);
-        self.broadcast_series_state(SeriesLoadState::Live);
+        let series = self.live.keys().cloned().collect::<Vec<_>>();
+        for series in series {
+            if self
+                .live
+                .get(&series)
+                .is_some_and(|live| !live.history.is_authoritative())
+            {
+                self.broadcast_series_resolution_for(
+                    &series,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Durable,
+                    Some(
+                        "The current Coinbase candle is provisional until its authoritative close",
+                    ),
+                );
+            } else {
+                self.broadcast_series_state_for(&series, SeriesLoadState::Live);
+            }
+        }
     }
 
     pub(super) fn series_live_if_ready(&mut self, series: &BarSeriesKey) -> bool {
         if !self
             .live
             .get(series)
-            .is_some_and(|live| live.connected && live.history_ready)
+            .is_some_and(|live| live.connected && live.history.is_authoritative())
         {
             return false;
         }
@@ -1514,7 +1532,7 @@ impl Coordinator<'_> {
         let Some(live) = self.live.get_mut(series) else {
             return;
         };
-        live.history_ready = false;
+        live.history = CoinbaseHistoryReadiness::Pending;
         live.dirty = false;
         live.published_completed = None;
         live.buffered.clear();

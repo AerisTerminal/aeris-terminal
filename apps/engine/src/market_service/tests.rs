@@ -2388,7 +2388,7 @@ fn empty_viewport_completion_cannot_hide_an_initialized_live_series() {
     let mut live = LiveHandoff::try_new(&series, generation, &coinbase_instrument(&series))
         .expect("live handoff");
     live.connected = true;
-    live.history_ready = true;
+    live.history = CoinbaseHistoryReadiness::Authoritative;
     coordinator.live.insert(series.clone(), live);
     let key = (series.clone(), generation);
 
@@ -4485,7 +4485,10 @@ fn provider_state_and_live_readiness_are_scoped_to_matching_consumers() {
         ProviderGeneration(NonZeroU64::MIN),
         Some("Coinbase fixture recovery"),
     );
-    coordinator.broadcast_series_state(SeriesLoadState::Live);
+    coordinator.broadcast_series_state_for(
+        &internal_series(&btc()).expect("BTC series"),
+        SeriesLoadState::Live,
+    );
     coordinator.broadcast_rithmic_provider(
         ProviderConnectionState::Online,
         rithmic_generation,
@@ -5478,6 +5481,22 @@ fn a_coinbase_page_served_after_bucket_roll_is_retried() {
 }
 
 #[test]
+fn coinbase_open_candle_replay_cutoff_comes_from_provider_bucket_identity() {
+    let cutoff = coinbase_handoff_replay_boundary(
+        CoinbaseInterval::Minute1,
+        600,
+        true,
+        true,
+        660_000_000_000,
+    )
+    .expect("replay cutoff");
+
+    assert_eq!(cutoff, 659_999_999_999);
+    assert!(10 * 60_000_000_000 + 59_000_000_000 <= cutoff);
+    assert!(11 * 60_000_000_000 + 1 > cutoff);
+}
+
+#[test]
 fn a_coinbase_bucket_roll_requests_authoritative_closed_ohlcv() {
     let (history_tx, history_rx) = mpsc::sync_channel(1);
     let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
@@ -5634,47 +5653,23 @@ fn coinbase_forming_bucket_is_absent_until_the_bucket_trades() {
 }
 
 #[test]
-fn coinbase_handoff_seeds_the_open_candle_and_replays_only_newer_trades() {
-    let mut engine = configured_engine().expect("engine configures");
-    let consumer_id = ConsumerId(id(1).expect("consumer"));
-    let series = internal_series(&btc()).expect("series");
-    let (history_tx, _history_rx) = mpsc::sync_channel(4);
+fn coinbase_handoff_keeps_ambiguous_open_bucket_trades_provisional() {
+    let (history_tx, history_rx) = mpsc::sync_channel(4);
     let (storage_tx, storage_rx) = mpsc::sync_channel(4);
     let (realtime_tx, _realtime_rx) = mpsc::sync_channel(4);
     let stop = Arc::new(AtomicBool::new(false));
-    engine
-        .register_consumer(
-            ConsumerIdentity {
-                client_id: ClientId(id(1).expect("client")),
-                workspace_id: WorkspaceId(id(1).expect("workspace")),
-                consumer_id,
-            },
-            true,
-        )
-        .expect("consumer registers");
-    let mut coordinator = retained_history_coordinator(
-        engine,
-        &history_tx,
-        &storage_tx,
-        &realtime_tx,
-        &stop,
-        consumer_id,
-        &series,
-    );
-    let instrument = coinbase_instrument(&series);
-    let mut live = LiveHandoff::try_new(
-        &series,
-        coordinator.coinbase_provider_generation(),
-        &instrument,
-    )
-    .expect("live handoff");
-    live.connected = true;
-    let boundary = 10 * 60_000_000_000 + 30_000_000_000;
+    let (mut coordinator, consumer_id, series) =
+        connected_coinbase_handoff_coordinator(&history_tx, &storage_tx, &realtime_tx, &stop);
+    let live = coordinator.live.get_mut(&series).expect("handoff exists");
+    // Coinbase does not report when it sampled its open candle. Both trades in
+    // minute 10 could already be in that aggregate even when one arrived after
+    // the client's response timestamp, so neither may be folded into it.
+    let boundary = 11 * 60_000_000_000 - 1;
     live.buffered.push_back(trade(10, "1.50", 1));
     let mut newer = trade(10, "3.00", 2);
-    newer.trade_time_unix_nanos = boundary + 1;
+    newer.trade_time_unix_nanos = 10 * 60_000_000_000 + 59_000_000_000;
     live.buffered.push_back(newer);
-    coordinator.live.insert(series.clone(), live);
+    live.buffered.push_back(trade(11, "4.00", 3));
 
     let expected_closed = coinbase_history(1, 9);
     let forming = MarketBar {
@@ -5697,35 +5692,120 @@ fn coinbase_handoff_seeds_the_open_candle_and_replays_only_newer_trades() {
             true,
         )
         .expect("history installs");
-    let initial = coordinator
-        .engine
-        .series_snapshot(&series)
-        .expect("open candle installs with history");
-    assert!(initial.forming);
-    assert_eq!(initial.bars.len(), expected_closed.len() + 1);
-    assert_eq!(
-        initial.bars.last(),
-        Some(&forming.as_ref().expect("forming").bar)
-    );
-    assert!(coordinator.complete_coinbase_live_handoff(&series, &closed, forming, Some(boundary),));
+    assert!(coordinator.complete_coinbase_live_handoff(
+        &series,
+        &closed,
+        forming,
+        Some(boundary),
+        true,
+    ));
 
     let live = coordinator.live.get_mut(&series).expect("handoff exists");
     let open = live
         .aggregator
         .in_flight()
-        .expect("the open candle is held");
-    assert_eq!(open.source_sequence, 11);
-    assert_eq!(open.exchange_timestamp_seconds, 600);
-    assert_eq!(open.open, 100);
-    assert_eq!(open.low, 90);
-    assert_eq!(open.close, 300);
-    assert_eq!(open.high, 300);
-    assert_eq!(open.volume, 6);
+        .expect("the next candle is held");
+    assert_eq!(
+        (open.source_sequence, open.close, open.volume),
+        (12, 400, 1)
+    );
+    let completed = live.aggregator.completed_after(10);
+    assert_eq!(completed.len(), 1);
+    assert_eq!((completed[0].close, completed[0].volume), (200, 5));
+    assert_eq!(live.history, CoinbaseHistoryReadiness::Provisional);
     assert_eq!(live.published_completed, Some(10));
+    coordinator.provider_online_if_all_series_ready();
+    assert!(matches!(
+        coordinator.events[&consumer_id].series_state,
+        Some(envelope::Payload::SeriesState(ref state))
+            if state.state == SeriesLoadState::Partial as i32
+                && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
+    ));
+    let repair = history_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cross-bucket buffered trade schedules authoritative repair");
+    assert_eq!(repair.kind, HistoryRequestKind::LiveEdgeRepair(0));
+    assert_eq!(
+        repair.range,
+        Some(HistoryRange {
+            start_unix_nanos: 600_000_000_000,
+            end_unix_nanos: 660_000_000_000,
+        })
+    );
+    let authoritative = MarketBar {
+        close: 250,
+        high: 250,
+        volume: 8,
+        ..completed[0]
+    };
+    coordinator.history_completed(
+        &series,
+        coordinator.coinbase_provider_generation(),
+        repair.range,
+        repair.kind,
+        Ok(backfill_snapshot(vec![authoritative])),
+    );
+    assert_eq!(
+        coordinator.live[&series].history,
+        CoinbaseHistoryReadiness::Authoritative
+    );
+    assert!(matches!(
+        coordinator.events[&consumer_id].series_state,
+        Some(envelope::Payload::SeriesState(ref state))
+            if state.state == SeriesLoadState::Live as i32
+    ));
     assert!(matches!(
         storage_rx.try_recv(),
         Ok(StorageRequest::Persist(_, _, ref bars, _, _, _)) if bars == &expected_closed
     ));
+}
+
+fn connected_coinbase_handoff_coordinator<'a>(
+    history: &'a SyncSender<HistoryRequest>,
+    storage: &'a SyncSender<StorageRequest>,
+    realtime: &'a SyncSender<RealtimeControl>,
+    stop: &'a Arc<AtomicBool>,
+) -> (Coordinator<'a>, ConsumerId, BarSeriesKey) {
+    let mut engine = configured_engine().expect("engine configures");
+    let consumer_id = ConsumerId(id(1).expect("consumer"));
+    let series = internal_series(&btc()).expect("series");
+    engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id: ClientId(id(1).expect("client")),
+                workspace_id: WorkspaceId(id(1).expect("workspace")),
+                consumer_id,
+            },
+            true,
+        )
+        .expect("consumer registers");
+    engine
+        .set_series_demand(
+            consumer_id,
+            GenerationId(id(1).expect("generation")),
+            &series,
+        )
+        .expect("series demand installs");
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        history,
+        storage,
+        realtime,
+        stop,
+        consumer_id,
+        &series,
+    );
+    let instrument = coinbase_instrument(&series);
+    let mut live = LiveHandoff::try_new(
+        &series,
+        coordinator.coinbase_provider_generation(),
+        &instrument,
+    )
+    .expect("live handoff");
+    live.connected = true;
+    coordinator.realtime_connected = true;
+    coordinator.live.insert(series.clone(), live);
+    (coordinator, consumer_id, series)
 }
 
 /// A not-yet-delivered append remains an append after same-candle coalescing.

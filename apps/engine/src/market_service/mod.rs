@@ -348,11 +348,30 @@ struct LiveHandoff {
     aggregator: CoinbaseBarAggregator,
     buffered: VecDeque<CanonicalTrade>,
     connected: bool,
-    history_ready: bool,
+    history: CoinbaseHistoryReadiness,
     dirty: bool,
     /// Highest sequence the canonical series already holds as a completed bar.
     /// Everything above it in the aggregator still has to be appended.
     published_completed: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoinbaseHistoryReadiness {
+    Pending,
+    /// Coinbase candles expose no trade watermark. The first open candle stays
+    /// provisional until it closes and a provider repair replaces it.
+    Provisional,
+    Authoritative,
+}
+
+impl CoinbaseHistoryReadiness {
+    const fn is_ready(self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+
+    const fn is_authoritative(self) -> bool {
+        matches!(self, Self::Authoritative)
+    }
 }
 
 struct RithmicLiveHandoff {
@@ -686,7 +705,9 @@ struct LiveCoinbaseRealtime {
 mod runtime;
 use runtime::join_runtime_workers;
 #[cfg(test)]
-use runtime::{coinbase_history_edge_is_current, forming_coinbase_bucket};
+use runtime::{
+    coinbase_handoff_replay_boundary, coinbase_history_edge_is_current, forming_coinbase_bucket,
+};
 
 mod storage;
 use storage::spawn_storage_worker;

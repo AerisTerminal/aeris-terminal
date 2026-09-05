@@ -1,12 +1,12 @@
 use super::{
     ActiveViewport, ActiveWorkerGuard, Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod,
     BarSeriesKey, COINBASE_PROVIDER_GENERATION, COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseBarAggregator,
-    CoinbaseBarAggregatorConfig, CoinbaseInterval, Command, ConsumerId, Coordinator,
-    CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, Entry, FailureStage, FormingBar,
-    GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest,
-    HistoryRequestKind, HistorySnapshot, HistorySource, HotSeries, HotSetManager, HotSetTier,
-    InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MarketBar, Mutex,
-    NonZeroU64, NonZeroUsize, Ordering, PersistenceState, ProviderCatalogCommand,
+    CoinbaseBarAggregatorConfig, CoinbaseHistoryReadiness, CoinbaseInterval, Command, ConsumerId,
+    Coordinator, CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, Entry, FailureStage,
+    FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_RETRY_DELAY, HistoryRange,
+    HistoryRequest, HistoryRequestKind, HistorySnapshot, HistorySource, HotSeries, HotSetManager,
+    HotSetTier, InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES,
+    MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering, PersistenceState, ProviderCatalogCommand,
     ProviderConnectionState, ProviderGeneration, ProviderRequest,
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, ResourceMode, RithmicHandoffSeed,
     SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
@@ -733,7 +733,10 @@ impl Coordinator<'_> {
         snapshot: &Arc<axiusflow_market_engine::SeriesSnapshot>,
     ) -> Result<bool, String> {
         let coinbase_live = series.provider_id != "coinbase"
-            || self.live.get(series).is_some_and(|live| live.history_ready);
+            || self
+                .live
+                .get(series)
+                .is_some_and(|live| live.history.is_ready());
         let needs_covering_repair = snapshot.provider_generation != provider_generation
             || self.prewarmed.remove(series)
             || !coinbase_live;
@@ -1152,8 +1155,12 @@ impl Coordinator<'_> {
         bars: &[MarketBar],
         forming: Option<FormingBar>,
         handoff_boundary_unix_nanos: Option<i64>,
+        provisional_edge: bool,
     ) -> bool {
-        let already_live = self.live.get(series).is_some_and(|live| live.history_ready);
+        let already_live = self
+            .live
+            .get(series)
+            .is_some_and(|live| live.history.is_ready());
         if already_live {
             self.resync_coinbase_live(series);
             return true;
@@ -1179,12 +1186,25 @@ impl Coordinator<'_> {
             None => live.aggregator.seed_history(bars),
         };
         let boundary = handoff_boundary_unix_nanos.unwrap_or(i64::MIN);
-        if seeded.is_err()
-            || buffered
+        let mut rolled = Vec::new();
+        let replay_failed = if seeded.is_ok() {
+            buffered
                 .iter()
                 .filter(|trade| trade.trade_time_unix_nanos > boundary)
-                .any(|trade| live.aggregator.apply_trade(trade).is_err())
-        {
+                .any(|trade| match live.aggregator.apply_trade(trade) {
+                    Ok(Some(completed)) => {
+                        if let Some(current) = live.aggregator.in_flight() {
+                            rolled.push((completed, current));
+                        }
+                        false
+                    }
+                    Ok(None) => false,
+                    Err(_) => true,
+                })
+        } else {
+            false
+        };
+        if seeded.is_err() || replay_failed {
             self.realtime_interrupted(
                 FailureStage::Handoff,
                 "Coinbase history/live handoff failed",
@@ -1192,11 +1212,19 @@ impl Coordinator<'_> {
             return false;
         }
         live.connected = connected;
-        live.history_ready = true;
+        live.history = if provisional_edge {
+            CoinbaseHistoryReadiness::Provisional
+        } else {
+            CoinbaseHistoryReadiness::Authoritative
+        };
         live.dirty = live.aggregator.in_flight().is_some();
         // The series holds every seeded bar as completed, so only what the
         // aggregator opens after the handoff still needs appending.
         live.published_completed = bars.last().map(|bar| bar.source_sequence);
+        let generation = live.generation;
+        for (completed, current) in rolled {
+            self.schedule_coinbase_live_edge_repair(series, generation, &completed, &current);
+        }
         true
     }
 
@@ -1584,9 +1612,20 @@ impl Coordinator<'_> {
             }
             return;
         };
-        if !self.complete_coinbase_live_handoff(series, &bars, forming, handoff_boundary_unix_nanos)
-        {
+        let provisional_edge = kind == HistoryRequestKind::Initial && forming.is_some();
+        if !self.complete_coinbase_live_handoff(
+            series,
+            &bars,
+            forming,
+            handoff_boundary_unix_nanos,
+            provisional_edge,
+        ) {
             return;
+        }
+        if matches!(kind, HistoryRequestKind::LiveEdgeRepair(_))
+            && let Some(live) = self.live.get_mut(series)
+        {
+            live.history = CoinbaseHistoryReadiness::Authoritative;
         }
         // Fold the seeded/replayed open candle into the queued covering image
         // before `Live` can uncover the chart. `ConsumerEvents` coalesces this
@@ -1594,7 +1633,9 @@ impl Coordinator<'_> {
         // one current image instead of a history paint followed by a burst.
         self.publish_live();
         self.pending.remove(series);
-        self.series_live_if_ready(series);
+        if !self.series_live_if_ready(series) {
+            self.provider_online_if_all_series_ready();
+        }
         if let Err(error) = self.record_coinbase_history_coverage(series, &bars) {
             self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
         }

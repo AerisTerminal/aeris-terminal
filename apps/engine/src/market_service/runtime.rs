@@ -119,12 +119,11 @@ impl HistorySource for LiveCoinbaseHistory {
             continuation: None,
         };
         let batch = self.adapter.fetch_paginated(&request)?;
-        // The provider built this page at some instant no later than now, so
-        // every trade the socket delivers after this point is definitely absent
-        // from it. Taking the boundary *after* the response — rather than the
-        // request's own end — is what keeps the buffered replay from counting a
-        // trade the forming candle already contains.
-        let served_at_unix_nanos = coinbase_history_handoff_boundary(
+        // This local timestamp detects a request that visibly crossed a bucket
+        // boundary. It is not a provider coverage watermark: Coinbase candles
+        // expose no such watermark, and response latency or clock skew cannot
+        // establish which buffered trades the open candle already contains.
+        validate_coinbase_history_response_bucket(
             profile.interval,
             live_edge_seconds,
             kind == HistoryRequestKind::Initial,
@@ -157,15 +156,13 @@ impl HistorySource for LiveCoinbaseHistory {
             } else {
                 None
             };
-        let handoff_boundary_unix_nanos = if forming.is_some() {
-            served_at_unix_nanos
-        } else if kind == HistoryRequestKind::Initial {
-            live_edge_seconds
-                .saturating_mul(1_000_000_000)
-                .saturating_sub(1)
-        } else {
-            range.end_unix_nanos
-        };
+        let handoff_boundary_unix_nanos = coinbase_handoff_replay_boundary(
+            profile.interval,
+            live_edge_seconds,
+            forming.is_some(),
+            kind == HistoryRequestKind::Initial,
+            range.end_unix_nanos,
+        )?;
         Ok(HistorySnapshot {
             price_scale: profile.price_scale,
             quantity_scale: profile.quantity_scale,
@@ -177,11 +174,34 @@ impl HistorySource for LiveCoinbaseHistory {
     }
 }
 
-fn coinbase_history_handoff_boundary(
+pub(super) fn coinbase_handoff_replay_boundary(
+    interval: CoinbaseInterval,
+    live_edge_seconds: i64,
+    has_forming: bool,
+    initial: bool,
+    requested_end_unix_nanos: i64,
+) -> Result<i64, String> {
+    if has_forming {
+        // The whole open candle overlaps the websocket buffer ambiguously. Keep
+        // the provider aggregate provisional and replay only later buckets.
+        return interval
+            .shift_bucket(live_edge_seconds, 1)
+            .map(|next| next.saturating_mul(1_000_000_000).saturating_sub(1));
+    }
+    Ok(if initial {
+        live_edge_seconds
+            .saturating_mul(1_000_000_000)
+            .saturating_sub(1)
+    } else {
+        requested_end_unix_nanos
+    })
+}
+
+fn validate_coinbase_history_response_bucket(
     interval: CoinbaseInterval,
     requested_edge_seconds: i64,
     initial: bool,
-) -> Result<i64, String> {
+) -> Result<(), String> {
     let served_at_unix_nanos = current_unix_nanos()?;
     if initial
         && !coinbase_history_edge_is_current(
@@ -192,7 +212,7 @@ fn coinbase_history_handoff_boundary(
     {
         return Err("Coinbase current history crossed a candle boundary; retrying".to_string());
     }
-    Ok(served_at_unix_nanos)
+    Ok(())
 }
 
 pub(super) fn coinbase_history_edge_is_current(
