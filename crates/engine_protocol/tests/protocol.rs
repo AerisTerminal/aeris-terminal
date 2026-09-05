@@ -59,9 +59,42 @@ fn account_payloads() -> Vec<envelope::Payload> {
             plan_id: "pro".into(),
             detail: "active".into(),
             request_generation: 3,
+            display_name: "Ada Trader".into(),
+            email: "ada@example.com".into(),
+            photo_url: "https://auth.axiusflow.com/photo/ada.png".into(),
         }),
         envelope::Payload::SignOut(SignOut {}),
     ]
+}
+
+#[test]
+fn account_profile_fields_round_trip_and_default_empty() {
+    use prost::Message as _;
+    let view = AccountView {
+        state: AccountSessionState::Active as i32,
+        account_id: "acct_01".into(),
+        plan_id: "pro".into(),
+        detail: "active".into(),
+        request_generation: 3,
+        display_name: "Ada Trader".into(),
+        email: "ada@example.com".into(),
+        photo_url: "https://auth.axiusflow.com/photo/ada.png".into(),
+    };
+    let decoded = AccountView::decode(view.encode_to_vec().as_slice()).expect("view decodes");
+    assert_eq!(decoded, view);
+    // Pre-profile peers omit tags 6-8: profile defaults empty, identity
+    // and plan still decode. The wire stays compatible at version 18.
+    let legacy = AccountView {
+        display_name: String::new(),
+        email: String::new(),
+        photo_url: String::new(),
+        ..view.clone()
+    };
+    let legacy_bytes = legacy.encode_to_vec();
+    assert!(legacy_bytes.len() < view.encode_to_vec().len());
+    let relaid = AccountView::decode(legacy_bytes.as_slice()).expect("legacy view decodes");
+    assert_eq!(relaid.display_name, "");
+    assert_eq!(relaid.account_id, "acct_01");
 }
 
 #[test]

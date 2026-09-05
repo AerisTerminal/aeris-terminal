@@ -12,6 +12,12 @@ use std::error::Error;
 pub const MAXIMUM_ACCOUNT_ID_BYTES: usize = 128;
 /// Maximum redacted detail length carried in a sanitized account view.
 pub const MAXIMUM_ACCOUNT_DETAIL_BYTES: usize = 256;
+/// Maximum display-name length carried in a sanitized account view.
+pub const MAXIMUM_PROFILE_NAME_BYTES: usize = 128;
+/// Maximum email length carried in a sanitized account view.
+pub const MAXIMUM_PROFILE_EMAIL_BYTES: usize = 320;
+/// Maximum photo-URL length carried in a sanitized account view.
+pub const MAXIMUM_PROFILE_PHOTO_URL_BYTES: usize = 2048;
 /// Entitlement lease schema version understood by this release.
 pub const LEASE_SCHEMA_VERSION: u32 = 1;
 /// Audience the control plane mints leases for.

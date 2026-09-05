@@ -1848,5 +1848,21 @@ mod tests {
                 "account protocol must carry no tokens or vendor payloads ({secret})"
             );
         }
+        // Profile display fields are additive tags on the sanitized view:
+        // identity and plan tags stay pinned, and the desktop never sends
+        // profile content back across the boundary.
+        for profile_tag in [
+            "pub display_name: String",
+            "pub email: String",
+            "pub photo_url: String",
+            "tag = \"6\"",
+            "tag = \"7\"",
+            "tag = \"8\"",
+        ] {
+            assert!(
+                account.contains(profile_tag),
+                "account protocol lost profile field {profile_tag}"
+            );
+        }
     }
 }

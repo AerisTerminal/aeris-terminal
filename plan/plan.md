@@ -2201,3 +2201,32 @@ pushed, website 3062260 pushed, auth Worker redeployed):
   once RESEND_API_KEY is real) to verify callback, link, lease,
   restart persistence, active-session sign-out, and the authenticated
   menu visually; confirm avatar-left placement and menu states by eye.
+
+Batch 9 - first-login account creation plus verified profile (2026-09-05):
+
+- Server link auto-creates the canonical Starter account on first login:
+  conflict-safe insert plus reread, so repeats and concurrent sign-ins
+  converge on one row and paid plans are never overwritten. Returns the
+  verified user record (name, email, photo) alongside account and plan;
+  desktop input is never trusted. SQL proven against local D1 (create,
+  converge, plan preservation, profile shape, cleanup); typecheck clean;
+  deployed; live bad-proof 401 and empty-body 422 verified.
+- AccountView carries display_name, email, photo_url (prost tags 6-8,
+  wire-compatible at protocol 18); round-trip plus legacy-default tests,
+  profile tags pinned in naming_check. Domain bounds 128/320/2048 with
+  char-boundary clipping in the link path.
+- Engine sets Active only after exchange, link, and vault storage all
+  succeed; profile assigns atomically with the view under generation
+  fencing. Sign-out, cancel, expiry, and every failure clear the profile;
+  retired completions and account switches cannot carry profile over.
+  Callback page now reads Authorization received, never success.
+- Desktop avatar shows verified initials with the https photo overlaid
+  via GPUI remote image loading (async, cached by URI); loading or
+  failure paints nothing so initials always show. Dropdown shows name,
+  email, plan with offline marker, plus Sign out.
+- Gates: fmt, workspace clippy, build, and tests all green (naming_check
+  suite 40 pass; binary main still fails on pre-existing font names).
+- Release desktop+engine rebuilt and running from target/release.
+- Still maintainer-side: one real browser login to verify first-login
+  Starter creation, profile display, restart persistence, and sign-out;
+  email OTP needs a real RESEND_API_KEY, Google needs the click.

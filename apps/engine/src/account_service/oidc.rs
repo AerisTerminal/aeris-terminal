@@ -318,10 +318,24 @@ pub fn refresh_grant(
     })
 }
 
+/// Server-verified profile attached to one linked session. Values come from
+/// the control-plane user record only; the desktop never supplies identity
+/// proof, and the engine never logs these values.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccountProfile {
+    /// Display name; empty when the user record has none.
+    pub display_name: String,
+    /// Email; empty when the user record has none.
+    pub email: String,
+    /// Photo URL; empty when absent. The desktop renders only `https` URLs.
+    pub photo_url: String,
+}
+
 /// Links one verified OIDC subject to the canonical Axiusflow account.
 ///
 /// The ID token travels as the proof: the control plane verifies it
-/// server-side and never trusts the client-claimed subject.
+/// server-side and never trusts the client-claimed subject. The verified
+/// user record travels back as the session profile.
 ///
 /// # Errors
 ///
@@ -331,7 +345,7 @@ pub fn link_subject(
     endpoints: &OidcEndpoints,
     id_token: &str,
     subject: &str,
-) -> Result<(AccountId, PlanId), String> {
+) -> Result<(AccountId, PlanId, AccountProfile), String> {
     let agent = oidc_agent();
     let body = format!(
         "{{\"subject\":\"{}\",\"id_token\":\"{}\"}}",
@@ -347,13 +361,40 @@ pub fn link_subject(
     let link: LinkResponse = response
         .body_mut()
         .with_config()
-        .limit(4096)
+        .limit(16_384)
         .read_json()
         .map_err(|_| "account linking failed; retry sign-in".to_string())?;
     let account_id =
         AccountId::try_new(link.account_id).map_err(|_| "account linking failed".to_string())?;
     let plan = PlanId::try_parse(&link.plan).map_err(|_| "account linking failed".to_string())?;
-    Ok((account_id, plan))
+    Ok((
+        account_id,
+        plan,
+        AccountProfile {
+            display_name: clip_profile(
+                &link.display_name,
+                axiusflow_account::MAXIMUM_PROFILE_NAME_BYTES,
+            ),
+            email: clip_profile(&link.email, axiusflow_account::MAXIMUM_PROFILE_EMAIL_BYTES),
+            photo_url: clip_profile(
+                &link.photo_url,
+                axiusflow_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
+            ),
+        },
+    ))
+}
+
+/// Clips server profile text to the IPC bound on a character boundary.
+/// Overlong values truncate; they never fail the link.
+fn clip_profile(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_string();
+    }
+    let mut end = maximum_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 pub(crate) fn oidc_agent() -> ureq::Agent {
@@ -379,6 +420,12 @@ struct LinkResponse {
     account_id: String,
     #[serde(default)]
     plan: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    photo_url: String,
 }
 
 #[derive(Deserialize)]
@@ -628,6 +675,24 @@ mod tests {
         );
         assert!(control_plane_origin("https://auth.axiusflow.com").is_err());
         assert!(control_plane_origin("http://auth.axiusflow.com/api/auth").is_err());
+    }
+
+    #[test]
+    fn profile_text_clips_on_character_boundaries() {
+        assert_eq!(super::clip_profile("Ada", 128), "Ada");
+        let long = "a".repeat(200);
+        assert_eq!(super::clip_profile(&long, 128).len(), 128);
+        // Multibyte names never split a character: the bound is bytes, the
+        // cut is a boundary.
+        let emoji = "😀".repeat(40);
+        let clipped = super::clip_profile(&emoji, 128);
+        assert!(clipped.len() <= 128);
+        assert_eq!(clipped.chars().count(), 32);
+        assert_eq!(
+            super::clip_profile("", 128),
+            String::new(),
+            "missing profile stays empty, never fails"
+        );
     }
 
     #[test]

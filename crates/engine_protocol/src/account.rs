@@ -65,7 +65,9 @@ pub struct LoginAuthorization {
 }
 
 /// Sanitized account state safe for desktop rendering. Carries no secret
-/// material, contact details, vendor identifiers, or purchase records.
+/// material, vendor identifiers, or purchase records. Profile display fields
+/// come from the control-plane user record verified at link time; the
+/// desktop never supplies identity proof, only renders it.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct AccountView {
     /// Current session state.
@@ -83,4 +85,13 @@ pub struct AccountView {
     /// Latest login-request generation observed by the engine.
     #[prost(uint64, tag = "5")]
     pub request_generation: u64,
+    /// Display name from the verified user record; empty when unknown.
+    #[prost(string, tag = "6")]
+    pub display_name: String,
+    /// Email from the verified user record; empty when unknown.
+    #[prost(string, tag = "7")]
+    pub email: String,
+    /// Photo URL from the verified user record; empty when absent.
+    #[prost(string, tag = "8")]
+    pub photo_url: String,
 }

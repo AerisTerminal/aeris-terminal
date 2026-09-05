@@ -812,15 +812,21 @@ pub(super) fn settings_toggle_row(
         )
 }
 
-/// Circular account avatar for the header toolbar. A primitive person glyph
-/// keeps the button asset-free: signed-out sessions render muted, signed-in
-/// sessions render in primary tones with a presence dot for session state.
+/// Circular account avatar for the header toolbar. Signed-out sessions keep
+/// the asset-free muted person glyph; signed-in sessions render verified
+/// initials with the profile photo overlaid when the user record has one.
+/// The photo loads asynchronously through GPUI's image cache: while loading
+/// or on failure the element paints nothing and the initials underneath
+/// stay visible, so image faults never break authentication or the avatar.
+/// Stale loads cannot win: the source derives from the current photo URL
+/// every frame, and the cache keys by URI.
 pub(super) fn account_avatar_button(
     terminal: &Entity<TerminalApp>,
     account: &axiusflow_desktop::account::AccountMenuState,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
+    let presentation = &account.presentation;
     let presence = if account.signed_in() {
         colors.bullish
     } else if account.authorizing() {
@@ -828,16 +834,10 @@ pub(super) fn account_avatar_button(
     } else {
         colors.text_muted
     };
-    let glyph = if account.signed_in() {
-        colors.text_primary
-    } else {
-        colors.text_muted
-    };
-    let tooltip = if account.signed_in() {
-        format!(
-            "Account — {} · {}",
-            account.presentation.state, account.presentation.plan
-        )
+    let tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
+        format!("Account — {}", presentation.display_name)
+    } else if account.signed_in() {
+        format!("Account — {} · {}", presentation.state, presentation.plan)
     } else {
         "Account — Sign in".to_string()
     };
@@ -851,10 +851,8 @@ pub(super) fn account_avatar_button(
             .size(px(28.0))
             .flex_none()
             .flex()
-            .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(2.0))
             .rounded_full()
             .border_1()
             .border_color(gpui_color(colors.border_secondary))
@@ -868,14 +866,7 @@ pub(super) fn account_avatar_button(
                 });
                 cx.stop_propagation();
             })
-            .child(div().size(px(7.0)).rounded_full().bg(gpui_color(glyph)))
-            .child(
-                div()
-                    .w(px(14.0))
-                    .h(px(6.0))
-                    .rounded_t(px(7.0))
-                    .bg(gpui_color(glyph)),
-            )
+            .child(account_avatar_face(account, theme))
             .child(
                 div()
                     .absolute()
@@ -889,6 +880,59 @@ pub(super) fn account_avatar_button(
             ),
         theme,
     )
+}
+
+fn account_avatar_face(
+    account: &axiusflow_desktop::account::AccountMenuState,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    if !account.signed_in() {
+        let glyph = colors.text_muted;
+        return div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(2.0))
+            .child(div().size(px(7.0)).rounded_full().bg(gpui_color(glyph)))
+            .child(
+                div()
+                    .w(px(14.0))
+                    .h(px(6.0))
+                    .rounded_t(px(7.0))
+                    .bg(gpui_color(glyph)),
+            )
+            .into_any_element();
+    }
+    let presentation = &account.presentation;
+    div()
+        .relative()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(gpui_color(colors.text_primary))
+                .child(axiusflow_desktop::account::profile_initials(
+                    &presentation.display_name,
+                    &presentation.email,
+                )),
+        )
+        .children(
+            axiusflow_desktop::account::has_profile_photo(&presentation.photo_url).then(|| {
+                img(presentation.photo_url.as_str())
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .rounded_full()
+                    .object_fit(ObjectFit::Cover)
+            }),
+        )
+        .into_any_element()
 }
 
 /// Account dropdown anchored under the header avatar. The panel opens below
@@ -907,22 +951,15 @@ pub(super) fn account_menu_layer(
     let colors = theme.colors;
     let dismiss = terminal.clone();
     let action_terminal = terminal.clone();
-    let presentation = &account.presentation;
-    // The header names the session state; the action rows below own the
-    // verbs. Showing the action twice read as two sign-in buttons.
-    let title = presentation.state;
-    let subtitle = if presentation.detail.is_empty() {
-        presentation.plan.to_string()
-    } else {
-        presentation.detail.clone()
-    };
     let header_bottom = theme.dimensions.app_header_height.logical_pixels + ACCOUNT_MENU_GAP;
     let anchor = anchor.unwrap_or(point(px(OVERLAY_EDGE_MARGIN), px(header_bottom)));
+    // Signed-in sessions show name, email, and plan: three header rows.
+    let header_rows = if account.signed_in() { 3.0 } else { 2.0 };
     let origin = clamp_overlay_origin(
         point(anchor.x, px(header_bottom)),
         viewport,
         CHART_SETTINGS_MENU_WIDTH,
-        5.0,
+        3.0 + header_rows,
         2.0,
     );
     div()
@@ -941,28 +978,7 @@ pub(super) fn account_menu_layer(
         })
         .child(
             compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
-                .children((!account.hides_identity()).then(|| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .pt_2()
-                        .pb_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(gpui_color(colors.text_primary))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(gpui_color(colors.text_muted))
-                                .child(subtitle),
-                        )
-                }))
+                .children(account_menu_header(account, theme))
                 .children(account_menu_actions(&action_terminal, account, theme))
                 .children(account.error.as_deref().map(|error| {
                     div()
@@ -974,6 +990,91 @@ pub(super) fn account_menu_layer(
                 })),
         )
         .into_any_element()
+}
+
+/// Dropdown header for the account panel. Signed-in sessions show the
+/// verified name, email, and plan (with an offline marker on a cached
+/// lease); other visible states name themselves with their detail. A plain
+/// signed-out session shows no header: only the Sign in action renders.
+fn account_menu_header(
+    account: &axiusflow_desktop::account::AccountMenuState,
+    theme: &AxiusflowTheme,
+) -> Option<AnyElement> {
+    let colors = theme.colors;
+    let presentation = &account.presentation;
+    if account.signed_in() {
+        let name = if presentation.display_name.is_empty() {
+            presentation.state.to_string()
+        } else {
+            presentation.display_name.clone()
+        };
+        let plan = if account.offline() {
+            format!("{} · offline", presentation.plan)
+        } else {
+            presentation.plan.to_string()
+        };
+        return Some(
+            div()
+                .flex()
+                .flex_col()
+                .px_3()
+                .pt_2()
+                .pb_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(gpui_color(colors.text_primary))
+                        .child(name),
+                )
+                .children((!presentation.email.is_empty()).then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child(presentation.email.clone())
+                }))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child(plan),
+                )
+                .into_any_element(),
+        );
+    }
+    if account.hides_identity() {
+        return None;
+    }
+    // The state names the session; the action rows below own the verbs.
+    // Showing the action twice read as two sign-in buttons.
+    let subtitle = if presentation.detail.is_empty() {
+        presentation.plan.to_string()
+    } else {
+        presentation.detail.clone()
+    };
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .pt_2()
+            .pb_1()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(gpui_color(colors.text_primary))
+                    .child(presentation.state),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(gpui_color(colors.text_muted))
+                    .child(subtitle),
+            )
+            .into_any_element(),
+    )
 }
 
 #[derive(Clone, Copy)]

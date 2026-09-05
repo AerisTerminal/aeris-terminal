@@ -118,8 +118,48 @@ pub fn unavailable_presentation() -> AccountPresentation {
         state: "Sign-in unavailable",
         plan: "No plan",
         detail: String::new(),
+        display_name: String::new(),
+        email: String::new(),
+        photo_url: String::new(),
         pending: false,
     }
+}
+
+/// Derives avatar initials from the verified profile. The first
+/// alphanumeric character of up to two name parts wins; the email local
+/// part backs it up. Never empty, so the avatar always has content when
+/// the photo is absent or fails to load.
+#[must_use]
+pub fn profile_initials(display_name: &str, email: &str) -> String {
+    let mut initials = String::new();
+    for part in display_name.split_whitespace() {
+        if let Some(first) = part.chars().find(|ch| ch.is_alphanumeric()) {
+            initials.push(first);
+            if initials.chars().count() >= 2 {
+                break;
+            }
+        }
+    }
+    if initials.is_empty() {
+        let local = email.split('@').next().unwrap_or("");
+        for first in local.chars().filter(|ch| ch.is_alphanumeric()).take(2) {
+            initials.push(first);
+        }
+    }
+    if initials.is_empty() {
+        initials.push('A');
+    }
+    initials.to_uppercase()
+}
+
+/// Returns whether a profile photo URL is renderable. Only `https` URLs
+/// reach the image loader; anything else falls back to initials.
+#[must_use]
+pub fn has_profile_photo(photo_url: &str) -> bool {
+    !photo_url.is_empty()
+        && photo_url.len() <= 2048
+        && photo_url.starts_with("https://")
+        && !photo_url.contains([' ', '\n', '\r', '\t'])
 }
 
 /// Owned settings-menu state for one account session.
@@ -142,6 +182,13 @@ impl AccountMenuState {
     #[must_use]
     pub fn authorizing(&self) -> bool {
         self.presentation.action == "Waiting for browser"
+    }
+
+    /// Returns whether the session is signed in on a cached lease.
+    #[must_use]
+    pub fn offline(&self) -> bool {
+        self.signed_in()
+            && self.presentation.state == account_state_label(AccountSessionState::OfflineLease)
     }
 
     /// Returns whether the panel hides identity metadata. A plain
@@ -208,6 +255,12 @@ pub struct AccountPresentation {
     pub plan: &'static str,
     /// Redacted engine detail for the settings row.
     pub detail: String,
+    /// Verified display name; empty unless signed in.
+    pub display_name: String,
+    /// Verified email; empty unless signed in.
+    pub email: String,
+    /// Verified photo URL; empty unless signed in with a photo.
+    pub photo_url: String,
     /// Whether an IPC request is in flight.
     pub pending: bool,
 }
@@ -247,6 +300,9 @@ fn signed_out_view() -> AccountView {
         plan_id: String::new(),
         detail: String::new(),
         request_generation: 0,
+        display_name: String::new(),
+        email: String::new(),
+        photo_url: String::new(),
     }
 }
 
@@ -356,6 +412,9 @@ impl DesktopAccount {
             ),
             plan: sanitized_plan_label(&view.plan_id),
             detail: view.detail.clone(),
+            display_name: view.display_name.clone(),
+            email: view.email.clone(),
+            photo_url: view.photo_url.clone(),
             pending: self.shared.pending.load(Ordering::Acquire),
         }
     }
@@ -631,6 +690,9 @@ mod tests {
             plan_id: String::new(),
             detail: String::new(),
             request_generation: 1,
+            display_name: String::new(),
+            email: String::new(),
+            photo_url: String::new(),
         }
     }
 
@@ -713,6 +775,9 @@ mod tests {
             state,
             plan: "No plan",
             detail: String::new(),
+            display_name: String::new(),
+            email: String::new(),
+            photo_url: String::new(),
             pending: false,
         };
         // Plain signed out: only the Sign in row (plus any error) renders.
@@ -747,6 +812,81 @@ mod tests {
             };
             assert!(!menu.hides_identity(), "state must stay visible: {state}");
         }
+    }
+
+    #[test]
+    fn initials_fall_back_from_name_to_email_to_placeholder() {
+        use super::profile_initials;
+
+        assert_eq!(profile_initials("Ada Trader", "ada@example.com"), "AT");
+        assert_eq!(profile_initials("Ada", "ada@example.com"), "A");
+        assert_eq!(profile_initials("  ada   trader  ", "x@y.z"), "AT");
+        assert_eq!(profile_initials("", "ada@example.com"), "AD");
+        assert_eq!(profile_initials("", "b.o.b@example.com"), "BO");
+        assert_eq!(profile_initials("", ""), "A");
+        assert_eq!(profile_initials("123 456", ""), "14");
+        // Initials never come back empty: the avatar always has content
+        // when the photo is absent or fails to load.
+        for (name, email) in [("", ""), (" - ", ""), ("", "@")] {
+            assert!(!profile_initials(name, email).is_empty());
+        }
+    }
+
+    #[test]
+    fn only_https_photos_reach_the_image_loader() {
+        use super::has_profile_photo;
+
+        assert!(has_profile_photo("https://auth.axiusflow.com/photo/a.png"));
+        assert!(has_profile_photo(
+            "https://lh3.googleusercontent.com/a/photo?x=1&y=2"
+        ));
+        for bad in [
+            "",
+            "http://auth.axiusflow.com/photo/a.png",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://auth.axiusflow.com/has space",
+            "data:image/png;base64,AAA",
+        ] {
+            assert!(!has_profile_photo(bad), "photo must not load: {bad}");
+        }
+        assert!(!has_profile_photo(&format!(
+            "https://auth.axiusflow.com/{}",
+            "a".repeat(2048)
+        )));
+    }
+
+    #[test]
+    fn status_profile_propagates_to_presentation_and_clears() {
+        use super::{AccountResponse, apply_account_response};
+
+        let session = DesktopAccount::spawn(10).expect("isolated account session spawns");
+        let mut active = view(AccountSessionState::Active);
+        active.account_id = "acct_01".to_string();
+        active.plan_id = "pro".to_string();
+        active.display_name = "Ada Trader".to_string();
+        active.email = "ada@example.com".to_string();
+        active.photo_url = "https://auth.axiusflow.com/photo/ada.png".to_string();
+        apply_account_response(&session.shared, Ok(AccountResponse::Status(active)));
+        let presentation = session.presentation();
+        assert_eq!(presentation.action, "Account");
+        assert_eq!(presentation.display_name, "Ada Trader");
+        assert_eq!(presentation.email, "ada@example.com");
+        assert_eq!(
+            presentation.photo_url,
+            "https://auth.axiusflow.com/photo/ada.png"
+        );
+        // Sign-out status wipes the profile: no stale identity survives.
+        apply_account_response(
+            &session.shared,
+            Ok(AccountResponse::SignedOut(view(
+                AccountSessionState::SignedOut,
+            ))),
+        );
+        let signed_out = session.presentation();
+        assert!(signed_out.display_name.is_empty());
+        assert!(signed_out.email.is_empty());
+        assert!(signed_out.photo_url.is_empty());
     }
 
     #[test]

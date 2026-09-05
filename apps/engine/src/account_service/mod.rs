@@ -24,8 +24,8 @@ use zeroize::Zeroizing;
 use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, device_id_for_key};
 use loopback::{LoopbackListener, validate_callback_query};
 use oidc::{
-    AuthorizationRequest, OidcEndpoints, authorization_url, control_plane_origin, discover,
-    exchange_code, link_subject, refresh_grant,
+    AccountProfile, AuthorizationRequest, OidcEndpoints, authorization_url, control_plane_origin,
+    discover, exchange_code, link_subject, refresh_grant,
 };
 use pkce::{PkceVerifier, generate_oauth_random};
 
@@ -119,13 +119,7 @@ impl AccountService {
         Self {
             config,
             state: Arc::new(Mutex::new(ServiceState {
-                view: AccountView {
-                    state: AccountSessionState::SignedOut as i32,
-                    account_id: String::new(),
-                    plan_id: String::new(),
-                    detail: "signed out".to_string(),
-                    request_generation: 0,
-                },
+                view: cleared_view(AccountSessionState::SignedOut, 0, "signed out"),
                 pending: None,
                 last_generation: 0,
             })),
@@ -204,13 +198,11 @@ impl AccountService {
             expires_at,
             code_received: false,
         });
-        state.view = AccountView {
-            state: AccountSessionState::Authorizing as i32,
-            account_id: String::new(),
-            plan_id: String::new(),
-            detail: "waiting for browser authorization".to_string(),
+        state.view = cleared_view(
+            AccountSessionState::Authorizing,
             request_generation,
-        };
+            "waiting for browser authorization",
+        );
         let service = self.clone();
         std::thread::Builder::new()
             .name("axiusflow-account-login".to_string())
@@ -233,14 +225,13 @@ impl AccountService {
         let mut state = lock_state(&self.state)?;
         match &state.pending {
             Some(pending) if pending.generation == request_generation => {
+                let generation = state.last_generation;
                 state.pending = None;
-                state.view = AccountView {
-                    state: AccountSessionState::SignedOut as i32,
-                    account_id: String::new(),
-                    plan_id: String::new(),
-                    detail: "sign-in cancelled".to_string(),
-                    request_generation: state.last_generation,
-                };
+                state.view = cleared_view(
+                    AccountSessionState::SignedOut,
+                    generation,
+                    "sign-in cancelled",
+                );
                 Ok(())
             }
             _ => Err("no matching sign-in transaction is pending".to_string()),
@@ -251,27 +242,24 @@ impl AccountService {
     #[must_use]
     pub fn account_status(&self) -> AccountView {
         let Ok(mut state) = self.state.lock() else {
-            return AccountView {
-                state: AccountSessionState::TerminalError as i32,
-                account_id: String::new(),
-                plan_id: String::new(),
-                detail: "account state is unavailable".to_string(),
-                request_generation: 0,
-            };
+            return cleared_view(
+                AccountSessionState::TerminalError,
+                0,
+                "account state is unavailable",
+            );
         };
         if state
             .pending
             .as_ref()
             .is_some_and(|pending| Instant::now() >= pending.expires_at)
         {
+            let generation = state.last_generation;
             state.pending = None;
-            state.view = AccountView {
-                state: AccountSessionState::SignedOut as i32,
-                account_id: String::new(),
-                plan_id: String::new(),
-                detail: "sign-in timed out; retry sign-in".to_string(),
-                request_generation: state.last_generation,
-            };
+            state.view = cleared_view(
+                AccountSessionState::SignedOut,
+                generation,
+                "sign-in timed out; retry sign-in",
+            );
         }
         state.view.clone()
     }
@@ -316,27 +304,25 @@ impl AccountService {
         let deleted = lease_deleted && refresh_deleted;
         let view = {
             let Ok(mut state) = self.state.lock() else {
-                return AccountView {
-                    state: AccountSessionState::TerminalError as i32,
-                    account_id: String::new(),
-                    plan_id: String::new(),
-                    detail: "account state is unavailable".to_string(),
-                    request_generation: 0,
-                };
+                return cleared_view(
+                    AccountSessionState::TerminalError,
+                    0,
+                    "account state is unavailable",
+                );
             };
+            let generation = state.last_generation;
             state.pending = None;
-            state.view = AccountView {
-                state: AccountSessionState::SignedOut as i32,
-                account_id: String::new(),
-                plan_id: String::new(),
-                detail: if deleted {
+            // Profile leaves with the session: a later sign-in as another
+            // user never inherits these fields, even briefly.
+            state.view = cleared_view(
+                AccountSessionState::SignedOut,
+                generation,
+                if deleted {
                     "signed out"
                 } else {
                     "signed out; credential cleanup needs attention"
-                }
-                .to_string(),
-                request_generation: state.last_generation,
-            };
+                },
+            );
             state.view.clone()
         };
         if let Some((endpoints, token)) = revocation {
@@ -434,11 +420,11 @@ impl AccountService {
             )
             .and_then(|tokens| {
                 link_subject(&endpoints, &tokens.id_token, &tokens.subject)
-                    .map(|(account, plan)| (account, plan, tokens))
+                    .map(|(account, plan, profile)| (account, plan, profile, tokens))
             })
         });
         match outcome {
-            Ok((account_id, plan, tokens)) => {
+            Ok((account_id, plan, profile, tokens)) => {
                 let vault = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE);
                 match vault {
                     Ok(vault) => {
@@ -446,6 +432,7 @@ impl AccountService {
                             generation,
                             &account_id,
                             plan,
+                            &profile,
                             tokens.refresh.as_deref(),
                             &vault,
                         );
@@ -463,11 +450,16 @@ impl AccountService {
         }
     }
 
+    /// Publishes the Active session only after the refresh material is
+    /// stored: exchange, link, and vault all precede any success the
+    /// desktop can render. A retired generation assigns nothing, so a late
+    /// callback can never restore another user's profile.
     fn complete_with_tokens<V>(
         &self,
         generation: u64,
         account_id: &AccountId,
         plan: PlanId,
+        profile: &AccountProfile,
         refresh_token: Option<&str>,
         vault: &V,
     ) where
@@ -486,23 +478,26 @@ impl AccountService {
         }
         let stored = store_refresh_material(vault, refresh_token).is_ok();
         if !stored {
+            let generation = state.last_generation;
             state.pending = None;
-            state.view = AccountView {
-                state: AccountSessionState::TerminalError as i32,
-                account_id: String::new(),
-                plan_id: String::new(),
-                detail: "credential storage is unavailable; retry sign-in".to_string(),
-                request_generation: state.last_generation,
-            };
+            state.view = cleared_view(
+                AccountSessionState::TerminalError,
+                generation,
+                "credential storage is unavailable; retry sign-in",
+            );
             return;
         }
+        let generation = state.last_generation;
         state.pending = None;
         state.view = AccountView {
             state: AccountSessionState::Active as i32,
             account_id: account_id.as_str().to_string(),
             plan_id: plan.as_str().to_string(),
             detail: "signed in".to_string(),
-            request_generation: state.last_generation,
+            request_generation: generation,
+            display_name: profile.display_name.clone(),
+            email: profile.email.clone(),
+            photo_url: profile.photo_url.clone(),
         };
         let service = self.clone();
         std::thread::Builder::new()
@@ -608,22 +603,11 @@ impl AccountService {
             return;
         }
         state.pending = None;
+        let generation = state.last_generation;
         if detail.contains("timed out") || detail.contains("cancelled") {
-            state.view = AccountView {
-                state: AccountSessionState::SignedOut as i32,
-                account_id: String::new(),
-                plan_id: String::new(),
-                detail: detail.to_string(),
-                request_generation: state.last_generation,
-            };
+            state.view = cleared_view(AccountSessionState::SignedOut, generation, detail);
         } else {
-            state.view = AccountView {
-                state: AccountSessionState::TerminalError as i32,
-                account_id: String::new(),
-                plan_id: String::new(),
-                detail: detail.to_string(),
-                request_generation: state.last_generation,
-            };
+            state.view = cleared_view(AccountSessionState::TerminalError, generation, detail);
         }
     }
 
@@ -637,16 +621,29 @@ impl AccountService {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        state.view = AccountView {
-            state: state_value as i32,
-            account_id: account_id
-                .map(AccountId::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            plan_id: plan.map(PlanId::as_str).unwrap_or_default().to_string(),
-            detail: detail.to_string(),
-            request_generation: state.last_generation,
-        };
+        let mut view = cleared_view(state_value, state.last_generation, detail);
+        view.account_id = account_id
+            .map(AccountId::as_str)
+            .unwrap_or_default()
+            .to_string();
+        view.plan_id = plan.map(PlanId::as_str).unwrap_or_default().to_string();
+        state.view = view;
+    }
+}
+
+/// One sanitized view with identity, plan, and profile cleared. Every
+/// non-Active assignment flows through here so sign-out, cancel, expiry,
+/// and failure can never leak a previous user's profile.
+fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> AccountView {
+    AccountView {
+        state: state as i32,
+        account_id: String::new(),
+        plan_id: String::new(),
+        detail: detail.to_string(),
+        request_generation: generation,
+        display_name: String::new(),
+        email: String::new(),
+        photo_url: String::new(),
     }
 }
 
@@ -1103,6 +1100,14 @@ mod tests {
         assert!(service.apply_callback_query(&query, 8).is_err());
     }
 
+    fn profile(name: &str, email: &str) -> super::oidc::AccountProfile {
+        super::oidc::AccountProfile {
+            display_name: name.to_string(),
+            email: email.to_string(),
+            photo_url: format!("https://auth.axiusflow.com/photo/{name}.png"),
+        }
+    }
+
     #[test]
     fn retired_completion_results_cannot_mutate_current_state() {
         let service = service();
@@ -1118,13 +1123,17 @@ mod tests {
             9,
             &AccountId::try_new("acct_01").expect("identity builds"),
             PlanId::Pro,
+            &profile("stale", "stale@example.com"),
             Some("refresh"),
             &vault,
         );
-        assert_eq!(
-            service.account_status().state,
-            AccountSessionState::SignedOut as i32
-        );
+        // A retired callback restores nothing: neither state nor another
+        // user's profile may leak into the current session.
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert!(view.display_name.is_empty());
+        assert!(view.email.is_empty());
+        assert!(view.photo_url.is_empty());
     }
 
     #[test]
@@ -1136,6 +1145,7 @@ mod tests {
             11,
             &AccountId::try_new("acct_01").expect("identity builds"),
             PlanId::Pro,
+            &profile("ada", "ada@example.com"),
             Some("refresh-value"),
             &vault,
         );
@@ -1143,6 +1153,72 @@ mod tests {
         assert_eq!(view.state, AccountSessionState::Active as i32);
         assert_eq!(view.account_id, "acct_01");
         assert_eq!(view.plan_id, "pro");
+        assert_eq!(view.display_name, "ada");
+        assert_eq!(view.email, "ada@example.com");
+        assert_eq!(view.photo_url, "https://auth.axiusflow.com/photo/ada.png");
+    }
+
+    #[test]
+    fn vault_failure_reports_without_activating_or_leaking_profile() {
+        let service = service();
+        service.begin_login(12).expect("login starts");
+        // Exchange and link succeeded; only credential storage failed.
+        service.complete_with_tokens(
+            12,
+            &AccountId::try_new("acct_01").expect("identity builds"),
+            PlanId::Pro,
+            &profile("ada", "ada@example.com"),
+            Some("refresh-value"),
+            &super::UnavailableVault,
+        );
+        // Failure is actionable and carries no session: a partial login
+        // never renders as success.
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::TerminalError as i32);
+        assert!(view.account_id.is_empty());
+        assert!(view.display_name.is_empty());
+        assert!(view.email.is_empty());
+        assert!(view.photo_url.is_empty());
+    }
+
+    #[test]
+    fn account_switch_replaces_profile_without_carryover() {
+        let service = service();
+        let vault = MemoryVault::default();
+        service.begin_login(31).expect("first login starts");
+        service.complete_with_tokens(
+            31,
+            &AccountId::try_new("acct_01").expect("identity builds"),
+            PlanId::Pro,
+            &profile("ada", "ada@example.com"),
+            Some("refresh-ada"),
+            &vault,
+        );
+        assert_eq!(service.account_status().display_name, "ada");
+        service
+            .endpoints
+            .lock()
+            .expect("endpoint cache locks")
+            .take();
+        let signed_out = service.sign_out_with(&vault);
+        assert!(signed_out.display_name.is_empty());
+        assert!(signed_out.email.is_empty());
+        assert!(signed_out.photo_url.is_empty());
+        service.begin_login(32).expect("second login starts");
+        service.complete_with_tokens(
+            32,
+            &AccountId::try_new("acct_02").expect("identity builds"),
+            PlanId::Starter,
+            &profile("bob", "bob@example.com"),
+            Some("refresh-bob"),
+            &vault,
+        );
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::Active as i32);
+        assert_eq!(view.account_id, "acct_02");
+        assert_eq!(view.display_name, "bob");
+        assert_eq!(view.email, "bob@example.com");
+        assert!(view.photo_url.contains("bob"));
     }
 
     #[test]
@@ -1162,6 +1238,7 @@ mod tests {
             21,
             &AccountId::try_new("acct_01").expect("identity builds"),
             PlanId::Pro,
+            &profile("ada", "ada@example.com"),
             Some("refresh-value"),
             &vault,
         );
@@ -1178,9 +1255,14 @@ mod tests {
             .lock()
             .expect("endpoint cache locks")
             .take();
+        // Seed a profile first: sign-out must clear it with the session.
+        service.state.lock().expect("state locks").view.display_name = "ada".to_string();
         let view = service.sign_out_with(&vault);
         assert_eq!(view.state, AccountSessionState::SignedOut as i32);
         assert!(view.account_id.is_empty());
+        assert!(view.display_name.is_empty());
+        assert!(view.email.is_empty());
+        assert!(view.photo_url.is_empty());
         // Refresh and lease material are gone; the device key stays for
         // complete uninstall to remove.
         assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_none());
@@ -1195,12 +1277,12 @@ mod tests {
             21,
             &AccountId::try_new("acct_01").expect("identity builds"),
             PlanId::Pro,
+            &profile("ada", "ada@example.com"),
             Some("refresh-value"),
             &vault,
         );
-        assert_eq!(
-            service.account_status().state,
-            AccountSessionState::SignedOut as i32
-        );
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert!(view.display_name.is_empty());
     }
 }

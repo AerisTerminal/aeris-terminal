@@ -118,7 +118,14 @@ fn read_callback_query(stream: &mut std::net::TcpStream) -> Result<String, Strin
         respond(stream, 400, "invalid callback");
         return Err("authorization callback is invalid".to_string());
     };
-    respond(stream, 200, "sign-in complete; return to Axiusflow");
+    // The callback only proves the browser returned: exchange, link, and
+    // vault storage still follow. The desktop reports success only after
+    // those complete, so this page must not claim the sign-in finished.
+    respond(
+        stream,
+        200,
+        "Authorization received. Return to Axiusflow to confirm sign-in.",
+    );
     Ok(query)
 }
 
@@ -277,5 +284,12 @@ mod tests {
         assert_eq!(validated.code, "live-code");
         let response = sender.join().expect("sender joins");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
+        // The page reports receipt, never completion: exchange, link, and
+        // vault storage still follow on the worker.
+        assert!(
+            response.contains("Authorization received. Return to Axiusflow to confirm sign-in."),
+            "callback page must not claim success: {response}"
+        );
+        assert!(!response.to_lowercase().contains("complete"));
     }
 }
