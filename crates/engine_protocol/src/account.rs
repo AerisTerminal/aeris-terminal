@@ -42,6 +42,14 @@ pub struct CancelLogin {
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct GetAccountStatus {}
 
+/// Signs out one engine-owned account session.
+///
+/// Clears the session state and deletes vault refresh and lease material on
+/// every engine. The device key stays: it identifies the device, not the
+/// user. Complete uninstall removes it separately.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct SignOut {}
+
 /// Engine-issued browser authorization address for one login transaction.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct LoginAuthorization {

@@ -13,9 +13,10 @@ use axiusflow_engine_protocol::{
     RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
     SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineLifecycle, SetEngineResourceMode,
-    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ShutdownEngine, StreamRole,
-    ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ShutdownEngine, SignOut,
+    StreamRole, ViewportDemand, VisibilityDemand, WorkspaceLayoutState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState, encode_envelope,
+    envelope,
 };
 use axiusflow_transport::encode_binary_frame;
 
@@ -59,6 +60,7 @@ fn account_payloads() -> Vec<envelope::Payload> {
             detail: "active".into(),
             request_generation: 3,
         }),
+        envelope::Payload::SignOut(SignOut {}),
     ]
 }
 

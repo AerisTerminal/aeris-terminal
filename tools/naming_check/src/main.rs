@@ -1815,8 +1815,8 @@ mod tests {
     fn account_protocol_versions_and_tags_remain_pinned() {
         let messages = manifest("crates/engine_protocol/src/messages.rs");
         assert!(
-            messages.contains("55, 56, 57, 58, 59"),
-            "phase 5 account envelope tags 55-59 must remain pinned"
+            messages.contains("55, 56, 57, 58, 59, 60"),
+            "phase 5 account envelope tags 55-60 must remain pinned"
         );
         let account = manifest("crates/engine_protocol/src/account.rs");
         for contract in [
@@ -1825,6 +1825,7 @@ mod tests {
             "pub struct GetAccountStatus",
             "pub struct LoginAuthorization",
             "pub struct AccountView",
+            "pub struct SignOut",
             "pub enum AccountSessionState",
         ] {
             assert!(

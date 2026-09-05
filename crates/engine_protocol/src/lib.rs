@@ -10,7 +10,8 @@ mod error;
 mod messages;
 
 pub use account::{
-    AccountSessionState, AccountView, BeginLogin, CancelLogin, GetAccountStatus, LoginAuthorization,
+    AccountSessionState, AccountView, BeginLogin, CancelLogin, GetAccountStatus,
+    LoginAuthorization, SignOut,
 };
 pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
@@ -47,10 +48,11 @@ pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 /// as implemented: each desktop attaches as an isolated authenticated client,
 /// and lifecycle transactions block new processes through the update lock.
 ///
-/// Revision 18 adds the phase 5 account boundary (tags 55-59): `BeginLogin`,
-/// `CancelLogin`, `GetAccountStatus`, `LoginAuthorization`, and the sanitized
-/// `AccountView`. The engine owns the PKCE transaction and vault material;
-/// the desktop receives only the browser URL and the sanitized view.
+/// Revision 18 adds the phase 5 account boundary (tags 55-60): `BeginLogin`,
+/// `CancelLogin`, `GetAccountStatus`, `LoginAuthorization`, the sanitized
+/// `AccountView`, and `SignOut`. The engine owns the PKCE transaction and
+/// vault material; the desktop receives only the browser URL and the
+/// sanitized view.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// Maximum prost payload accepted in one frame (3 MiB).

@@ -830,7 +830,9 @@ pub(super) fn settings_account_row(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let action_terminal = terminal.clone();
+    let signout_terminal = terminal.clone();
     let cancellable = account.action == "Waiting for browser";
+    let signed_in = account.action == "Account";
     let interactive = !account.pending && (account.action == "Sign in" || cancellable);
     let status = if account.detail.is_empty() {
         format!("{} · {}", account.state, account.plan)
@@ -869,9 +871,34 @@ pub(super) fn settings_account_row(
         .child(account.action)
         .child(
             div()
-                .text_xs()
-                .text_color(gpui_color(colors.text_muted))
-                .child(status),
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child(status),
+                )
+                .children(signed_in.then(|| {
+                    div()
+                        .id("settings_sign_out")
+                        .px_2()
+                        .py(px(2.0))
+                        .text_xs()
+                        .text_color(gpui_color(colors.danger))
+                        .cursor_pointer()
+                        .hover(|button| {
+                            button.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            signout_terminal.update(cx, |_, terminal_cx| {
+                                TerminalApp::sign_out(terminal_cx);
+                            });
+                            cx.stop_propagation();
+                        })
+                        .child("Sign out")
+                })),
         )
 }
 

@@ -43,6 +43,8 @@ pub struct OidcEndpoints {
     pub token_endpoint: String,
     /// JWKS URI from discovery metadata.
     pub jwks_uri: String,
+    /// Revocation endpoint from discovery metadata.
+    pub revocation_endpoint: String,
     /// Axiusflow subject-link route on the control-plane origin.
     pub link_endpoint: String,
 }
@@ -74,6 +76,11 @@ pub fn discover(issuer: &str) -> Result<OidcEndpoints, String> {
         .limit(32_768)
         .read_json()
         .map_err(|_| "account service is unreachable; retry sign-in".to_string())?;
+    parse_discovery(issuer, &metadata)
+}
+
+/// Validates discovery metadata against the configured issuer.
+fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEndpoints, String> {
     if metadata.issuer != issuer {
         return Err("sign-in verification failed; retry sign-in".to_string());
     }
@@ -82,18 +89,49 @@ pub fn discover(issuer: &str) -> Result<OidcEndpoints, String> {
         &metadata.authorization_endpoint,
         &metadata.token_endpoint,
         &metadata.jwks_uri,
+        &metadata.revocation_endpoint,
     ] {
         if !endpoint.starts_with(&origin) {
             return Err("sign-in verification failed; retry sign-in".to_string());
         }
     }
     Ok(OidcEndpoints {
-        issuer: metadata.issuer,
-        authorization_endpoint: metadata.authorization_endpoint,
-        token_endpoint: metadata.token_endpoint,
-        jwks_uri: metadata.jwks_uri,
+        issuer: metadata.issuer.clone(),
+        authorization_endpoint: metadata.authorization_endpoint.clone(),
+        token_endpoint: metadata.token_endpoint.clone(),
+        jwks_uri: metadata.jwks_uri.clone(),
+        revocation_endpoint: metadata.revocation_endpoint.clone(),
         link_endpoint: format!("{origin}/api/axiusflow/link"),
     })
+}
+
+/// Revokes one refresh token at the discovered revocation endpoint.
+///
+/// Best-effort by design: local vault deletion always happens first, so a
+/// revocation failure only leaves the server-side grant to expire.
+///
+/// # Errors
+///
+/// Returns a redacted error when the revocation request fails.
+pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<(), String> {
+    let agent = oidc_agent();
+    let body = format!(
+        "token={}&token_type_hint=refresh_token",
+        url_encode(refresh_token)
+    );
+    let mut response = agent
+        .post(&endpoints.revocation_endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .send(body)
+        .map_err(|_| "sign-out revocation failed".to_string())?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(4096)
+        .read_to_vec()
+        .map_err(|_| "sign-out revocation failed".to_string())?;
+    Ok(())
 }
 
 /// Derives the control-plane origin from the OIDC issuer.
@@ -290,6 +328,8 @@ struct DiscoveryMetadata {
     token_endpoint: String,
     #[serde(default)]
     jwks_uri: String,
+    #[serde(default)]
+    revocation_endpoint: String,
 }
 
 fn verify_id_token(
@@ -437,8 +477,52 @@ mod tests {
                 .to_string(),
             token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
             jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
+            revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke".to_string(),
             link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
         }
+    }
+
+    fn discovery_fixture() -> super::DiscoveryMetadata {
+        super::DiscoveryMetadata {
+            issuer: "https://auth.axiusflow.com/api/auth".to_string(),
+            authorization_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/authorize"
+                .to_string(),
+            token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
+            jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
+            revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke".to_string(),
+        }
+    }
+
+    #[test]
+    fn discovery_fixture_matches_the_live_worker_layout() {
+        let endpoints =
+            super::parse_discovery("https://auth.axiusflow.com/api/auth", &discovery_fixture())
+                .expect("fixture parses");
+        assert_eq!(endpoints, self::endpoints());
+    }
+
+    #[test]
+    fn discovery_rejects_mismatched_issuer_and_off_origin_endpoints() {
+        assert!(
+            super::parse_discovery(
+                "https://auth.axiusflow.com/api/auth",
+                &super::DiscoveryMetadata {
+                    issuer: "https://evil.example.com/api/auth".to_string(),
+                    ..discovery_fixture()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            super::parse_discovery(
+                "https://auth.axiusflow.com/api/auth",
+                &super::DiscoveryMetadata {
+                    jwks_uri: "https://evil.example.com/jwks".to_string(),
+                    ..discovery_fixture()
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

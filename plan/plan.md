@@ -2030,3 +2030,25 @@ maintainer's direction while CI lanes run):
   callback_over_loopback`).
 - Full workspace gates pass locally with zero failures; no push until the
   maintainer approves (CI lanes still running).
+
+Batch 3 — session lifecycle (2026-09-05, unpushed at the maintainer's
+direction while CI lanes run):
+
+- `SignOut` command (tag 60, `PROTOCOL_VERSION` stays 18): the engine
+  clears the shared session and deletes vault refresh plus lease material
+  synchronously so a concurrent login cannot observe stale state, then
+  revokes the refresh token best-effort on a bounded worker against the
+  discovered `revocation_endpoint` (advertised by the Worker; local vault
+  deletion never depends on it). The device key stays for complete
+  uninstall. Retired completions after sign-out cannot resurrect the
+  session (`sign_out_clears_state_and_deletes_vault_material` proves
+  deletion, device retention, and fencing against a memory vault).
+- Desktop settings row gains a trailing `Sign out` button while signed in;
+  sign-out, cancellation, and status share the one bounded worker.
+- Worker README documents the revocation reliance. `BETTER_AUTH_SECRET`
+  needs no maintainer action (auto-generated); email OTP delivery still
+  needs the transactional sender before launch, with Google as the day-1
+  path.
+- Full workspace gates pass locally with zero failures. Still maintainer
+  actions before live sandbox login: D1 id, Google OAuth client, sender
+  domain, DNS/TLS for the issuer origin. No push until approved.

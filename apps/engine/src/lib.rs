@@ -2015,7 +2015,8 @@ fn serve_authenticated_messages(
             }
             payload @ (envelope::Payload::BeginLogin(_)
             | envelope::Payload::CancelLogin(_)
-            | envelope::Payload::GetAccountStatus(_)) => {
+            | envelope::Payload::GetAccountStatus(_)
+            | envelope::Payload::SignOut(_)) => {
                 handle_account_message(connection, state, &payload)?;
             }
             envelope::Payload::Goodbye(_) => {
@@ -2156,6 +2157,9 @@ fn handle_account_message(
         envelope::Payload::GetAccountStatus(_) => connection.send(envelope::Payload::AccountView(
             state.account().account_status(),
         )),
+        envelope::Payload::SignOut(_) => {
+            connection.send(envelope::Payload::AccountView(state.account().sign_out()))
+        }
         _ => unreachable!("only account messages reach account dispatch"),
     }
 }

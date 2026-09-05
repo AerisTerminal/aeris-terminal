@@ -269,6 +269,82 @@ impl AccountService {
         state.view.clone()
     }
 
+    /// Signs out the shared session, deleting vault refresh and lease material.
+    ///
+    /// Local deletion happens synchronously so a concurrent login cannot
+    /// observe stale material; server-side revocation follows on a bounded
+    /// worker with the in-memory refresh copy and never blocks IPC.
+    #[must_use]
+    pub fn sign_out(&self) -> AccountView {
+        let vault = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE);
+        match vault {
+            Ok(vault) => self.sign_out_with(&vault),
+            Err(_) => self.sign_out_with(&UnavailableVault),
+        }
+    }
+
+    fn sign_out_with<V>(&self, vault: &V) -> AccountView
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let token = vault
+            .load(REFRESH_VAULT_KEY)
+            .unwrap_or_default()
+            .filter(|token| !token.is_empty());
+        let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
+        let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
+        // Revocation reuses already-cached endpoints only: sign-out never
+        // performs discovery on the IPC path.
+        let cached = self
+            .endpoints
+            .lock()
+            .map(|cached| cached.clone())
+            .unwrap_or_default();
+        let revocation = cached.zip(
+            token
+                .filter(|_| refresh_deleted)
+                .and_then(|token| String::from_utf8(token).ok()),
+        );
+        let deleted = lease_deleted && refresh_deleted;
+        let view = {
+            let Ok(mut state) = self.state.lock() else {
+                return AccountView {
+                    state: AccountSessionState::TerminalError as i32,
+                    account_id: String::new(),
+                    plan_id: String::new(),
+                    detail: "account state is unavailable".to_string(),
+                    request_generation: 0,
+                };
+            };
+            state.pending = None;
+            state.view = AccountView {
+                state: AccountSessionState::SignedOut as i32,
+                account_id: String::new(),
+                plan_id: String::new(),
+                detail: if deleted {
+                    "signed out"
+                } else {
+                    "signed out; credential cleanup needs attention"
+                }
+                .to_string(),
+                request_generation: state.last_generation,
+            };
+            state.view.clone()
+        };
+        if let Some((endpoints, token)) = revocation {
+            std::thread::Builder::new()
+                .name("axiusflow-account-revoke".to_string())
+                .spawn(move || {
+                    if oidc::revoke_refresh(&endpoints, &token).is_err() {
+                        eprintln!("Axiusflow sign-out revocation degraded");
+                    }
+                })
+                .ok();
+        }
+        view
+    }
+
     fn run_login_transaction(&self, generation: u64, listener: &LoopbackListener) {
         let remaining = self.pending_remaining(generation);
         if remaining.is_zero() {
@@ -480,6 +556,26 @@ fn lock_state(
         .map_err(|_| "account state is unavailable".to_string())
 }
 
+/// Credential vault that is always unavailable, used when native storage
+/// cannot be constructed so sign-out still clears engine state.
+struct UnavailableVault;
+
+impl CredentialVault for UnavailableVault {
+    type Error = String;
+
+    fn store(&self, _key: &str, _secret: &[u8]) -> Result<(), Self::Error> {
+        Err("credential storage is unavailable".to_string())
+    }
+
+    fn load(&self, _key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+        Err("credential storage is unavailable".to_string())
+    }
+
+    fn delete(&self, _key: &str) -> Result<(), Self::Error> {
+        Err("credential storage is unavailable".to_string())
+    }
+}
+
 fn store_refresh_material<V>(vault: &V, refresh_token: Option<&str>) -> Result<(), String>
 where
     V: CredentialVault,
@@ -587,6 +683,8 @@ mod tests {
                     .to_string(),
                 token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
                 jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
+                revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke"
+                    .to_string(),
                 link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
             });
         service
@@ -705,5 +803,59 @@ mod tests {
     #[test]
     fn login_timeout_is_configured() {
         assert!(LOGIN_TIMEOUT.as_secs() >= 60);
+    }
+
+    #[test]
+    fn sign_out_clears_state_and_deletes_vault_material() {
+        use super::{DEVICE_VAULT_KEY, LEASE_VAULT_KEY, REFRESH_VAULT_KEY};
+        use axiusflow_platform_runtime::CredentialVault as _;
+
+        let service = service();
+        let vault = MemoryVault::default();
+        service.begin_login(21).expect("login starts");
+        service.complete_with_tokens(
+            21,
+            &AccountId::try_new("acct_01").expect("identity builds"),
+            PlanId::Pro,
+            Some("refresh-value"),
+            &vault,
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::Active as i32
+        );
+        assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_some());
+        assert!(vault.load(DEVICE_VAULT_KEY).expect("load reads").is_some());
+        // Drop the cached endpoints so no revocation worker touches the
+        // network during the test.
+        service
+            .endpoints
+            .lock()
+            .expect("endpoint cache locks")
+            .take();
+        let view = service.sign_out_with(&vault);
+        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert!(view.account_id.is_empty());
+        // Refresh and lease material are gone; the device key stays for
+        // complete uninstall to remove.
+        assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_none());
+        assert!(vault.load(LEASE_VAULT_KEY).expect("load reads").is_none());
+        assert!(vault.load(DEVICE_VAULT_KEY).expect("load reads").is_some());
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::SignedOut as i32
+        );
+        // A retired completion after sign-out cannot resurrect the session.
+        service.complete_with_tokens(
+            21,
+            &AccountId::try_new("acct_01").expect("identity builds"),
+            PlanId::Pro,
+            Some("refresh-value"),
+            &vault,
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::SignedOut as i32
+        );
     }
 }

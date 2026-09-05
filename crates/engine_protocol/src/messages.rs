@@ -1189,7 +1189,7 @@ pub struct Envelope {
     /// Message payload.
     #[prost(
         oneof = "envelope::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 15, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59"
+        tags = "2, 3, 4, 5, 6, 7, 15, 17, 18, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60"
     )]
     pub payload: Option<envelope::Payload>,
 }
@@ -1325,5 +1325,8 @@ pub mod envelope {
         /// Sanitized account view. Tag 59.
         #[prost(message, tag = "59")]
         AccountView(super::super::account::AccountView),
+        /// Account sign-out command. Tag 60.
+        #[prost(message, tag = "60")]
+        SignOut(super::super::account::SignOut),
     }
 }

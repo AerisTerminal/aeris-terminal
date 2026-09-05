@@ -160,6 +160,7 @@ enum AccountRequest {
     BeginLogin { client_id: u64, generation: u64 },
     CancelLogin { generation: u64 },
     RefreshStatus,
+    SignOut,
 }
 
 /// Bounded account worker outcome.
@@ -168,6 +169,7 @@ enum AccountResponse {
     Authorized,
     Status(AccountView),
     Cancelled(AccountView),
+    SignedOut(AccountView),
 }
 
 /// Presentation snapshot for account rendering.
@@ -363,6 +365,27 @@ impl DesktopAccount {
         Ok(())
     }
 
+    /// Signs out the shared engine-owned account session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a request is already in flight or the worker
+    /// cannot be reached.
+    pub fn request_sign_out(&self) -> Result<(), String> {
+        if self.shared.pending.load(Ordering::Acquire) {
+            return Err("another account request is already pending".to_string());
+        }
+        self.shared
+            .requests
+            .try_send(AccountRequest::SignOut)
+            .map_err(|_| "an account request is already pending".to_string())?;
+        self.shared.pending.store(true, Ordering::Release);
+        if let Ok(mut error) = self.shared.error.lock() {
+            error.take();
+        }
+        Ok(())
+    }
+
     /// Applies worker results and refreshes the engine view while
     /// authorizing. Returns whether presentation changed.
     #[must_use]
@@ -409,7 +432,11 @@ fn apply_account_response(shared: &AccountShared, response: Result<AccountRespon
             // Status polling picks up the outcome.
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
-        Ok(AccountResponse::Status(view) | AccountResponse::Cancelled(view)) => {
+        Ok(
+            AccountResponse::Status(view)
+            | AccountResponse::Cancelled(view)
+            | AccountResponse::SignedOut(view),
+        ) => {
             shared.pending.store(false, Ordering::Release);
             if let Ok(mut current) = shared.view.lock() {
                 *current = view;
@@ -463,7 +490,20 @@ fn handle_account_request(request: AccountRequest) -> AccountResult {
             let view = fetch_account_status(&mut client)?;
             Ok(AccountResponse::Status(view))
         }
+        AccountRequest::SignOut => {
+            let view = sign_out(&mut client)?;
+            Ok(AccountResponse::SignedOut(view))
+        }
     }
+}
+
+/// Signs out the shared engine-owned session.
+///
+/// # Errors
+///
+/// Returns an error when the request fails or the reply is invalid.
+pub fn sign_out(client: &mut EngineClient) -> Result<AccountView, String> {
+    client.sign_out()
 }
 
 #[cfg(test)]

@@ -24,8 +24,8 @@ use axiusflow_engine_protocol::{
     LIFECYCLE_CONTRACT_REVISION, LoginAuthorization, PROTOCOL_VERSION, ProviderInstrumentInstalled,
     RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
     SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineLifecycle, SetEngineResourceMode,
-    SetSelection, SetViewport, SetWorkspaceLayout, ShutdownEngine, StreamRole, ViewportDemand,
-    VisibilityDemand, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    SetSelection, SetViewport, SetWorkspaceLayout, ShutdownEngine, SignOut, StreamRole,
+    ViewportDemand, VisibilityDemand, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{
     BackgroundService, CredentialVault, NativeCredentialVault, current_release_identity,
@@ -690,6 +690,16 @@ impl EngineClient {
     pub fn account_status(&mut self) -> Result<AccountView, String> {
         self.connection
             .send(envelope::Payload::GetAccountStatus(GetAccountStatus {}))?;
+        self.receive_account_view()
+    }
+
+    /// Signs out the shared engine-owned account session.
+    ///
+    /// # Errors
+    /// Returns an error when the request fails or the reply is invalid.
+    pub fn sign_out(&mut self) -> Result<AccountView, String> {
+        self.connection
+            .send(envelope::Payload::SignOut(SignOut {}))?;
         self.receive_account_view()
     }
 

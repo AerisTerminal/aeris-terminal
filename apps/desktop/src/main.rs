@@ -5586,6 +5586,17 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn sign_out(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.request_sign_out(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow sign-out degraded: {error}");
+        }
+        cx.notify();
+    }
+
     fn cancel_sign_in(cx: &mut Context<Self>) {
         let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),
