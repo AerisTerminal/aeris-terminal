@@ -17,7 +17,8 @@
 use std::{
     collections::BTreeMap,
     fs,
-    path::PathBuf,
+    io::Read,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -27,6 +28,8 @@ use axiusflow_engine_protocol::{
     InstallProviderInstrument, MarketBar, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceState, envelope,
 };
+use serde::Serialize;
+use sha2::Digest as _;
 
 const CLIENT_ID: u64 = 1;
 /// Where this gate records its own outcome, relative to the repository root.
@@ -34,6 +37,8 @@ const CLIENT_ID: u64 = 1;
 /// The desktop conformance report reads it verbatim. A missing file means the
 /// gate did not run, and "did not run" is never reported as a pass.
 const GATE_REPORT_DIRECTORY: &str = ".cache/evidence";
+const GATE_REPORT_SCHEMA_VERSION: u32 = 1;
+const GATE_EVIDENCE_SCOPE: &str = "engine_live_market_gate";
 const CONSUMER_ID: u64 = 1;
 const COINBASE_ENTITLEMENT_ID: &str = "crypto_public_realtime";
 
@@ -611,12 +616,46 @@ fn assert_streaming(fold: &SeriesFold, symbol: &str) {
 
 /// Records this gate's outcome where the conformance report can read it.
 ///
-/// It is written before the assertions that can fail and rewritten after they
-/// pass, so a run that dies mid-flight leaves `failed` behind rather than the
-/// previous run's `passed`.
-fn record_gate(provider: &str, outcome: &str, detail: &str) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+/// It is written as incomplete before the assertions that can fail and rewritten
+/// as completed after they pass, so an interrupted run cannot reuse the previous
+/// run's completed result.
+#[derive(Serialize)]
+struct LiveMarketGateReport<'a> {
+    schema_version: u32,
+    evidence_scope: &'static str,
+    provider: &'a str,
+    outcome: GateOutcome,
+    completion_state: GateCompletion,
+    recorded_at_unix_seconds: u64,
+    source_revision: String,
+    source_clean: bool,
+    binary_path: PathBuf,
+    binary_sha256: String,
+    detail: &'a str,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GateOutcome {
+    Passed,
+    Failed,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GateCompletion {
+    Incomplete,
+    Completed,
+}
+
+fn record_gate(
+    provider: &str,
+    outcome: GateOutcome,
+    completion_state: GateCompletion,
+    detail: &str,
+) {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = repository
         .join(GATE_REPORT_DIRECTORY)
         .join(format!("live_market_gate_{provider}.json"));
     let Some(parent) = path.parent() else {
@@ -625,15 +664,93 @@ fn record_gate(provider: &str, outcome: &str, detail: &str) {
     if fs::create_dir_all(parent).is_err() {
         return;
     }
+    // Remove the prior result before doing any other work. If this process is
+    // interrupted from here onward, the candidate has no completed report.
+    let _ = fs::remove_file(&path);
     let recorded_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let _ = fs::write(
-        &path,
-        format!(
-            "{{\n  \"provider\": \"{provider}\",\n  \"outcome\": \"{outcome}\",\n  \"recorded_at_unix_seconds\": {recorded_at},\n  \"detail\": \"{detail}\"\n}}\n"
-        ),
-    );
+    let (source_revision, source_clean) = source_provenance(&repository);
+    let binary_path = PathBuf::from(format!("live_market_gate_{provider}.bin"));
+    let binary_artifact = parent.join(&binary_path);
+    let binary_sha256 = std::env::current_exe()
+        .ok()
+        .and_then(|executable| fs::copy(executable, &binary_artifact).ok())
+        .and_then(|_| file_sha256_hex(&binary_artifact).ok())
+        .unwrap_or_default();
+    let report = LiveMarketGateReport {
+        schema_version: GATE_REPORT_SCHEMA_VERSION,
+        evidence_scope: GATE_EVIDENCE_SCOPE,
+        provider,
+        outcome,
+        completion_state,
+        recorded_at_unix_seconds: recorded_at,
+        source_revision,
+        source_clean,
+        binary_path,
+        binary_sha256,
+        detail,
+    };
+    if let Ok(mut encoded) = serde_json::to_vec_pretty(&report) {
+        encoded.push(b'\n');
+        // Truncating the old report before writing means an interrupted run
+        // can leave only an incomplete or malformed record, never a stale pass.
+        let _ = fs::write(&path, encoded);
+    }
+}
+
+fn source_provenance(repository: &Path) -> (String, bool) {
+    let revision = git_output(repository, &["rev-parse", "HEAD"]);
+    let clean = git_output(
+        repository,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )
+    .is_some_and(|status| status.is_empty());
+    let revision = revision.filter(|revision| {
+        revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    let revision_is_valid = revision.is_some();
+    (revision.unwrap_or_default(), clean && revision_is_valid)
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_string())
+}
+
+fn file_sha256_hex(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 16 * 1_024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(lower_hex(hasher.finalize()))
+}
+
+fn lower_hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.into_iter();
+    let mut encoded = String::with_capacity(bytes.size_hint().0.saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 /// One provider's gate. Both are the same experiment against different venues.
@@ -672,7 +789,8 @@ fn start_gate_service(gate: &Gate) -> MarketService {
 fn run_gate(gate: &Gate) {
     record_gate(
         gate.provider,
-        "failed",
+        GateOutcome::Failed,
+        GateCompletion::Incomplete,
         "soak started and has not completed",
     );
     let soak = Duration::from_secs(
@@ -786,7 +904,8 @@ fn close_gate(gate: &Gate, soak: Duration, elapsed: Duration, totals: &GateTotal
     );
     record_gate(
         gate.provider,
-        "passed",
+        GateOutcome::Passed,
+        GateCompletion::Completed,
         &format!("{switches} switches, {snapshots} snapshots, {updates} updates"),
     );
 }

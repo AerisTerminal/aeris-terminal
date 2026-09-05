@@ -23,11 +23,12 @@ use axiusflow_market_data::{
     OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
 use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 use std::{
     error::Error,
     fs,
-    io::Write,
+    io::{Read, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     thread,
@@ -39,10 +40,15 @@ const BURST_UPDATES: usize = 10_000;
 /// Where each live market gate records its own outcome, relative to the
 /// repository root. A gate is a separate, credentialed, network-bound run; a
 /// missing file means it did not run, which is not a pass.
-const LIVE_GATE_REPORTS: [&str; 2] = [
-    ".cache/evidence/live_market_gate_coinbase.json",
-    ".cache/evidence/live_market_gate_rithmic.json",
+const LIVE_GATE_REPORTS: [(&str, &str); 2] = [
+    ("coinbase", ".cache/evidence/live_market_gate_coinbase.json"),
+    ("rithmic", ".cache/evidence/live_market_gate_rithmic.json"),
 ];
+const LIVE_GATE_SCHEMA_VERSION: u32 = 1;
+const LIVE_GATE_EVIDENCE_SCOPE: &str = "engine_live_market_gate";
+const LIVE_GATE_MAXIMUM_AGE_SECONDS: u64 = 24 * 60 * 60;
+const LIVE_GATE_MAXIMUM_FUTURE_SKEW_SECONDS: u64 = 5 * 60;
+const LIVE_GATE_MAXIMUM_REPORT_BYTES: u64 = 16 * 1_024;
 const MAXIMUM_WORKING_SET_GROWTH_BYTES: u64 = 64 * 1_024 * 1_024;
 const ENDURANCE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ENDURANCE_BURST_UPDATES: usize = 1_000;
@@ -64,15 +70,52 @@ enum LiveMarketGate {
     Failed,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedLiveMarketGate {
+    schema_version: u32,
+    evidence_scope: String,
+    provider: String,
+    outcome: RecordedLiveMarketGateOutcome,
+    completion_state: RecordedLiveMarketGateCompletion,
+    recorded_at_unix_seconds: u64,
+    source_revision: String,
+    source_clean: bool,
+    binary_path: PathBuf,
+    binary_sha256: String,
+    detail: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RecordedLiveMarketGateOutcome {
+    Passed,
+    Failed,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum RecordedLiveMarketGateCompletion {
+    Incomplete,
+    Completed,
+}
+
 /// Reads what each live market gate recorded, and reports the worst of them.
 ///
 /// A failure anywhere is a failure; a gate that has not run leaves the whole
 /// result "not run", because a provider nobody exercised cannot be reported as
 /// working on the strength of another one that was.
 fn live_market_gate() -> LiveMarketGate {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(source_revision) = clean_source_revision(&repository) else {
+        return LiveMarketGate::NotRun;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
     let mut combined = LiveMarketGate::Passed;
-    for report in LIVE_GATE_REPORTS {
-        match recorded_gate(Path::new(report)) {
+    for (provider, report) in LIVE_GATE_REPORTS {
+        match recorded_gate(&repository.join(report), provider, &source_revision, now) {
             LiveMarketGate::Failed => return LiveMarketGate::Failed,
             LiveMarketGate::NotRun => combined = LiveMarketGate::NotRun,
             LiveMarketGate::Passed => {}
@@ -81,17 +124,113 @@ fn live_market_gate() -> LiveMarketGate {
     combined
 }
 
-fn recorded_gate(path: &Path) -> LiveMarketGate {
-    let Ok(contents) = fs::read_to_string(path) else {
+fn recorded_gate(
+    path: &Path,
+    expected_provider: &str,
+    expected_source_revision: &str,
+    now_unix_seconds: u64,
+) -> LiveMarketGate {
+    let Ok(file) = fs::File::open(path) else {
         return LiveMarketGate::NotRun;
     };
-    if contents.contains("\"outcome\": \"passed\"") {
-        LiveMarketGate::Passed
-    } else if contents.contains("\"outcome\": \"failed\"") {
-        LiveMarketGate::Failed
-    } else {
-        LiveMarketGate::NotRun
+    let mut contents = Vec::new();
+    if file
+        .take(LIVE_GATE_MAXIMUM_REPORT_BYTES + 1)
+        .read_to_end(&mut contents)
+        .is_err()
+        || u64::try_from(contents.len()).unwrap_or(u64::MAX) > LIVE_GATE_MAXIMUM_REPORT_BYTES
+    {
+        return LiveMarketGate::NotRun;
     }
+    let Ok(report) = serde_json::from_slice::<RecordedLiveMarketGate>(&contents) else {
+        return LiveMarketGate::NotRun;
+    };
+    let freshest_allowed = now_unix_seconds.saturating_add(LIVE_GATE_MAXIMUM_FUTURE_SKEW_SECONDS);
+    let age = now_unix_seconds.saturating_sub(report.recorded_at_unix_seconds);
+    let expected_binary_name = format!("live_market_gate_{expected_provider}.bin");
+    if report.schema_version != LIVE_GATE_SCHEMA_VERSION
+        || report.evidence_scope != LIVE_GATE_EVIDENCE_SCOPE
+        || report.provider != expected_provider
+        || report.completion_state != RecordedLiveMarketGateCompletion::Completed
+        || !report.source_clean
+        || report.source_revision != expected_source_revision
+        || report.recorded_at_unix_seconds > freshest_allowed
+        || age > LIVE_GATE_MAXIMUM_AGE_SECONDS
+        || report.detail.len() > 4 * 1_024
+        || report.binary_path.to_str() != Some(expected_binary_name.as_str())
+        || report.binary_sha256.len() != 64
+        || !report
+            .binary_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return LiveMarketGate::NotRun;
+    }
+    let Some(report_directory) = path.parent() else {
+        return LiveMarketGate::NotRun;
+    };
+    let Ok(binary_sha256) = file_sha256_hex(&report_directory.join(&report.binary_path)) else {
+        return LiveMarketGate::NotRun;
+    };
+    if !binary_sha256.eq_ignore_ascii_case(&report.binary_sha256) {
+        return LiveMarketGate::NotRun;
+    }
+    match report.outcome {
+        RecordedLiveMarketGateOutcome::Passed => LiveMarketGate::Passed,
+        RecordedLiveMarketGateOutcome::Failed => LiveMarketGate::Failed,
+    }
+}
+
+fn clean_source_revision(repository: &Path) -> Option<String> {
+    let revision = git_output(repository, &["rev-parse", "HEAD"])?;
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let status = git_output(
+        repository,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?;
+    status.is_empty().then_some(revision)
+}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_string())
+}
+
+fn file_sha256_hex(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 16 * 1_024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(lower_hex(hasher.finalize()))
+}
+
+fn lower_hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.into_iter();
+    let mut encoded = String::with_capacity(bytes.size_hint().0.saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[derive(Serialize)]
@@ -894,9 +1033,93 @@ mod tests {
         EnduranceCounters, EnduranceEvidenceSnapshot, FramePollGate, ProcessMemoryProbe,
         collect_endurance_with_checkpoints, collect_evidence, collect_gap_recovery_evidence,
         collect_generation_fencing_evidence, collect_history_gap_evidence, endurance_evidence,
-        write_endurance_evidence_atomically,
+        file_sha256_hex, recorded_gate, write_endurance_evidence_atomically,
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn live_gate_report(
+        binary_name: &std::path::Path,
+        outcome: &str,
+        completion_state: &str,
+        provider: &str,
+        revision: &str,
+        recorded_at: u64,
+        binary_sha256: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "evidence_scope": "engine_live_market_gate",
+            "provider": provider,
+            "outcome": outcome,
+            "completion_state": completion_state,
+            "recorded_at_unix_seconds": recorded_at,
+            "source_revision": revision,
+            "source_clean": true,
+            "binary_path": binary_name,
+            "binary_sha256": binary_sha256,
+            "detail": "fixture"
+        })
+    }
+
+    fn write_json(path: &std::path::Path, value: &serde_json::Value) {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(value).expect("report fixture serializes"),
+        )
+        .expect("report fixture is written");
+    }
+
+    struct LiveGateFixture {
+        directory: std::path::PathBuf,
+        report_path: std::path::PathBuf,
+        binary_sha256: String,
+        source_revision: String,
+        now: u64,
+    }
+
+    impl LiveGateFixture {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "axiusflow-live-gate-evidence-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time follows the Unix epoch")
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&directory).expect("evidence test directory is created");
+            let binary_path = directory.join("live_market_gate_coinbase.bin");
+            std::fs::write(&binary_path, b"candidate binary")
+                .expect("candidate binary fixture is written");
+            let binary_sha256 = file_sha256_hex(&binary_path).expect("candidate binary is hashed");
+            let report_path = directory.join("live_market_gate_coinbase.json");
+            Self {
+                directory,
+                report_path,
+                binary_sha256,
+                source_revision: "a".repeat(40),
+                now: 2_000_000,
+            }
+        }
+
+        fn report(&self, outcome: &str, completion: &str) -> serde_json::Value {
+            live_gate_report(
+                std::path::Path::new("live_market_gate_coinbase.bin"),
+                outcome,
+                completion,
+                "coinbase",
+                &self.source_revision,
+                self.now,
+                &self.binary_sha256,
+            )
+        }
+    }
+
+    impl Drop for LiveGateFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
 
     fn run_provider_neutral_handoff_scenario(provider: &str) {
         let recovery = collect_history_gap_evidence()
@@ -938,6 +1161,99 @@ mod tests {
         assert!(!gate.try_schedule());
         gate.complete();
         assert!(gate.try_schedule());
+    }
+
+    #[test]
+    fn live_gate_accepts_only_completed_outcomes() {
+        let fixture = LiveGateFixture::new();
+        write_json(&fixture.report_path, &fixture.report("passed", "completed"));
+        assert_eq!(
+            recorded_gate(
+                &fixture.report_path,
+                "coinbase",
+                &fixture.source_revision,
+                fixture.now
+            ),
+            super::LiveMarketGate::Passed
+        );
+
+        write_json(&fixture.report_path, &fixture.report("failed", "completed"));
+        assert_eq!(
+            recorded_gate(
+                &fixture.report_path,
+                "coinbase",
+                &fixture.source_revision,
+                fixture.now
+            ),
+            super::LiveMarketGate::Failed
+        );
+    }
+
+    #[test]
+    fn live_gate_rejects_interrupted_stale_or_mismatched_evidence() {
+        let fixture = LiveGateFixture::new();
+        for invalid in [
+            fixture.report("passed", "incomplete"),
+            live_gate_report(
+                std::path::Path::new("live_market_gate_coinbase.bin"),
+                "passed",
+                "completed",
+                "rithmic",
+                &fixture.source_revision,
+                fixture.now,
+                &fixture.binary_sha256,
+            ),
+            live_gate_report(
+                std::path::Path::new("live_market_gate_coinbase.bin"),
+                "passed",
+                "completed",
+                "coinbase",
+                &"b".repeat(40),
+                fixture.now,
+                &fixture.binary_sha256,
+            ),
+            live_gate_report(
+                std::path::Path::new("live_market_gate_coinbase.bin"),
+                "passed",
+                "completed",
+                "coinbase",
+                &fixture.source_revision,
+                fixture.now - super::LIVE_GATE_MAXIMUM_AGE_SECONDS - 1,
+                &fixture.binary_sha256,
+            ),
+            live_gate_report(
+                std::path::Path::new("live_market_gate_coinbase.bin"),
+                "passed",
+                "completed",
+                "coinbase",
+                &fixture.source_revision,
+                fixture.now,
+                &"0".repeat(64),
+            ),
+        ] {
+            write_json(&fixture.report_path, &invalid);
+            assert_eq!(
+                recorded_gate(
+                    &fixture.report_path,
+                    "coinbase",
+                    &fixture.source_revision,
+                    fixture.now
+                ),
+                super::LiveMarketGate::NotRun
+            );
+        }
+
+        std::fs::write(&fixture.report_path, br#"{"outcome":"passed"}"#)
+            .expect("malformed evidence fixture is written");
+        assert_eq!(
+            recorded_gate(
+                &fixture.report_path,
+                "coinbase",
+                &fixture.source_revision,
+                fixture.now
+            ),
+            super::LiveMarketGate::NotRun
+        );
     }
 
     #[test]
