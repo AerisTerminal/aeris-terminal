@@ -13,7 +13,7 @@ struct FixtureHistory {
     fetches: Option<Arc<AtomicUsize>>,
 }
 
-enum FixtureRealtimeAction {
+pub(crate) enum FixtureRealtimeAction {
     Connected,
     Trade(CanonicalTrade),
     Heartbeat,
@@ -27,13 +27,13 @@ struct FixtureRealtime {
     configured_products: Option<SyncSender<Vec<String>>>,
 }
 
-struct FixtureRealtimeHarness {
-    service: MarketService,
-    actions: SyncSender<FixtureRealtimeAction>,
-    generations: Receiver<ProviderGeneration>,
-    stops: Receiver<ProviderGeneration>,
-    configured_products: Receiver<Vec<String>>,
-    history_fetches: Arc<AtomicUsize>,
+pub(crate) struct FixtureRealtimeHarness {
+    pub(crate) service: MarketService,
+    pub(crate) actions: SyncSender<FixtureRealtimeAction>,
+    pub(crate) generations: Receiver<ProviderGeneration>,
+    pub(crate) stops: Receiver<ProviderGeneration>,
+    pub(crate) configured_products: Receiver<Vec<String>>,
+    pub(crate) history_fetches: Arc<AtomicUsize>,
 }
 
 impl HistorySource for FixtureHistory {
@@ -183,7 +183,9 @@ impl MarketService {
         Ok(service)
     }
 
-    fn start_fixture_realtime(bars: Vec<MarketBar>) -> Result<FixtureRealtimeHarness, String> {
+    pub(crate) fn start_fixture_realtime(
+        bars: Vec<MarketBar>,
+    ) -> Result<FixtureRealtimeHarness, String> {
         Self::start_fixture_realtime_with_storage(bars, None)
     }
 
@@ -3196,7 +3198,7 @@ const fn align_down(value: i64, interval: i64) -> i64 {
     value - value.rem_euclid(interval)
 }
 
-fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {
+pub(crate) fn trade(minute: i64, price: &str, provider_sequence: u64) -> CanonicalTrade {
     trade_for("BTC-USD", minute, price, provider_sequence)
 }
 

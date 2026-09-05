@@ -904,4 +904,4 @@ fn test_coinbase_eth_instrument() -> InstallProviderInstrument {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

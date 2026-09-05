@@ -1,5 +1,6 @@
 //! Resident engine process boundary and authenticated local sessions.
 
+mod account_market_gate;
 pub mod account_service;
 mod coinbase_catalog;
 mod market_service;
@@ -7,6 +8,7 @@ mod rithmic_history;
 mod rithmic_realtime;
 mod workspace_layout;
 
+pub use account_market_gate::start_account_market_gate;
 pub use account_service::{AccountService, AccountServiceConfig};
 pub use market_service::{MarketService, MarketServiceStatus};
 
@@ -2658,11 +2660,14 @@ mod tests {
     use axiusflow_local_engine_client::EngineClient;
     use axiusflow_market_data::MarketBar;
 
+    use crate::market_service::tests::{FixtureRealtimeAction, FixtureRealtimeHarness, trade};
+
     use super::{
         COINBASE_PRICE_SCALE, COINBASE_QUANTITY_SCALE, EngineShutdown, EngineState, MarketService,
         RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, SessionPairer, SessionStreams, bind_listener,
         default_workspace, migrate_workspace, platform_access_requires_account,
-        serve_client_with_market, serve_client_with_market_and_shutdown, sync_layout_hot_series,
+        serve_client_with_account_gate, serve_client_with_market,
+        serve_client_with_market_and_shutdown, start_account_market_gate, sync_layout_hot_series,
     };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
@@ -2682,6 +2687,176 @@ mod tests {
         assert!(!platform_access_requires_account(
             &envelope::Payload::GetAccountStatus(GetAccountStatus {})
         ));
+    }
+
+    #[test]
+    fn authenticated_account_gate_resumes_existing_ipc_demand_after_sign_in() {
+        let socket_name = socket_name("account-gate-resume");
+        let listener = bind_listener(&socket_name).expect("bind account-gated endpoint");
+        let token = [43_u8; 32];
+        let harness = MarketService::start_fixture_realtime(vec![MarketBar {
+            source_sequence: 2,
+            exchange_timestamp_seconds: 60,
+            exchange_timestamp_unix_nanos: 60_000_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 7,
+        }])
+        .expect("realtime fixture starts");
+        harness
+            .service
+            .set_resource_mode(ResourceMode::OfflineSuspended)
+            .expect("production startup suspension applies");
+        let state = EngineState::default();
+        state.set_resource_mode(ResourceMode::OfflineSuspended);
+        let shutdown = EngineShutdown::default();
+        let gate = start_account_market_gate(&state, &harness.service, &shutdown)
+            .expect("account market gate starts");
+        let server_state = state.clone();
+        let server_market = harness.service.clone();
+        let server_shutdown = shutdown.clone();
+        let server = thread::spawn(move || {
+            let pair = accept_session_pair(&listener, &token);
+            serve_client_with_account_gate(
+                pair,
+                51,
+                &server_state,
+                &server_market,
+                &server_shutdown,
+            )
+            .expect("serve account-gated market client");
+        });
+
+        let mut client =
+            EngineClient::connect(&socket_name, &token).expect("connect account-gated client");
+        assert!(
+            client.restore_workspace().is_err(),
+            "signed-out platform commands remain rejected"
+        );
+
+        state.account().set_authenticated_for_test(true);
+        wait_for_resource_mode(&state, ResourceMode::Warm);
+        let series = cached_series(BTC_INSTRUMENT, 60);
+        client
+            .attach_client(51)
+            .expect("authenticated client attaches");
+        client
+            .register_consumer(51, 1, 501)
+            .expect("chart consumer registers through production IPC");
+        client
+            .set_series_demand(501, 1, series.clone())
+            .expect("chart demand crosses production IPC");
+        poll_ipc_snapshot(&mut client, 501, 1, &series);
+        publish_fixture_live_update(&harness, &mut client, 1, 2, "2.00", 1, 200);
+
+        state.account().set_authenticated_for_test(false);
+        assert_eq!(
+            harness
+                .stops
+                .recv_timeout(Duration::from_secs(1))
+                .expect("sign-out stops the active provider generation")
+                .0
+                .get(),
+            1
+        );
+        wait_for_resource_mode(&state, ResourceMode::OfflineSuspended);
+
+        state.account().set_authenticated_for_test(true);
+        wait_for_resource_mode(&state, ResourceMode::Warm);
+        publish_fixture_live_update(&harness, &mut client, 2, 3, "2.50", 2, 250);
+        assert!(
+            harness.history_fetches.load(Ordering::Acquire) >= 2,
+            "sign-in requests fresh covering history"
+        );
+
+        drop(client);
+        server.join().expect("join account-gated IPC server");
+        shutdown.request();
+        gate.join().expect("join account market gate");
+    }
+
+    fn wait_for_resource_mode(state: &EngineState, expected: ResourceMode) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while state.workspace().resource_mode != expected as i32 {
+            assert!(
+                Instant::now() < deadline,
+                "account market gate did not apply {expected:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn publish_fixture_live_update(
+        harness: &FixtureRealtimeHarness,
+        client: &mut EngineClient,
+        provider_generation: u64,
+        minute: i64,
+        price: &str,
+        provider_sequence: u64,
+        expected_close: i64,
+    ) {
+        assert_eq!(
+            harness
+                .generations
+                .recv_timeout(Duration::from_secs(1))
+                .expect("expected realtime generation starts")
+                .0
+                .get(),
+            provider_generation
+        );
+        assert_eq!(
+            harness
+                .configured_products
+                .recv_timeout(Duration::from_secs(1))
+                .expect("expected product set configures"),
+            ["BTC-USD"]
+        );
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Connected)
+            .expect("realtime fixture connects");
+        harness
+            .actions
+            .send(FixtureRealtimeAction::Trade(trade(
+                minute,
+                price,
+                provider_sequence,
+            )))
+            .expect("fixture trade arrives");
+        poll_ipc_live_update(client, 501, 1, provider_generation, expected_close);
+    }
+
+    fn poll_ipc_live_update(
+        client: &mut EngineClient,
+        consumer_id: u64,
+        generation: u64,
+        provider_generation: u64,
+        close: i64,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(event) = receive_ipc_event(client, consumer_id, Duration::from_millis(50)) {
+                let matched = matches!(
+                    &event,
+                    envelope::Payload::SeriesUpdate(update)
+                        if update.generation == generation
+                            && update.provider_generation == provider_generation
+                            && update.bar.as_ref().is_some_and(|bar| bar.close == close)
+                ) || matches!(
+                    &event,
+                    envelope::Payload::SeriesSnapshot(snapshot)
+                        if snapshot.generation == generation
+                            && snapshot.provider_generation == provider_generation
+                            && snapshot.bars.last().is_some_and(|bar| bar.close == close)
+                );
+                if matched {
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "live IPC update timed out");
+        }
     }
 
     fn socket_name(label: &str) -> String {

@@ -143,6 +143,19 @@ impl AccountService {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_authenticated_for_test(&self, authenticated: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.view.state = if authenticated {
+            AccountSessionState::Active
+        } else {
+            AccountSessionState::SignedOut
+        } as i32;
+    }
+
     /// Resolves cached OIDC endpoints, refreshing them from discovery once.
     ///
     /// # Errors
