@@ -5913,6 +5913,30 @@ impl TerminalApp {
             return;
         }
         self.market_wake_listener_started = Some(());
+        // Authentication must progress even when a suspended provider has
+        // no events to wake this window. Poll only account presentation;
+        // a changed view schedules a frame that also drains retained data.
+        cx.spawn_in(window, async move |terminal, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if terminal
+                    .update_in(cx, |terminal, window, terminal_cx| {
+                        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                            && account.poll()
+                        {
+                            terminal.schedule_market_frame(window, terminal_cx);
+                            terminal_cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let wake = self.market_frame_wake.clone();
         cx.spawn_in(window, async move |terminal, cx| {
             loop {
@@ -6185,16 +6209,6 @@ fn wait_for_authenticated_account(
     }
 }
 
-fn relaunch_authenticated_desktop() -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|_| "Axiusflow could not locate its desktop executable".to_string())?;
-    std::process::Command::new(executable)
-        .args(std::env::args_os().skip(1))
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| "Axiusflow could not open the authenticated workspace".to_string())
-}
-
 fn run_onboarding() {
     application()
         .with_assets(assets::AxiusflowAssets)
@@ -6210,15 +6224,22 @@ fn run_onboarding() {
                     )),
                 ])
                 .expect("the bundled HK Grotesk fonts are valid");
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
             let options = desktop_window_options(0, cx);
-            cx.open_window(options, |_, cx| {
-                cx.new(|_| onboarding::OnboardingApp::new())
+            cx.open_window(options, |window, cx| {
+                let screen = cx.new(|_| onboarding::OnboardingApp::new());
+                let closing = screen.clone();
+                // Terminal mounting replaces this window's content in place.
+                // Only quit here while still onboarding; after the terminal
+                // mounts its own should-close owns the close and the
+                // app-level shutdown owns quit.
+                window.on_window_should_close(cx, move |_, cx| {
+                    if closing.read(cx).has_terminal() {
+                        return true;
+                    }
+                    cx.quit();
+                    true
+                });
+                screen
             })
             .expect("the Axiusflow onboarding window opens");
             cx.activate(true);
@@ -6226,12 +6247,6 @@ fn run_onboarding() {
 }
 
 fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
-    let market_workers = configured.market_workers;
-    let workspace_panes = configured.workspace_panes;
-    let restored_workspace = configured.restored_workspace;
-    let workspace_factory = configured.workspace_factory;
-    let layout = configured.layout;
-    let chart_chrome = configured.chart_chrome;
     application()
         .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
@@ -6246,86 +6261,112 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                     )),
                 ])
                 .expect("the bundled HK Grotesk fonts are valid");
-            cx.bind_keys([
-                KeyBinding::new("f11", ToggleFullscreen, None),
-                KeyBinding::new("alt-enter", ToggleFullscreen, None),
-                KeyBinding::new("alt-f9", MinimizeWindow, None),
-                KeyBinding::new("alt-f10", ZoomWindow, None),
-                KeyBinding::new("alt-f4", CloseWindow, None),
-                KeyBinding::new("ctrl-t", NewWorkspace, None),
-                KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
-                KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
-                KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
-                KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
-                KeyBinding::new("ctrl-w", CloseWorkspace, None),
-                KeyBinding::new("ctrl-alt-h", SplitPaneHorizontal, None),
-                KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
-                KeyBinding::new("ctrl-shift-w", ClosePane, None),
-            ]);
-            let quit_lifecycle = lifecycle.clone();
-            cx.on_app_quit(move |cx| {
-                let quit = quit_lifecycle.begin_quit(cx);
-                async move {
-                    if let Some(quit) = quit
-                        && let Err(error) = quit.await
-                    {
-                        eprintln!("Axiusflow desktop shutdown failed: {error}");
-                    }
-                }
-            })
-            .detach();
-            let last_window_lifecycle = lifecycle.clone();
-            cx.on_window_closed(move |cx, _| {
-                if cx.windows().is_empty() {
-                    last_window_lifecycle.quit_after_shutdown(cx);
-                }
-            })
-            .detach();
-            match layout {
-                DesktopLayout::Windows => {
-                    for (window_index, (bootstrap, market_worker)) in
-                        market_workers.into_iter().enumerate()
-                    {
-                        let options = desktop_window_options(window_index, cx);
-                        let window_lifecycle = lifecycle.clone();
-                        let window_factory = workspace_factory.clone();
-                        cx.open_window(options, move |window, cx| {
-                            terminal_root(
-                                bootstrap,
-                                market_worker,
-                                window_factory,
-                                &window_lifecycle,
-                                chart_chrome,
-                                window,
-                                cx,
-                            )
-                        })
-                        .expect("the Axiusflow terminal window opens");
-                    }
-                }
-                DesktopLayout::WorkspaceTabs => {
-                    let window_lifecycle = lifecycle.clone();
-                    let options = desktop_window_options(0, cx);
-                    let workspace_factory =
-                        workspace_factory.expect("workspace layout has a market workspace factory");
-                    cx.open_window(options, move |window, cx| {
-                        workspace_tabs_root(
-                            workspace_panes,
-                            &restored_workspace,
-                            workspace_factory,
-                            &window_lifecycle,
-                            chart_chrome,
-                            window,
-                            cx,
-                        )
-                    })
-                    .expect("the Axiusflow workspace window opens");
-                }
-            }
-            cx.activate(true);
+            mount_desktop(configured, lifecycle, None, cx);
         });
 }
 
+/// Mounts the authenticated workspace in the existing onboarding window.
+/// Startup I/O has completed on a background worker before entering GPUI.
+fn mount_desktop(
+    configured: ConfiguredDesktop,
+    lifecycle: DesktopLifecycle,
+    mut existing_window: Option<&mut Window>,
+    cx: &mut App,
+) -> Option<Entity<TerminalApp>> {
+    let market_workers = configured.market_workers;
+    let workspace_panes = configured.workspace_panes;
+    let restored_workspace = configured.restored_workspace;
+    let workspace_factory = configured.workspace_factory;
+    let layout = configured.layout;
+    let chart_chrome = configured.chart_chrome;
+    cx.bind_keys([
+        KeyBinding::new("f11", ToggleFullscreen, None),
+        KeyBinding::new("alt-enter", ToggleFullscreen, None),
+        KeyBinding::new("alt-f9", MinimizeWindow, None),
+        KeyBinding::new("alt-f10", ZoomWindow, None),
+        KeyBinding::new("alt-f4", CloseWindow, None),
+        KeyBinding::new("ctrl-t", NewWorkspace, None),
+        KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
+        KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
+        KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
+        KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
+        KeyBinding::new("ctrl-w", CloseWorkspace, None),
+        KeyBinding::new("ctrl-alt-h", SplitPaneHorizontal, None),
+        KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
+        KeyBinding::new("ctrl-shift-w", ClosePane, None),
+    ]);
+    let quit_lifecycle = lifecycle.clone();
+    cx.on_app_quit(move |cx| {
+        let quit = quit_lifecycle.begin_quit(cx);
+        async move {
+            if let Some(quit) = quit
+                && let Err(error) = quit.await
+            {
+                eprintln!("Axiusflow desktop shutdown failed: {error}");
+            }
+        }
+    })
+    .detach();
+    let last_window_lifecycle = lifecycle.clone();
+    cx.on_window_closed(move |cx, _| {
+        if cx.windows().is_empty() {
+            last_window_lifecycle.quit_after_shutdown(cx);
+        }
+    })
+    .detach();
+    let mut existing_root = None;
+    match layout {
+        DesktopLayout::Windows => {
+            for (window_index, (bootstrap, market_worker)) in market_workers.into_iter().enumerate()
+            {
+                let window_lifecycle = lifecycle.clone();
+                let window_factory = workspace_factory.clone();
+                let build = move |window: &mut Window, cx: &mut App| {
+                    terminal_root(
+                        bootstrap,
+                        market_worker,
+                        window_factory,
+                        &window_lifecycle,
+                        chart_chrome,
+                        window,
+                        cx,
+                    )
+                };
+                if let Some(window) = existing_window.take() {
+                    existing_root = Some(build(window, cx));
+                } else {
+                    let options = desktop_window_options(window_index, cx);
+                    cx.open_window(options, build)
+                        .expect("the Axiusflow terminal window opens");
+                }
+            }
+        }
+        DesktopLayout::WorkspaceTabs => {
+            let workspace_factory =
+                workspace_factory.expect("workspace layout has a market workspace factory");
+            let build = move |window: &mut Window, cx: &mut App| {
+                workspace_tabs_root(
+                    workspace_panes,
+                    &restored_workspace,
+                    workspace_factory,
+                    &lifecycle,
+                    chart_chrome,
+                    window,
+                    cx,
+                )
+            };
+            if let Some(window) = existing_window {
+                existing_root = Some(build(window, cx));
+            } else {
+                let options = desktop_window_options(0, cx);
+                cx.open_window(options, build)
+                    .expect("the Axiusflow workspace window opens");
+            }
+        }
+    }
+    cx.activate(true);
+    existing_root
+}
 #[cfg(test)]
 mod tests {
     use super::{

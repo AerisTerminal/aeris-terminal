@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axiusflow_design_system::AxiusflowTheme;
-use gpui::{App, Context, FontWeight, Render, Role, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, FontWeight, Render, Role, Window, div, prelude::*, px};
 
 use crate::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
 
@@ -9,6 +9,8 @@ pub(super) struct OnboardingApp {
     theme: AxiusflowTheme,
     polling: bool,
     launch_error: Option<String>,
+    terminal: Option<Entity<crate::TerminalApp>>,
+    loading: bool,
 }
 
 impl OnboardingApp {
@@ -17,6 +19,8 @@ impl OnboardingApp {
             theme: AxiusflowTheme::dark(),
             polling: false,
             launch_error: None,
+            terminal: None,
+            loading: false,
         }
     }
 
@@ -38,8 +42,12 @@ impl OnboardingApp {
         cx.refresh_windows();
     }
 
+    pub(super) fn has_terminal(&self) -> bool {
+        self.terminal.is_some()
+    }
+
     fn start_account_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.polling {
+        if self.polling || self.launch_error.is_some() || self.terminal.is_some() {
             return;
         }
         self.polling = true;
@@ -48,35 +56,100 @@ impl OnboardingApp {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
-                let finished = screen
-                    .update_in(cx, |screen, _, screen_cx| {
-                        let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
-                        else {
+                let Ok(finished) = screen.update_in(cx, |screen, _, screen_cx| {
+                    let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() else {
+                        if screen.launch_error.is_none() {
                             screen.launch_error = Some(
                                 "Sign-in service is unavailable. Restart Axiusflow.".to_string(),
                             );
+                            screen.loading = false;
                             screen_cx.notify();
-                            return false;
-                        };
-                        let changed = account.poll();
-                        if account.authenticated() {
-                            match crate::relaunch_authenticated_desktop() {
-                                Ok(()) => {
-                                    screen_cx.quit();
-                                    return true;
-                                }
-                                Err(error) => {
-                                    screen.launch_error = Some(error);
-                                }
+                        }
+                        return false;
+                    };
+                    let changed = account.poll();
+                    if account.authenticated() && screen.launch_error.is_none() {
+                        screen.loading = true;
+                        screen_cx.notify();
+                        return true;
+                    }
+                    if changed {
+                        screen_cx.notify();
+                    }
+                    false
+                }) else {
+                    break;
+                };
+                if !finished {
+                    continue;
+                }
+                {
+                    // IPC, workspace restore, preferences, and provider worker
+                    // startup must never block the window's event loop.
+                    let configured = cx
+                        .background_executor()
+                        .spawn(async { crate::configured_market_workers() })
+                        .await;
+                    // Retired completion fencing: sign-out, cancellation, or
+                    // expiry may have landed while startup ran. Drop the
+                    // just-built workers on this background task and resume
+                    // waiting instead of attaching stale state to the window.
+                    let still_authenticated = axiusflow_desktop::account::DesktopAccount::shared()
+                        .is_some_and(|account| {
+                            let _ = account.poll();
+                            account.authenticated()
+                        });
+                    if !still_authenticated {
+                        drop(configured);
+                        let _ = screen.update_in(cx, |screen, _, screen_cx| {
+                            screen.loading = false;
+                            screen_cx.notify();
+                        });
+                        continue;
+                    }
+                    let mounted = screen.update_in(cx, |screen, window, screen_cx| {
+                        screen.loading = false;
+                        match configured {
+                            Ok(Some(configured)) => {
+                                let lifecycle = match crate::DesktopLifecycle::new(
+                                    configured.lifetime_mode,
+                                    configured.autostart_enabled,
+                                    configured.markets_live_permitted,
+                                ) {
+                                    Ok(lifecycle) => lifecycle,
+                                    Err(error) => {
+                                        screen.launch_error = Some(error);
+                                        screen.polling = false;
+                                        screen_cx.notify();
+                                        return;
+                                    }
+                                };
+                                // The terminal keeps the same window and account
+                                // client; a sign-out that races this mount is
+                                // observed on the next poll and returns to
+                                // onboarding without stale state.
+                                screen.terminal = crate::mount_desktop(
+                                    configured,
+                                    lifecycle,
+                                    Some(window),
+                                    screen_cx,
+                                );
+                            }
+                            Ok(None) => {
+                                // Diagnostic commands (readiness/conformance)
+                                // already ran on the background worker.
+                                screen_cx.quit();
+                            }
+                            Err(error) => {
+                                screen.launch_error = Some(error);
+                                screen.polling = false;
                             }
                         }
-                        if changed {
-                            screen_cx.notify();
-                        }
-                        false
-                    })
-                    .unwrap_or(true);
-                if finished {
+                        screen_cx.notify();
+                    });
+                    if mounted.is_err() {
+                        break;
+                    }
                     break;
                 }
             }
@@ -133,8 +206,45 @@ fn onboarding_button(
 
 impl Render for OnboardingApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(terminal) = &self.terminal {
+            return terminal.clone().into_any_element();
+        }
         self.start_account_poll(window, cx);
-        onboarding_surface(window, &self.theme, self.launch_error.as_ref())
+        if self.loading {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_color(self.theme.colors.surface))
+                .text_color(gpui_color(self.theme.colors.text_primary))
+                .child("Signed in. Loading your workspace…")
+                .into_any_element();
+        }
+        if let Some(error) = &self.launch_error {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .bg(gpui_color(self.theme.colors.surface))
+                .text_color(gpui_color(self.theme.colors.text_primary))
+                .child(error.clone())
+                .child(
+                    div()
+                        .id("retry_workspace")
+                        .cursor_pointer()
+                        .mt_3()
+                        .child("Retry")
+                        .on_click(cx.listener(|screen, _, _, cx| {
+                            screen.launch_error = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
+        onboarding_surface(window, &self.theme, None).into_any_element()
     }
 }
 
