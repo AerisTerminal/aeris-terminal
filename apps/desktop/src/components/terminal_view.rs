@@ -87,11 +87,16 @@ impl TerminalApp {
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_market_wake_listener(window, cx);
+        self.schedule_market_frame(window, cx);
+        if !axiusflow_desktop::account::DesktopAccount::shared()
+            .is_some_and(|account| account.authenticated())
+        {
+            return onboarding::onboarding_surface(&self.theme, None);
+        }
         if self.workspace_drag.is_some() && !cx.has_active_drag() {
             self.workspace_drag = None;
         }
         self.track_window_activation(window, cx);
-        self.schedule_market_frame(window, cx);
         self.absorb_pane_activate_requests(cx);
         self.absorb_chart_context_menu_requests(cx);
         let terminal = cx.entity();

@@ -144,6 +144,18 @@ impl AccountService {
         service
     }
 
+    /// Returns whether a verified online session or valid offline lease is
+    /// installed. Market and workspace operations use this as a hard gate.
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            matches!(
+                AccountSessionState::try_from(state.view.state),
+                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+            )
+        })
+    }
+
     fn restore_session(&self) {
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
             return;

@@ -1905,7 +1905,7 @@ pub fn serve_client_with_state(
     engine_epoch: u64,
     state: &EngineState,
 ) -> Result<(), String> {
-    serve_client_with_services(pair, engine_epoch, state, None, None)
+    serve_client_with_services(pair, engine_epoch, state, None, None, false)
 }
 
 /// Serves one paired client session with workspace and resident market ownership.
@@ -1920,7 +1920,7 @@ pub fn serve_client_with_market(
     state: &EngineState,
     market: &MarketService,
 ) -> Result<(), String> {
-    serve_client_with_services(pair, engine_epoch, state, Some(market), None)
+    serve_client_with_services(pair, engine_epoch, state, Some(market), None, false)
 }
 
 /// Serves one paired client session with market ownership and process shutdown control.
@@ -1936,7 +1936,36 @@ pub fn serve_client_with_market_and_shutdown(
     market: &MarketService,
     shutdown: &EngineShutdown,
 ) -> Result<(), String> {
-    serve_client_with_services(pair, engine_epoch, state, Some(market), Some(shutdown))
+    serve_client_with_services(
+        pair,
+        engine_epoch,
+        state,
+        Some(market),
+        Some(shutdown),
+        false,
+    )
+}
+
+/// Serves the production desktop boundary with mandatory cloud-account
+/// authentication in addition to the native installation credential.
+///
+/// # Errors
+/// Returns an error for I/O, framing, authentication setup, or malformed requests.
+pub fn serve_client_with_account_gate(
+    pair: SessionStreams,
+    engine_epoch: u64,
+    state: &EngineState,
+    market: &MarketService,
+    shutdown: &EngineShutdown,
+) -> Result<(), String> {
+    serve_client_with_services(
+        pair,
+        engine_epoch,
+        state,
+        Some(market),
+        Some(shutdown),
+        true,
+    )
 }
 
 fn serve_client_with_services(
@@ -1945,6 +1974,7 @@ fn serve_client_with_services(
     state: &EngineState,
     market: Option<&MarketService>,
     shutdown: Option<&EngineShutdown>,
+    account_gate_required: bool,
 ) -> Result<(), String> {
     let mut connection = FramedConnection::new(pair, state.clone())?;
     let release = current_release_identity();
@@ -1958,7 +1988,13 @@ fn serve_client_with_services(
         release_identity: release.release_identity,
         install_generation: release.install_generation,
     }))?;
-    serve_authenticated_session(&mut connection, state, market, shutdown)
+    serve_authenticated_session(
+        &mut connection,
+        state,
+        market,
+        shutdown,
+        account_gate_required,
+    )
 }
 
 fn serve_authenticated_session(
@@ -1966,10 +2002,17 @@ fn serve_authenticated_session(
     state: &EngineState,
     market: Option<&MarketService>,
     shutdown: Option<&EngineShutdown>,
+    account_gate_required: bool,
 ) -> Result<(), String> {
     let mut attached_client = None;
-    let result =
-        serve_authenticated_messages(connection, state, market, shutdown, &mut attached_client);
+    let result = serve_authenticated_messages(
+        connection,
+        state,
+        market,
+        shutdown,
+        account_gate_required,
+        &mut attached_client,
+    );
     if let (Some(market), Some(client_id)) = (market, attached_client) {
         let _ = market.detach(client_id);
         state.record_client_detach(client_id);
@@ -1982,6 +2025,7 @@ fn serve_authenticated_messages(
     state: &EngineState,
     market: Option<&MarketService>,
     shutdown: Option<&EngineShutdown>,
+    account_gate_required: bool,
     attached_client: &mut Option<u64>,
 ) -> Result<(), String> {
     loop {
@@ -1995,6 +2039,13 @@ fn serve_authenticated_messages(
         if shutdown.is_some_and(EngineShutdown::is_requested) {
             connection.send(cancelled_mutation_fault("engine is shutting down"))?;
             return Ok(());
+        }
+        if account_gate_required
+            && platform_access_requires_account(&payload)
+            && !state.account().is_authenticated()
+        {
+            connection.send(account_required_fault())?;
+            continue;
         }
         match payload {
             payload @ (envelope::Payload::RestoreWorkspace(_)
@@ -2017,7 +2068,7 @@ fn serve_authenticated_messages(
             | envelope::Payload::CancelLogin(_)
             | envelope::Payload::GetAccountStatus(_)
             | envelope::Payload::SignOut(_)) => {
-                handle_account_message(connection, state, &payload)?;
+                handle_account_message(connection, state, market, &payload)?;
             }
             envelope::Payload::Goodbye(_) => {
                 connection.send(envelope::Payload::Goodbye(Goodbye {
@@ -2135,6 +2186,7 @@ fn handle_engine_control_message(
 fn handle_account_message(
     connection: &mut FramedConnection,
     state: &EngineState,
+    market: Option<&MarketService>,
     payload: &envelope::Payload,
 ) -> Result<(), String> {
     match payload {
@@ -2158,10 +2210,26 @@ fn handle_account_message(
             state.account().account_status(),
         )),
         envelope::Payload::SignOut(_) => {
+            if let Some(market) = market {
+                market.set_resource_mode(ResourceMode::OfflineSuspended)?;
+            }
             connection.send(envelope::Payload::AccountView(state.account().sign_out()))
         }
         _ => unreachable!("only account messages reach account dispatch"),
     }
+}
+
+fn platform_access_requires_account(payload: &envelope::Payload) -> bool {
+    !matches!(
+        payload,
+        envelope::Payload::BeginLogin(_)
+            | envelope::Payload::CancelLogin(_)
+            | envelope::Payload::GetAccountStatus(_)
+            | envelope::Payload::SignOut(_)
+            | envelope::Payload::GetEngineStatus(_)
+            | envelope::Payload::ShutdownEngine(_)
+            | envelope::Payload::Goodbye(_)
+    )
 }
 
 fn apply_engine_lifecycle(
@@ -2548,6 +2616,13 @@ fn cancelled_mutation_fault(detail: impl Into<String>) -> envelope::Payload {
     })
 }
 
+fn account_required_fault() -> envelope::Payload {
+    envelope::Payload::Fault(Fault {
+        code: EngineFaultCode::Unauthenticated as i32,
+        redacted_detail: "sign in before using the Axiusflow platform".to_string(),
+    })
+}
+
 fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -2573,8 +2648,9 @@ mod tests {
 
     use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
     use axiusflow_engine_protocol::{
-        EngineLifetimeMode, EngineShutdownState, InstallProviderInstrument,
-        ProviderInstrumentSelection, ResourceMode, SeriesCadence, SeriesKey, envelope,
+        EngineLifetimeMode, EngineShutdownState, GetAccountStatus, InstallProviderInstrument,
+        ProviderInstrumentSelection, ResourceMode, RestoreWorkspace, SeriesCadence, SeriesKey,
+        envelope,
     };
     use axiusflow_local_engine_client::EngineClient;
     use axiusflow_market_data::MarketBar;
@@ -2582,8 +2658,8 @@ mod tests {
     use super::{
         COINBASE_PRICE_SCALE, COINBASE_QUANTITY_SCALE, EngineShutdown, EngineState, MarketService,
         RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, SessionPairer, SessionStreams, bind_listener,
-        default_workspace, migrate_workspace, serve_client_with_market,
-        serve_client_with_market_and_shutdown, sync_layout_hot_series,
+        default_workspace, migrate_workspace, platform_access_requires_account,
+        serve_client_with_market, serve_client_with_market_and_shutdown, sync_layout_hot_series,
     };
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
@@ -2594,6 +2670,16 @@ mod tests {
     const MULTI_MEASURED_SAMPLES: usize = 32;
     const BTC_INSTRUMENT: &str = "instrument:coinbase:btc:usd";
     const ETH_INSTRUMENT: &str = "instrument:coinbase:eth:usd";
+
+    #[test]
+    fn production_account_gate_allows_only_control_plane_messages() {
+        assert!(platform_access_requires_account(
+            &envelope::Payload::RestoreWorkspace(RestoreWorkspace {})
+        ));
+        assert!(!platform_access_requires_account(
+            &envelope::Payload::GetAccountStatus(GetAccountStatus {})
+        ));
+    }
 
     fn socket_name(label: &str) -> String {
         format!(

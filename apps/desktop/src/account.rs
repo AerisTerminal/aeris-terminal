@@ -95,7 +95,7 @@ pub const fn account_state_label(state: AccountSessionState) -> &'static str {
         AccountSessionState::Active => "Signed in",
         AccountSessionState::OfflineLease => "Signed in (offline)",
         AccountSessionState::ReauthenticationRequired => "Sign-in required",
-        AccountSessionState::LeaseExpired => "Subscription expired",
+        AccountSessionState::LeaseExpired => "Sign-in expired",
         AccountSessionState::TerminalError => "Sign-in unavailable",
     }
 }
@@ -218,7 +218,7 @@ pub fn unavailable_menu_state() -> AccountMenuState {
 pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
     match plan_id {
         "" => "No plan",
-        "starter" => "Starter",
+        "starter" => "Early access",
         "pro" => "Pro",
         "elite" => "Elite",
         "enterprise" => "Enterprise",
@@ -375,6 +375,19 @@ impl DesktopAccount {
         INSTALLED_ACCOUNT.get().cloned()
     }
 
+    /// Returns whether the engine has verified a usable account session.
+    /// The desktop uses this as its hard boundary before creating any
+    /// workspace or market worker.
+    #[must_use]
+    pub fn authenticated(&self) -> bool {
+        self.shared.view.lock().is_ok_and(|view| {
+            matches!(
+                AccountSessionState::try_from(view.state),
+                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+            )
+        })
+    }
+
     fn spawn(client_id: u64) -> Result<Self, String> {
         Self::spawn_with(client_id, handle_account_request)
     }
@@ -482,8 +495,7 @@ impl DesktopAccount {
         }
     }
 
-    /// Returns the current verified internal plan identity. Signed-out and
-    /// unavailable sessions receive the Starter limits.
+    /// Returns the current verified internal plan identity.
     #[must_use]
     pub fn plan_id(&self) -> String {
         self.shared.view.lock().map_or_else(
@@ -1041,7 +1053,7 @@ mod tests {
         );
         assert_eq!(
             account_state_label(AccountSessionState::LeaseExpired),
-            "Subscription expired"
+            "Sign-in expired"
         );
         assert_eq!(
             account_state_label(AccountSessionState::TerminalError),

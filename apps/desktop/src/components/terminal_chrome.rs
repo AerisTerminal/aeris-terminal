@@ -833,9 +833,13 @@ pub(super) fn exchange_mark(
 }
 
 pub(super) fn brand_mark() -> impl IntoElement {
+    brand_mark_sized(px(28.0))
+}
+
+pub(super) fn brand_mark_sized(size: Pixels) -> impl IntoElement {
     ColoredSvgMark {
         path: assets::BrandIcon::Mark.path(),
-        size: px(28.0),
+        size,
     }
 }
 

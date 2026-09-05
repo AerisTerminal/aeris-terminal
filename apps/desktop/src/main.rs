@@ -18,6 +18,7 @@ mod frame_poll_gate;
 #[path = "components/indicator_menu.rs"]
 mod indicator_menu;
 mod native_ui;
+mod onboarding;
 #[cfg(any(test, feature = "diagnostics"))]
 mod readiness_conformance;
 mod rithmic_engine_client;
@@ -226,27 +227,14 @@ struct PlanLimits {
 }
 
 fn current_plan_limits() -> PlanLimits {
-    let plan = axiusflow_desktop::account::DesktopAccount::shared()
-        .map_or_else(|| "starter".to_string(), |account| account.plan_id());
-    match plan.as_str() {
-        "pro" => PlanLimits {
-            workspaces: 3,
-            panes_per_workspace: MAXIMUM_PANES_PER_WORKSPACE,
-            indicators_per_chart: 5,
-            extended_timeframes: true,
-        },
-        "elite" | "enterprise" => PlanLimits {
-            workspaces: MAXIMUM_OPEN_WORKSPACES,
-            panes_per_workspace: MAXIMUM_PANES_PER_WORKSPACE,
-            indicators_per_chart: usize::MAX,
-            extended_timeframes: true,
-        },
-        _ => PlanLimits {
-            workspaces: 1,
-            panes_per_workspace: 2,
-            indicators_per_chart: 2,
-            extended_timeframes: false,
-        },
+    // Authentication is mandatory, but billing is intentionally not a
+    // product-access boundary during early access. Keep one capability shape
+    // until paid-plan enforcement is deliberately enabled.
+    PlanLimits {
+        workspaces: MAXIMUM_OPEN_WORKSPACES,
+        panes_per_workspace: MAXIMUM_PANES_PER_WORKSPACE,
+        indicators_per_chart: usize::MAX,
+        extended_timeframes: true,
     }
 }
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
@@ -5883,12 +5871,14 @@ impl TerminalApp {
                         .and_then(WorkspaceLayoutPersistence::error);
                     cx.notify();
                 }
+                let authenticated = axiusflow_desktop::account::DesktopAccount::shared()
+                    .is_some_and(|account| account.authenticated());
                 let mut diagnostics = Vec::new();
                 for workspace in &terminal.workspaces {
                     for pane in &workspace.panes {
                         let surface = pane.surface.clone();
                         let pending = surface.update(cx, |workspace, workspace_cx| {
-                            if workspace.should_poll_market() {
+                            if authenticated && workspace.should_poll_market() {
                                 workspace.poll_market_worker(workspace_cx);
                             }
                             workspace.pending_ui_diagnostics.take()
@@ -6143,6 +6133,19 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
 }
 
 fn main() {
+    let account =
+        match axiusflow_desktop::account::DesktopAccount::install(u64::from(std::process::id())) {
+            Ok(account) => account,
+            Err(error) => {
+                eprintln!("Axiusflow account client could not start: {error}");
+                run_onboarding();
+                return;
+            }
+        };
+    if !wait_for_authenticated_account(&account, Duration::from_secs(2)) {
+        run_onboarding();
+        return;
+    }
     let configured = match configured_market_workers() {
         Ok(Some(configured)) => configured,
         Ok(None) => return,
@@ -6162,15 +6165,65 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // Sign-in is optional: market data works signed out, so a failed
-    // account client degrades to an unavailable sign-in row, never a
-    // startup failure.
-    if let Err(error) =
-        axiusflow_desktop::account::DesktopAccount::install(u64::from(std::process::id()))
-    {
-        eprintln!("Axiusflow account client degraded: {error}");
-    }
     run_desktop(configured, lifecycle);
+}
+
+fn wait_for_authenticated_account(
+    account: &axiusflow_desktop::account::DesktopAccount,
+    timeout: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let _ = account.poll();
+        if account.authenticated() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn relaunch_authenticated_desktop() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "Axiusflow could not locate its desktop executable".to_string())?;
+    std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "Axiusflow could not open the authenticated workspace".to_string())
+}
+
+fn run_onboarding() {
+    application()
+        .with_assets(assets::AxiusflowAssets)
+        .with_quit_mode(QuitMode::Explicit)
+        .run(move |cx: &mut App| {
+            cx.text_system()
+                .add_fonts(vec![
+                    Cow::Borrowed(include_bytes!(
+                        "../../../crates/ui/design_system/HKGrotesk-Regular.ttf"
+                    )),
+                    Cow::Borrowed(include_bytes!(
+                        "../../../crates/ui/design_system/HKGrotesk-Bold.ttf"
+                    )),
+                ])
+                .expect("the bundled HK Grotesk fonts are valid");
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let mut options = desktop_window_options(0, cx);
+            options.app_owns_titlebar_drag = false;
+            cx.open_window(options, |_, cx| {
+                cx.new(|_| onboarding::OnboardingApp::new())
+            })
+            .expect("the Axiusflow onboarding window opens");
+            cx.activate(true);
+        });
 }
 
 fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {

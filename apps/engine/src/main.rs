@@ -16,7 +16,7 @@ use std::{
 
 use axiusflow_engine::{
     EngineShutdown, EngineState, MarketService, SessionPairer, bind_listener,
-    default_engine_state_root, serve_client_with_market_and_shutdown,
+    default_engine_state_root, serve_client_with_account_gate,
 };
 use axiusflow_engine_protocol::{EngineLifetimeMode, ResourceMode};
 use axiusflow_local_engine_client::{
@@ -85,11 +85,18 @@ fn run() -> Result<(), String> {
     let state = EngineState::open(default_engine_state_root()?)?;
     let workspace = state.workspace();
     install_background_service(&state, workspace.autostart_enabled)?;
-    let market = MarketService::start(&workspace)?;
-    market.set_resource_mode(lifetime_resource_mode(&workspace)?)?;
+    // Never restore hot demand or allow provider activity before the account
+    // service has verified an online session or a valid offline lease.
+    let mut gated_workspace = workspace.clone();
+    gated_workspace.hot_series.clear();
+    gated_workspace.resource_mode = ResourceMode::OfflineSuspended as i32;
+    let market = MarketService::start(&gated_workspace)?;
+    market.set_resource_mode(ResourceMode::OfflineSuspended)?;
+    state.set_resource_mode(ResourceMode::OfflineSuspended);
     let active_clients = Arc::new(AtomicUsize::new(0));
     let pairer = SessionPairer::new();
     let shutdown = EngineShutdown::default();
+    let account_gate = start_account_market_gate(&state, &market, &shutdown)?;
     let session_shutdown = match start_session_shutdown_monitor(shutdown.clone()) {
         Ok(runtime) => Some(runtime),
         Err(error) => {
@@ -127,7 +134,7 @@ fn run() -> Result<(), String> {
             .spawn(move || {
                 match pairer.accept_one(stream, token.as_slice()) {
                     Ok(Some(pair)) => {
-                        if let Err(error) = serve_client_with_market_and_shutdown(
+                        if let Err(error) = serve_client_with_account_gate(
                             pair,
                             engine_epoch,
                             &state,
@@ -152,6 +159,7 @@ fn run() -> Result<(), String> {
         &market,
         active_clients.as_ref(),
         session_shutdown,
+        account_gate,
         ACCEPT_POLL_INTERVAL,
         Instant::now() + ENGINE_SHUTDOWN_DEADLINE,
     )
@@ -162,12 +170,16 @@ fn finish_shutdown(
     market: &MarketService,
     active_clients: &AtomicUsize,
     session_shutdown: Option<SessionShutdownRuntime>,
+    account_gate: thread::JoinHandle<()>,
     poll_interval: Duration,
     deadline: Instant,
 ) -> Result<(), String> {
     state.begin_shutdown();
     state.set_resource_mode(ResourceMode::OfflineSuspended);
     let session_shutdown = stop_session_shutdown_monitor(session_shutdown, deadline);
+    let account_gate_shutdown = account_gate
+        .join()
+        .map_err(|_| "account market gate stopped unexpectedly".to_string());
     let hot_set_state = state.clone();
     let hot_set_flush = thread::Builder::new()
         .name("axiusflow-engine-hot-set-flush".to_string())
@@ -189,6 +201,7 @@ fn finish_shutdown(
     };
     let errors = [
         session_shutdown,
+        account_gate_shutdown,
         market_shutdown,
         hot_set_shutdown,
         client_shutdown,
@@ -201,6 +214,39 @@ fn finish_shutdown(
     } else {
         Err(errors.join("; "))
     }
+}
+
+fn start_account_market_gate(
+    state: &EngineState,
+    market: &MarketService,
+    shutdown: &EngineShutdown,
+) -> Result<thread::JoinHandle<()>, String> {
+    let state = state.clone();
+    let market = market.clone();
+    let shutdown = shutdown.clone();
+    thread::Builder::new()
+        .name("axiusflow-account-market-gate".to_string())
+        .spawn(move || {
+            let mut was_authenticated = false;
+            while !shutdown.is_requested() {
+                let authenticated = state.account().is_authenticated();
+                if authenticated != was_authenticated {
+                    let mode = if authenticated {
+                        lifetime_resource_mode(&state.workspace())
+                            .unwrap_or(ResourceMode::Interactive)
+                    } else {
+                        ResourceMode::OfflineSuspended
+                    };
+                    if let Err(error) = market.set_resource_mode(mode) {
+                        eprintln!("Axiusflow account market gate degraded: {error}");
+                    }
+                    state.set_resource_mode(mode);
+                    was_authenticated = authenticated;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn start_session_shutdown_monitor(
