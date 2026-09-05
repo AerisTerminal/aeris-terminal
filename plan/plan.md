@@ -2084,3 +2084,22 @@ Stripe deferred indefinitely, Dodo is primary):
   API keys, webhook secret, four subscription products with their
   `DODO_PLAN_PRODUCTS` values, live base-URL switch, sender domain. No push
   until approved.
+
+Batch 4 proof — live test-mode credentials (2026-09-05, unpushed):
+
+- The four real product IDs are pinned in `wrangler.jsonc`
+  (`DODO_PLAN_PRODUCTS`); test base URL stays until live approval.
+- Replay drill re-run against the real webhook-secret format: valid,
+  duplicate, out-of-order, and unknown events 200; tampered and missing
+  type 400.
+- Live `POST /checkouts` on the test host with the exact adapter request
+  shape returned a real session (`cks_...`, `test.checkout.dodopayments.com`):
+  key valid, Pro monthly product live, metadata accepted. No charge is
+  possible from session creation; the session expires in 24h.
+- Real secrets never entered either repo: they lived briefly in gitignored
+  `.dev.vars` for the proof and were replaced with a random local secret
+  after. The pasted values transited chat — rotate the test key and webhook
+  secret in the Dodo dashboard when convenient, then store fresh values
+  with `wrangler secret put DODO_API_KEY` and `wrangler secret put
+  DODO_WEBHOOK_SECRET` (this machine is not Cloudflare-authenticated, so
+  that step stays maintainer-side).
