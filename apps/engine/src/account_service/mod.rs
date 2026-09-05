@@ -25,7 +25,7 @@ use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, devi
 use loopback::{LoopbackListener, validate_callback_query};
 use oidc::{
     AccountProfile, AuthorizationRequest, OidcEndpoints, authorization_url, control_plane_origin,
-    discover, exchange_code, link_subject, refresh_grant,
+    discover, exchange_code, link_subject, oidc_agent, refresh_grant,
 };
 use pkce::{PkceVerifier, generate_oauth_random};
 
@@ -455,8 +455,13 @@ impl AccountService {
             )
         };
         let outcome = self.oidc_endpoints().and_then(|endpoints| {
+            // One connection pool for the whole transaction: exchange, JWKS
+            // verification, and linking all reuse it instead of paying a
+            // fresh TLS handshake per stage.
+            let agent = oidc_agent();
             exchange_code(
                 &endpoints,
+                &agent,
                 &self.config.client_id,
                 &redirect_uri,
                 code,
@@ -464,12 +469,12 @@ impl AccountService {
                 &nonce,
             )
             .and_then(|tokens| {
-                link_subject(&endpoints, &tokens.id_token, &tokens.subject)
-                    .map(|(account, plan, profile)| (account, plan, profile, tokens))
+                link_subject(&endpoints, &agent, &tokens.id_token, &tokens.subject)
+                    .map(|(account, plan, profile)| (account, plan, profile, tokens, agent))
             })
         });
         match outcome {
-            Ok((account_id, plan, profile, tokens)) => {
+            Ok((account_id, plan, profile, tokens, agent)) => {
                 let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
                     self.fail_generation(
                         generation,
@@ -486,9 +491,25 @@ impl AccountService {
                     &vault,
                 );
                 if completed {
-                    // Best-effort initial lease cache warmup; a
-                    // failure never blocks the Active session.
-                    self.refresh_lease_once(generation, &tokens, &account_id, &vault);
+                    // Lease warmup leaves the browser-response path: Active
+                    // is already published, and generation-fenced
+                    // apply_lease_outcome keeps a late warmup from touching
+                    // retired state or weakening enforcement.
+                    let service = self.clone();
+                    std::thread::Builder::new()
+                        .name("axiusflow-account-lease-warmup".to_string())
+                        .spawn(move || {
+                            if let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) {
+                                service.refresh_lease_once(
+                                    generation,
+                                    &tokens,
+                                    &account_id,
+                                    &agent,
+                                    &vault,
+                                );
+                            }
+                        })
+                        .ok();
                 }
                 Ok(completed)
             }
@@ -591,6 +612,7 @@ impl AccountService {
         generation: u64,
         tokens: &oidc::VerifiedTokens,
         account_id: &AccountId,
+        agent: &ureq::Agent,
         vault: &V,
     ) where
         V: CredentialVault,
@@ -599,7 +621,7 @@ impl AccountService {
         if ensure_device_key(vault).is_err() {
             return;
         }
-        let outcome = initial_lease_round(self, generation, tokens, account_id, vault);
+        let outcome = initial_lease_round(self, generation, tokens, account_id, agent, vault);
         self.apply_lease_outcome(generation, outcome);
     }
 
@@ -780,6 +802,7 @@ fn validate_and_cache<V>(
     service: &AccountService,
     generation: u64,
     session: &LeaseSession,
+    agent: &ureq::Agent,
     compact: &str,
     vault: &V,
     now_unix_seconds: u64,
@@ -788,7 +811,7 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let fetched_keys = lease::fetch_directory(&session.origin).unwrap_or_default();
+    let fetched_keys = lease::fetch_directory(agent, &session.origin).unwrap_or_default();
     let (claims, cached_claims) = {
         let cached_keys = service
             .lease_keys
@@ -899,8 +922,12 @@ where
         return lease::RefreshOutcome::Unavailable;
     };
     let now = unix_now();
+    // One connection pool per background round: grant, link, lease, and
+    // directory reuse it instead of paying a fresh handshake per stage.
+    let agent = oidc_agent();
     let Ok(tokens) = refresh_grant(
         &session.endpoints,
+        &agent,
         &service.config.client_id,
         &session.refresh_token,
     ) else {
@@ -917,9 +944,12 @@ where
             }
         });
     }
-    if let Ok((account_id, plan, profile)) =
-        link_subject(&session.endpoints, &tokens.id_token, &tokens.subject)
-        && account_id == session.account_id
+    if let Ok((account_id, plan, profile)) = link_subject(
+        &session.endpoints,
+        &agent,
+        &tokens.id_token,
+        &tokens.subject,
+    ) && account_id == session.account_id
         && let Ok(mut state) = service.state.lock()
         && state.last_generation == generation
         && (state.view.state == AccountSessionState::Active as i32
@@ -932,13 +962,14 @@ where
     }
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
+        &agent,
         &tokens.id_token,
         &tokens.subject,
         &session.device_id,
     ) else {
         return cached_outcome(service, &session, vault, now);
     };
-    validate_and_cache(service, generation, &session, &compact, vault, now)
+    validate_and_cache(service, generation, &session, &agent, &compact, vault, now)
 }
 
 fn cached_outcome<V>(
@@ -964,6 +995,7 @@ fn initial_lease_round<V>(
     generation: u64,
     tokens: &oidc::VerifiedTokens,
     account_id: &AccountId,
+    agent: &ureq::Agent,
     vault: &V,
 ) -> lease::RefreshOutcome
 where
@@ -978,6 +1010,7 @@ where
     }
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
+        agent,
         &tokens.id_token,
         &tokens.subject,
         &session.device_id,
@@ -985,7 +1018,15 @@ where
         return lease::RefreshOutcome::Current(None);
     };
     // A failed initial fetch leaves the fresh Active session untouched.
-    match validate_and_cache(service, generation, &session, &compact, vault, unix_now()) {
+    match validate_and_cache(
+        service,
+        generation,
+        &session,
+        agent,
+        &compact,
+        vault,
+        unix_now(),
+    ) {
         lease::RefreshOutcome::Unavailable => lease::RefreshOutcome::Current(None),
         outcome => outcome,
     }
@@ -1392,5 +1433,42 @@ mod tests {
         let view = service.account_status();
         assert_eq!(view.state, AccountSessionState::SignedOut as i32);
         assert!(view.display_name.is_empty());
+    }
+
+    #[test]
+    fn retired_lease_warmup_cannot_touch_a_newer_session() {
+        use super::lease::RefreshOutcome;
+
+        let service = service();
+        let vault = MemoryVault::default();
+        service.begin_login(51).expect("login starts");
+        service.complete_with_tokens(
+            51,
+            &AccountId::try_new("acct_01").expect("identity builds"),
+            PlanId::Pro,
+            &profile("ada", "ada@example.com"),
+            Some("refresh-value"),
+            &vault,
+        );
+        // Current-generation warmup updates the plan and stays Active.
+        service.apply_lease_outcome(51, RefreshOutcome::Refreshed(PlanId::Elite));
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::Active as i32);
+        assert_eq!(view.plan_id, "elite");
+        // A late warmup from a retired generation lands after sign-out:
+        // it must not resurrect identity, plan, or access.
+        service
+            .endpoints
+            .lock()
+            .expect("endpoint cache locks")
+            .take();
+        service.sign_out_with(&vault);
+        service.apply_lease_outcome(51, RefreshOutcome::Refreshed(PlanId::Elite));
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert!(view.account_id.is_empty());
+        assert!(view.plan_id.is_empty());
+        assert!(view.display_name.is_empty());
+        assert!(!service.is_authenticated());
     }
 }

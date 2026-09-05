@@ -77,6 +77,117 @@ Resume from these observations without treating them as end-to-end proof:
 - Existing running release binaries predate the candidate changes. Identify
   their paths/PIDs again before replacement; do not use them as fix evidence.
 
+## Authentication latency diagnosis and implementation handoff
+
+Source audit: native 412fae5 and website ef98209, on the dedicated branches.
+These commits supersede the earlier uncommitted-work snapshot above; inspect
+current git status and PR evidence before repeating or overwriting work.
+Keep Workers + D1. No authenticated browser timing trace was captured during
+this diagnosis, so the measured contribution of each server stage remains open.
+
+Confirmed request-path issues, in implementation priority order:
+
+1. Website request waterfall: account.ts boot waits for GET get-session, then
+   POST /api/axiusflow/ensure. handleEnsure in index.ts validates the session
+   again, then awaits canonical link, userProfile, subscription, billing customer,
+   and auth methods sequentially: five application reads for an existing link,
+   in addition to Better Auth's session work. First provisioning adds writes.
+   Better Auth findSession already obtains the user. Make account bootstrap one
+   authoritative browser request returning the required sanitized identity and
+   account state, with an explicit signed-out response. Reuse verified profile
+   data where freshness permits; batch/join independent reads after resolving
+   the canonical account. Do not remove authentication from /ensure or trust
+   browser-supplied identity. Load session-management details outside the first
+   usable-dashboard critical path. Preserve provisioning races and billing truth.
+2. Native completion notification: apps/desktop/src/account.rs uses a two-second
+   STATUS_POLL_INTERVAL during authorization. A 100 ms UI timer does not change
+   that IPC cadence; it can add nearly two seconds after engine completion.
+   Deliver completion through the existing bounded IPC path where practical,
+   or use bounded faster polling only while a transaction is active. Preserve
+   one request in flight, generation fencing, cancellation, and slow idle polling.
+3. Native callback waits for lease warmup: account_service/mod.rs publishes
+   Active in complete_with_tokens, then exchange_and_link synchronously calls
+   refresh_lease_once before run_login_transaction responds to the browser.
+   initial_lease_round fetches the lease, then validate_and_cache fetches the
+   entitlement key directory. Each HTTP operation has a 15-second timeout.
+   Moreover, Unavailable changes Active to ReauthenticationRequired, while the
+   captured completed=true still permits a browser success response. Resolve
+   this contradictory success/entitlement sequence, not just its latency.
+   If the lease is required for access, prepare it efficiently before publishing
+   the final usable state. If it is optional under the intended access policy,
+   move warmup to bounded generation-fenced work and do not turn its transient
+   failure into identity failure. Do not bypass current entitlement enforcement
+   to make login appear faster; settle any policy ambiguity with the maintainer.
+4. Native HTTP connection reuse: oidc.rs creates a new ureq Agent in discovery,
+   exchange/refresh, and linking; lease.rs creates fresh agents for lease and
+   directory requests. Token exchange and its OIDC JWKS request already share
+   one agent, but later stages cannot reuse that pool. Reuse an engine-owned
+   transport for same-origin calls without sharing transaction credentials or
+   weakening origin, TLS, timeout, and cancellation rules. Evaluate bounded key
+   caching with expiry and one controlled unknown-kid refresh; preserve rotation.
+5. Public assets unnecessarily enter auth setup: wrangler.jsonc sets
+   run_worker_first=true and index.ts constructs Better Auth before routing
+   assets/public pages; handleEnsure constructs it again. The pinned Better Auth
+   createBetterAuth invokes initFn(options) immediately. Route public assets
+   directly and construct/pass auth only where needed. Measure initialization
+   cost before adding any isolate cache; never cache per-user session context.
+6. Region placement is a hypothesis, not a diagnosed cause. Measure Worker-to-D1
+   round trips and compare placement only after removing avoidable serial calls.
+   Do not migrate databases, enable eventual-consistency session caches, or add
+   services as a speculative latency fix.
+
+Small read-only baseline from this workstation, five requests per route over a
+reused HTTPS connection after warmup (milliseconds to first byte):
+
+| Route | Median | Range |
+| --- | ---: | ---: |
+| /api/axiusflow/health | 95 | 88-98 |
+| /account | 90 | 89-96 |
+| /api/auth/get-session, no cookie | 91 | 90-101 |
+| /api/auth/jwks | 180 | 178-424 |
+| /auth.css | 97 | 93-107 |
+
+These are client-observed HTTP/1.1 timings, not Worker CPU timings, database
+benchmarks, authenticated-login latency, or representative p95 measurements.
+Earlier fresh-connection probes included DNS/TCP/TLS and were much slower.
+Do not describe their difference as a measured cold-start penalty. JWKS being
+slower is evidence to investigate its path, not proof that D1 alone caused it.
+
+Remaining measurement and acceptance work:
+
+- [ ] Capture the real website and native login waterfall, separating user/Google
+  interaction and email delivery from application-controlled time. Measure OTP
+  verification or Google callback to usable dashboard, and desktop approval to
+  loopback arrival, token exchange, JWKS verification, link, vault, lease/key
+  fetch, final state publication, UI observation, workspace load, first history,
+  and first live market update. Authentication and provider readiness are distinct.
+- [ ] Add minimal sanitized stage timings/query counts using existing diagnostics
+  and appropriate server timing/metrics. Never capture cookies, tokens, OAuth
+  query strings, OTPs, account identifiers, raw payloads, or unsanitized HAR files.
+- [ ] Compare baseline/final revisions under the same network, account scenarios,
+  and connection conditions. Report sample counts, median and p95 with enough
+  samples to support the percentile; keep cold/fresh and warm/reused separate.
+  Include existing sessions, first login, account switching, and delayed/failing
+  database/lease/key-directory paths. Avoid production OTP spam or rate-limit
+  changes to collect samples.
+- [ ] Use provisional engineering targets of <=100 ms visible action feedback,
+  <=250 ms p95 engine-final-state-to-desktop-display, <=1 second p95 warm account
+  dashboard bootstrap, and <=2 seconds p95 native approval-response-to-usable
+  account on the measured healthy network. These are optimization targets, not
+  measured guarantees; report actuals and remaining bottlenecks if unmet.
+  Exclude human interaction/mail delivery from these targets, but report their
+  timings separately. Do not weaken checks, delay error display, or fake success.
+- [ ] Test one truthful loading sequence with no blank page, false sign-out,
+  premature success, extra desktop launch, stale-account flash, or manual symbol
+  reload. Verify cancellation and sign-out during every delayed stage, plus
+  key rotation and revoked-session behavior after any caching/pooling changes.
+- [ ] Include these latency results and regression evidence in the linked PRs;
+  the reviewing agent must verify the final revisions and remaining bottlenecks.
+
+Implementation references: [D1 batching](https://developers.cloudflare.com/d1/worker-api/d1-database/),
+[Worker placement](https://developers.cloudflare.com/workers/configuration/placement/),
+and [asset routing](https://developers.cloudflare.com/workers/static-assets/binding/).
+
 ## Current-session completion and verification
 
 These are the checks still owed for the interrupted session. The implementation

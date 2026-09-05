@@ -338,7 +338,10 @@ static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 /// How often the engine view refreshes while a browser transaction is open.
-const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Fast enough that engine-side completion reaches the UI within a frame
+/// budget, slow enough to keep one bounded IPC fetch in flight. Idle
+/// sessions poll slowly for restore and expiry.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Idle refresh so restored sessions and engine-side expiry reach the UI.
 const IDLE_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 

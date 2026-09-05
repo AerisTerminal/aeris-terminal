@@ -173,8 +173,10 @@ struct LeasePayload {
 ///
 /// Returns a redacted error when the directory cannot be fetched or carries
 /// no usable Ed25519 keys.
-pub fn fetch_directory(origin: &str) -> Result<Vec<(String, [u8; 32])>, String> {
-    let agent = super::oidc::oidc_agent();
+pub fn fetch_directory(
+    agent: &ureq::Agent,
+    origin: &str,
+) -> Result<Vec<(String, [u8; 32])>, String> {
     let mut response = agent
         .get(&format!("{origin}/.well-known/entitlement-jwks.json"))
         .header("Accept", "application/json")
@@ -243,11 +245,11 @@ where
 /// the reply is malformed. Token material never enters the detail.
 pub fn fetch_compact(
     endpoints: &OidcEndpoints,
+    agent: &ureq::Agent,
     id_token: &str,
     subject: &str,
     device_id: &str,
 ) -> Result<String, String> {
-    let agent = super::oidc::oidc_agent();
     let body = format!(
         "{{\"subject\":\"{}\",\"id_token\":\"{}\",\"device_id\":\"{}\"}}",
         subject.replace('\\', "\\\\").replace('"', "\\\""),

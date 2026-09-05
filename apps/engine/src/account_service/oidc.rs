@@ -219,13 +219,13 @@ pub struct VerifiedTokens {
 #[allow(clippy::too_many_lines)]
 pub fn exchange_code(
     endpoints: &OidcEndpoints,
+    agent: &ureq::Agent,
     client_id: &str,
     redirect_uri: &str,
     code: &str,
     code_verifier: &str,
     expected_nonce: &str,
 ) -> Result<VerifiedTokens, String> {
-    let agent = oidc_agent();
     let body = format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
         url_encode(code),
@@ -255,7 +255,7 @@ pub fn exchange_code(
         &endpoints.issuer,
         client_id,
         Some(expected_nonce),
-        &agent,
+        agent,
         &endpoints.jwks_uri,
         &token.identity,
     )?;
@@ -278,10 +278,10 @@ pub fn exchange_code(
 /// Returns a redacted actionable error when the grant or validation fails.
 pub fn refresh_grant(
     endpoints: &OidcEndpoints,
+    agent: &ureq::Agent,
     client_id: &str,
     refresh_token: &str,
 ) -> Result<VerifiedTokens, String> {
-    let agent = oidc_agent();
     let body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",
         url_encode(refresh_token),
@@ -306,7 +306,7 @@ pub fn refresh_grant(
         &endpoints.issuer,
         client_id,
         None,
-        &agent,
+        agent,
         &endpoints.jwks_uri,
         &token.identity,
     )?;
@@ -343,10 +343,10 @@ pub struct AccountProfile {
 /// the subject or returns an unknown plan.
 pub fn link_subject(
     endpoints: &OidcEndpoints,
+    agent: &ureq::Agent,
     id_token: &str,
     subject: &str,
 ) -> Result<(AccountId, PlanId, AccountProfile), String> {
-    let agent = oidc_agent();
     let body = format!(
         "{{\"subject\":\"{}\",\"id_token\":\"{}\"}}",
         subject.replace('\\', "\\\\").replace('"', "\\\""),
