@@ -26,8 +26,8 @@ use axiusflow_local_engine_client::EngineClient;
 /// authorization URL in the system browser on a background thread.
 ///
 /// Returns the engine authorization reply for expiry display. The browser
-/// launch is fire-and-forget: a spawn failure is reported, but later
-/// browser exit status is not tracked.
+/// launch runs bounded off-thread: a missing launcher, a nonzero launcher
+/// exit, or a hung launcher is reported, and a hung launcher is killed.
 ///
 /// # Errors
 ///
@@ -142,6 +142,17 @@ impl AccountMenuState {
     #[must_use]
     pub fn authorizing(&self) -> bool {
         self.presentation.action == "Waiting for browser"
+    }
+
+    /// Returns whether the panel hides identity metadata. A plain
+    /// signed-out session shows only the Sign in action (plus any error):
+    /// signed-out status and plan metadata stay hidden. Every other state
+    /// names itself so the trader knows what happened.
+    #[must_use]
+    pub fn hides_identity(&self) -> bool {
+        !self.signed_in()
+            && !self.authorizing()
+            && self.presentation.state == account_state_label(AccountSessionState::SignedOut)
     }
 }
 
@@ -691,6 +702,51 @@ mod tests {
         assert_eq!(menu.presentation.action, "Sign in");
         assert_eq!(menu.presentation.state, "Sign-in unavailable");
         assert!(menu.error.is_none());
+    }
+
+    #[test]
+    fn signed_out_hides_identity_but_errors_and_recovery_show() {
+        use super::{AccountMenuState, AccountPresentation};
+
+        let presentation = |action: &'static str, state: &'static str| AccountPresentation {
+            action,
+            state,
+            plan: "No plan",
+            detail: String::new(),
+            pending: false,
+        };
+        // Plain signed out: only the Sign in row (plus any error) renders.
+        let signed_out = AccountMenuState {
+            presentation: presentation("Sign in", "Signed out"),
+            error: None,
+        };
+        assert!(signed_out.hides_identity());
+        assert!(!signed_out.signed_in());
+        assert!(!signed_out.authorizing());
+        // Signed out with an error still hides identity metadata; the error
+        // row carries the actionable message.
+        let failed = AccountMenuState {
+            presentation: presentation("Sign in", "Signed out"),
+            error: Some("account request timed out; try again".to_string()),
+        };
+        assert!(failed.hides_identity());
+        // Every other state names itself: unavailable engine, browser wait,
+        // recovery states, and authenticated sessions all show the header.
+        for (action, state) in [
+            ("Sign in", "Sign-in unavailable"),
+            ("Waiting for browser", "Waiting for browser sign-in"),
+            ("Sign in", "Sign-in required"),
+            ("Sign in", "Subscription expired"),
+            ("Sign in", "Sign-in unavailable"),
+            ("Account", "Signed in"),
+            ("Account", "Signed in (offline)"),
+        ] {
+            let menu = AccountMenuState {
+                presentation: presentation(action, state),
+                error: None,
+            };
+            assert!(!menu.hides_identity(), "state must stay visible: {state}");
+        }
     }
 
     #[test]

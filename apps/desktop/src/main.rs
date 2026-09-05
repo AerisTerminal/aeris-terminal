@@ -222,6 +222,7 @@ const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
+const ACCOUNT_MENU_GAP: f32 = 4.0;
 const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIMEFRAME_FLYOUT_WIDTH: f32 = 136.0;
@@ -4397,6 +4398,7 @@ struct TerminalApp {
     chart_context_menu: Option<ChartContextMenu>,
     chart_settings_menu: Option<ChartContextMenu>,
     account_menu_open: bool,
+    account_menu_anchor: Option<gpui::Point<Pixels>>,
     chart_chrome: chart_chrome::ChartChromePreferences,
     window_move_pending: bool,
     closing: bool,
@@ -4709,6 +4711,7 @@ impl TerminalApp {
             chart_context_menu: None,
             chart_settings_menu: None,
             account_menu_open: false,
+            account_menu_anchor: None,
             chart_chrome: init.chart_chrome,
             window_move_pending: false,
             closing: false,
@@ -4848,8 +4851,17 @@ impl TerminalApp {
         }
     }
 
-    fn toggle_account_menu(&mut self, cx: &mut Context<Self>) {
-        self.account_menu_open = !self.account_menu_open;
+    /// Opens the account dropdown under the avatar click point, or closes it
+    /// when already open. The stored anchor keeps the panel glued to the
+    /// avatar's rendered position instead of a fixed screen corner.
+    fn toggle_account_menu_at(&mut self, anchor: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        if self.account_menu_open {
+            self.account_menu_open = false;
+            self.account_menu_anchor = None;
+        } else {
+            self.account_menu_open = true;
+            self.account_menu_anchor = Some(anchor);
+        }
         cx.notify();
     }
 
@@ -4875,6 +4887,7 @@ impl TerminalApp {
         Some(account_menu_layer(
             terminal,
             &account,
+            self.account_menu_anchor,
             viewport,
             &self.theme,
         ))

@@ -861,9 +861,10 @@ pub(super) fn account_avatar_button(
             .bg(gpui_color(colors.surface_secondary))
             .cursor_pointer()
             .hover(|button| button.border_color(gpui_color(colors.border)))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                let anchor = event.position;
                 toggle_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.toggle_account_menu(terminal_cx);
+                    terminal.toggle_account_menu_at(anchor, terminal_cx);
                 });
                 cx.stop_propagation();
             })
@@ -890,12 +891,16 @@ pub(super) fn account_avatar_button(
     )
 }
 
-/// Account dropdown anchored under the header avatar. Shows sanitized state
-/// plus exactly one recovery action: sign in, cancel the browser wait, or
-/// sign out.
+/// Account dropdown anchored under the header avatar. The panel opens below
+/// the avatar's actual click point with a small gap and clamps into the
+/// viewport, so resize, scaling, and fullscreen never push it off-screen.
+/// A plain signed-out session shows only the Sign in action (plus any
+/// error): signed-out status and plan metadata stay hidden. Authorizing
+/// keeps both recovery exits; authenticated sessions name status and plan.
 pub(super) fn account_menu_layer(
     terminal: &Entity<TerminalApp>,
     account: &axiusflow_desktop::account::AccountMenuState,
+    anchor: Option<gpui::Point<Pixels>>,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
@@ -903,19 +908,18 @@ pub(super) fn account_menu_layer(
     let dismiss = terminal.clone();
     let action_terminal = terminal.clone();
     let presentation = &account.presentation;
-    // The header names the session state; the single action row below owns
-    // the verb. Showing the action twice read as two sign-in buttons.
+    // The header names the session state; the action rows below own the
+    // verbs. Showing the action twice read as two sign-in buttons.
     let title = presentation.state;
     let subtitle = if presentation.detail.is_empty() {
         presentation.plan.to_string()
     } else {
         presentation.detail.clone()
     };
+    let header_bottom = theme.dimensions.app_header_height.logical_pixels + ACCOUNT_MENU_GAP;
+    let anchor = anchor.unwrap_or(point(px(OVERLAY_EDGE_MARGIN), px(header_bottom)));
     let origin = clamp_overlay_origin(
-        point(
-            px(f32::from(viewport.width) - CHART_SETTINGS_MENU_WIDTH - OVERLAY_EDGE_MARGIN),
-            px(theme.dimensions.app_header_height.logical_pixels + 4.0),
-        ),
+        point(anchor.x, px(header_bottom)),
         viewport,
         CHART_SETTINGS_MENU_WIDTH,
         5.0,
@@ -937,7 +941,7 @@ pub(super) fn account_menu_layer(
         })
         .child(
             compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
-                .child(
+                .children((!account.hides_identity()).then(|| {
                     div()
                         .flex()
                         .items_center()
@@ -957,8 +961,8 @@ pub(super) fn account_menu_layer(
                                 .text_xs()
                                 .text_color(gpui_color(colors.text_muted))
                                 .child(subtitle),
-                        ),
-                )
+                        )
+                }))
                 .children(account_menu_actions(&action_terminal, account, theme))
                 .children(account.error.as_deref().map(|error| {
                     div()

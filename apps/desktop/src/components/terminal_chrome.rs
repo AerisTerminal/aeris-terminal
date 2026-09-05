@@ -439,6 +439,11 @@ pub(super) fn header_controls(
         .flex()
         .items_center()
         .gap_2()
+        .child(account_avatar_button(
+            terminal,
+            &state.account,
+            &state.theme,
+        ))
         .child(connection_status_indicator(
             connection_label,
             connection_color(&state.theme),
@@ -502,12 +507,6 @@ pub(super) fn header_controls(
         ))
         .child(dom_toggle)
         .child(theme_toggle(terminal.clone(), &state.theme))
-        .child(div().flex_1())
-        .child(account_avatar_button(
-            terminal,
-            &state.account,
-            &state.theme,
-        ))
 }
 
 pub(super) fn side_panel_toggle(
