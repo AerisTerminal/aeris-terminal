@@ -2165,3 +2165,39 @@ pushed and live; gpui unpushed):
 - `axiusflow.com/download` live with the build; `/waitlist` 404s fresh
   (one stale edge-cached 200 observed mid-deploy, aged out). gpui tree
   untouched by this batch; its 7 local commits still await approved push.
+
+Batch 8 - desktop auth repair plus profile menu (2026-09-05, gpui 69bf686
+pushed, website 3062260 pushed, auth Worker redeployed):
+
+- Windows launcher replaced: cmd /C start dropped the client_id at every &
+  separator. A hidden PowerShell host now reads the validated https URL
+  from stdin and opens it with the shell default-browser verb
+  (UseShellExecute equivalent); CREATE_NO_WINDOW, 10s bounded wait with
+  kill, nonzero exit reported. URL never appears in argv or script text.
+  Five regression tests (argv purity, missing binary, nonzero exit,
+  stdin plumbing, hung kill); live stdin proof plus a one-shot real
+  browser open through the shipped path, scratch deleted after.
+- Scopes now openid offline_access (server advertises it; EdDSA JWKS
+  intact); refresh persistence path unchanged otherwise. PKCE, state,
+  nonce, verification, vault, fencing untouched.
+- Worker login page completes email OTP at /api/auth/sign-in/email-otp
+  (verify-email never created a session). Deployed; live /sign-in carries
+  the new endpoint, bad-OTP probe returns INVALID_OTP with no side
+  effects. Google and email both preserve the signed query via
+  callbackURL/resume. Worker typecheck clean.
+- Avatar is first in the header; dropdown anchors under the avatar click
+  point with a 4px gap and viewport clamping. Signed-out shows only
+  Sign in plus any error; authorizing keeps Reopen plus Cancel;
+  authenticated names status and plan with Sign out. hides_identity
+  matrix unit-tested.
+- Gates: fmt, workspace clippy, workspace build, workspace tests all
+  green. naming_check fails identically on the clean tree (pre-existing
+  HK-Grotesk font names) - reported, not caused here.
+- Release desktop+engine built and running from target/release
+  (desktop 21704, engine 24588 at relaunch). Push made with no active
+  lanes: only stale queued runs, superseded same-ref CI run covers the
+  new commits.
+- Still maintainer-side: approve one real browser login (Google or OTP
+  once RESEND_API_KEY is real) to verify callback, link, lease,
+  restart persistence, active-session sign-out, and the authenticated
+  menu visually; confirm avatar-left placement and menu states by eye.
