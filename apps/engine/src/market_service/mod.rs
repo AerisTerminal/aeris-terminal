@@ -75,6 +75,8 @@ const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
+const VIEWPORT_HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAXIMUM_VIEWPORT_HISTORY_RETRIES: u8 = 3;
 const LIVE_EDGE_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAXIMUM_LIVE_EDGE_REPAIR_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
@@ -353,6 +355,12 @@ struct LiveHandoff {
     /// Highest sequence the canonical series already holds as a completed bar.
     /// Everything above it in the aggregator still has to be appended.
     published_completed: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingViewportHistoryRetry {
+    ready_at: Instant,
+    attempts: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

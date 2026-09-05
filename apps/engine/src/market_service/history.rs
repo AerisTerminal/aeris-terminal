@@ -6,14 +6,15 @@ use super::{
     FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_RETRY_DELAY, HistoryRange,
     HistoryRequest, HistoryRequestKind, HistorySnapshot, HistorySource, HotSeries, HotSetManager,
     HotSetTier, InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES,
-    MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering, PersistenceState, ProviderCatalogCommand,
-    ProviderConnectionState, ProviderGeneration, ProviderRequest,
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, ResourceMode, RithmicHandoffSeed,
-    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
-    StorageRequest, StoredHistory, SyncSender, SystemTime, TrySendError, UNIX_EPOCH,
-    VIEWPORT_BACKFILL_BARS, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId,
-    WorkspaceState, engine_install_failure_stage, fail_waiters, ipc_series, publish_state,
-    series_state, thread, try_enqueue_history,
+    MAXIMUM_VIEWPORT_HISTORY_RETRIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering,
+    PendingViewportHistoryRetry, PersistenceState, ProviderCatalogCommand, ProviderConnectionState,
+    ProviderGeneration, ProviderRequest, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver,
+    ResourceMode, RithmicHandoffSeed, SearchProviderInstruments, SeriesCadence, SeriesKey,
+    SeriesLoadState, SeriesSnapshot, StorageRequest, StoredHistory, SyncSender, SystemTime,
+    TrySendError, UNIX_EPOCH, VIEWPORT_BACKFILL_BARS, VIEWPORT_HISTORY_RETRY_DELAY,
+    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId, WorkspaceState,
+    engine_install_failure_stage, fail_waiters, ipc_series, publish_state, series_state, thread,
+    try_enqueue_history,
 };
 
 /// Merges a Coinbase repair page into the canonical series.
@@ -1074,10 +1075,16 @@ impl Coordinator<'_> {
         );
         let key = (series.clone(), provider_generation);
         let replaced = self.viewport_history_ranges.insert(key.clone(), range);
+        if replaced != Some(range) {
+            self.viewport_history_retries.remove(&key);
+        }
         if replaced.is_some_and(|previous| previous != range)
             && let Some(stop) = self.history_cancellations.get(&key)
         {
             stop.store(true, Ordering::Release);
+        }
+        if self.viewport_history_retries.contains_key(&key) {
+            return Ok(());
         }
         let key = (series.clone(), provider_generation, range);
         if !self.viewport_history_local_inflight.insert(key.clone()) {
@@ -1093,12 +1100,8 @@ impl Coordinator<'_> {
                 self.viewport_history_local_inflight.remove(&key);
             }
         }
-        self.schedule_coinbase_history(
-            &series,
-            provider_generation,
-            HistoryRequestKind::ViewportBackfill,
-        )
-        .map_err(|error| error.clone())
+        self.schedule_next_coinbase_viewport_page(&series, provider_generation);
+        Ok(())
     }
 
     pub(super) fn arm_initial_viewport_history(
@@ -1295,6 +1298,26 @@ impl Coordinator<'_> {
             .map_err(str::to_string)
     }
 
+    pub(super) fn schedule_next_coinbase_viewport_page(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        if let Err(error) =
+            self.schedule_coinbase_history(series, generation, HistoryRequestKind::ViewportBackfill)
+        {
+            eprintln!(
+                "Axiusflow engine could not queue Coinbase viewport history for {}: {error}",
+                series.instrument_id
+            );
+            self.viewport_backfill_failed(
+                series,
+                generation,
+                "Visible history repair could not be queued; retained data remains usable",
+            );
+        }
+    }
+
     pub(super) fn enqueue_history_request(
         &mut self,
         series: &BarSeriesKey,
@@ -1419,14 +1442,9 @@ impl Coordinator<'_> {
         if let Some(requested) = requested {
             record_covered_range(&mut self.history_coverage, series, requested);
         }
-        if let Err(error) =
-            self.schedule_coinbase_history(series, key.1, HistoryRequestKind::ViewportBackfill)
-        {
-            self.viewport_history_ranges.remove(key);
-            self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
-        } else if !self.viewport_history_ranges.contains_key(key)
-            && !self.series_live_if_ready(series)
-        {
+        self.viewport_history_retries.remove(key);
+        self.schedule_next_coinbase_viewport_page(series, key.1);
+        if !self.viewport_history_ranges.contains_key(key) && !self.series_live_if_ready(series) {
             self.broadcast_series_resolution_for(
                 series,
                 SeriesLoadState::Partial,
@@ -1458,6 +1476,7 @@ impl Coordinator<'_> {
             .and_then(|status| status.generation);
         if current != Some(generation) {
             self.pending_live_edge_repairs.remove(&key);
+            self.viewport_history_retries.remove(&key);
             let pending_viewport = self.viewport_history_ranges.remove(&key);
             if series.provider_id == "coinbase"
                 && let Some(current) = current
@@ -1477,11 +1496,7 @@ impl Coordinator<'_> {
                 && self.engine.has_subscription(series)
             {
                 if self.viewport_history_ranges.contains_key(&key) {
-                    let _ = self.schedule_coinbase_history(
-                        series,
-                        generation,
-                        HistoryRequestKind::ViewportBackfill,
-                    );
+                    self.schedule_next_coinbase_viewport_page(series, generation);
                 } else {
                     let _ = self.enqueue_history(series, generation);
                 }
@@ -1497,11 +1512,7 @@ impl Coordinator<'_> {
             Err(error) => {
                 if cancelled {
                     if self.viewport_history_ranges.contains_key(&key) {
-                        let _ = self.schedule_coinbase_history(
-                            series,
-                            generation,
-                            HistoryRequestKind::ViewportBackfill,
-                        );
+                        self.schedule_next_coinbase_viewport_page(series, generation);
                     } else if self.engine.has_subscription(series) {
                         let _ = self.enqueue_history(series, generation);
                     }
@@ -1515,7 +1526,6 @@ impl Coordinator<'_> {
                     self.viewport_backfill_failed(
                         series,
                         generation,
-                        range,
                         "Visible history backfill is unavailable; retained data remains usable",
                     );
                 } else if let HistoryRequestKind::LiveEdgeRepair(attempt) = kind {
@@ -1528,11 +1538,7 @@ impl Coordinator<'_> {
             && kind == HistoryRequestKind::ViewportBackfill
             && self.viewport_history_ranges.get(&key).copied() != range
         {
-            let _ = self.schedule_coinbase_history(
-                series,
-                generation,
-                HistoryRequestKind::ViewportBackfill,
-            );
+            self.schedule_next_coinbase_viewport_page(series, generation);
             return None;
         }
         Some(snapshot)
@@ -1571,10 +1577,11 @@ impl Coordinator<'_> {
         let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot, repair)
         else {
             if repair {
-                self.viewport_backfill_failed(
+                self.history_repair_failed(
                     series,
                     generation,
                     range,
+                    kind,
                     "Visible history could not be merged; retained data remains usable",
                 );
             }
@@ -1603,10 +1610,11 @@ impl Coordinator<'_> {
             publish,
         ) else {
             if repair {
-                self.viewport_backfill_failed(
+                self.history_repair_failed(
                     series,
                     generation,
                     range,
+                    kind,
                     "Visible history could not be installed; retained data remains usable",
                 );
             }
@@ -1639,16 +1647,13 @@ impl Coordinator<'_> {
         if let Err(error) = self.record_coinbase_history_coverage(series, &bars) {
             self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
         }
+        if kind == HistoryRequestKind::ViewportBackfill {
+            self.viewport_history_retries.remove(&key);
+        }
         if arm_initial_viewport {
             self.arm_initial_viewport_history(series, generation);
         }
-        if let Err(error) =
-            self.schedule_coinbase_history(series, generation, HistoryRequestKind::ViewportBackfill)
-        {
-            self.viewport_history_ranges
-                .remove(&(series.clone(), generation));
-            self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &error, None);
-        }
+        self.schedule_next_coinbase_viewport_page(series, generation);
     }
 
     pub(super) fn record_coinbase_history_coverage(
@@ -1685,27 +1690,50 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        failed_range: Option<HistoryRange>,
         detail: &'static str,
     ) {
         let key = (series.clone(), generation);
-        if self.viewport_history_ranges.get(&key).copied() == failed_range {
-            self.viewport_history_ranges.remove(&key);
-        }
         if self.viewport_history_ranges.contains_key(&key) {
-            if let Err(error) = self.schedule_coinbase_history(
-                series,
-                generation,
-                HistoryRequestKind::ViewportBackfill,
-            ) {
+            let attempts = self
+                .viewport_history_retries
+                .get(&key)
+                .map_or(1, |retry| retry.attempts.saturating_add(1));
+            eprintln!(
+                "Axiusflow engine Coinbase viewport history attempt {attempts} failed for {}: {detail}",
+                series.instrument_id
+            );
+            if attempts > MAXIMUM_VIEWPORT_HISTORY_RETRIES {
+                self.viewport_history_retries.remove(&key);
                 self.viewport_history_ranges.remove(&key);
                 self.broadcast_demand_error_for(
                     series,
                     FailureStage::ProviderHistory,
-                    &error,
+                    "Visible history repair exhausted bounded retries; move the viewport to retry",
                     None,
                 );
+                self.flush_deferred_publication(series);
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Durable,
+                    Some("Visible history repair is unavailable; move the viewport to retry"),
+                );
+                return;
             }
+            self.viewport_history_retries.insert(
+                key,
+                PendingViewportHistoryRetry {
+                    ready_at: Instant::now()
+                        + VIEWPORT_HISTORY_RETRY_DELAY.saturating_mul(u32::from(attempts)),
+                    attempts,
+                },
+            );
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Partial,
+                PersistenceState::Durable,
+                Some(detail),
+            );
             return;
         }
         self.flush_deferred_publication(series);
@@ -1717,6 +1745,57 @@ impl Coordinator<'_> {
                 Some(detail),
             );
         }
+    }
+
+    fn history_repair_failed(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        kind: HistoryRequestKind,
+        detail: &'static str,
+    ) {
+        match kind {
+            HistoryRequestKind::ViewportBackfill => {
+                self.viewport_backfill_failed(series, generation, detail);
+            }
+            HistoryRequestKind::LiveEdgeRepair(attempt) => {
+                self.retry_coinbase_live_edge_repair(series, generation, range, attempt);
+            }
+            HistoryRequestKind::Initial => {}
+        }
+    }
+
+    pub(super) fn retry_viewport_history(&mut self) {
+        if self.resource_mode == ResourceMode::OfflineSuspended {
+            return;
+        }
+        let now = Instant::now();
+        let Some(key) = self
+            .viewport_history_retries
+            .iter()
+            .find(|(key, retry)| now >= retry.ready_at && !self.history_inflight.contains_key(*key))
+            .map(|(key, _)| key.clone())
+        else {
+            return;
+        };
+        let (series, generation) = &key;
+        let current_generation = self
+            .engine
+            .provider_status(&series.provider_id)
+            .and_then(|status| status.generation);
+        if !self.engine.has_subscription(series)
+            || current_generation != Some(*generation)
+            || !self.viewport_history_ranges.contains_key(&key)
+        {
+            self.viewport_history_retries.remove(&key);
+            return;
+        }
+        if let Some(retry) = self.viewport_history_retries.get_mut(&key) {
+            retry.ready_at =
+                now + VIEWPORT_HISTORY_RETRY_DELAY.saturating_mul(u32::from(retry.attempts.max(1)));
+        }
+        self.schedule_next_coinbase_viewport_page(series, *generation);
     }
 
     pub(super) fn install_completed_history(
@@ -2014,6 +2093,7 @@ impl Coordinator<'_> {
             .collect::<Vec<_>>();
         for key in obsolete_viewports {
             self.viewport_history_ranges.remove(&key);
+            self.viewport_history_retries.remove(&key);
         }
         self.history_retries.retain(|(series, generation), _| {
             self.engine.has_subscription(series)
@@ -2023,6 +2103,17 @@ impl Coordinator<'_> {
                     .and_then(|status| status.generation)
                     == Some(*generation)
         });
+        self.viewport_history_retries
+            .retain(|(series, generation), _| {
+                self.viewport_history_ranges
+                    .contains_key(&(series.clone(), *generation))
+                    && self.engine.has_subscription(series)
+                    && self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        == Some(*generation)
+            });
         self.pending_live_edge_repairs
             .retain(|(series, generation), _| {
                 self.engine.has_subscription(series)

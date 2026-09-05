@@ -3,13 +3,14 @@ use super::{
     Command, ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter,
     Duration, EMPTY_REPAIR_RETRY_DELAY, EngineError, EngineResourceMode, FailureStage,
     HistoryRange, InstallProviderInstrument, Instant, LiveHandoff, MAXIMUM_SERIES, MarketEngine,
-    MarketServiceStatus, MarketStream, Ordering, PendingLiveEdgeRepair, PersistenceState,
-    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
-    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
-    REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply, ResourceMode, ResourcePolicyDecision,
-    ResourcePolicyInput, RithmicLiveHandoff, StorageRequest, StoredHistory, SyncSender, WarmSeries,
-    authorize_consumer, chart_stream_requirements, decide_resource_policy, envelope,
-    local_history_failure_stage, publish_ready, resource_policy_mode, thread,
+    MarketServiceStatus, MarketStream, Ordering, PendingLiveEdgeRepair,
+    PendingViewportHistoryRetry, PersistenceState, ProviderConnectionState, ProviderDispatch,
+    ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
+    ProviderRuntimeRegistry, ProviderState, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError,
+    Reply, ResourceMode, ResourcePolicyDecision, ResourcePolicyInput, RithmicLiveHandoff,
+    StorageRequest, StoredHistory, SyncSender, WarmSeries, authorize_consumer,
+    chart_stream_requirements, decide_resource_policy, envelope, local_history_failure_stage,
+    publish_ready, resource_policy_mode, thread,
 };
 
 pub(super) struct OwnedCoordinatorChannels {
@@ -86,6 +87,7 @@ fn run_coordinator(
         suspended_history: BTreeSet::new(),
         history_coverage: BTreeMap::new(),
         viewport_history_ranges: BTreeMap::new(),
+        viewport_history_retries: BTreeMap::new(),
         active_viewports: BTreeMap::new(),
         viewport_history_local_inflight: BTreeSet::new(),
         deferred_publications: BTreeSet::new(),
@@ -135,6 +137,7 @@ fn run_coordinator(
         coordinator.expire_local_history_reads();
         coordinator.retry_pending_empty_repairs();
         coordinator.retry_history();
+        coordinator.retry_viewport_history();
         coordinator.flush_coinbase_live_edge_repairs();
         coordinator.recover_stalled_depth_snapshots();
         coordinator.enforce_resource_policy();
@@ -198,6 +201,8 @@ pub(super) struct Coordinator<'a> {
     pub(super) suspended_history: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     pub(super) history_coverage: BTreeMap<BarSeriesKey, Vec<HistoryRange>>,
     pub(super) viewport_history_ranges: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
+    pub(super) viewport_history_retries:
+        BTreeMap<(BarSeriesKey, ProviderGeneration), PendingViewportHistoryRetry>,
     pub(super) active_viewports: BTreeMap<ConsumerId, ActiveViewport>,
     pub(super) viewport_history_local_inflight:
         BTreeSet<(BarSeriesKey, ProviderGeneration, HistoryRange)>,

@@ -314,6 +314,7 @@ fn retained_history_coordinator<'a>(
         suspended_history: BTreeSet::new(),
         history_coverage: BTreeMap::new(),
         viewport_history_ranges: BTreeMap::new(),
+        viewport_history_retries: BTreeMap::new(),
         active_viewports: BTreeMap::new(),
         viewport_history_local_inflight: BTreeSet::new(),
         deferred_publications: BTreeSet::new(),
@@ -2681,8 +2682,8 @@ fn visible_viewport_pages_publish_and_background_pages_defer() {
 }
 
 #[test]
-fn resolving_the_demanded_repair_range_flushes_one_accumulated_covering_snapshot() {
-    let (history_tx, _history_rx) = mpsc::sync_channel(1);
+fn exhausting_the_demanded_repair_range_flushes_one_accumulated_covering_snapshot() {
+    let (history_tx, history_rx) = mpsc::sync_channel(1);
     let (storage_tx, storage_rx) = mpsc::sync_channel(1);
     let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
     let realtime_stop = Arc::new(AtomicBool::new(true));
@@ -2718,8 +2719,9 @@ fn resolving_the_demanded_repair_range_flushes_one_accumulated_covering_snapshot
     );
     let _ = storage_rx.try_recv().expect("background page persists");
 
-    // Demanding the same region and failing its repair resolves the plan
-    // and must flush one covering snapshot carrying the silent install.
+    // Demanding the same region keeps the accumulated snapshot deferred while
+    // its repair retries. Exhaustion resolves the plan and flushes exactly one
+    // covering snapshot carrying the silent install.
     let resolution =
         Viewport::try_new((end_minute - 500) * interval, (end_minute - 300) * interval)
             .expect("resolution viewport");
@@ -2742,16 +2744,31 @@ fn resolving_the_demanded_repair_range_flushes_one_accumulated_covering_snapshot
         .get_mut(&consumer_id)
         .expect("events")
         .demand_error = None;
-    coordinator.history_completed(
-        &series,
-        provider_generation,
+    let mut request = history_rx.try_recv().expect("provider repair queues");
+    for _ in 0..=MAXIMUM_VIEWPORT_HISTORY_RETRIES {
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            request.range,
+            HistoryRequestKind::ViewportBackfill,
+            Err("fixture backfill unavailable".to_string()),
+        );
+        let key = (series.clone(), provider_generation);
+        if !coordinator.viewport_history_retries.contains_key(&key) {
+            break;
+        }
+        assert!(
+            coordinator.events[&consumer_id].queued_series().is_none(),
+            "retrying keeps the accumulated snapshot deferred"
+        );
         coordinator
-            .viewport_history_ranges
-            .get(&(series.clone(), provider_generation))
-            .copied(),
-        HistoryRequestKind::ViewportBackfill,
-        Err("fixture backfill superseded".to_string()),
-    );
+            .viewport_history_retries
+            .get_mut(&key)
+            .expect("retry remains")
+            .ready_at = Instant::now();
+        coordinator.retry_viewport_history();
+        request = history_rx.try_recv().expect("bounded retry queues");
+    }
     assert!(matches!(
         coordinator.events[&consumer_id].queued_series(),
         Some(envelope::Payload::SeriesSnapshot(snapshot))
@@ -2929,6 +2946,144 @@ fn adjoining_viewport_backfill_extends_the_run_without_renumbering() {
             .windows(2)
             .all(|pair| { pair[0].source_sequence + 1 == pair[1].source_sequence })
     );
+}
+
+fn fail_viewport_history_request(
+    coordinator: &mut Coordinator<'_>,
+    series: &BarSeriesKey,
+    generation: ProviderGeneration,
+    request: &HistoryRequest,
+) {
+    coordinator.history_completed(
+        series,
+        generation,
+        request.range,
+        HistoryRequestKind::ViewportBackfill,
+        Err("fixture provider failure".to_string()),
+    );
+}
+
+fn assert_viewport_retry_waits(
+    coordinator: &mut Coordinator<'_>,
+    consumer_id: ConsumerId,
+    generation: GenerationId,
+    viewport: Viewport,
+    storage_rx: &Receiver<StorageRequest>,
+    history_rx: &Receiver<HistoryRequest>,
+) {
+    coordinator
+        .request_viewport_history(consumer_id, generation, viewport)
+        .expect("duplicate viewport is accepted");
+    assert!(storage_rx.try_recv().is_err() && history_rx.try_recv().is_err());
+    coordinator.resource_mode = ResourceMode::OfflineSuspended;
+    coordinator.retry_viewport_history();
+    assert!(history_rx.try_recv().is_err());
+    coordinator.resource_mode = ResourceMode::Warm;
+}
+
+#[test]
+fn viewport_history_failure_backs_off_exhausts_and_rearms() {
+    let (history_tx, history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+    let realtime_stop = Arc::new(AtomicBool::new(true));
+    let mut engine = configured_engine().expect("engine configures");
+    let consumer_id = ConsumerId(id(1).expect("consumer"));
+    let generation = GenerationId(id(1).expect("generation"));
+    let series = internal_series(&btc()).expect("series");
+    engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id: ClientId(id(1).expect("client")),
+                workspace_id: WorkspaceId(id(1).expect("workspace")),
+                consumer_id,
+            },
+            true,
+        )
+        .expect("consumer registers");
+    engine
+        .set_series_demand(consumer_id, generation, &series)
+        .expect("demand installs");
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &realtime_stop,
+        consumer_id,
+        &series,
+    );
+    let provider_generation = coordinator
+        .provider_generation_for_series(&series)
+        .expect("provider generation");
+    let interval = 60_000_000_000_i64;
+    let end = align_down(current_unix_nanos().expect("clock"), interval);
+    let viewport = Viewport::try_new(end - 800 * interval, end - 700 * interval).expect("viewport");
+
+    coordinator
+        .request_viewport_history(consumer_id, generation, viewport)
+        .expect("viewport queues local history");
+    let StorageRequest::ReadRange(_, _, range) = storage_rx.recv().expect("local range request")
+    else {
+        panic!("viewport uses a range read");
+    };
+    coordinator.viewport_history_local_completed(
+        &series,
+        provider_generation,
+        range,
+        Err("fixture local history is unavailable".to_string()),
+    );
+    let mut request = history_rx.recv().expect("provider backfill request");
+
+    for expected_attempt in 1..=MAXIMUM_VIEWPORT_HISTORY_RETRIES {
+        fail_viewport_history_request(&mut coordinator, &series, provider_generation, &request);
+        let key = (series.clone(), provider_generation);
+        let retry = coordinator
+            .viewport_history_retries
+            .get_mut(&key)
+            .expect("bounded retry remains armed");
+        assert_eq!(retry.attempts, expected_attempt);
+        assert!(history_rx.try_recv().is_err(), "failure must not hot-loop");
+        retry.ready_at = Instant::now();
+        if expected_attempt == 1 {
+            assert_viewport_retry_waits(
+                &mut coordinator,
+                consumer_id,
+                generation,
+                viewport,
+                &storage_rx,
+                &history_rx,
+            );
+        }
+        coordinator.retry_viewport_history();
+        request = history_rx.recv().expect("bounded retry is queued");
+    }
+
+    fail_viewport_history_request(&mut coordinator, &series, provider_generation, &request);
+    let key = (series.clone(), provider_generation);
+    assert!(!coordinator.viewport_history_retries.contains_key(&key));
+    assert!(!coordinator.viewport_history_ranges.contains_key(&key));
+    assert!(
+        history_rx.try_recv().is_err(),
+        "exhaustion stops provider work"
+    );
+    assert!(matches!(
+        coordinator.events[&consumer_id].series_state,
+        Some(envelope::Payload::SeriesState(ref state))
+            if state.state == SeriesLoadState::Partial as i32
+                && state.detail.as_deref()
+                    == Some("Visible history repair is unavailable; move the viewport to retry")
+    ));
+
+    coordinator
+        .request_viewport_history(consumer_id, generation, viewport)
+        .expect("same viewport rearms after exhaustion");
+    assert!(matches!(
+        storage_rx.recv().expect("rearmed local range request"),
+        StorageRequest::ReadRange(_, _, _)
+    ));
+    assert!(!coordinator.viewport_history_retries.contains_key(&key));
+    assert!(coordinator.viewport_history_ranges.contains_key(&key));
 }
 
 #[test]

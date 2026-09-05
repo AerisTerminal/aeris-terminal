@@ -1,14 +1,13 @@
 use super::{
     Arc, AtomicBool, BarPeriod, BarSeriesKey, COINBASE_PUBLIC_ACCOUNT_ID, Command, Coordinator,
     ENTITLEMENT_CLASS, FailureStage, HISTORY_BARS_PER_SERIES, HistoryPrecedence, HistoryRange,
-    HistoryRequestKind, HistoryScope, Instant, LOCAL_HISTORY_READ_TIMEOUT, LocalHistoryError,
-    LocalHistoryStore, LocalRangeHistory, MarketBar, Ordering, PersistenceState,
-    ProviderGeneration, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RetainedRange,
-    SeriesLoadState, StorageRequest, StoredHistory, SyncSender, TrySendError,
-    aggregate_coinbase_bars, canonical_local_range, canonicalize_coinbase_history,
-    coinbase_bar_coverage_ranges, coinbase_interval, coinbase_series_interval, fail_waiters,
-    local_history_failure_stage, publish_state, reconcile_history_repair, record_covered_range,
-    thread,
+    HistoryScope, Instant, LOCAL_HISTORY_READ_TIMEOUT, LocalHistoryError, LocalHistoryStore,
+    LocalRangeHistory, MarketBar, Ordering, PersistenceState, ProviderGeneration,
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RetainedRange, SeriesLoadState, StorageRequest,
+    StoredHistory, SyncSender, TrySendError, aggregate_coinbase_bars, canonical_local_range,
+    canonicalize_coinbase_history, coinbase_bar_coverage_ranges, coinbase_interval,
+    coinbase_series_interval, fail_waiters, local_history_failure_stage, publish_state,
+    reconcile_history_repair, record_covered_range, thread,
 };
 
 pub(super) fn spawn_storage_worker(
@@ -408,18 +407,7 @@ impl Coordinator<'_> {
             return;
         }
         let Ok(local) = result else {
-            if let Err(detail) = self.schedule_coinbase_history(
-                series,
-                generation,
-                HistoryRequestKind::ViewportBackfill,
-            ) {
-                self.broadcast_demand_error_for(
-                    series,
-                    FailureStage::ProviderHistory,
-                    &detail,
-                    None,
-                );
-            }
+            self.schedule_next_coinbase_viewport_page(series, generation);
             return;
         };
         for confirmed_empty in local.confirmed_empty {
@@ -471,11 +459,7 @@ impl Coordinator<'_> {
                 self.resync_coinbase_live(series);
             }
         }
-        if let Err(detail) =
-            self.schedule_coinbase_history(series, generation, HistoryRequestKind::ViewportBackfill)
-        {
-            self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, &detail, None);
-        }
+        self.schedule_next_coinbase_viewport_page(series, generation);
     }
 
     pub(super) fn install_warm_local_history(
