@@ -4004,6 +4004,12 @@ fn run_desktop_readiness_command(
     }
     let account = axiusflow_desktop::account::fetch_account_status(&mut client)?;
     axiusflow_desktop::account::verify_account_readiness(&account)?;
+    // The probe shuts the engine down at the end, so it must never run
+    // against a live session: this attach is counted, so more than one
+    // client means another desktop is using the resident engine.
+    if status.connected_desktop_clients > 1 {
+        return Err("candidate readiness probe refused: another desktop session is attached to the resident engine".to_string());
+    }
     let release = axiusflow_platform_runtime::current_release_identity();
     if ready.release_identity != release.release_identity
         || ready.install_generation != release.install_generation

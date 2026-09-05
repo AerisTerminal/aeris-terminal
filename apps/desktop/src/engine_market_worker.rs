@@ -55,6 +55,10 @@ const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
 pub(crate) const ENGINE_RESTARTED_MESSAGE: &str =
     "Resident engine restarted; restoring chart demand";
 const EVENT_WAIT: Duration = Duration::from_millis(8);
+/// Backoff between engine-restore retries in the event loop. Each failed
+/// receive already spent up to the supervisor's restore deadline retrying,
+/// so this only spaces the recovering notices, never hot-loops reconnects.
+const RESTORE_BACKOFF: Duration = Duration::from_millis(250);
 /// Engine events one chart drains per tick before yielding to the other charts.
 const MARKET_EVENTS_PER_POLL: usize = 512;
 const WORKSPACE_ADDITION_CAPACITY: usize = 8;
@@ -501,15 +505,51 @@ fn run_attached_workers(
             }
         }
         endpoints.retain(|record| record.endpoint.active);
-        if receive_and_apply_event(client, endpoints, EVENT_WAIT)? {
-            for _ in 1..MARKET_EVENTS_PER_POLL {
-                if !receive_and_apply_event(client, endpoints, Duration::ZERO)? {
-                    break;
+        // A failed restore must never exit this thread: the engine may be
+        // restarting or waiting on sign-in, and exiting here stranded charts
+        // in a terminal error until the trader reloaded or changed symbols.
+        // Report recovering and retry on the next tick instead.
+        match receive_and_apply_event(client, endpoints, EVENT_WAIT) {
+            Ok(received) => {
+                if received {
+                    for _ in 1..MARKET_EVENTS_PER_POLL {
+                        match receive_and_apply_event(client, endpoints, Duration::ZERO) {
+                            Ok(more) => {
+                                if !more {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                note_engine_restore_failure(endpoints, &error);
+                                break;
+                            }
+                        }
+                    }
                 }
+            }
+            Err(error) => {
+                note_engine_restore_failure(endpoints, &error);
             }
         }
     }
     Ok(())
+}
+
+/// Reports a failed engine restore as recovering on every active endpoint
+/// and backs off before the next retry. The redacted engine detail stays
+/// visible so an unauthenticated engine still tells the trader to sign in,
+/// but the worker thread survives to retry once the engine is back.
+fn note_engine_restore_failure(endpoints: &[EndpointRecord], error: &str) {
+    for record in endpoints.iter().filter(|record| record.endpoint.active) {
+        let _ = record
+            .endpoint
+            .messages
+            .send(MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Recovering,
+                message: error.to_string(),
+            });
+    }
+    thread::sleep(RESTORE_BACKOFF);
 }
 
 /// Receives and applies one pushed engine event. Returns whether one arrived.
@@ -2180,6 +2220,36 @@ mod tests {
                 message,
             }] if message.contains("retained history")
         ));
+    }
+
+    #[test]
+    fn engine_restore_failure_stays_recovering_without_killing_the_worker() {
+        let product = coinbase_products().remove(0);
+        let (mut live_pane, live_record) =
+            worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
+        let (mut dead_pane, mut dead_record) =
+            worker_endpoint(2, 10, product.clone(), 42, ChartInterval::Minute5, None, 7);
+        dead_record.endpoint.active = false;
+        let records = vec![live_record, dead_record];
+
+        note_engine_restore_failure(
+            &records,
+            "resident engine connection failed: ipc_receive failed: local engine connection closed; recovery failed: sign in before using the Axiusflow platform",
+        );
+
+        let (messages, disconnected) = live_pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Recovering,
+                message,
+            }] if message.contains("sign in before using the Axiusflow platform")
+        ));
+        // Retired endpoints never observe the failure.
+        let (messages, _) = dead_pane.worker.drain_messages();
+        assert!(messages.is_empty());
+        drop(records);
     }
 
     #[test]
