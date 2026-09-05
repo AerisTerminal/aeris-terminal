@@ -110,7 +110,6 @@ fn run_coordinator(
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
-        realtime_started: false,
         realtime_connected: false,
         rithmic_selection: None,
         rithmic_pending_selection: None,
@@ -226,7 +225,6 @@ pub(super) struct Coordinator<'a> {
     pub(super) catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     pub(super) catalog_sessions: BTreeMap<String, u64>,
     pub(super) catalog_selections: BTreeMap<String, u64>,
-    pub(super) realtime_started: bool,
     pub(super) realtime_connected: bool,
     /// The instrument the Rithmic live worker is currently selected on.
     ///
@@ -676,7 +674,6 @@ impl Coordinator<'_> {
         }
         self.providers.stop("coinbase");
         self.providers.stop("rithmic");
-        self.realtime_started = false;
         self.realtime_connected = false;
         self.rithmic_selection = None;
         self.rithmic_pending_selection = None;

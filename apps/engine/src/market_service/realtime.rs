@@ -1734,7 +1734,6 @@ impl Coordinator<'_> {
                 .start_coinbase_realtime(subscriptions.into_values().collect())?
         {
             self.realtime_products = products;
-            self.realtime_started = true;
         }
         Ok(())
     }
@@ -1778,12 +1777,13 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn stop_realtime_if_idle(&mut self) {
-        if self.live.is_empty() && self.realtime_started {
+        // The applied product set is the worker-start authority. Keeping a
+        // second `started` flag made every start, stop, suspension, and resume
+        // update two representations of the same fact.
+        if self.live.is_empty() && !self.realtime_products.is_empty() {
             self.providers.stop("coinbase");
-            self.realtime_started = false;
             self.realtime_connected = false;
             self.realtime_products.clear();
-            self.live.clear();
             let generation = self.coinbase_provider_generation();
             let _ = self.engine.end_provider_session("coinbase", generation);
         }

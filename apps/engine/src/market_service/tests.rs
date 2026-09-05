@@ -344,7 +344,6 @@ fn retained_history_coordinator<'a>(
         },
         catalog_sessions: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
-        realtime_started: false,
         realtime_connected: false,
         rithmic_selection: None,
         rithmic_pending_selection: None,
@@ -3770,6 +3769,18 @@ fn shared_realtime_stops_at_last_market_reference_with_idle_consumer() {
             .expect("BTC product set configures"),
         ["BTC-USD"]
     );
+    harness
+        .actions
+        .send(FixtureRealtimeAction::Connected)
+        .expect("shared realtime connects");
+    assert!(matches!(
+        poll_until(&harness.service, 1, 1, |event| matches!(
+            event,
+            envelope::Payload::ProviderState(state)
+                if state.state == ProviderConnectionState::Online as i32
+        )),
+        envelope::Payload::ProviderState(state) if state.generation == 1
+    ));
 
     harness
         .service
@@ -3794,6 +3805,29 @@ fn shared_realtime_stops_at_last_market_reference_with_idle_consumer() {
             .0
             .get(),
         1
+    );
+
+    harness
+        .service
+        .register_consumer(1, 1, 4)
+        .expect("replacement consumer registers");
+    harness
+        .service
+        .set_demand(1, 4, 1, &btc())
+        .expect("the same product is demanded again");
+    assert_eq!(
+        harness
+            .generations
+            .recv_timeout(Duration::from_secs(1))
+            .expect("released provider worker restarts")
+            .0
+            .get(),
+        2
+    );
+    expect_configured_products(
+        &harness,
+        "the cleared applied product set configures again",
+        &["BTC-USD"],
     );
 }
 

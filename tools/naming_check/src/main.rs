@@ -1067,6 +1067,8 @@ mod tests {
 
         let coordinator = manifest("apps/engine/src/market_service/tests.rs");
         for regression in [
+            "existing_chart_demand_resumes_after_offline_account_suspension",
+            "shared_realtime_stops_at_last_market_reference_with_idle_consumer",
             "timeframe_switch_waits_for_its_own_current_provider_history",
             "newer_demand_cancels_history_without_waiting_for_cleanup",
             "symbol_and_interval_switch_reuses_the_shared_realtime_session",
@@ -1078,6 +1080,14 @@ mod tests {
                 "viewport/history lifecycle lost regression {regression}"
             );
         }
+
+        let coordinator_state = manifest("apps/engine/src/market_service/coordinator.rs");
+        let realtime = manifest("apps/engine/src/market_service/realtime.rs");
+        assert!(
+            !coordinator_state.contains("realtime_started")
+                && !production_prefix(&realtime).contains("realtime_started"),
+            "the applied Coinbase product set must remain the sole worker-start authority"
+        );
     }
 
     #[test]
