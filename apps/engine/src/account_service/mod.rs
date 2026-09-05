@@ -6,6 +6,7 @@
 //! market-coordinator, provider, or chart state, and account refresh never
 //! recreates a provider session.
 
+pub mod lease;
 pub mod loopback;
 pub mod oidc;
 pub mod pkce;
@@ -20,9 +21,11 @@ use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthoriza
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
+use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, device_id_for_key};
 use loopback::{LoopbackListener, validate_callback_query};
 use oidc::{
-    AuthorizationRequest, OidcEndpoints, authorization_url, discover, exchange_code, link_subject,
+    AuthorizationRequest, OidcEndpoints, authorization_url, control_plane_origin, discover,
+    exchange_code, link_subject, refresh_grant,
 };
 use pkce::{PkceVerifier, generate_oauth_random};
 
@@ -98,12 +101,15 @@ struct ServiceState {
     last_generation: u64,
 }
 
+type LeaseKey = (String, [u8; 32]);
+
 /// Engine-owned account session shared by all desktop windows.
 #[derive(Clone)]
 pub struct AccountService {
     config: AccountServiceConfig,
     state: Arc<Mutex<ServiceState>>,
     endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
+    lease_keys: Arc<Mutex<Vec<LeaseKey>>>,
 }
 
 impl AccountService {
@@ -124,6 +130,7 @@ impl AccountService {
                 last_generation: 0,
             })),
             endpoints: Arc::new(Mutex::new(None)),
+            lease_keys: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -426,21 +433,26 @@ impl AccountService {
                 &nonce,
             )
             .and_then(|tokens| {
-                link_subject(&endpoints, &tokens.access, &tokens.subject)
-                    .map(|(account, plan)| (account, plan, tokens.refresh))
+                link_subject(&endpoints, &tokens.id_token, &tokens.subject)
+                    .map(|(account, plan)| (account, plan, tokens))
             })
         });
         match outcome {
-            Ok((account_id, plan, refresh)) => {
+            Ok((account_id, plan, tokens)) => {
                 let vault = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE);
                 match vault {
-                    Ok(vault) => self.complete_with_tokens(
-                        generation,
-                        &account_id,
-                        plan,
-                        refresh.as_deref(),
-                        &vault,
-                    ),
+                    Ok(vault) => {
+                        self.complete_with_tokens(
+                            generation,
+                            &account_id,
+                            plan,
+                            tokens.refresh.as_deref(),
+                            &vault,
+                        );
+                        // Best-effort initial lease for the shadow cache; a
+                        // failure never blocks the Active session.
+                        self.refresh_lease_once(generation, &tokens, &account_id, &vault);
+                    }
                     Err(_) => self.fail_generation(
                         generation,
                         "credential storage is unavailable; retry sign-in",
@@ -492,6 +504,96 @@ impl AccountService {
             detail: "signed in".to_string(),
             request_generation: state.last_generation,
         };
+        let service = self.clone();
+        std::thread::Builder::new()
+            .name("axiusflow-account-lease".to_string())
+            .spawn(move || service.run_lease_worker(generation))
+            .ok();
+    }
+
+    /// Returns whether one generation still owns the shared session.
+    fn is_current(&self, generation: u64) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.last_generation == generation
+                && (state.view.state == AccountSessionState::Active as i32
+                    || state.view.state == AccountSessionState::OfflineLease as i32)
+        })
+    }
+
+    fn run_lease_worker(&self, generation: u64) {
+        loop {
+            if !sleep_until_lease_round(self, generation) {
+                return;
+            }
+            if !self.is_current(generation) {
+                return;
+            }
+            self.lease_round(generation);
+        }
+    }
+
+    fn lease_round(&self, generation: u64) {
+        let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+            note_lease_shadow("vault-unavailable");
+            return;
+        };
+        let outcome = refresh_lease_round(self, generation, &vault);
+        self.apply_lease_outcome(generation, outcome);
+    }
+
+    /// Best-effort initial lease right after sign-in (shadow cache warmup).
+    fn refresh_lease_once<V>(
+        &self,
+        generation: u64,
+        tokens: &oidc::VerifiedTokens,
+        account_id: &AccountId,
+        vault: &V,
+    ) where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        if ensure_device_key(vault).is_err() {
+            return;
+        }
+        let outcome = initial_lease_round(self, generation, tokens, account_id, vault);
+        self.apply_lease_outcome(generation, outcome);
+    }
+
+    fn apply_lease_outcome(&self, generation: u64, outcome: lease::RefreshOutcome) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation != generation {
+            return;
+        }
+        let current = state.view.state;
+        let active = AccountSessionState::Active as i32;
+        let offline = AccountSessionState::OfflineLease as i32;
+        if current != active && current != offline {
+            return;
+        }
+        match outcome {
+            lease::RefreshOutcome::Refreshed | lease::RefreshOutcome::Current => {
+                if current != active {
+                    state.view.state = active;
+                    state.view.detail = "signed in".to_string();
+                }
+                note_lease_shadow("valid");
+            }
+            lease::RefreshOutcome::OfflineCovered => {
+                if current != offline {
+                    state.view.state = offline;
+                    state.view.detail =
+                        "signed in with a cached subscription; reconnect to refresh".to_string();
+                }
+                note_lease_shadow("offline-covered");
+            }
+            lease::RefreshOutcome::Unavailable => {
+                state.view.state = AccountSessionState::ReauthenticationRequired as i32;
+                state.view.detail = "sign-in expired; sign in again".to_string();
+                note_lease_shadow("unavailable");
+            }
+        }
     }
 
     fn fail_generation(&self, generation: u64, detail: &str) {
@@ -554,6 +656,248 @@ fn lock_state(
     state
         .lock()
         .map_err(|_| "account state is unavailable".to_string())
+}
+
+/// Redacted shadow observation: outcome class only, never identities.
+fn note_lease_shadow(outcome: &str) {
+    eprintln!("Axiusflow lease shadow: {outcome}");
+}
+
+/// Sleeps until the next lease round in interruptible slices. Returns false
+/// when the generation retired while waiting.
+fn sleep_until_lease_round(service: &AccountService, generation: u64) -> bool {
+    let mut jitter = [0_u8; 8];
+    if getrandom::fill(&mut jitter).is_err() {
+        return false;
+    }
+    let wait =
+        Duration::from_secs(LEASE_REFRESH_INTERVAL_SECONDS + u64::from_le_bytes(jitter) % 1800);
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        if !service.is_current(generation) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_secs(60).min(deadline - Instant::now()));
+    }
+    service.is_current(generation)
+}
+
+struct LeaseSession {
+    account_id: AccountId,
+    device_id: String,
+    refresh_token: String,
+    endpoints: OidcEndpoints,
+    origin: String,
+}
+
+fn lease_session<V>(service: &AccountService, generation: u64, vault: &V) -> Option<LeaseSession>
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let account_id = {
+        let state = service.state.lock().ok()?;
+        if state.last_generation != generation {
+            return None;
+        }
+        AccountId::try_new(&state.view.account_id).ok()?
+    };
+    let refresh_token = vault
+        .load(REFRESH_VAULT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|token| !token.is_empty())?;
+    let endpoints = service.oidc_endpoints().ok()?;
+    let origin = control_plane_origin(&endpoints.issuer).ok()?;
+    if ensure_device_key(vault).is_err() {
+        return None;
+    }
+    let device_id = vault
+        .load(DEVICE_VAULT_KEY)
+        .ok()
+        .flatten()
+        .map(|key| device_id_for_key(&key))?;
+    Some(LeaseSession {
+        account_id,
+        device_id,
+        refresh_token,
+        endpoints,
+        origin,
+    })
+}
+
+fn validate_and_cache<V>(
+    service: &AccountService,
+    session: &LeaseSession,
+    compact: &str,
+    vault: &V,
+    now_unix_seconds: u64,
+) -> lease::RefreshOutcome
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let keys = lease::fetch_directory(&session.origin).unwrap_or_default();
+    if !keys.is_empty()
+        && let Ok(mut cached) = service.lease_keys.lock()
+    {
+        *cached = keys;
+    }
+    let keys = service
+        .lease_keys
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(claims) = lease::validate_compact(
+        compact,
+        &keys,
+        &session.account_id,
+        &session.device_id,
+        now_unix_seconds,
+    ) else {
+        return lease::RefreshOutcome::Unavailable;
+    };
+    let cached_revision = lease::load_cached(vault, LEASE_VAULT_KEY)
+        .and_then(|cached| {
+            lease::validate_compact(
+                &cached,
+                &keys,
+                &session.account_id,
+                &session.device_id,
+                now_unix_seconds,
+            )
+            .ok()
+        })
+        .map(|cached| cached.revision());
+    match cached_revision {
+        Some(cached) if cached >= claims.revision() => lease::RefreshOutcome::Current,
+        _ => {
+            let secret = Zeroizing::new(compact.as_bytes().to_vec());
+            match vault.store(LEASE_VAULT_KEY, secret.as_slice()) {
+                Ok(()) => lease::RefreshOutcome::Refreshed,
+                Err(_) => lease::RefreshOutcome::Unavailable,
+            }
+        }
+    }
+}
+
+fn cached_lease_covers<V>(
+    service: &AccountService,
+    session: &LeaseSession,
+    vault: &V,
+    now_unix_seconds: u64,
+) -> bool
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    // Offline coverage re-validates the cached lease against the last-known
+    // directory without touching the network, and additionally requires the
+    // remaining validity to sit inside the approved offline window.
+    let keys = service
+        .lease_keys
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    lease::load_cached(vault, LEASE_VAULT_KEY)
+        .and_then(|cached| {
+            lease::validate_compact(
+                &cached,
+                &keys,
+                &session.account_id,
+                &session.device_id,
+                now_unix_seconds,
+            )
+            .ok()
+        })
+        .is_some_and(|claims| {
+            claims.expires_at().saturating_sub(now_unix_seconds) <= LEASE_OFFLINE_VALIDITY_SECONDS
+        })
+}
+
+/// One background lease round: refresh grant, lease fetch, monotonic cache.
+fn refresh_lease_round<V>(
+    service: &AccountService,
+    generation: u64,
+    vault: &V,
+) -> lease::RefreshOutcome
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Some(session) = lease_session(service, generation, vault) else {
+        return lease::RefreshOutcome::Unavailable;
+    };
+    let now = unix_now();
+    let Ok(tokens) = refresh_grant(
+        &session.endpoints,
+        &service.config.client_id,
+        &session.refresh_token,
+    ) else {
+        return cached_outcome(service, &session, vault, now);
+    };
+    if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
+        let secret = Zeroizing::new(rotated.as_bytes().to_vec());
+        let _ = vault.store(REFRESH_VAULT_KEY, secret.as_slice());
+    }
+    let Ok(compact) = lease::fetch_compact(
+        &session.endpoints,
+        &tokens.id_token,
+        &tokens.subject,
+        &session.device_id,
+    ) else {
+        return cached_outcome(service, &session, vault, now);
+    };
+    validate_and_cache(service, &session, &compact, vault, now)
+}
+
+fn cached_outcome<V>(
+    service: &AccountService,
+    session: &LeaseSession,
+    vault: &V,
+    now_unix_seconds: u64,
+) -> lease::RefreshOutcome
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    if cached_lease_covers(service, session, vault, now_unix_seconds) {
+        lease::RefreshOutcome::OfflineCovered
+    } else {
+        lease::RefreshOutcome::Unavailable
+    }
+}
+
+/// Best-effort initial lease with login-time tokens (no grant needed).
+fn initial_lease_round<V>(
+    service: &AccountService,
+    generation: u64,
+    tokens: &oidc::VerifiedTokens,
+    account_id: &AccountId,
+    vault: &V,
+) -> lease::RefreshOutcome
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Some(session) = lease_session(service, generation, vault) else {
+        return lease::RefreshOutcome::Unavailable;
+    };
+    if &session.account_id != account_id {
+        return lease::RefreshOutcome::Unavailable;
+    }
+    let Ok(compact) = lease::fetch_compact(
+        &session.endpoints,
+        &tokens.id_token,
+        &tokens.subject,
+        &session.device_id,
+    ) else {
+        return lease::RefreshOutcome::Current;
+    };
+    // A failed initial fetch leaves the fresh Active session untouched.
+    match validate_and_cache(service, &session, &compact, vault, unix_now()) {
+        lease::RefreshOutcome::Unavailable => lease::RefreshOutcome::Current,
+        outcome => outcome,
+    }
 }
 
 /// Credential vault that is always unavailable, used when native storage
@@ -686,6 +1030,7 @@ mod tests {
                 revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke"
                     .to_string(),
                 link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
+                lease_endpoint: "https://auth.axiusflow.com/api/axiusflow/lease".to_string(),
             });
         service
     }

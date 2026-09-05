@@ -12,6 +12,16 @@ use std::error::Error;
 pub const MAXIMUM_ACCOUNT_ID_BYTES: usize = 128;
 /// Maximum redacted detail length carried in a sanitized account view.
 pub const MAXIMUM_ACCOUNT_DETAIL_BYTES: usize = 256;
+/// Entitlement lease schema version understood by this release.
+pub const LEASE_SCHEMA_VERSION: u32 = 1;
+/// Audience the control plane mints leases for.
+pub const LEASE_AUDIENCE: &str = "axiusflow-engine";
+/// Maximum compact lease size accepted for validation.
+pub const MAXIMUM_LEASE_BYTES: usize = 2048;
+/// Maximum device identifier length accepted in a lease.
+pub const MAXIMUM_DEVICE_ID_BYTES: usize = 128;
+/// Maximum signing-key identifier length accepted in a lease.
+pub const MAXIMUM_KEY_ID_BYTES: usize = 64;
 
 /// Canonical Axiusflow account identity. External identifiers (identity-provider
 /// user ID, email, billing-vendor customer, Rithmic account) are links, never
@@ -262,6 +272,129 @@ impl AccountView {
     }
 }
 
+/// Validated offline entitlement lease claims.
+///
+/// The signature itself is verified by the caller (engine lease worker);
+/// this type owns claim-shape, binding-shape, and time-window validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseClaims {
+    account_id: AccountId,
+    device_id: String,
+    plan: PlanId,
+    features: FeatureSet,
+    revision: u64,
+    issued_at: u64,
+    not_before: u64,
+    expires_at: u64,
+    key_id: String,
+}
+
+impl LeaseClaims {
+    /// Validates raw lease claim fields against the expected binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountValidationError`] when any field is malformed,
+    /// unbound, or outside its time window at `now_unix_seconds`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        version: u32,
+        account_id: AccountId,
+        device_id: impl Into<String>,
+        plan: PlanId,
+        feature_bits: u32,
+        revision: u64,
+        issued_at: u64,
+        not_before: u64,
+        expires_at: u64,
+        audience: &str,
+        key_id: impl Into<String>,
+        expected_account_id: &AccountId,
+        expected_device_id: &str,
+        now_unix_seconds: u64,
+    ) -> Result<Self, AccountValidationError> {
+        let device_id = device_id.into();
+        let key_id = key_id.into();
+        if version != LEASE_SCHEMA_VERSION {
+            return Err(AccountValidationError::UnknownLeaseVersion);
+        }
+        if audience != LEASE_AUDIENCE {
+            return Err(AccountValidationError::LeaseAudienceMismatch);
+        }
+        if device_id.is_empty() || device_id.len() > MAXIMUM_DEVICE_ID_BYTES {
+            return Err(AccountValidationError::InvalidDeviceId);
+        }
+        if key_id.is_empty() || key_id.len() > MAXIMUM_KEY_ID_BYTES {
+            return Err(AccountValidationError::UnknownSigningKey);
+        }
+        if revision == 0 {
+            return Err(AccountValidationError::StaleLeaseRevision);
+        }
+        if &account_id != expected_account_id || device_id != expected_device_id {
+            return Err(AccountValidationError::LeaseBindingMismatch);
+        }
+        if not_before > now_unix_seconds || now_unix_seconds >= expires_at {
+            return Err(AccountValidationError::LeaseOutsideTimeWindow);
+        }
+        if issued_at > now_unix_seconds {
+            return Err(AccountValidationError::LeaseOutsideTimeWindow);
+        }
+        Ok(Self {
+            account_id,
+            device_id,
+            plan,
+            features: FeatureSet::try_new(feature_bits)?,
+            revision,
+            issued_at,
+            not_before,
+            expires_at,
+            key_id,
+        })
+    }
+
+    /// Returns the canonical account identity.
+    #[must_use]
+    pub const fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns the bound device identifier.
+    #[must_use]
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Returns the lease plan.
+    #[must_use]
+    pub const fn plan(&self) -> PlanId {
+        self.plan
+    }
+
+    /// Returns the leased feature set.
+    #[must_use]
+    pub const fn features(&self) -> FeatureSet {
+        self.features
+    }
+
+    /// Returns the monotonic entitlement revision.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the expiry in Unix seconds.
+    #[must_use]
+    pub const fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    /// Returns the signing-key identifier.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+}
+
 /// Validation failures for pure account contracts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccountValidationError {
@@ -272,6 +405,13 @@ pub enum AccountValidationError {
     UnknownAccountState,
     DetailTooLong,
     AccountWithoutIdentity,
+    UnknownLeaseVersion,
+    LeaseAudienceMismatch,
+    InvalidDeviceId,
+    UnknownSigningKey,
+    StaleLeaseRevision,
+    LeaseBindingMismatch,
+    LeaseOutsideTimeWindow,
 }
 
 impl fmt::Display for AccountValidationError {
@@ -286,6 +426,23 @@ impl fmt::Display for AccountValidationError {
             Self::AccountWithoutIdentity => {
                 formatter.write_str("account state requires an account identity")
             }
+            Self::UnknownLeaseVersion => {
+                formatter.write_str("entitlement lease version is unknown")
+            }
+            Self::LeaseAudienceMismatch => {
+                formatter.write_str("entitlement lease audience mismatches")
+            }
+            Self::InvalidDeviceId => formatter.write_str("entitlement lease device is invalid"),
+            Self::UnknownSigningKey => formatter.write_str("entitlement signing key is unknown"),
+            Self::StaleLeaseRevision => {
+                formatter.write_str("entitlement lease revision is not positive")
+            }
+            Self::LeaseBindingMismatch => {
+                formatter.write_str("entitlement lease binds another account or device")
+            }
+            Self::LeaseOutsideTimeWindow => {
+                formatter.write_str("entitlement lease is outside its time window")
+            }
         }
     }
 }
@@ -295,7 +452,8 @@ impl Error for AccountValidationError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountId, AccountState, AccountValidationError, AccountView, FeatureId, FeatureSet, PlanId,
+        AccountId, AccountState, AccountValidationError, AccountView, FeatureId, FeatureSet,
+        LeaseClaims, PlanId,
     };
 
     #[test]
@@ -357,6 +515,77 @@ mod tests {
         assert_eq!(
             FeatureSet::try_new(1 << 31).expect_err("unknown bit fails"),
             AccountValidationError::UnknownFeature
+        );
+    }
+
+    #[test]
+    fn lease_claims_enforce_binding_and_time_window() {
+        let account = AccountId::try_new("acct_01").expect("identity builds");
+        let build = |now| {
+            LeaseClaims::try_new(
+                1,
+                account.clone(),
+                "device-01",
+                PlanId::Pro,
+                FeatureId::AdvancedCharts.bit() | FeatureId::PremiumAnalytics.bit(),
+                7,
+                1_700_000_000,
+                1_700_000_000,
+                1_700_259_200,
+                "axiusflow-engine",
+                "ent1",
+                &account,
+                "device-01",
+                now,
+            )
+        };
+        let lease = build(1_700_000_100).expect("valid lease passes");
+        assert_eq!(lease.revision(), 7);
+        assert_eq!(lease.plan(), PlanId::Pro);
+        assert!(lease.features().contains(FeatureId::PremiumAnalytics));
+        assert_eq!(
+            build(1_700_259_200).expect_err("expiry is exclusive"),
+            AccountValidationError::LeaseOutsideTimeWindow
+        );
+        assert_eq!(
+            LeaseClaims::try_new(
+                1,
+                account.clone(),
+                "device-02",
+                PlanId::Pro,
+                0,
+                7,
+                1_700_000_000,
+                1_700_000_000,
+                1_700_259_200,
+                "axiusflow-engine",
+                "ent1",
+                &account,
+                "device-01",
+                1_700_000_100,
+            )
+            .expect_err("device mismatch fails"),
+            AccountValidationError::LeaseBindingMismatch
+        );
+        assert_eq!(
+            LeaseClaims::try_new(
+                2,
+                account.clone(),
+                "device-01",
+                PlanId::Pro,
+                0,
+                7,
+                1_700_000_000,
+                1_700_000_000,
+                1_700_259_200,
+                "axiusflow-engine",
+                "ent1",
+                &account,
+                "device-01",
+                1_700_000_100,
+            )
+            .expect_err("unknown version fails"),
+            AccountValidationError::UnknownLeaseVersion
         );
     }
 

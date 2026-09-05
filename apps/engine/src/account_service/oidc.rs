@@ -47,6 +47,8 @@ pub struct OidcEndpoints {
     pub revocation_endpoint: String,
     /// Axiusflow subject-link route on the control-plane origin.
     pub link_endpoint: String,
+    /// Axiusflow lease-issue route on the control-plane origin.
+    pub lease_endpoint: String,
 }
 
 /// Resolves OIDC endpoints from discovery metadata.
@@ -102,6 +104,7 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
         jwks_uri: metadata.jwks_uri.clone(),
         revocation_endpoint: metadata.revocation_endpoint.clone(),
         link_endpoint: format!("{origin}/api/axiusflow/link"),
+        lease_endpoint: format!("{origin}/api/axiusflow/lease"),
     })
 }
 
@@ -194,6 +197,8 @@ pub struct VerifiedTokens {
     pub subject: String,
     /// Bearer proof for the control-plane link call (memory only).
     pub access: String,
+    /// Identity proof for control-plane calls (memory only).
+    pub id_token: String,
     /// Refresh material for vault storage (opaque to logs).
     pub refresh: Option<String>,
 }
@@ -246,7 +251,7 @@ pub fn exchange_code(
     let subject = verify_id_token(
         &endpoints.issuer,
         client_id,
-        expected_nonce,
+        Some(expected_nonce),
         &agent,
         &endpoints.jwks_uri,
         &token.identity,
@@ -254,11 +259,66 @@ pub fn exchange_code(
     Ok(VerifiedTokens {
         subject,
         access: token.bearer,
+        id_token: token.identity,
+        refresh: token.refresh.filter(|token| !token.is_empty()),
+    })
+}
+
+/// Refreshes one token set with a vault refresh token.
+///
+/// The refreshed ID token carries no nonce (none was requested in this
+/// grant), so nonce checking is skipped while issuer, audience, signature,
+/// and expiry still verify.
+///
+/// # Errors
+///
+/// Returns a redacted actionable error when the grant or validation fails.
+pub fn refresh_grant(
+    endpoints: &OidcEndpoints,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<VerifiedTokens, String> {
+    let agent = oidc_agent();
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        url_encode(refresh_token),
+        url_encode(client_id),
+    );
+    let mut response = agent
+        .post(&endpoints.token_endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .send(body)
+        .map_err(|_| "session refresh failed".to_string())?;
+    let token: TokenResponse = response
+        .body_mut()
+        .with_config()
+        .limit(65_536)
+        .read_json()
+        .map_err(|_| "session refresh failed".to_string())?;
+    if token.identity.is_empty() || token.identity.len() > 16_384 {
+        return Err("session refresh failed".to_string());
+    }
+    let subject = verify_id_token(
+        &endpoints.issuer,
+        client_id,
+        None,
+        &agent,
+        &endpoints.jwks_uri,
+        &token.identity,
+    )?;
+    Ok(VerifiedTokens {
+        subject,
+        access: token.bearer.clone(),
+        id_token: token.identity,
         refresh: token.refresh.filter(|token| !token.is_empty()),
     })
 }
 
 /// Links one verified OIDC subject to the canonical Axiusflow account.
+///
+/// The ID token travels as the proof: the control plane verifies it
+/// server-side and never trusts the client-claimed subject.
 ///
 /// # Errors
 ///
@@ -266,19 +326,19 @@ pub fn exchange_code(
 /// the subject or returns an unknown plan.
 pub fn link_subject(
     endpoints: &OidcEndpoints,
-    access_token: &str,
+    id_token: &str,
     subject: &str,
 ) -> Result<(AccountId, PlanId), String> {
     let agent = oidc_agent();
     let body = format!(
-        "{{\"subject\":\"{}\"}}",
-        subject.replace('\\', "\\\\").replace('"', "\\\"")
+        "{{\"subject\":\"{}\",\"id_token\":\"{}\"}}",
+        subject.replace('\\', "\\\\").replace('"', "\\\""),
+        id_token.replace('\\', "\\\\").replace('"', "\\\"")
     );
     let mut response = agent
         .post(&endpoints.link_endpoint)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {access_token}"))
         .send(body)
         .map_err(|_| "account linking failed; retry sign-in".to_string())?;
     let link: LinkResponse = response
@@ -293,7 +353,7 @@ pub fn link_subject(
     Ok((account_id, plan))
 }
 
-fn oidc_agent() -> ureq::Agent {
+pub(crate) fn oidc_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
         .build();
@@ -335,7 +395,7 @@ struct DiscoveryMetadata {
 fn verify_id_token(
     issuer: &str,
     client_id: &str,
-    expected_nonce: &str,
+    expected_nonce: Option<&str>,
     agent: &ureq::Agent,
     jwks_uri: &str,
     id_token: &str,
@@ -358,7 +418,11 @@ fn verify_id_token(
     if claims.exp <= unix_now() {
         return Err("sign-in session expired; retry sign-in".to_string());
     }
-    if claims.nonce != expected_nonce || claims.sub.trim().is_empty() {
+    // A present nonce must match the transaction; refresh grants carry none.
+    if !claims.nonce.is_empty() && Some(claims.nonce.as_str()) != expected_nonce {
+        return Err(claim_failure());
+    }
+    if claims.sub.trim().is_empty() {
         return Err(claim_failure());
     }
     Ok(claims.sub)
@@ -479,6 +543,7 @@ mod tests {
             jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
             revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke".to_string(),
             link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
+            lease_endpoint: "https://auth.axiusflow.com/api/axiusflow/lease".to_string(),
         }
     }
 

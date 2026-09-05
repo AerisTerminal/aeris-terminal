@@ -2103,3 +2103,26 @@ Batch 4 proof — live test-mode credentials (2026-09-05, unpushed):
   with `wrangler secret put DODO_API_KEY` and `wrangler secret put
   DODO_WEBHOOK_SECRET` (this machine is not Cloudflare-authenticated, so
   that step stays maintainer-side).
+
+Batch 5 — signed leases in shadow mode (2026-09-05, unpushed; approved
+defaults: 6h refresh with jitter, 72h offline validity, 7-day grace,
+fraud-only revocation):
+
+- Worker mints compact Ed25519 leases (`ver`, `AccountId`, device ID,
+  `PlanId`, feature bits, revision, `iat`/`nbf`/`exp`, audience,
+  key ID; no email, name, vendor ID, or payment details). Keys derive
+  deterministically from the seed secret; `/.well-known/
+  entitlement-jwks.json` serves the current plus retired keys. `/link`
+  now verifies the ID token server-side instead of trusting cookies, and
+  `POST /api/axiusflow/lease` binds the lease to the engine device ID.
+- Native `LeaseClaims` domain validation plus a lease worker: refresh
+  grant, directory fetch, monotonic vault cache (`account-entitlement-
+  lease-v1`), 6h+jitter background rounds. Shadow only: redacted outcome
+  observations, truthful `OfflineLease` display on outage with a valid
+  cache, `ReauthenticationRequired` when nothing valid remains. No demand
+  is ever gated on a lease.
+- Interop proven locally: the worker's own mint output verifies in the
+  native validator (pinned fixture), and the served JWKS directory exposes
+  the identical key. Full workspace gates pass with zero failures (one
+  Coinbase catalog timing test flaked once under load and passed alone
+  and on rerun; untouched by this work). No push until approved.
