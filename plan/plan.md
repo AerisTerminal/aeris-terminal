@@ -2126,3 +2126,21 @@ fraud-only revocation):
   the identical key. Full workspace gates pass with zero failures (one
   Coinbase catalog timing test flaked once under load and passed alone
   and on rerun; untouched by this work). No push until approved.
+
+Batch 6 — remote backend live (2026-09-05, unpushed):
+
+- Remote D1 `axiusflow-auth` created and all four migrations applied;
+  database id pinned in `wrangler.jsonc` (non-secret, committed).
+- Secrets stored via `wrangler secret put`: `DODO_API_KEY` (test),
+  `DODO_WEBHOOK_SECRET`, and a fresh `ENTITLEMENT_SIGNING_KEY` (generated
+  locally, kid `ent1`; never in the repo).
+- Deployed `axiusflow-auth` and smoked every public route live: health,
+  discovery (production issuer), OIDC JWKS (one Ed25519 key), entitlement
+  JWKS (`ent1`, derived from the stored secret), unsigned webhook 400.
+- Live reconcile proven against remote D1 with signed events: both
+  reconciled, subscription active on pro, revision 2; proof rows deleted
+  after (all counts zero). `workers_dev` was enabled only for the smoke
+  and is back to false; the worker awaits the `auth.axiusflow.com` route.
+- Still maintainer-side: Google OAuth client, sender domain, DNS/TLS for
+  the issuer origin (full login unblocks then), plus rotating the two
+  chat-transited test values at convenience. No git push until approved.
