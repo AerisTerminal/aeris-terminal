@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::{
     atomic::AtomicU8,
     mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
@@ -34,13 +34,13 @@ const PREPARE_FOR_SLEEP_SIGNAL: &str = "PrepareForSleep";
 #[cfg(target_os = "linux")]
 const MAX_QUEUED_POWER_EVENTS: usize = 16;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct PowerEventPublisher {
     pending: Arc<AtomicU8>,
     wake: SyncSender<()>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl PowerEventPublisher {
     fn publish(&self, event: PowerEvent) {
         match event {
@@ -55,14 +55,14 @@ impl PowerEventPublisher {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct PowerEventInbox {
     pending: Arc<AtomicU8>,
     cancelled: Arc<AtomicBool>,
     wake: Receiver<()>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl PowerEventInbox {
     fn channel() -> (
         Arc<PowerEventPublisher>,
@@ -100,7 +100,7 @@ impl PowerEventInbox {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "windows"))]
     fn try_recv(&self) -> Option<PowerEvent> {
         self.take_next()
     }
@@ -126,9 +126,9 @@ impl PowerEventInbox {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const SUSPEND_PENDING: u8 = 1;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const RESUME_PENDING: u8 = 2;
 
 #[cfg(target_os = "windows")]
@@ -233,6 +233,259 @@ mod windows {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+const MACOS_CAN_SYSTEM_SLEEP: u32 = 0xe000_0270;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_SYSTEM_WILL_SLEEP: u32 = 0xe000_0280;
+#[cfg(any(target_os = "macos", test))]
+const MACOS_SYSTEM_HAS_POWERED_ON: u32 = 0xe000_0300;
+
+#[cfg(any(target_os = "macos", test))]
+const fn macos_power_message_requires_ack(message_type: u32) -> bool {
+    matches!(
+        message_type,
+        MACOS_CAN_SYSTEM_SLEEP | MACOS_SYSTEM_WILL_SLEEP
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos {
+    use super::{
+        NativePowerMonitorCancellation, PowerEvent, PowerEventPublisher, PowerNotificationError,
+    };
+    use std::{
+        ffi::c_void,
+        ptr,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc::{RecvTimeoutError, sync_channel},
+        },
+        thread::{self, JoinHandle},
+        time::Duration,
+    };
+
+    type IoServiceInterestCallback = unsafe extern "C" fn(*mut c_void, u32, u32, *mut c_void);
+
+    const IO_SUCCESS: i32 = 0;
+    const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(2);
+    const RUN_LOOP_SLICE_SECONDS: f64 = 0.1;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        #[link_name = "IORegisterForSystemPower"]
+        fn io_register_for_system_power(
+            refcon: *mut c_void,
+            notification_port: *mut *mut c_void,
+            callback: IoServiceInterestCallback,
+            notifier: *mut u32,
+        ) -> u32;
+        #[link_name = "IODeregisterForSystemPower"]
+        fn io_deregister_for_system_power(notifier: *mut u32) -> i32;
+        #[link_name = "IONotificationPortGetRunLoopSource"]
+        fn io_notification_port_get_run_loop_source(port: *mut c_void) -> *mut c_void;
+        #[link_name = "IONotificationPortDestroy"]
+        fn io_notification_port_destroy(port: *mut c_void);
+        #[link_name = "IOAllowPowerChange"]
+        fn io_allow_power_change(root_port: u32, notification_id: isize) -> i32;
+        #[link_name = "IOServiceClose"]
+        fn io_service_close(connection: u32) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        #[link_name = "kCFRunLoopDefaultMode"]
+        static CF_RUN_LOOP_DEFAULT_MODE: *const c_void;
+        #[link_name = "CFRunLoopGetCurrent"]
+        fn cf_run_loop_get_current() -> *mut c_void;
+        #[link_name = "CFRunLoopAddSource"]
+        fn cf_run_loop_add_source(run_loop: *mut c_void, source: *mut c_void, mode: *const c_void);
+        #[link_name = "CFRunLoopRemoveSource"]
+        fn cf_run_loop_remove_source(
+            run_loop: *mut c_void,
+            source: *mut c_void,
+            mode: *const c_void,
+        );
+        #[link_name = "CFRunLoopRunInMode"]
+        fn cf_run_loop_run_in_mode(
+            mode: *const c_void,
+            seconds: f64,
+            return_after_source_handled: u8,
+        ) -> i32;
+    }
+
+    struct CallbackContext {
+        root_port: u32,
+        publisher: Arc<PowerEventPublisher>,
+    }
+
+    struct Registration {
+        root_port: u32,
+        notifier: u32,
+        notification_port: *mut c_void,
+        run_loop: *mut c_void,
+        source: *mut c_void,
+        context: *mut CallbackContext,
+    }
+
+    impl Registration {
+        fn connect(publisher: Arc<PowerEventPublisher>) -> Result<Self, PowerNotificationError> {
+            let context = Box::into_raw(Box::new(CallbackContext {
+                root_port: 0,
+                publisher,
+            }));
+            let mut notification_port = ptr::null_mut();
+            let mut notifier = 0_u32;
+            let root_port = unsafe {
+                io_register_for_system_power(
+                    context.cast(),
+                    &raw mut notification_port,
+                    power_callback,
+                    &raw mut notifier,
+                )
+            };
+            if root_port == 0 || notification_port.is_null() {
+                cleanup_failed_registration(root_port, notifier, notification_port, context);
+                return Err(PowerNotificationError::MacOsPlatform(
+                    "IORegisterForSystemPower",
+                ));
+            }
+            unsafe {
+                (*context).root_port = root_port;
+            }
+            let run_loop = unsafe { cf_run_loop_get_current() };
+            let source = unsafe { io_notification_port_get_run_loop_source(notification_port) };
+            if run_loop.is_null() || source.is_null() {
+                cleanup_failed_registration(root_port, notifier, notification_port, context);
+                return Err(PowerNotificationError::MacOsPlatform(
+                    "IONotificationPortGetRunLoopSource",
+                ));
+            }
+            unsafe {
+                cf_run_loop_add_source(run_loop, source, CF_RUN_LOOP_DEFAULT_MODE);
+            }
+            Ok(Self {
+                root_port,
+                notifier,
+                notification_port,
+                run_loop,
+                source,
+                context,
+            })
+        }
+
+        fn run(self, cancelled: &AtomicBool) {
+            let _registration = self;
+            while !cancelled.load(Ordering::Acquire) {
+                unsafe {
+                    cf_run_loop_run_in_mode(CF_RUN_LOOP_DEFAULT_MODE, RUN_LOOP_SLICE_SECONDS, 1);
+                }
+            }
+        }
+    }
+
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            unsafe {
+                cf_run_loop_remove_source(self.run_loop, self.source, CF_RUN_LOOP_DEFAULT_MODE);
+            }
+            let deregistered =
+                unsafe { io_deregister_for_system_power(&raw mut self.notifier) } == IO_SUCCESS;
+            unsafe {
+                let _ = io_service_close(self.root_port);
+                io_notification_port_destroy(self.notification_port);
+            }
+            if deregistered {
+                unsafe {
+                    drop(Box::from_raw(self.context));
+                }
+            }
+            // If IOKit refuses deregistration, retain the callback context.
+            // This mirrors the Windows backend's fail-safe lifetime rule: a
+            // late native callback must never observe freed memory.
+        }
+    }
+
+    pub(super) fn connect(
+        publisher: Arc<PowerEventPublisher>,
+        cancellation: &NativePowerMonitorCancellation,
+    ) -> Result<JoinHandle<()>, PowerNotificationError> {
+        let cancelled = Arc::clone(&cancellation.cancelled);
+        let (ready, registered) = sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("axiusflow-power-macos".to_string())
+            .spawn(move || match Registration::connect(publisher) {
+                Ok(registration) => {
+                    if ready.send(Ok(())).is_ok() {
+                        registration.run(&cancelled);
+                    }
+                }
+                Err(error) => {
+                    let _ = ready.send(Err(error));
+                }
+            })
+            .map_err(|_| PowerNotificationError::MacOsPlatform("power notification worker"))?;
+        match registered.recv_timeout(REGISTRATION_TIMEOUT) {
+            Ok(Ok(())) => Ok(worker),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                Err(PowerNotificationError::StreamClosed)
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                cancellation.clone().cancel();
+                drop(worker);
+                Err(PowerNotificationError::MacOsPlatform(
+                    "power notification registration timed out",
+                ))
+            }
+        }
+    }
+
+    fn cleanup_failed_registration(
+        root_port: u32,
+        mut notifier: u32,
+        notification_port: *mut c_void,
+        context: *mut CallbackContext,
+    ) {
+        if notifier != 0 {
+            let _ = unsafe { io_deregister_for_system_power(&raw mut notifier) };
+        }
+        if root_port != 0 {
+            let _ = unsafe { io_service_close(root_port) };
+        }
+        if !notification_port.is_null() {
+            unsafe {
+                io_notification_port_destroy(notification_port);
+            }
+        }
+        unsafe {
+            drop(Box::from_raw(context));
+        }
+    }
+
+    unsafe extern "C" fn power_callback(
+        context: *mut c_void,
+        _service: u32,
+        message_type: u32,
+        message_argument: *mut c_void,
+    ) {
+        let Some(context) = (unsafe { context.cast::<CallbackContext>().as_ref() }) else {
+            return;
+        };
+        if let Some(event) = PowerEvent::from_macos_message_type(message_type) {
+            context.publisher.publish(event);
+        }
+        if super::macos_power_message_requires_ack(message_type) {
+            let _ = unsafe { io_allow_power_change(context.root_port, message_argument as isize) };
+        }
+    }
+}
+
 /// A native system power transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PowerEvent {
@@ -273,23 +526,37 @@ impl PowerEvent {
         }
         None
     }
+
+    #[cfg(any(target_os = "macos", test))]
+    const fn from_macos_message_type(message_type: u32) -> Option<Self> {
+        if message_type == MACOS_SYSTEM_WILL_SLEEP {
+            return Some(Self::Suspending);
+        }
+        if message_type == MACOS_SYSTEM_HAS_POWERED_ON {
+            return Some(Self::Resumed);
+        }
+        None
+    }
 }
 
 /// Blocking native power-event listener.
 ///
 /// On Linux this subscribes to systemd-logind's `PrepareForSleep` signal on the
-/// system bus. On Windows it registers a suspend/resume callback with the power
-/// manager and coalesces callback bursts while preserving suspend before resume.
-/// Callers must run [`Self::next_event`] outside async executors and UI threads
-/// because it blocks until a transition arrives.
+/// system bus. On macOS it consumes `IOKit`'s root power-domain notifications on a
+/// dedicated CoreFoundation run loop. On Windows it registers a suspend/resume
+/// callback with the power manager. Callback-based backends coalesce bursts while
+/// preserving suspend before resume. Callers must run [`Self::next_event`] outside
+/// async executors and UI threads because it blocks until a transition arrives.
 pub struct NativePowerMonitor {
     cancellation: NativePowerMonitorCancellation,
     #[cfg(target_os = "linux")]
     messages: MessageIterator,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     events: PowerEventInbox,
     #[cfg(target_os = "windows")]
     _registration: windows::Registration,
+    #[cfg(target_os = "macos")]
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Handle that unblocks a [`NativePowerMonitor`] waiting for its next event.
@@ -298,7 +565,7 @@ pub struct NativePowerMonitorCancellation {
     cancelled: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     connection: Connection,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     wake: SyncSender<()>,
 }
 
@@ -310,7 +577,7 @@ impl NativePowerMonitorCancellation {
         {
             let _ = self.connection.close();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         match self.wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
         }
@@ -321,10 +588,10 @@ impl NativePowerMonitor {
     /// Reports whether this crate implements a native power-event source for the target.
     #[must_use]
     pub const fn availability() -> CapabilityAvailability {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         return CapabilityAvailability::Available;
 
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         CapabilityAvailability::Unavailable
     }
 
@@ -332,8 +599,8 @@ impl NativePowerMonitor {
     ///
     /// # Errors
     ///
-    /// Returns an error when the target is unsupported or the native Linux or
-    /// Windows notification registration cannot be installed.
+    /// Returns an error when the target is unsupported or its native power
+    /// notification registration cannot be installed.
     pub fn connect() -> Result<Self, PowerNotificationError> {
         #[cfg(target_os = "linux")]
         {
@@ -372,7 +639,18 @@ impl NativePowerMonitor {
             })
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(target_os = "macos")]
+        {
+            let (publisher, events, cancellation) = PowerEventInbox::channel();
+            let worker = macos::connect(publisher, &cancellation)?;
+            Ok(Self {
+                cancellation,
+                events,
+                worker: Some(worker),
+            })
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Err(PowerNotificationError::UnsupportedPlatform)
     }
 
@@ -408,13 +686,25 @@ impl NativePowerMonitor {
             Ok(PowerEvent::from_preparing_for_sleep(preparing))
         }
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.events.recv()
         }
 
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         Err(PowerNotificationError::UnsupportedPlatform)
+    }
+}
+
+impl Drop for NativePowerMonitor {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            self.cancellation.clone().cancel();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 }
 
@@ -437,6 +727,8 @@ pub enum PowerNotificationError {
         operation: &'static str,
         code: u32,
     },
+    #[cfg(target_os = "macos")]
+    MacOsPlatform(&'static str),
     Cancelled,
     StreamClosed,
     UnsupportedPlatform,
@@ -451,6 +743,11 @@ impl fmt::Display for PowerNotificationError {
             Self::WindowsPlatform { operation, code } => write!(
                 formatter,
                 "native power notification operation {operation} failed with Windows error {code}"
+            ),
+            #[cfg(target_os = "macos")]
+            Self::MacOsPlatform(operation) => write!(
+                formatter,
+                "native power notification operation {operation} failed on macOS"
             ),
             Self::Cancelled => formatter.write_str("native power notification wait cancelled"),
             Self::StreamClosed => formatter.write_str("native power notification stream closed"),
@@ -505,6 +802,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn macos_power_messages_map_only_committed_sleep_and_completed_wake() {
+        assert_eq!(
+            PowerEvent::from_macos_message_type(super::MACOS_SYSTEM_WILL_SLEEP),
+            Some(PowerEvent::Suspending)
+        );
+        assert_eq!(
+            PowerEvent::from_macos_message_type(super::MACOS_SYSTEM_HAS_POWERED_ON),
+            Some(PowerEvent::Resumed)
+        );
+        assert_eq!(
+            PowerEvent::from_macos_message_type(super::MACOS_CAN_SYSTEM_SLEEP),
+            None
+        );
+        assert_eq!(PowerEvent::from_macos_message_type(0xe000_0320), None);
+        assert!(super::macos_power_message_requires_ack(
+            super::MACOS_CAN_SYSTEM_SLEEP
+        ));
+        assert!(super::macos_power_message_requires_ack(
+            super::MACOS_SYSTEM_WILL_SLEEP
+        ));
+        assert!(!super::macos_power_message_requires_ack(
+            super::MACOS_SYSTEM_HAS_POWERED_ON
+        ));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_mailbox_preserves_suspend_before_a_coalesced_resume() {
@@ -534,12 +857,12 @@ mod tests {
 
     #[test]
     fn availability_matches_the_implemented_native_backend() {
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         assert_eq!(
             NativePowerMonitor::availability(),
             CapabilityAvailability::Available
         );
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         assert_eq!(
             NativePowerMonitor::availability(),
             CapabilityAvailability::Unavailable
@@ -557,6 +880,27 @@ mod tests {
     #[test]
     fn windows_power_monitor_cancellation_unblocks_a_waiter() {
         let mut monitor = NativePowerMonitor::connect().expect("Windows power callback registers");
+        let cancellation = monitor.cancellation();
+        let waiter = std::thread::spawn(move || monitor.next_event());
+        cancellation.cancel();
+        assert!(matches!(
+            waiter.join().expect("join power monitor waiter"),
+            Err(super::PowerNotificationError::Cancelled)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_power_monitor_registers_and_unregisters() {
+        let monitor = NativePowerMonitor::connect().expect("macOS IOKit power callback registers");
+        drop(monitor);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_power_monitor_cancellation_unblocks_a_waiter() {
+        let mut monitor =
+            NativePowerMonitor::connect().expect("macOS IOKit power callback registers");
         let cancellation = monitor.cancellation();
         let waiter = std::thread::spawn(move || monitor.next_event());
         cancellation.cancel();
