@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const RELEASE_CHANNEL_SCHEMA_VERSION: u32 = 1;
 const INVENTORY_SCHEMA_VERSION: u32 = 1;
 const MAXIMUM_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAXIMUM_RELEASE_FILES: usize = 256;
@@ -79,6 +80,36 @@ pub struct ReleaseManifest {
 pub struct SignedReleaseManifest {
     pub manifest: ReleaseManifest,
     pub signature: String,
+}
+
+/// Mutable channel metadata. The embedded signed release remains the trust
+/// root; every duplicated field is cross-checked by the launcher before use.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseChannelPointer {
+    pub schema_version: u32,
+    pub channel: String,
+    pub platform: String,
+    #[serde(rename = "arch")]
+    pub architecture: String,
+    pub release_identity: String,
+    #[serde(rename = "generation")]
+    pub install_generation: u64,
+    pub version: String,
+    pub published_at: String,
+    pub manifest_url: String,
+    pub signed_release: SignedReleaseManifest,
+    pub installer: ReleaseInstallerMetadata,
+}
+
+/// Website-visible setup metadata carried beside the signed release payload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseInstallerMetadata {
+    pub filename: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256_b64url: String,
 }
 
 /// Local policy applied in addition to the signed manifest.
@@ -296,7 +327,7 @@ fn canonical_manifest(manifest: &ReleaseManifest) -> Result<Vec<u8>, LifecycleEr
 }
 
 fn validate_manifest_shape(manifest: &ReleaseManifest) -> Result<(), LifecycleError> {
-    if manifest.schema_version != MANIFEST_SCHEMA_VERSION
+    if manifest.schema_version != RELEASE_MANIFEST_SCHEMA_VERSION
         || manifest.install_generation == 0
         || !valid_identifier(&manifest.release_identity, 128)
         || !valid_identifier(&manifest.channel, 32)
@@ -694,7 +725,7 @@ impl ReleaseInstaller {
             let parent = destination.parent().ok_or(LifecycleError::StagingFailed)?;
             fs::create_dir_all(parent).map_err(|_| LifecycleError::StagingFailed)?;
             copy_new_file(&source, &destination)?;
-            verify_file(&destination, expected)?;
+            verify_release_file(&destination, expected)?;
             #[cfg(unix)]
             set_executable(&destination, expected.executable)?;
             #[cfg(not(unix))]
@@ -905,6 +936,39 @@ pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
     }
 }
 
+/// Resolves the stable per-user Axiusflow installation root used by the
+/// website bootstrap and the persisted launcher. It intentionally requires no
+/// administrator-owned system directory.
+///
+/// # Errors
+/// Returns an error when the current user's native home directory is unavailable.
+pub fn native_install_root() -> Result<PathBuf, LifecycleError> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("Programs/Axiusflow"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|root| root.join("Applications/Axiusflow"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
+            })
+            .map(|root| root.join("axiusflow/app"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+}
+
 /// Builds the versioned inventory for all currently owned native artifacts.
 ///
 /// # Errors
@@ -941,7 +1005,10 @@ pub fn native_installation_inventory(
     };
     let logs = data.join("logs");
     let registrations = if cfg!(target_os = "windows") {
-        vec!["windows-run:Axiusflow Engine".to_string()]
+        vec![
+            "windows-run:Axiusflow Engine".to_string(),
+            "start-menu:Axiusflow".to_string(),
+        ]
     } else if cfg!(target_os = "macos") {
         vec!["launch-agent:com.axiusflow.engine".to_string()]
     } else {
@@ -1075,7 +1142,12 @@ fn copy_new_file(source: &Path, destination: &Path) -> Result<(), LifecycleError
     output.sync_all().map_err(|_| LifecycleError::StagingFailed)
 }
 
-fn verify_file(path: &Path, expected: &ReleaseFile) -> Result<(), LifecycleError> {
+/// Verifies one downloaded release file against its signed size and SHA-256.
+///
+/// # Errors
+/// Returns [`LifecycleError::VerificationFailed`] when the file is absent,
+/// symlinked, has the wrong size, cannot be read, or does not match its digest.
+pub fn verify_release_file(path: &Path, expected: &ReleaseFile) -> Result<(), LifecycleError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| LifecycleError::VerificationFailed)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != expected.size {
         return Err(LifecycleError::VerificationFailed);
@@ -1110,7 +1182,7 @@ fn verify_candidate_inventory(root: &Path, expected: &[ReleaseFile]) -> Result<(
     }
     for file in expected {
         let path = root.join(&file.path);
-        verify_file(&path, file)?;
+        verify_release_file(&path, file)?;
         #[cfg(unix)]
         verify_executable(&path, file.executable)?;
         #[cfg(not(unix))]
@@ -1454,7 +1526,7 @@ mod tests {
         })
         .collect();
         let manifest = ReleaseManifest {
-            schema_version: MANIFEST_SCHEMA_VERSION,
+            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
             release_identity: format!("release-{generation}"),
             install_generation: generation,
             channel: "stable".to_string(),

@@ -774,6 +774,7 @@ dependencies = [
  "sha2 0.11.0",
  "signal-hook",
  "sysinfo 0.39.6",
+ "ureq",
  "wayland-client",
  "wayland-protocols",
  "windows-sys 0.61.2",

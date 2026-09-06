@@ -72,28 +72,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build workspace
         run: cargo build --workspace --all-targets --all-features
-      - name: Build release desktop and engine pair
-        env:
-          AXIUSFLOW_RELEASE_IDENTITY: ${{ github.sha }}
-          AXIUSFLOW_INSTALL_GENERATION: ${{ github.run_number }}
-        run: cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features
-      - name: Record release pair provenance
-        shell: bash
-        run: |
-          {
-            printf 'commit=%s\n' "$GITHUB_SHA"
-            printf 'generation=%s\n' "$GITHUB_RUN_NUMBER"
-            sha256sum target/release/axiusflow_desktop target/release/axiusflow_engine
-          } > target/release/release-pair.provenance
-      - name: Upload release pair
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-pair-linux
-          path: |
-            target/release/axiusflow_desktop
-            target/release/axiusflow_engine
-            target/release/release-pair.provenance
-          if-no-files-found: error
       - name: Test workspace
         run: cargo test --workspace --all-features
       - name: Check local market-data performance
@@ -146,31 +124,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Build workspace
         run: cargo build --workspace --all-targets --all-features
-      - name: Build release desktop and engine pair
-        env:
-          AXIUSFLOW_RELEASE_IDENTITY: ${{ github.sha }}
-          AXIUSFLOW_INSTALL_GENERATION: ${{ github.run_number }}
-        run: cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features
-      - name: Record release pair provenance
-        shell: pwsh
-        run: |
-          $desktop = (Get-FileHash target/release/axiusflow_desktop.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $engine = (Get-FileHash target/release/axiusflow_engine.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          @(
-            "commit=$env:GITHUB_SHA"
-            "generation=$env:GITHUB_RUN_NUMBER"
-            "$desktop  target/release/axiusflow_desktop.exe"
-            "$engine  target/release/axiusflow_engine.exe"
-          ) | Set-Content target/release/release-pair.provenance -Encoding utf8NoBOM
-      - name: Upload release pair
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-pair-windows
-          path: |
-            target/release/axiusflow_desktop.exe
-            target/release/axiusflow_engine.exe
-            target/release/release-pair.provenance
-          if-no-files-found: error
       - name: Test workspace
         run: cargo test --workspace --all-features
       - name: Check local market-data performance

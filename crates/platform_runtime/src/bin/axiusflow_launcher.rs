@@ -1,8 +1,9 @@
 //! Stable packaging launcher/updater. This binary lives outside version directories.
 
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -10,8 +11,9 @@ use std::{
 
 use axiusflow_platform_runtime::{
     ActiveRelease, BackgroundService, CredentialVault, InstallationInventory, LifecycleHooks,
-    NativeCredentialVault, ReleaseInstaller, ReleasePolicy, SignedReleaseManifest, VaultEntry,
-    native_installation_inventory,
+    NativeCredentialVault, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer, ReleaseFile,
+    ReleaseInstaller, ReleasePolicy, SignedReleaseManifest, VaultEntry, native_install_root,
+    native_installation_inventory, verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -20,31 +22,43 @@ use sysinfo::{ProcessesToUpdate, System};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
+const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
+const RELEASE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const RELEASE_CHANNEL: &str = "stable";
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    let no_arguments = std::env::args_os().len() == 1;
     if let Err(error) = run(std::env::args_os().skip(1)) {
         eprintln!("Axiusflow lifecycle: {error}");
+        #[cfg(target_os = "windows")]
+        if no_arguments {
+            let _ = Command::new("cmd").args(["/c", "echo. & pause"]).status();
+        }
         std::process::exit(1);
     }
 }
 
 fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(redacted)?;
+    let command = arguments
+        .next()
+        .and_then(|argument| argument.into_string().ok());
+    let verifying_key = embedded_verifying_key()?;
+    if command.is_none() {
+        require_no_more(arguments)?;
+        return bootstrap_update_and_launch(&executable, &verifying_key);
+    }
     let install_root = executable
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "stable launcher installation root is unavailable".to_string())?;
-    let verifying_key = embedded_verifying_key()?;
     let installer = ReleaseInstaller::new(&install_root, verifying_key, ReleasePolicy::native(0))
         .map_err(|error| error.to_string())?;
     let hooks = NativeHooks {
         install_root: install_root.clone(),
     };
-    match arguments
-        .next()
-        .and_then(|argument| argument.into_string().ok())
-        .as_deref()
-    {
+    match command.as_deref() {
         Some("--launch-desktop") => {
             require_no_more(arguments)?;
             installer.recover(&hooks).map_err(|error| error.to_string())?;
@@ -64,6 +78,11 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
                 .recover(&hooks)
                 .and_then(|()| installer.install(&signed, &bundle_root, &hooks).map(|_| ()))
                 .map_err(|error| error.to_string())
+        }
+        Some("--update") => {
+            require_no_more(arguments)?;
+            installer.recover(&hooks).map_err(|error| error.to_string())?;
+            install_remote_update(&installer, &verifying_key, &hooks, &install_root)
         }
         Some("--recover") => {
             require_no_more(arguments)?;
@@ -85,8 +104,601 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             remove_relocated_binary(&staged);
             result
         }
-        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--recover|--remove-all-local-data>".to_string()),
+        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--update|--recover|--remove-all-local-data>".to_string()),
     }
+}
+
+fn bootstrap_update_and_launch(
+    executable: &Path,
+    verifying_key: &VerifyingKey,
+) -> Result<(), String> {
+    let install_root = native_install_root().map_err(|error| error.to_string())?;
+    fs::create_dir_all(&install_root)
+        .map_err(|_| "per-user Axiusflow installation root could not be created".to_string())?;
+    // Validate the ownership root before copying the bootstrap into it. This
+    // rejects a pre-created symlinked install root before the first write.
+    let installer = ReleaseInstaller::new(&install_root, *verifying_key, ReleasePolicy::native(0))
+        .map_err(|error| error.to_string())?;
+    let stable_launcher = install_root.join(format!(
+        "axiusflow_launcher{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    if executable != stable_launcher {
+        persist_stable_launcher(executable, &stable_launcher)?;
+    }
+    let hooks = NativeHooks {
+        install_root: install_root.clone(),
+    };
+    installer
+        .recover(&hooks)
+        .map_err(|error| error.to_string())?;
+    let had_active_release = installer
+        .audit_active_release()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if let Err(update_error) =
+        install_remote_update(&installer, verifying_key, &hooks, &install_root)
+    {
+        if !had_active_release {
+            return Err(update_error);
+        }
+        // Axiusflow is local-first: an already verified installation remains
+        // launchable while offline or when the release service is temporarily
+        // unavailable. If an update transaction had started, recover it before
+        // selecting the active release again.
+        installer
+            .recover(&hooks)
+            .map_err(|error| error.to_string())?;
+        eprintln!("Axiusflow update deferred: {update_error}");
+    }
+    ensure_launcher_registration(&stable_launcher)?;
+    launch_active(&installer, "axiusflow_desktop")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_start_menu_shortcut() -> Result<PathBuf, String> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join("Microsoft/Windows/Start Menu/Programs/Axiusflow/Axiusflow.lnk"))
+        .ok_or_else(|| "Windows Start Menu location is unavailable".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_launcher_registration(launcher: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const SCRIPT: &str = "$shell=New-Object -ComObject WScript.Shell; $link=$shell.CreateShortcut($env:AXIUSFLOW_SHORTCUT); $link.TargetPath=$env:AXIUSFLOW_LAUNCHER; $link.WorkingDirectory=[IO.Path]::GetDirectoryName($env:AXIUSFLOW_LAUNCHER); $link.IconLocation=$env:AXIUSFLOW_LAUNCHER; $link.Save()";
+
+    let shortcut = windows_start_menu_shortcut()?;
+    let parent = shortcut
+        .parent()
+        .ok_or_else(|| "Windows Start Menu shortcut path is invalid".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|_| "Windows Start Menu directory could not be created".to_string())?;
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("AXIUSFLOW_SHORTCUT", &shortcut)
+        .env("AXIUSFLOW_LAUNCHER", launcher)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| "Windows Start Menu shortcut creation could not start".to_string())?;
+    if !status.success() || !shortcut.is_file() {
+        return Err("Windows Start Menu shortcut could not be created".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_launcher_registration(_launcher: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn remove_launcher_registration() -> Result<(), String> {
+    let shortcut = windows_start_menu_shortcut()?;
+    match fs::remove_file(&shortcut) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Windows Start Menu shortcut could not be removed".to_string()),
+    }
+    if let Some(parent) = shortcut.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remove_launcher_registration() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn launcher_registration_absent() -> Result<bool, String> {
+    Ok(!windows_start_menu_shortcut()?.exists())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launcher_registration_absent() -> Result<bool, String> {
+    Ok(true)
+}
+
+fn persist_stable_launcher(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|_| "setup executable metadata is unavailable".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("setup executable is not a regular file".to_string());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "stable launcher destination is invalid".to_string())?;
+    let staging = parent.join(format!(
+        ".axiusflow_launcher{}.next",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let _ = fs::remove_file(&staging);
+    fs::copy(source, &staging).map_err(|_| "stable launcher staging copy failed".to_string())?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&staging)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| "stable launcher staging copy could not be committed".to_string())?;
+    if destination.exists() {
+        fs::remove_file(destination)
+            .map_err(|_| "existing stable launcher could not be replaced".to_string())?;
+    }
+    fs::rename(&staging, destination)
+        .map_err(|_| "stable launcher could not be committed".to_string())
+}
+
+fn install_remote_update(
+    installer: &ReleaseInstaller,
+    verifying_key: &VerifyingKey,
+    hooks: &NativeHooks,
+    install_root: &Path,
+) -> Result<(), String> {
+    let active = installer
+        .audit_active_release()
+        .map_err(|error| error.to_string())?;
+    let base_url = embedded_release_base_url()?;
+    let manifest_url = format!(
+        "{base_url}/channels/{RELEASE_CHANNEL}/{}/{}.json",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    let discovery_agent = release_http_agent(RELEASE_DISCOVERY_TIMEOUT);
+    let channel = fetch_release_channel(&discovery_agent, &manifest_url)?;
+    let signed = &channel.signed_release;
+
+    // The mutable channel object is untrusted transport data until the
+    // offline release key authenticates the complete manifest, including all
+    // artifact URLs and hashes. No file URL is issued before this succeeds.
+    let active_generation = active
+        .as_ref()
+        .map_or(0, |release| release.install_generation);
+    let minimum_generation = bootstrap_minimum_generation()?.max(active_generation);
+    verify_release_manifest(
+        signed,
+        verifying_key,
+        &ReleasePolicy::native(minimum_generation),
+    )
+    .map_err(|error| error.to_string())?;
+    validate_release_channel(&channel, base_url)?;
+    if signed.manifest.channel != RELEASE_CHANNEL {
+        return Err("release channel manifest does not match the stable channel".to_string());
+    }
+    if signed.manifest.rollout.cohort != "all" || signed.manifest.rollout.percentage != 100 {
+        return Err("stable release manifest uses an unsupported partial rollout".to_string());
+    }
+    if let Some(active) = &active {
+        if signed.manifest.install_generation < active.install_generation {
+            return Err(
+                "release channel generation regressed below the active release".to_string(),
+            );
+        }
+        if signed.manifest.install_generation == active.install_generation {
+            return Ok(());
+        }
+    }
+
+    let downloads_root = install_root.join(".release-downloads");
+    prepare_secure_directory(&downloads_root)?;
+    let bundle_root = downloads_root.join(format!(
+        "{:020}-{}",
+        signed.manifest.install_generation, signed.manifest.release_identity
+    ));
+    prepare_secure_directory(&bundle_root)?;
+    let download_agent = release_http_agent(RELEASE_HTTP_TIMEOUT);
+    for file in &signed.manifest.files {
+        download_release_file(&download_agent, &bundle_root, file)?;
+    }
+    installer
+        .install(signed, &bundle_root, hooks)
+        .map_err(|error| error.to_string())?;
+    fs::remove_dir_all(&bundle_root)
+        .map_err(|_| "release installed but its download cache could not be removed".to_string())?;
+    if fs::read_dir(&downloads_root).is_ok_and(|mut entries| entries.next().is_none()) {
+        let _ = fs::remove_dir(downloads_root);
+    }
+    Ok(())
+}
+
+fn bootstrap_minimum_generation() -> Result<u64, String> {
+    let encoded = option_env!("AXIUSFLOW_BOOTSTRAP_MIN_GENERATION").ok_or_else(|| {
+        "bootstrap minimum release generation was not embedded by packaging".to_string()
+    })?;
+    encoded
+        .parse::<u64>()
+        .ok()
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| "embedded bootstrap minimum release generation is invalid".to_string())
+}
+
+fn release_http_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(3)
+        .max_idle_connections(2)
+        .max_idle_connections_per_host(2)
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
+}
+
+fn embedded_release_base_url() -> Result<&'static str, String> {
+    let url = option_env!("AXIUSFLOW_RELEASE_BASE_URL")
+        .ok_or_else(|| "release base URL was not embedded by packaging".to_string())?;
+    if !valid_https_url(url) || url.ends_with('/') || url.contains('?') {
+        return Err("embedded release base URL is invalid".to_string());
+    }
+    Ok(url)
+}
+
+fn valid_https_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.starts_with('/')
+        && !url.contains([' ', '\n', '\r', '\t'])
+        && !url.contains('#')
+}
+
+fn fetch_release_channel(agent: &ureq::Agent, url: &str) -> Result<ReleaseChannelPointer, String> {
+    if !valid_https_url(url) {
+        return Err("release channel URL is invalid".to_string());
+    }
+    let mut response = agent
+        .get(url)
+        .call()
+        .map_err(|_| "release channel request failed".to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAXIMUM_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "release channel response is unreadable".to_string())?;
+    if bytes.len() as u64 > MAXIMUM_INPUT_BYTES {
+        return Err("release channel response exceeds the size bound".to_string());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "release channel response is malformed".to_string())
+}
+
+fn validate_release_channel(channel: &ReleaseChannelPointer, base_url: &str) -> Result<(), String> {
+    let manifest = &channel.signed_release.manifest;
+    if channel.schema_version != RELEASE_CHANNEL_SCHEMA_VERSION
+        || channel.channel != manifest.channel
+        || channel.platform != manifest.platform
+        || channel.architecture != manifest.architecture
+        || channel.release_identity != manifest.release_identity
+        || channel.install_generation != manifest.install_generation
+        || !valid_release_identity(&channel.release_identity)
+        || !valid_release_version(&channel.version)
+        || !valid_published_at(&channel.published_at)
+    {
+        return Err("release channel metadata does not match its signed release".to_string());
+    }
+    let release_key = format!(
+        "{}-{}",
+        manifest.install_generation, manifest.release_identity
+    );
+    let release_root = format!(
+        "{base_url}/{}/{}/{release_key}",
+        manifest.platform, manifest.architecture
+    );
+    let expected_manifest_url = format!("{release_root}/manifest.json");
+    if channel.manifest_url != expected_manifest_url || !valid_https_url(&channel.manifest_url) {
+        return Err("release channel manifest URL is invalid".to_string());
+    }
+    let expected_installer_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+    let installer = &channel.installer;
+    let expected_installer_url = format!("{release_root}/{expected_installer_name}");
+    let installer_digest = URL_SAFE_NO_PAD
+        .decode(&installer.sha256_b64url)
+        .map_err(|_| "release channel installer hash is invalid".to_string())?;
+    if installer.filename != expected_installer_name
+        || installer.url != expected_installer_url
+        || installer.size == 0
+        || installer_digest.len() != 32
+    {
+        return Err("release channel installer metadata is invalid".to_string());
+    }
+    for file in &manifest.files {
+        let expected_url = format!("{release_root}/{}", file.path);
+        if file.url != expected_url {
+            return Err(
+                "signed release artifact URL is outside its immutable release path".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn valid_release_identity(value: &str) -> bool {
+    (16..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_release_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'+' | b'-'))
+        })
+}
+
+fn valid_published_at(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes.len() > 40
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes.last() != Some(&b'Z')
+    {
+        return false;
+    }
+    if bytes.len() == 21
+        || (bytes.len() > 20
+            && (bytes[19] != b'.'
+                || bytes[20..bytes.len() - 1]
+                    .iter()
+                    .any(|byte| !byte.is_ascii_digit())))
+    {
+        return false;
+    }
+    let numeric = |start: usize, end: usize| {
+        value
+            .get(start..end)
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        numeric(0, 4),
+        numeric(5, 7),
+        numeric(8, 10),
+        numeric(11, 13),
+        numeric(14, 16),
+        numeric(17, 19),
+    ) else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day > 0 && day <= maximum_day && hour <= 23 && minute <= 59 && second <= 59
+}
+
+fn download_release_file(
+    agent: &ureq::Agent,
+    bundle_root: &Path,
+    expected: &ReleaseFile,
+) -> Result<(), String> {
+    if !valid_https_url(&expected.url) {
+        return Err("signed release artifact URL is invalid".to_string());
+    }
+    let relative = Path::new(&expected.path);
+    prepare_release_parent(bundle_root, relative)?;
+    let final_path = bundle_root.join(relative);
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| "release artifact path is invalid".to_string())?;
+    debug_assert!(parent.starts_with(bundle_root));
+    if final_path.exists() {
+        if verify_release_file(&final_path, expected).is_ok() {
+            return Ok(());
+        }
+        fs::remove_file(&final_path)
+            .map_err(|_| "invalid cached release artifact could not be removed".to_string())?;
+    }
+
+    let partial_path = partial_download_path(&final_path)?;
+    let mut offset = partial_length(&partial_path, expected.size)?;
+    if offset == expected.size {
+        if verify_release_file(&partial_path, expected).is_ok() {
+            fs::rename(&partial_path, &final_path)
+                .map_err(|_| "verified release artifact could not be committed".to_string())?;
+            return Ok(());
+        }
+        truncate_file(&partial_path)?;
+        offset = 0;
+    }
+
+    let mut request = agent.get(&expected.url);
+    if offset > 0 {
+        request = request.header("Range", format!("bytes={offset}-"));
+    }
+    let mut response = request
+        .call()
+        .map_err(|_| "release artifact request failed".to_string())?;
+    let status = response.status().as_u16();
+    let append = if offset == 0 {
+        if status != 200 {
+            return Err("release artifact server returned an invalid status".to_string());
+        }
+        false
+    } else if status == 206 {
+        validate_content_range(response.headers(), offset, expected.size)?;
+        true
+    } else if status == 200 {
+        // The origin ignored Range. Restart safely from the full response
+        // rather than combining incompatible byte streams.
+        truncate_file(&partial_path)?;
+        offset = 0;
+        false
+    } else {
+        return Err("release artifact resume response is invalid".to_string());
+    };
+
+    write_bounded_download(
+        response.body_mut().as_reader(),
+        &partial_path,
+        offset,
+        expected.size,
+        append,
+    )?;
+    if verify_release_file(&partial_path, expected).is_err() {
+        let _ = fs::remove_file(&partial_path);
+        return Err("release artifact hash verification failed".to_string());
+    }
+    fs::rename(&partial_path, &final_path)
+        .map_err(|_| "verified release artifact could not be committed".to_string())?;
+    Ok(())
+}
+
+fn prepare_release_parent(bundle_root: &Path, relative: &Path) -> Result<(), String> {
+    prepare_secure_directory(bundle_root)?;
+    let mut current = bundle_root.to_path_buf();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            let Component::Normal(component) = component else {
+                return Err("release artifact path is invalid".to_string());
+            };
+            current.push(component);
+            prepare_secure_directory(&current)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_secure_directory(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("release download directory is invalid".to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)
+                .map_err(|_| "release download directory could not be created".to_string())?;
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|_| "release download directory is invalid".to_string())?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("release download directory is invalid".to_string());
+            }
+        }
+        Err(_) => return Err("release download directory is invalid".to_string()),
+    }
+    Ok(())
+}
+
+fn partial_download_path(final_path: &Path) -> Result<PathBuf, String> {
+    let name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "release artifact filename is invalid".to_string())?;
+    Ok(final_path.with_file_name(format!("{name}.part")))
+}
+
+fn partial_length(path: &Path, maximum: u64) -> Result<u64, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err("release partial metadata is unavailable".to_string()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("release partial artifact is invalid".to_string());
+    }
+    if metadata.len() > maximum {
+        truncate_file(path)?;
+        return Ok(0);
+    }
+    Ok(metadata.len())
+}
+
+fn truncate_file(path: &Path) -> Result<(), String> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| "release partial artifact could not be reset".to_string())
+}
+
+fn validate_content_range(
+    headers: &ureq::http::HeaderMap,
+    offset: u64,
+    expected_size: u64,
+) -> Result<(), String> {
+    let value = headers
+        .get("Content-Range")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "release resume response omitted Content-Range".to_string())?;
+    let expected_prefix = format!("bytes {offset}-");
+    let expected_value = format!("{expected_prefix}{}/{expected_size}", expected_size - 1);
+    if value != expected_value {
+        return Err("release resume Content-Range does not match the artifact".to_string());
+    }
+    Ok(())
+}
+
+fn write_bounded_download(
+    reader: impl Read,
+    path: &Path,
+    offset: u64,
+    expected_size: u64,
+    append: bool,
+) -> Result<(), String> {
+    let remaining = expected_size
+        .checked_sub(offset)
+        .ok_or_else(|| "release artifact offset exceeds its signed size".to_string())?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)
+        .map_err(|_| "release partial artifact could not be opened".to_string())?;
+    let mut limited = reader.take(remaining.saturating_add(1));
+    let Ok(copied) = std::io::copy(&mut limited, &mut output) else {
+        let _ = output.flush().and_then(|()| output.sync_all());
+        return Err("release artifact download was interrupted".to_string());
+    };
+    output
+        .flush()
+        .and_then(|()| output.sync_all())
+        .map_err(|_| "release partial artifact could not be committed".to_string())?;
+    if copied > remaining {
+        return Err("release artifact response exceeded its signed size".to_string());
+    }
+    if offset.saturating_add(copied) != expected_size {
+        return Err("release artifact download is incomplete".to_string());
+    }
+    Ok(())
 }
 
 /// Renames the running launcher to a sibling staging directory outside
@@ -360,7 +972,13 @@ impl LifecycleHooks for NativeHooks {
         result
     }
 
-    fn disable_registrations(&self, _registrations: &[String]) -> Result<(), String> {
+    fn disable_registrations(&self, registrations: &[String]) -> Result<(), String> {
+        if registrations
+            .iter()
+            .any(|entry| entry == "start-menu:Axiusflow")
+        {
+            remove_launcher_registration()?;
+        }
         if let Some(active) = active_from_root(&self.install_root)? {
             BackgroundService::new(self.engine(&active))
                 .and_then(|service| service.set_autostart(false))
@@ -385,6 +1003,14 @@ impl LifecycleHooks for NativeHooks {
     fn audit_external_absence(&self, inventory: &InstallationInventory) -> Result<(), String> {
         if owned_process_is_running(&self.install_root) {
             return Err("an Axiusflow process remains active".to_string());
+        }
+        if inventory
+            .registrations
+            .iter()
+            .any(|entry| entry == "start-menu:Axiusflow")
+            && !launcher_registration_absent()?
+        {
+            return Err("an Axiusflow Start Menu shortcut remains".to_string());
         }
         for entry in &inventory.vault_entries {
             let vault = NativeCredentialVault::new(&entry.service).map_err(redacted)?;
@@ -437,6 +1063,11 @@ fn redacted<E>(_error: E) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiusflow_platform_runtime::{
+        RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole, ReleaseInstallerMetadata,
+        ReleaseManifest, RolloutMetadata, sign_release_manifest,
+    };
+    use ed25519_dalek::SigningKey;
 
     fn temporary_base(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -470,6 +1101,102 @@ mod tests {
         // installed-lifecycle campaign: its Windows path schedules an
         // OS-owned delayed delete that a unit test cannot await
         // deterministically.
+    }
+
+    #[test]
+    fn stable_channel_requires_exact_website_envelope_and_immutable_paths() {
+        let base_url = "https://auth.axiusflow.test/releases";
+        let identity = "0123456789abcdef0123456789abcdef01234567";
+        let release_root = format!(
+            "{base_url}/{}/{}/7-{identity}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        let digest = URL_SAFE_NO_PAD.encode([3_u8; 32]);
+        let suffix = std::env::consts::EXE_SUFFIX;
+        let files = vec![
+            ReleaseFile {
+                role: ReleaseFileRole::Desktop,
+                path: format!("axiusflow_desktop{suffix}"),
+                url: format!("{release_root}/axiusflow_desktop{suffix}"),
+                size: 10,
+                sha256: digest.clone(),
+                executable: true,
+            },
+            ReleaseFile {
+                role: ReleaseFileRole::Engine,
+                path: format!("axiusflow_engine{suffix}"),
+                url: format!("{release_root}/axiusflow_engine{suffix}"),
+                size: 11,
+                sha256: digest,
+                executable: true,
+            },
+        ];
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
+            release_identity: identity.to_string(),
+            install_generation: 7,
+            channel: "stable".to_string(),
+            minimum_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            files,
+            rollout: RolloutMetadata {
+                cohort: "all".to_string(),
+                percentage: 100,
+            },
+        };
+        let signing_key = SigningKey::from_bytes(&[9; 32]);
+        let signed = sign_release_manifest(manifest, &signing_key).expect("signed fixture");
+        verify_release_manifest(
+            &signed,
+            &signing_key.verifying_key(),
+            &ReleasePolicy::native(0),
+        )
+        .expect("fixture signature verifies");
+        let mut channel = ReleaseChannelPointer {
+            schema_version: RELEASE_CHANNEL_SCHEMA_VERSION,
+            channel: "stable".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            release_identity: identity.to_string(),
+            install_generation: 7,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            published_at: "2026-09-07T00:00:00Z".to_string(),
+            manifest_url: format!("{release_root}/manifest.json"),
+            signed_release: signed,
+            installer: ReleaseInstallerMetadata {
+                filename: format!("Axiusflow-Setup{suffix}"),
+                url: format!("{release_root}/Axiusflow-Setup{suffix}"),
+                size: 12,
+                sha256_b64url: URL_SAFE_NO_PAD.encode([4_u8; 32]),
+            },
+        };
+        validate_release_channel(&channel, base_url).expect("exact channel envelope");
+        channel.manifest_url = format!("{base_url}/releases/{identity}/manifest.json");
+        assert!(validate_release_channel(&channel, base_url).is_err());
+    }
+
+    #[test]
+    fn bounded_download_resumes_exactly_and_rejects_excess_bytes() {
+        let base = temporary_base("download-resume");
+        let partial = base.join("artifact.part");
+        fs::write(&partial, b"abc").expect("initial partial bytes");
+        write_bounded_download(std::io::Cursor::new(b"def"), &partial, 3, 6, true)
+            .expect("resume exact remainder");
+        assert_eq!(fs::read(&partial).expect("resumed bytes"), b"abcdef");
+        assert!(
+            write_bounded_download(std::io::Cursor::new(b"toolong"), &partial, 3, 6, true).is_err()
+        );
+        fs::remove_dir_all(base).expect("remove download fixture");
+    }
+
+    #[test]
+    fn publish_time_validation_rejects_impossible_dates() {
+        assert!(valid_published_at("2026-09-07T00:00:00Z"));
+        assert!(valid_published_at("2024-02-29T23:59:59.1Z"));
+        assert!(!valid_published_at("2026-02-30T00:00:00Z"));
+        assert!(!valid_published_at("2026-09-07T24:00:00Z"));
     }
 
     // Note: the relocated-child path (`uninstall_from_root_with_key` with

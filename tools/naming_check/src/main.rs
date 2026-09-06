@@ -1513,7 +1513,6 @@ mod tests {
             "cargo fmt --all -- --check",
             "cargo clippy --workspace --all-targets --all-features -- -D warnings",
             "cargo build --workspace --all-targets --all-features",
-            "cargo build --release -p axiusflow_desktop -p axiusflow_engine --all-features",
             "cargo test --workspace --all-features",
         ] {
             assert_eq!(
@@ -1525,8 +1524,6 @@ mod tests {
         for artifact in [
             "market-data-performance-linux",
             "market-data-performance-windows",
-            "release-pair-linux",
-            "release-pair-windows",
         ] {
             assert!(
                 workflow.contains(artifact),
@@ -1534,30 +1531,21 @@ mod tests {
             );
         }
         assert_eq!(
-            workflow.matches("release-pair.provenance").count(),
-            4,
-            "each native release pair must record and upload its provenance manifest"
-        );
-        assert_eq!(
             workflow
                 .matches("Validate private chart credential")
                 .count(),
             2,
             "every native workspace lane must preflight private chart access"
         );
-        assert_eq!(
-            workflow.matches("if-no-files-found: error").count(),
-            2,
-            "every native release-pair upload must fail when its binaries are absent"
-        );
-        for identity in [
-            "AXIUSFLOW_RELEASE_IDENTITY: ${{ github.sha }}",
-            "AXIUSFLOW_INSTALL_GENERATION: ${{ github.run_number }}",
+        for production_release_contract in [
+            "release-pair",
+            "AXIUSFLOW_RELEASE_IDENTITY",
+            "AXIUSFLOW_INSTALL_GENERATION",
+            "AXIUSFLOW_RELEASE_VERIFYING_KEY",
         ] {
-            assert_eq!(
-                workflow.matches(identity).count(),
-                2,
-                "every native release pair must embed {identity}"
+            assert!(
+                !workflow.contains(production_release_contract),
+                "production release publication must stay out of GitHub Actions: found {production_release_contract}"
             );
         }
         assert!(

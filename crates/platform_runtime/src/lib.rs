@@ -25,10 +25,12 @@ pub use display_timing::{
 pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
 pub use io_cancellation::cancel_tcp_stream_io;
 pub use lifecycle::{
-    ActiveRelease, InstallationInventory, LifecycleError, LifecycleHooks, ReleaseFile,
-    ReleaseFileRole, ReleaseInstaller, ReleaseManifest, ReleasePolicy, RolloutMetadata,
-    SignedReleaseManifest, UninstallOutcome, UpdateOutcome, VaultEntry, native_data_root,
-    native_installation_inventory, sign_release_manifest, verify_release_manifest,
+    ActiveRelease, InstallationInventory, LifecycleError, LifecycleHooks,
+    RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseChannelPointer,
+    ReleaseFile, ReleaseFileRole, ReleaseInstaller, ReleaseInstallerMetadata, ReleaseManifest,
+    ReleasePolicy, RolloutMetadata, SignedReleaseManifest, UninstallOutcome, UpdateOutcome,
+    VaultEntry, native_data_root, native_install_root, native_installation_inventory,
+    sign_release_manifest, verify_release_file, verify_release_manifest,
 };
 pub use network_notifications::{
     NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,
