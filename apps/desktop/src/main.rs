@@ -800,7 +800,7 @@ fn publication_chart_state(accepted: bool, recovery_pending: bool) -> ChartState
 }
 
 fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> ChartState {
-    if matches!(current, ChartState::Ready | ChartState::Provisional) && recovery_pending {
+    if current == ChartState::Ready && recovery_pending {
         ChartState::Recovering
     } else {
         current
@@ -1457,14 +1457,12 @@ fn chart_surface_notice(
             tone: ChartNoticeTone::Muted,
         }),
         ChartState::Ready => None,
-        ChartState::Provisional | ChartState::Stale | ChartState::Recovering => {
-            Some(ChartSurfaceNotice {
-                label: state.label(),
-                detail,
-                placement,
-                tone: ChartNoticeTone::Warning,
-            })
-        }
+        ChartState::Stale | ChartState::Recovering => Some(ChartSurfaceNotice {
+            label: state.label(),
+            detail,
+            placement,
+            tone: ChartNoticeTone::Warning,
+        }),
         ChartState::Error => Some(ChartSurfaceNotice {
             label: state.label(),
             detail,
@@ -2561,15 +2559,9 @@ impl WorkspaceSurface {
                 return;
             }
             (Some(chart), update) => {
-                let (accepted, recovery_pending) = chart.update(cx, |chart, chart_cx| {
+                let (accepted, recovery_pending) = chart.update(cx, |chart, _| {
                     let accepted = chart.try_queue_replay_update(update).is_ok();
-                    if accepted {
-                        // A covering history page is useful only after the
-                        // child chart drains it. Wake that entity immediately;
-                        // relying on a later pointer or countdown tick leaves
-                        // successfully fetched history looking stuck.
-                        chart_cx.notify();
-                    } else {
+                    if !accepted {
                         eprintln!("bounded chart queue overflowed; fixture resnapshot required");
                     }
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
@@ -2780,8 +2772,7 @@ impl WorkspaceSurface {
                     } else {
                         self.coinbase_previous_selection = None;
                     }
-                } else if self.provider == TerminalProvider::Coinbase
-                    && matches!(state, ChartState::Ready | ChartState::Provisional)
+                } else if self.provider == TerminalProvider::Coinbase && state == ChartState::Ready
                 {
                     self.coinbase_switch = CoinbaseSwitchState::Idle;
                     self.coinbase_previous_selection = None;
@@ -7994,17 +7985,6 @@ mod tests {
         );
         assert_eq!(loading.placement, ChartNoticePlacement::Center);
         assert_eq!(loading.tone, ChartNoticeTone::Muted);
-
-        let provisional = chart_surface_notice(
-            ChartState::Provisional,
-            true,
-            false,
-            "The current Coinbase candle is provisional until its authoritative close",
-        )
-        .expect("provisional notice");
-        assert_eq!(provisional.label, "Chart provisional");
-        assert_eq!(provisional.placement, ChartNoticePlacement::BottomRight);
-        assert_eq!(provisional.tone, ChartNoticeTone::Warning);
 
         let recovery = chart_surface_notice(
             ChartState::Recovering,

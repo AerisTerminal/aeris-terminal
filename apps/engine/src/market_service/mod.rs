@@ -2,7 +2,7 @@
 
 use std::{
     cell::Cell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
@@ -821,7 +821,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
 mod publication;
 use publication::{
     engine_install_failure_stage, fail_waiters, local_history_failure_stage, order_flow_payload,
-    publish_current_state, publish_state, series_state, series_state_with_persistence,
+    publish_ready, publish_state, series_state, series_state_with_persistence,
     series_update_message, snapshot_message,
 };
 
@@ -833,9 +833,7 @@ use instrument_selection::{
 
 mod history;
 #[cfg(test)]
-use history::{
-    COINBASE_HISTORY_PAGE_SOURCE_BARS, initial_coinbase_history_bars, recent_coinbase_history_range,
-};
+use history::recent_coinbase_history_range;
 use history::{
     HistoryPrecedence, canonical_local_range, canonicalize_coinbase_history, coinbase_aggregator,
     coinbase_bar_coverage_ranges, coinbase_interval, coinbase_live_edge_repair_range,

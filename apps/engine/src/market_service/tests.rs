@@ -2417,9 +2417,9 @@ fn empty_viewport_completion_cannot_hide_an_initialized_live_series() {
 }
 
 #[test]
-fn initial_coinbase_request_stops_at_latest_window_until_viewport_moves() {
+fn initial_coinbase_request_with_explicit_range_arms_bounded_viewport_repair() {
     let (history_tx, history_rx) = mpsc::sync_channel(1);
-    let (storage_tx, storage_rx) = mpsc::sync_channel(2);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
     let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
     let realtime_stop = Arc::new(AtomicBool::new(true));
     let mut engine = configured_engine().expect("engine configures");
@@ -2473,29 +2473,16 @@ fn initial_coinbase_request_stops_at_latest_window_until_viewport_moves() {
         }),
     );
 
+    let request = history_rx
+        .try_recv()
+        .expect("initial viewport repair queues");
+    let range = request.range.expect("initial repair range is explicit");
+    assert_eq!(request.kind, HistoryRequestKind::ViewportBackfill);
     assert!(
-        history_rx.try_recv().is_err(),
-        "initial completion must not start an unsolicited deep backfill"
+        range.end_unix_nanos - range.start_unix_nanos
+            <= i64::try_from(HISTORY_BARS_PER_SERIES).expect("history bound fits") * interval
     );
-    assert!(coordinator.viewport_history_ranges.is_empty());
-    assert!(matches!(
-        storage_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(StorageRequest::Persist(..))
-    ));
-
-    let viewport = Viewport::try_new((end_minute - 600) * interval, (end_minute - 500) * interval)
-        .expect("older viewport");
-    coordinator
-        .request_viewport_history(consumer_id, generation, viewport)
-        .expect("scrolling left requests older history");
-    assert!(matches!(
-        storage_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(StorageRequest::ReadRange(requested, current, range))
-            if requested == series
-                && current == provider_generation
-                && range.start_unix_nanos <= viewport.start_unix_nanos
-                && range.end_unix_nanos >= viewport.end_unix_nanos
-    ));
+    assert!(request.maximum_bars <= 350);
 }
 /// One consumer demanding BTC-USD 1m with a shorter-than-prefetch initial
 /// window installed, so the working-window backfill stays disarmed.
@@ -2789,110 +2776,6 @@ fn exhausting_the_demanded_repair_range_flushes_one_accumulated_covering_snapsho
             if snapshot.bars.len() == 400
     ));
     assert!(coordinator.deferred_publications.is_empty());
-}
-
-#[test]
-fn shared_series_viewports_union_without_cancelling_each_other() {
-    let (history_tx, history_rx) = mpsc::sync_channel(2);
-    let (storage_tx, storage_rx) = mpsc::sync_channel(4);
-    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
-    let realtime_stop = Arc::new(AtomicBool::new(true));
-    let mut engine = configured_engine().expect("engine configures");
-    let first = ConsumerId(id(1).expect("first consumer"));
-    let second = ConsumerId(id(2).expect("second consumer"));
-    let generation = GenerationId(NonZeroU64::MIN);
-    let series = internal_series(&btc()).expect("series");
-    for consumer_id in [first, second] {
-        engine
-            .register_consumer(
-                ConsumerIdentity {
-                    client_id: ClientId(NonZeroU64::MIN),
-                    workspace_id: WorkspaceId(consumer_id.0),
-                    consumer_id,
-                },
-                true,
-            )
-            .expect("consumer registers");
-        engine
-            .set_series_demand(consumer_id, generation, &series)
-            .expect("shared demand installs");
-    }
-    let mut coordinator = retained_history_coordinator(
-        engine,
-        &history_tx,
-        &storage_tx,
-        &realtime_tx,
-        &realtime_stop,
-        first,
-        &series,
-    );
-    coordinator.events.insert(second, ConsumerEvents::default());
-    let provider_generation = coordinator
-        .provider_generation_for_series(&series)
-        .expect("provider generation");
-    let interval = 60_000_000_000_i64;
-    let end = align_down(current_unix_nanos().expect("clock"), interval);
-    let first_older =
-        Viewport::try_new(end - 800 * interval, end - 700 * interval).expect("first viewport");
-    coordinator
-        .request_viewport_history(first, generation, first_older)
-        .expect("first viewport queues");
-    let StorageRequest::ReadRange(_, _, first_range) =
-        storage_rx.try_recv().expect("first cache read")
-    else {
-        panic!("viewport uses a range read");
-    };
-    coordinator.viewport_history_local_completed(
-        &series,
-        provider_generation,
-        first_range,
-        Err("fixture cache miss".to_string()),
-    );
-    let _ = history_rx.try_recv().expect("provider page starts");
-    let stop = Arc::clone(
-        coordinator
-            .history_cancellations
-            .get(&(series.clone(), provider_generation))
-            .expect("provider page is cancellable"),
-    );
-
-    let second_latest =
-        Viewport::try_new(end - 100 * interval, end).expect("second latest viewport");
-    coordinator
-        .request_viewport_history(second, generation, second_latest)
-        .expect("second viewport joins");
-    assert_eq!(
-        coordinator
-            .viewport_history_ranges
-            .get(&(series.clone(), provider_generation)),
-        Some(&first_range),
-        "a live-edge workspace cannot erase another workspace's older demand"
-    );
-    assert!(!stop.load(Ordering::Acquire));
-
-    let second_older = Viewport::try_new(end - 1_600 * interval, end - 1_500 * interval)
-        .expect("second older viewport");
-    coordinator
-        .request_viewport_history(second, generation, second_older)
-        .expect("second viewport expands");
-    assert!(
-        coordinator
-            .viewport_history_ranges
-            .get(&(series.clone(), provider_generation))
-            .is_some_and(|range| range.start_unix_nanos < first_range.start_unix_nanos),
-        "the shared target expands to the oldest active workspace"
-    );
-    assert!(!stop.load(Ordering::Acquire));
-
-    assert!(coordinator.engine.remove_consumer(second));
-    coordinator.prune_history_tracking();
-    assert_eq!(
-        coordinator
-            .viewport_history_ranges
-            .get(&(series, provider_generation)),
-        Some(&first_range),
-        "retiring a workspace contracts the shared target to the remaining demand"
-    );
 }
 
 #[test]
@@ -3697,187 +3580,6 @@ fn split_pane_attaches_to_an_already_live_series_without_staying_at_ready() {
             is_live_update(event, 1, 1, 200)
         });
         assert!(is_live_update(&update, 1, 1, 200));
-    }
-}
-
-#[test]
-fn split_pane_reuses_a_provisional_calendar_series_without_staying_loading() {
-    let (history_tx, history_rx) = mpsc::sync_channel(1);
-    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
-    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
-    let realtime_stop = Arc::new(AtomicBool::new(false));
-    let mut protocol_series = btc();
-    protocol_series.cadence = SeriesCadence::CalendarMonths as i32;
-    protocol_series.cadence_value = 1;
-    let series = internal_series(&protocol_series).expect("monthly series");
-    let provider_generation = ProviderGeneration(NonZeroU64::MIN);
-    let first = ConsumerId(id(1).expect("first consumer"));
-    let second = ConsumerId(id(2).expect("second consumer"));
-    let generation = GenerationId(NonZeroU64::MIN);
-    let mut engine = configured_engine().expect("engine configures");
-    for consumer_id in [first, second] {
-        engine
-            .register_consumer(
-                ConsumerIdentity {
-                    client_id: ClientId(id(1).expect("client")),
-                    workspace_id: WorkspaceId(consumer_id.0),
-                    consumer_id,
-                },
-                true,
-            )
-            .expect("consumer registers");
-    }
-    engine
-        .set_series_demand(first, generation, &series)
-        .expect("first demand installs");
-    engine
-        .install_history(provider_generation, &series, 2, 8, vec![history_bar()])
-        .expect("shared history installs");
-    let publication = engine
-        .set_series_demand(second, generation, &series)
-        .expect("second demand installs")
-        .expect("second demand reuses the shared snapshot");
-    let mut coordinator = retained_history_coordinator(
-        engine,
-        &history_tx,
-        &storage_tx,
-        &realtime_tx,
-        &realtime_stop,
-        first,
-        &series,
-    );
-    coordinator.events.insert(second, ConsumerEvents::default());
-    let mut live =
-        LiveHandoff::try_new(&series, provider_generation, &coinbase_instrument(&series))
-            .expect("live handoff");
-    live.connected = true;
-    live.history = CoinbaseHistoryReadiness::Provisional;
-    coordinator.live.insert(series.clone(), live);
-
-    coordinator
-        .publish_cached_demand(
-            &series,
-            provider_generation,
-            &DemandWaiter {
-                consumer_id: second,
-                generation,
-                started_at: Instant::now(),
-            },
-            &publication,
-        )
-        .expect("shared provisional demand publishes");
-
-    assert!(matches!(
-        coordinator.events.get_mut(&second).and_then(ConsumerEvents::pop),
-        Some(envelope::Payload::SeriesSnapshot(snapshot)) if snapshot.consumer_id == 2
-    ));
-    assert!(matches!(
-        coordinator.events.get_mut(&second).and_then(ConsumerEvents::pop),
-        Some(envelope::Payload::SeriesState(state))
-            if state.state == SeriesLoadState::Partial as i32
-                && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
-    ));
-    assert!(history_rx.try_recv().is_err());
-}
-
-#[test]
-fn cached_coinbase_history_is_published_while_live_edge_repair_runs() {
-    let (history_tx, history_rx) = mpsc::sync_channel(1);
-    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
-    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
-    let realtime_stop = Arc::new(AtomicBool::new(false));
-    let protocol_series = btc();
-    let series = internal_series(&protocol_series).expect("series");
-    let cached_generation = ProviderGeneration(id(1).expect("cached generation"));
-    let provider_generation = ProviderGeneration(id(2).expect("provider generation"));
-    let consumer_id = ConsumerId(id(1).expect("consumer"));
-    let generation = GenerationId(id(1).expect("demand generation"));
-    let mut engine = configured_engine().expect("engine configures");
-    engine
-        .register_consumer(
-            ConsumerIdentity {
-                client_id: ClientId(id(1).expect("client")),
-                workspace_id: WorkspaceId(id(1).expect("workspace")),
-                consumer_id,
-            },
-            true,
-        )
-        .expect("consumer registers");
-    engine
-        .install_history(cached_generation, &series, 2, 8, vec![history_bar()])
-        .expect("cached history installs");
-    let publication = engine
-        .set_series_demand(consumer_id, generation, &series)
-        .expect("demand installs")
-        .expect("demand reuses cached snapshot");
-    let mut coordinator = retained_history_coordinator(
-        engine,
-        &history_tx,
-        &storage_tx,
-        &realtime_tx,
-        &realtime_stop,
-        consumer_id,
-        &series,
-    );
-
-    coordinator
-        .publish_cached_demand(
-            &series,
-            provider_generation,
-            &DemandWaiter {
-                consumer_id,
-                generation,
-                started_at: Instant::now(),
-            },
-            &publication,
-        )
-        .expect("cached demand publishes while repair runs");
-
-    assert!(history_rx.try_recv().is_ok(), "live-edge repair was queued");
-    assert!(matches!(
-        coordinator
-            .events
-            .get_mut(&consumer_id)
-            .and_then(ConsumerEvents::pop),
-        Some(envelope::Payload::SeriesSnapshot(snapshot))
-            if snapshot.consumer_id == consumer_id.0.get()
-    ));
-    assert!(matches!(
-        coordinator
-            .events
-            .get_mut(&consumer_id)
-            .and_then(ConsumerEvents::pop),
-        Some(envelope::Payload::SeriesState(state))
-            if state.state == SeriesLoadState::Partial as i32
-                && state.detail.as_deref().is_some_and(|detail| detail.contains("refreshes"))
-    ));
-}
-
-#[test]
-fn initial_coinbase_windows_fit_one_source_page_for_every_cadence() {
-    let cases = [
-        (SeriesCadence::FixedSeconds, 60, 349),
-        (SeriesCadence::FixedSeconds, 180, 115),
-        (SeriesCadence::FixedSeconds, 86_400, 349),
-        (SeriesCadence::CalendarWeeks, 1, 49),
-        (SeriesCadence::CalendarMonths, 1, 10),
-    ];
-    for (cadence, cadence_value, expected_bars) in cases {
-        let mut protocol_series = btc();
-        protocol_series.cadence = cadence as i32;
-        protocol_series.cadence_value = cadence_value;
-        let series = internal_series(&protocol_series).expect("supported series");
-        let bars = initial_coinbase_history_bars(&series, 350).expect("initial bound");
-        assert_eq!(bars, expected_bars);
-        let interval = coinbase_series_interval(&series).expect("Coinbase interval");
-        let range = recent_coinbase_history_range(&series, bars).expect("recent range");
-        let source_nanos = interval.source().1 * 1_000_000_000;
-        assert!(
-            range.end_unix_nanos - range.start_unix_nanos
-                <= i64::try_from(COINBASE_HISTORY_PAGE_SOURCE_BARS).expect("page bound fits")
-                    * source_nanos,
-            "{interval:?} initial range exceeded one provider page"
-        );
     }
 }
 
@@ -6289,7 +5991,6 @@ fn coinbase_handoff_keeps_ambiguous_open_bucket_trades_provisional() {
             if state.state == SeriesLoadState::Partial as i32
                 && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
     ));
-    assert_persistence_keeps_provisional(&mut coordinator, consumer_id, &series);
     let repair = history_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("cross-bucket buffered trade schedules authoritative repair");
@@ -6326,24 +6027,6 @@ fn coinbase_handoff_keeps_ambiguous_open_bucket_trades_provisional() {
     assert!(matches!(
         storage_rx.try_recv(),
         Ok(StorageRequest::Persist(_, _, ref bars, _, _, _)) if bars == &expected_closed
-    ));
-}
-
-fn assert_persistence_keeps_provisional(
-    coordinator: &mut Coordinator<'_>,
-    consumer_id: ConsumerId,
-    series: &BarSeriesKey,
-) {
-    coordinator.broadcast_persistence_for(
-        series,
-        PersistenceState::Durable,
-        Some("Coinbase history is cached"),
-    );
-    assert!(matches!(
-        coordinator.events[&consumer_id].series_state,
-        Some(envelope::Payload::SeriesState(ref state))
-            if state.state == SeriesLoadState::Partial as i32
-                && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
     ));
 }
 

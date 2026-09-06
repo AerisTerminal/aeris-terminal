@@ -42,6 +42,8 @@ use axiusflow_desktop::market_worker::{
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
+const MAXIMUM_STARTUP_ATTEMPTS: u8 = 4;
+const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
 const RETAINED_BAR_CAPACITY: usize = 32_768;
@@ -280,6 +282,7 @@ struct WorkerEndpoint {
     /// a `Partial` state is a background history repair, not a loading chart.
     live: bool,
     active_generation: u64,
+    selection_sequence: Arc<AtomicU64>,
     resource_class: ConsumerResourceClass,
     active: bool,
 }
@@ -381,6 +384,7 @@ fn worker_endpoint(
             publication: None,
             live: false,
             active_generation: initial_generation,
+            selection_sequence,
             resource_class: ConsumerResourceClass::Foreground,
             active: true,
         },
@@ -660,11 +664,56 @@ fn initialize_endpoint(
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
     client.install_provider_instrument(product.clone())?;
     let series = series_key(product, interval)?;
-    // Demand acknowledgement is synchronous, but history completion is not.
-    // Every pane must enter the shared event loop before any one of them waits
-    // for a covering snapshot; otherwise one slow initial fetch serializes all
-    // workspaces and can strand later panes in an unregistered loading state.
-    client.set_series_demand(endpoint.consumer_id, endpoint.active_generation, series)?;
+    let mut attempt = 1_u8;
+    let result = loop {
+        match request_snapshot(
+            client,
+            endpoint.consumer_id,
+            endpoint.active_generation,
+            series.clone(),
+            &endpoint.messages,
+        ) {
+            Ok(snapshot) => break Ok(snapshot),
+            Err(_error) if attempt < MAXIMUM_STARTUP_ATTEMPTS => {
+                attempt += 1;
+                let Some(generation) = endpoint.active_generation.checked_add(1) else {
+                    break Err("Coinbase startup generation exhausted".to_string());
+                };
+                endpoint.active_generation = generation;
+                endpoint
+                    .selection_sequence
+                    .store(generation, Ordering::Release);
+                let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                    state: ChartState::Loading,
+                    message: "Retrying initial Coinbase market load".to_string(),
+                });
+                thread::sleep(STARTUP_RETRY_DELAY);
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    match result {
+        Ok((snapshot, generation)) => {
+            let publication = MarketPublicationGeneration::from_generation(&generation);
+            send_publication(
+                &endpoint.messages,
+                ReplayStreamUpdate::Snapshot(snapshot),
+                publication,
+            )?;
+            endpoint.publication = Some(publication);
+            let (state, message) = snapshot_connection_state(interval);
+            let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
+                state,
+                message: message.to_string(),
+            });
+        }
+        Err(error) => {
+            let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: error,
+            });
+        }
+    }
     client.search_provider_instruments(SearchProviderInstruments {
         consumer_id: endpoint.consumer_id,
         search_generation: 1,
@@ -806,10 +855,6 @@ fn apply_series_state(
             })
             .map_err(|error| error.to_string())
     };
-    let provisional = state
-        .detail
-        .as_deref()
-        .is_some_and(|detail| detail.contains("provisional until its authoritative close"));
     match load_state {
         SeriesLoadState::Live => {
             if !realtime {
@@ -848,21 +893,6 @@ fn apply_series_state(
             )?;
             Ok(())
         }
-        // Coinbase cannot watermark the trade coverage inside a provider-built
-        // open candle. The snapshot and live stream are usable, but the candle
-        // must remain visibly provisional until its authoritative close. This
-        // is not an in-flight load: long intervals may stay provisional for a
-        // week or month, so keeping the loader active strands a complete chart.
-        SeriesLoadState::Partial if realtime && published && provisional => {
-            *live = true;
-            announce(
-                ChartState::Provisional,
-                state.detail.unwrap_or_else(|| {
-                    "The current candle is provisional until its authoritative close".to_string()
-                }),
-            )?;
-            Ok(())
-        }
         SeriesLoadState::Resolving | SeriesLoadState::Partial if !*live => {
             announce(
                 ChartState::Loading,
@@ -894,11 +924,8 @@ fn apply_pushed_event(
     } = context;
     match event {
         envelope::Payload::SeriesSnapshot(snapshot) => {
-            if snapshot.consumer_id != consumer_id {
+            if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
                 return Err("engine realtime snapshot identity mismatched".to_string());
-            }
-            if snapshot.generation != active_generation {
-                return Ok(());
             }
             let replay = replay_snapshot(&snapshot)?;
             let generation = generation_from_snapshot(&snapshot, &replay)?;
@@ -908,11 +935,8 @@ fn apply_pushed_event(
             Ok(())
         }
         envelope::Payload::SeriesUpdate(update) => {
-            if update.consumer_id != consumer_id {
+            if update.consumer_id != consumer_id || update.generation != active_generation {
                 return Err("engine realtime update identity mismatched".to_string());
-            }
-            if update.generation != active_generation {
-                return Ok(());
             }
             let tail = replay_tail_update(&update)?;
             let status = tail_publication(
@@ -929,23 +953,12 @@ fn apply_pushed_event(
             Ok(())
         }
         envelope::Payload::SeriesState(state) => {
-            if state.consumer_id != consumer_id {
+            if state.consumer_id != consumer_id || state.generation != active_generation {
                 return Err("engine realtime state identity mismatched".to_string());
-            }
-            if state.generation != active_generation {
-                return Ok(());
             }
             apply_series_state(state, realtime, publication.is_some(), live, messages)
         }
-        envelope::Payload::DemandError(error) => {
-            if error.consumer_id != consumer_id {
-                return Err("engine demand error identity mismatched".to_string());
-            }
-            if error.generation != active_generation {
-                return Ok(());
-            }
-            Err(demand_error(&error))
-        }
+        envelope::Payload::DemandError(error) => Err(demand_error(&error)),
         envelope::Payload::OrderBookSnapshot(snapshot) => {
             if snapshot.consumer_id != consumer_id {
                 return Err("engine order-book consumer mismatched".to_string());
@@ -1441,7 +1454,6 @@ fn series_supports_realtime(series: &SeriesKey) -> bool {
         )
 }
 
-#[cfg(test)]
 const fn snapshot_connection_state(
     _interval: ChartInterval,
 ) -> (FeedConnectionState, &'static str) {
@@ -1546,67 +1558,6 @@ mod tests {
         OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState,
         ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
     };
-
-    #[test]
-    #[ignore = "requires an authenticated resident engine and live Coinbase history"]
-    fn native_monthly_workspace_delivery_probe() {
-        let product = default_coinbase_product("BTC-USD");
-        let (mut workers, factory) =
-            start_group(vec![(901, product.clone()), (902, product.clone())])
-                .expect("shared desktop workers start");
-        for (_, worker) in &workers {
-            worker
-                .try_select_coinbase(product.clone(), ChartInterval::Month1)
-                .expect("monthly selection queues");
-        }
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let mut snapshots = [0; 2];
-        let mut ready = [false; 2];
-        while std::time::Instant::now() < deadline
-            && (!ready.iter().all(|value| *value) || snapshots.contains(&0))
-        {
-            for (index, (_, worker)) in workers.iter_mut().enumerate() {
-                for message in worker.drain_messages().0 {
-                    match message {
-                        MarketWorkerMessage::Update(publication) => {
-                            if let ReplayStreamUpdate::Snapshot(snapshot) = publication.update
-                                && snapshot.bar_definition().calendar_months == Some(1)
-                            {
-                                snapshots[index] = snapshot.bars().len();
-                                println!("workspace={index} monthly_bars={}", snapshots[index]);
-                            }
-                        }
-                        MarketWorkerMessage::State { state, message } => {
-                            println!("workspace={index} state={state:?} detail={message}");
-                            assert_ne!(
-                                state,
-                                ChartState::Error,
-                                "monthly workspace failed: {message}"
-                            );
-                            ready[index] =
-                                matches!(state, ChartState::Ready | ChartState::Provisional);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        drop(factory);
-        for (_, worker) in &mut workers {
-            if let Some(retirement) = worker.begin_retirement() {
-                assert!(retirement.wait());
-            }
-        }
-        assert!(
-            !snapshots.contains(&0),
-            "both monthly workspaces receive history: {snapshots:?}"
-        );
-        assert!(
-            ready.iter().all(|value| *value),
-            "both monthly states resolve: {ready:?}"
-        );
-    }
 
     fn handle_coinbase_catalog_event(
         endpoint: &mut WorkerEndpoint,
@@ -1909,41 +1860,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provisional_forming_history_renders_without_an_indefinite_loader() {
-        let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
-        let mut live = false;
-        apply_series_state(
-            SeriesState {
-                consumer_id: 1,
-                generation: 1,
-                series: None,
-                state: SeriesLoadState::Partial as i32,
-                persistence: 0,
-                detail: Some(
-                    "The current Coinbase candle is provisional until its authoritative close"
-                        .to_string(),
-                ),
-            },
-            true,
-            true,
-            &mut live,
-            &sender,
-        )
-        .expect("provisional coverage is usable");
-
-        assert!(live, "the live handoff is advancing the provisional candle");
-        assert_eq!(
-            drained_states(&receiver),
-            vec![(
-                ChartState::Provisional,
-                "The current Coinbase candle is provisional until its authoritative close"
-                    .to_string(),
-            )]
-        );
-    }
-
     /// The engine republishes a covering snapshot whenever it repairs coverage,
     /// so the client is routinely handed one it is already past. That is not a
     /// failure, and failing on it put an error over a chart that was streaming.
@@ -2015,38 +1931,6 @@ mod tests {
             publication.map(MarketPublicationGeneration::sequence_range),
             Some((1, 1))
         );
-    }
-
-    #[test]
-    fn superseded_series_state_is_ignored_without_failing_the_current_chart() {
-        let (sender, receiver) =
-            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut publication = None;
-        let mut live = false;
-
-        assert_eq!(
-            apply_pushed_event(
-                envelope::Payload::SeriesState(SeriesState {
-                    consumer_id: 1,
-                    generation: 1,
-                    state: SeriesLoadState::Resolving as i32,
-                    ..SeriesState::default()
-                }),
-                &PushedEventContext {
-                    consumer_id: 1,
-                    active_generation: 2,
-                    realtime: true,
-                    instrument: &default_coinbase_product("BTC-USD"),
-                },
-                &mut publication,
-                &mut live,
-                &sender,
-            ),
-            Ok(())
-        );
-        assert!(receiver.drain().0.is_empty());
-        assert!(publication.is_none());
-        assert!(!live);
     }
 
     #[test]

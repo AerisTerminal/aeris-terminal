@@ -2,7 +2,7 @@ use super::{
     ActiveViewport, ActiveWorkerGuard, Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod,
     BarSeriesKey, COINBASE_PROVIDER_GENERATION, COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseBarAggregator,
     CoinbaseBarAggregatorConfig, CoinbaseHistoryReadiness, CoinbaseInterval, Command, ConsumerId,
-    Coordinator, CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, FailureStage,
+    Coordinator, CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, Entry, FailureStage,
     FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED,
     HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest, HistoryRequestKind, HistorySnapshot,
     HistorySource, HotSeries, HotSetManager, HotSetTier, InstallProviderInstrument, Instant,
@@ -33,44 +33,6 @@ pub(super) enum HistoryPrecedence {
     Repair,
     /// The incoming page came from the local cache and may only fill gaps.
     Current,
-}
-
-pub(super) const COINBASE_HISTORY_PAGE_SOURCE_BARS: usize = 350;
-
-const fn coinbase_source_bars_per_bucket(interval: CoinbaseInterval) -> usize {
-    match interval {
-        CoinbaseInterval::Minute1
-        | CoinbaseInterval::Minute5
-        | CoinbaseInterval::Minute15
-        | CoinbaseInterval::Minute30
-        | CoinbaseInterval::Hour1
-        | CoinbaseInterval::Hour2
-        | CoinbaseInterval::Day1 => 1,
-        CoinbaseInterval::Hour4 | CoinbaseInterval::Hour12 => 2,
-        CoinbaseInterval::Minute3 | CoinbaseInterval::Day3 => 3,
-        CoinbaseInterval::Hour8 => 4,
-        CoinbaseInterval::Week1 => 7,
-        CoinbaseInterval::Month1 => 31,
-    }
-}
-
-/// Keeps the initial live-edge request inside one Coinbase source page.
-///
-/// One whole target bucket is reserved for the candle currently forming. This
-/// matters for calendar candles: requesting 350 monthly bars translates to
-/// years of daily source pages even though the chart only needs its newest
-/// screen before the user scrolls left.
-pub(super) fn initial_coinbase_history_bars(
-    series: &BarSeriesKey,
-    requested_bars: usize,
-) -> Result<usize, String> {
-    let source_bars = coinbase_source_bars_per_bucket(coinbase_series_interval(series)?);
-    let single_page_buckets = COINBASE_HISTORY_PAGE_SOURCE_BARS
-        .checked_div(source_bars)
-        .unwrap_or(1)
-        .saturating_sub(1)
-        .max(1);
-    Ok(requested_bars.max(1).min(single_page_buckets))
 }
 
 pub(super) fn reconcile_interval_history(
@@ -327,14 +289,24 @@ pub(super) fn coinbase_history_page_range(
     missing: HistoryRange,
 ) -> Result<HistoryRange, String> {
     let interval = coinbase_series_interval(series)?;
-    let source_bars_per_bucket = coinbase_source_bars_per_bucket(interval);
-    let maximum_buckets = i64::try_from(
-        COINBASE_HISTORY_PAGE_SOURCE_BARS
-            .checked_div(source_bars_per_bucket)
-            .unwrap_or(1),
-    )
-    .unwrap_or(1)
-    .max(1);
+    let source_bars_per_bucket = match interval {
+        CoinbaseInterval::Minute1
+        | CoinbaseInterval::Minute5
+        | CoinbaseInterval::Minute15
+        | CoinbaseInterval::Minute30
+        | CoinbaseInterval::Hour1
+        | CoinbaseInterval::Hour2
+        | CoinbaseInterval::Day1 => 1,
+        CoinbaseInterval::Hour4 | CoinbaseInterval::Hour12 => 2,
+        CoinbaseInterval::Minute3 => 3,
+        CoinbaseInterval::Hour8 => 4,
+        CoinbaseInterval::Week1 => 7,
+        CoinbaseInterval::Month1 => 31,
+        CoinbaseInterval::Day3 => {
+            return Err("unsupported Coinbase engine interval".to_string());
+        }
+    };
+    let maximum_buckets = i64::from(350 / source_bars_per_bucket).max(1);
     let end_seconds = missing.end_unix_nanos.div_euclid(1_000_000_000);
     let page_start = interval
         .shift_bucket(end_seconds, -maximum_buckets)?
@@ -1086,8 +1058,7 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
     ) -> Result<(), &'static str> {
         let range = if series.provider_id == "coinbase" {
-            initial_coinbase_history_bars(series, self.resource_policy.history_prefetch_bars.max(1))
-                .and_then(|bars| recent_coinbase_history_range(series, bars))
+            recent_coinbase_history_range(series, self.resource_policy.history_prefetch_bars.max(1))
                 .ok()
         } else {
             None
@@ -1125,16 +1096,14 @@ impl Coordinator<'_> {
             },
         );
         let key = (series.clone(), provider_generation);
-        // The provider fetch and canonical cache are shared by series, but the
-        // viewport intent belongs to each consumer. Plan against their union:
-        // a workspace at the live edge must never replace another workspace's
-        // older range or cancel the page it is already fetching.
-        let range = self
-            .combined_active_viewport_range(&series, provider_generation)
-            .unwrap_or(range);
         let replaced = self.viewport_history_ranges.insert(key.clone(), range);
         if replaced != Some(range) {
             self.viewport_history_retries.remove(&key);
+        }
+        if replaced.is_some_and(|previous| previous != range)
+            && let Some(stop) = self.history_cancellations.get(&key)
+        {
+            stop.store(true, Ordering::Release);
         }
         if self.viewport_history_retries.contains_key(&key) {
             return Ok(());
@@ -1157,21 +1126,39 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    fn combined_active_viewport_range(
+    pub(super) fn arm_initial_viewport_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        let Ok(range) = recent_coinbase_history_range(series, HISTORY_BARS_PER_SERIES) else {
+            self.broadcast_demand_error_for(
+                series,
+                FailureStage::ProviderHistory,
+                "Coinbase initial-history range is unavailable",
+                None,
+            );
+            return;
+        };
+        if let Entry::Vacant(entry) = self
+            .viewport_history_ranges
+            .entry((series.clone(), generation))
+        {
+            entry.insert(range);
+        }
+    }
+
+    pub(super) fn should_arm_initial_viewport_history(
         &self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-    ) -> Option<HistoryRange> {
-        self.active_viewports
-            .values()
-            .filter(|viewport| {
-                viewport.series == *series && viewport.provider_generation == generation
-            })
-            .map(|viewport| viewport.range)
-            .reduce(|left, right| HistoryRange {
-                start_unix_nanos: left.start_unix_nanos.min(right.start_unix_nanos),
-                end_unix_nanos: left.end_unix_nanos.max(right.end_unix_nanos),
-            })
+        kind: HistoryRequestKind,
+        snapshot: &HistorySnapshot,
+    ) -> bool {
+        series.provider_id == "coinbase"
+            && kind == HistoryRequestKind::Initial
+            && !self.local_loaded.contains(&(series.clone(), generation))
+            && snapshot.bars.len() >= self.resource_policy.history_prefetch_bars.max(1)
     }
 
     /// Seeds the live aggregator from installed history and drains the buffer.
@@ -1604,6 +1591,8 @@ impl Coordinator<'_> {
         {
             return;
         }
+        let arm_initial_viewport =
+            self.should_arm_initial_viewport_history(series, generation, kind, &snapshot);
         let repair = kind != HistoryRequestKind::Initial;
         let replace_covering = series.provider_id == "coinbase" && repair;
         let provider_bars = snapshot.bars.clone();
@@ -1683,9 +1672,9 @@ impl Coordinator<'_> {
         if kind == HistoryRequestKind::ViewportBackfill {
             self.viewport_history_retries.remove(&key);
         }
-        // Initial demand stops at the newest bounded window. Older coverage is
-        // requested only from `request_viewport_history` when a chart actually
-        // moves left, then persisted for the next consumer of the same series.
+        if arm_initial_viewport {
+            self.arm_initial_viewport_history(series, generation);
+        }
         self.schedule_next_coinbase_viewport_page(series, generation);
     }
 
@@ -2099,24 +2088,6 @@ impl Coordinator<'_> {
                     .and_then(|status| status.generation)
                     == Some(viewport.provider_generation)
         });
-        let pending_viewports = self
-            .viewport_history_ranges
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in pending_viewports {
-            let (series, generation) = &key;
-            if let Some(range) = self.combined_active_viewport_range(series, *generation) {
-                let changed =
-                    self.viewport_history_ranges.insert(key.clone(), range) != Some(range);
-                if changed {
-                    self.viewport_history_retries.remove(&key);
-                }
-            } else {
-                self.viewport_history_ranges.remove(&key);
-                self.viewport_history_retries.remove(&key);
-            }
-        }
         let unused_coverage = self
             .history_coverage
             .keys()

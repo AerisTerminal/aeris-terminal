@@ -10,7 +10,7 @@ use super::{
     Reply, ResourceMode, ResourcePolicyDecision, ResourcePolicyInput, RithmicLiveHandoff,
     StorageRequest, StoredHistory, SyncSender, WarmSeries, authorize_consumer,
     chart_stream_requirements, decide_resource_policy, envelope, local_history_failure_stage,
-    publish_current_state, resource_policy_mode, thread,
+    publish_ready, resource_policy_mode, thread,
 };
 
 pub(super) struct OwnedCoordinatorChannels {
@@ -370,19 +370,10 @@ impl Coordinator<'_> {
                             .engine
                             .set_resource_class(consumer_id, resource_class)
                             .map_err(|error| error.to_string())?;
-                        if let Some(publication) = publication {
-                            let coinbase_history = self
-                                .live
-                                .get(&publication.snapshot.series)
-                                .map(|live| live.history);
-                            if let Some(events) = self.events.get_mut(&consumer_id) {
-                                publish_current_state(
-                                    events,
-                                    &publication,
-                                    coinbase_history,
-                                    PersistenceState::NotRequested,
-                                );
-                            }
+                        if let Some(publication) = publication
+                            && let Some(events) = self.events.get_mut(&consumer_id)
+                        {
+                            publish_ready(events, &publication);
                         }
                         Ok(())
                     });
