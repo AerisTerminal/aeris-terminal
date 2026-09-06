@@ -2,7 +2,8 @@
 
 mod account_market_gate;
 pub mod account_service;
-mod coinbase_catalog;
+mod hyperliquid_history;
+mod hyperliquid_realtime;
 mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
@@ -27,7 +28,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_coinbase_market_adapter::{COINBASE_PUBLIC_ACCOUNT_ID, ENTITLEMENT_CLASS};
 use axiusflow_engine_protocol::{
     ClientHello, ClientKind, ConsumerResourceClass as IpcConsumerResourceClass, EngineFaultCode,
     EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope, EnvelopeDecoder,
@@ -47,8 +47,6 @@ use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName as
 const WORKSPACE_SCHEMA_REVISION: u32 = 5;
 const CACHE_MANIFEST_REVISION: u32 = 1;
 const MAXIMUM_HOT_SERIES: usize = 32;
-const COINBASE_PRICE_SCALE: u32 = 2;
-const COINBASE_QUANTITY_SCALE: u32 = 8;
 const WORKSPACE_SHUTTING_DOWN: &str = "engine workspace is shutting down";
 const IPC_OUTBOX_CAPACITY: usize = 256;
 const IPC_WRITE_BATCH_MESSAGES: usize = 64;
@@ -237,10 +235,12 @@ impl EngineState {
     }
 
     fn record_installed_instrument(&self, instrument: &InstallProviderInstrument) {
-        let account_id = match instrument.provider.as_str() {
-            "coinbase" => COINBASE_PUBLIC_ACCOUNT_ID,
-            "rithmic" => RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
-            _ => return,
+        let account_id = if instrument.provider == "hyperliquid" {
+            crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID
+        } else if instrument.provider == "rithmic" {
+            RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID
+        } else {
+            return;
         };
         let Ok(price_scale) = u8::try_from(instrument.price_scale) else {
             return;
@@ -606,14 +606,13 @@ impl EngineState {
         persist_workspace(root, workspace)
     }
 }
-
 fn default_workspace() -> WorkspaceState {
-    let primary = coinbase_hot_series("BTC-USD", 60, 1, unix_seconds());
+    let primary = hyperliquid_hot_series(1, unix_seconds());
     WorkspaceState {
-        provider: "coinbase".to_string(),
-        market: "BTC-USD".to_string(),
+        provider: "hyperliquid".to_string(),
+        market: "BTC-PERP".to_string(),
         interval_seconds: 60,
-        watchlist: vec!["BTC-USD".to_string(), "ETH-USD".to_string()],
+        watchlist: vec!["BTC-PERP".to_string()],
         workspace_revision: 0,
         warm_mode_enabled: true,
         resource_mode: ResourceMode::Warm as i32,
@@ -855,12 +854,13 @@ fn sync_layout_hot_series(workspace: &mut WorkspaceState) {
     });
     workspace.hot_series.truncate(MAXIMUM_HOT_SERIES);
 }
-
 fn provider_account_id(provider: &str) -> &str {
-    match provider {
-        "coinbase" => COINBASE_PUBLIC_ACCOUNT_ID,
-        "rithmic" => RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
-        _ => "provider-account-unavailable",
+    if provider == "rithmic" {
+        RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID
+    } else if provider == "hyperliquid" {
+        crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID
+    } else {
+        "provider-account-unavailable"
     }
 }
 
@@ -930,8 +930,18 @@ fn valid_reconstructable_hot_series(series: &HotSeries) -> bool {
         && series.price_scale <= 18
         && series.quantity_scale <= 18
 }
-
 fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
+    // Both live providers survive migration untouched; anything else was
+    // never resolvable and restarts from the Hyperliquid default.
+    if workspace.provider != "rithmic" && workspace.provider != "hyperliquid"
+        || workspace
+            .hot_series
+            .iter()
+            .any(|series| series.provider != "rithmic" && series.provider != "hyperliquid")
+    {
+        *workspace = default_workspace();
+        return true;
+    }
     let mut migrated = false;
     if workspace.schema_revision < 2 {
         workspace.lifetime_mode = if workspace.warm_mode_enabled {
@@ -943,129 +953,51 @@ fn migrate_workspace(workspace: &mut WorkspaceState) -> bool {
         workspace.markets_live_permitted = false;
         migrated = true;
     }
-    if workspace.schema_revision < 3 {
-        workspace.hot_series.retain_mut(|series| {
-            if series.provider != "coinbase"
-                || !matches!(series.market.as_str(), "BTC-USD" | "ETH-USD")
-                || !matches!(series.interval_seconds, 60 | 300 | 900 | 3_600)
-            {
-                return false;
-            }
-            let migrated = coinbase_hot_series(
-                &series.market,
-                series.interval_seconds,
-                series.score,
-                series.last_used_unix_seconds,
-            );
-            let viewport_start = series.viewport_start_unix_nanos;
-            let viewport_end = series.viewport_end_unix_nanos;
-            let provider_watermark = series.provider_watermark;
-            let series_watermark = series.series_watermark;
-            *series = HotSeries {
-                viewport_start_unix_nanos: viewport_start,
-                viewport_end_unix_nanos: viewport_end,
-                provider_watermark,
-                series_watermark,
-                ..migrated
-            };
-            true
-        });
-        workspace.schema_revision = 3;
-        migrated = true;
-    }
     if workspace.schema_revision < 4 {
-        let primary = workspace
-            .hot_series
-            .iter()
-            .find(|series| {
-                series.provider == workspace.provider
-                    && series.market == workspace.market
-                    && series.interval_seconds == workspace.interval_seconds
-            })
-            .cloned()
-            .or_else(|| workspace.hot_series.first().cloned())
-            .or_else(|| {
-                (workspace.provider == "coinbase").then(|| {
-                    coinbase_hot_series(
-                        &workspace.market,
-                        workspace.interval_seconds,
-                        1,
-                        unix_seconds(),
-                    )
-                })
-            })
-            .unwrap_or_else(|| coinbase_hot_series("BTC-USD", 60, 1, unix_seconds()));
+        let primary = workspace.hot_series.first().cloned().unwrap_or_else(|| {
+            pending_hot_series(
+                &workspace.provider,
+                &workspace.market,
+                workspace.interval_seconds,
+            )
+        });
         workspace.layout_generation = 1;
         workspace.active_workspace_id = 1;
         workspace.workspace_tabs = vec![default_workspace_tab(&primary)];
-        workspace.schema_revision = WORKSPACE_SCHEMA_REVISION;
-        sync_layout_hot_series(workspace);
         migrated = true;
     }
     if workspace.schema_revision < 5 {
         workspace_layout::add_native_layouts(&mut workspace.workspace_tabs);
-        workspace.schema_revision = 5;
         migrated = true;
     }
+    workspace.schema_revision = WORKSPACE_SCHEMA_REVISION;
     if workspace.cache_manifest_revision == 0 {
         workspace.cache_manifest_revision = CACHE_MANIFEST_REVISION;
         migrated = true;
     }
-    if workspace.hot_series.is_empty() && workspace.provider == "coinbase" {
-        touch_hot_series(workspace);
+    if workspace.hot_series.is_empty() {
+        workspace.hot_series.push(pending_hot_series(
+            &workspace.provider,
+            &workspace.market,
+            workspace.interval_seconds,
+        ));
         migrated = true;
     }
-    migrated |= repair_legacy_coinbase_precision(workspace);
     migrated
 }
 
-fn repair_legacy_coinbase_precision(workspace: &mut WorkspaceState) -> bool {
-    let mut repaired = false;
-    for series in &mut workspace.hot_series {
-        repaired |= repair_legacy_precision(
-            &series.instrument_id,
-            &mut series.price_scale,
-            &mut series.quantity_scale,
-        );
+/// Builds one unresolved hot-series entry for a freshly selected market.
+///
+/// The entry carries the selection identity with pending instrument metadata;
+/// catalog resolution replaces it with the installed instrument before any
+/// demand is accepted.
+fn pending_hot_series(provider: &str, market: &str, interval_seconds: u32) -> HotSeries {
+    if provider == "hyperliquid" {
+        hyperliquid_hot_series(1, unix_seconds())
+    } else {
+        rithmic_hot_series(market, interval_seconds, 1, unix_seconds())
     }
-    for instrument in workspace
-        .workspace_tabs
-        .iter_mut()
-        .flat_map(|tab| &mut tab.panes)
-        .filter_map(|pane| pane.instrument.as_mut())
-    {
-        repaired |= repair_legacy_precision(
-            &instrument.instrument_id,
-            &mut instrument.price_scale,
-            &mut instrument.quantity_scale,
-        );
-    }
-    repaired
 }
-
-fn repair_legacy_precision(
-    instrument_id: &str,
-    price_scale: &mut u32,
-    quantity_scale: &mut u32,
-) -> bool {
-    if !matches!(
-        instrument_id,
-        "instrument:coinbase:btc:usd" | "instrument:coinbase:eth:usd"
-    ) {
-        return false;
-    }
-    let repaired = *price_scale == 0 || *quantity_scale == 0;
-    *price_scale = match *price_scale {
-        0 => COINBASE_PRICE_SCALE,
-        value => value,
-    };
-    *quantity_scale = match *quantity_scale {
-        0 => COINBASE_QUANTITY_SCALE,
-        value => value,
-    };
-    repaired
-}
-
 fn touch_hot_series(workspace: &mut WorkspaceState) {
     let identity = (
         &workspace.provider,
@@ -1087,13 +1019,17 @@ fn touch_hot_series(workspace: &mut WorkspaceState) {
     }) {
         series.score = next_score;
         series.last_used_unix_seconds = now;
-    } else if workspace.provider == "coinbase" {
-        workspace.hot_series.push(coinbase_hot_series(
+    } else if workspace.provider == "rithmic" {
+        workspace.hot_series.push(rithmic_hot_series(
             &workspace.market,
             workspace.interval_seconds,
             next_score,
             now,
         ));
+    } else if workspace.provider == "hyperliquid" {
+        workspace
+            .hot_series
+            .push(hyperliquid_hot_series(next_score, now));
     }
     workspace.hot_series.sort_unstable_by(|left, right| {
         right
@@ -1103,16 +1039,16 @@ fn touch_hot_series(workspace: &mut WorkspaceState) {
     });
     workspace.hot_series.truncate(MAXIMUM_HOT_SERIES);
 }
-
-fn coinbase_hot_series(
+fn rithmic_hot_series(
     market: &str,
     interval_seconds: u32,
     score: u32,
     last_used_unix_seconds: u64,
 ) -> HotSeries {
+    let symbol = market.trim().to_ascii_uppercase();
     HotSeries {
-        provider: "coinbase".to_string(),
-        market: market.to_string(),
+        provider: "rithmic".to_string(),
+        market: symbol.clone(),
         interval_seconds,
         score,
         last_used_unix_seconds,
@@ -1120,13 +1056,9 @@ fn coinbase_hot_series(
         series_watermark: 0,
         viewport_start_unix_nanos: None,
         viewport_end_unix_nanos: None,
-        account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
-        instrument_id: format!(
-            "instrument:coinbase:{}:{}",
-            market_base(market),
-            market_quote(market)
-        ),
-        entitlement_id: ENTITLEMENT_CLASS.to_string(),
+        account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
+        instrument_id: format!("rithmic-pending:{symbol}"),
+        entitlement_id: format!("rithmic-test:pending:{symbol}"),
         cadence: SeriesCadence::FixedSeconds as i32,
         cadence_value: interval_seconds,
         definition_revision: 1,
@@ -1134,26 +1066,43 @@ fn coinbase_hot_series(
         workspace_ids: vec![1],
         coverage_start_unix_nanos: None,
         coverage_end_unix_nanos: None,
-        provider_symbol: market.to_string(),
-        venue_id: "coinbase".to_string(),
-        display_symbol: market.replace('-', "/"),
-        price_scale: COINBASE_PRICE_SCALE,
-        quantity_scale: COINBASE_QUANTITY_SCALE,
+        provider_symbol: symbol.clone(),
+        venue_id: "CME".to_string(),
+        display_symbol: symbol,
+        price_scale: 2,
+        quantity_scale: 0,
     }
 }
 
-fn market_base(market: &str) -> String {
-    market.split_once('-').map_or_else(
-        || market.to_ascii_lowercase(),
-        |(base, _)| base.to_ascii_lowercase(),
-    )
-}
-
-fn market_quote(market: &str) -> String {
-    market.split_once('-').map_or_else(
-        || "usd".to_string(),
-        |(_, quote)| quote.to_ascii_lowercase(),
-    )
+/// Pending fresh-install entry: Hyperliquid BTC perpetual, one-minute
+/// candles, resolved against the public catalog before demand is accepted.
+fn hyperliquid_hot_series(score: u32, last_used_unix_seconds: u64) -> HotSeries {
+    HotSeries {
+        provider: "hyperliquid".to_string(),
+        market: "BTC-PERP".to_string(),
+        interval_seconds: 60,
+        score,
+        last_used_unix_seconds,
+        provider_watermark: 0,
+        series_watermark: 0,
+        viewport_start_unix_nanos: None,
+        viewport_end_unix_nanos: None,
+        account_id: crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID.to_string(),
+        instrument_id: "hyperliquid:perp:BTC".to_string(),
+        entitlement_id: crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ENTITLEMENT_ID.to_string(),
+        cadence: SeriesCadence::FixedSeconds as i32,
+        cadence_value: 60,
+        definition_revision: 1,
+        pinned: false,
+        workspace_ids: vec![1],
+        coverage_start_unix_nanos: None,
+        coverage_end_unix_nanos: None,
+        provider_symbol: "BTC".to_string(),
+        venue_id: "Hyperliquid".to_string(),
+        display_symbol: "BTC-PERP".to_string(),
+        price_scale: 8,
+        quantity_scale: 8,
+    }
 }
 
 fn empty_hot_set_state() -> HotSetState {
@@ -2646,1421 +2595,74 @@ fn constant_time_equals(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeSet,
-        sync::atomic::{AtomicU64, Ordering},
-        thread,
-        time::{Duration, Instant},
-    };
+    use axiusflow_engine_protocol::{ResourceMode, WorkspacePaneKind};
 
-    use interprocess::local_socket::{prelude::LocalSocketListener, traits::Listener as _};
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-
-    use axiusflow_coinbase_market_adapter::ENTITLEMENT_CLASS;
-    use axiusflow_engine_protocol::{
-        EngineLifetimeMode, EngineShutdownState, GetAccountStatus, InstallProviderInstrument,
-        MarketBar as IpcMarketBar, ProviderInstrumentSelection, ResourceMode, RestoreWorkspace,
-        SeriesCadence, SeriesKey, envelope,
-    };
-    use axiusflow_local_engine_client::EngineClient;
-    use axiusflow_market_data::MarketBar;
-
-    use crate::market_service::tests::{FixtureRealtimeAction, FixtureRealtimeHarness, trade};
-
-    use super::{
-        COINBASE_PRICE_SCALE, COINBASE_QUANTITY_SCALE, EngineShutdown, EngineState, MarketService,
-        RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, SessionPairer, SessionStreams, bind_listener,
-        default_workspace, migrate_workspace, platform_access_requires_account,
-        serve_client_with_account_gate, serve_client_with_market,
-        serve_client_with_market_and_shutdown, start_account_market_gate, sync_layout_hot_series,
-    };
-
-    static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
-    const WARMUP_SAMPLES: usize = 32;
-    const MEASURED_SAMPLES: usize = 128;
-    const MULTI_CONSUMERS: u64 = 20;
-    const MULTI_WARMUP_SAMPLES: usize = 8;
-    const MULTI_MEASURED_SAMPLES: usize = 32;
-    const BTC_INSTRUMENT: &str = "instrument:coinbase:btc:usd";
-    const ETH_INSTRUMENT: &str = "instrument:coinbase:eth:usd";
+    use super::{EngineShutdown, default_workspace, migrate_workspace};
 
     #[test]
-    fn production_account_gate_allows_only_control_plane_messages() {
-        assert!(platform_access_requires_account(
-            &envelope::Payload::RestoreWorkspace(RestoreWorkspace {})
-        ));
-        assert!(!platform_access_requires_account(
-            &envelope::Payload::GetAccountStatus(GetAccountStatus {})
-        ));
-    }
-
-    #[test]
-    fn twenty_account_gate_cycles_resume_ipc_demand_in_both_live_modes() {
-        let socket_name = socket_name("account-gate-resume");
-        let listener = bind_listener(&socket_name).expect("bind account-gated endpoint");
-        let token = [43_u8; 32];
-        let harness = MarketService::start_fixture_realtime(vec![MarketBar {
-            source_sequence: 2,
-            exchange_timestamp_seconds: 60,
-            exchange_timestamp_unix_nanos: 60_000_000_000,
-            open: 100,
-            high: 110,
-            low: 90,
-            close: 105,
-            volume: 7,
-        }])
-        .expect("realtime fixture starts");
-        harness
-            .service
-            .set_resource_mode(ResourceMode::OfflineSuspended)
-            .expect("production startup suspension applies");
-        let state = EngineState::default();
-        state.set_resource_mode(ResourceMode::OfflineSuspended);
-        let shutdown = EngineShutdown::default();
-        let gate = start_account_market_gate(&state, &harness.service, &shutdown)
-            .expect("account market gate starts");
-        let server_state = state.clone();
-        let server_market = harness.service.clone();
-        let server_shutdown = shutdown.clone();
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_account_gate(
-                pair,
-                51,
-                &server_state,
-                &server_market,
-                &server_shutdown,
-            )
-            .expect("serve account-gated market client");
-        });
-
-        let mut client =
-            EngineClient::connect(&socket_name, &token).expect("connect account-gated client");
+    fn default_workspace_is_hyperliquid_btc_perp() {
+        let workspace = default_workspace();
+        assert_eq!(workspace.resource_mode, ResourceMode::Warm as i32);
+        assert_eq!(workspace.provider, "hyperliquid");
+        assert_eq!(workspace.market, "BTC-PERP");
+        assert_eq!(workspace.interval_seconds, 60);
+        let primary = workspace.hot_series.first().expect("default hot series");
+        assert_eq!(primary.provider, "hyperliquid");
+        assert_eq!(primary.instrument_id, "hyperliquid:perp:BTC");
+        assert_eq!(primary.provider_symbol, "BTC");
+        assert_eq!(primary.price_scale, 8);
+        assert_eq!(primary.quantity_scale, 8);
         assert!(
-            client.restore_workspace().is_err(),
-            "signed-out platform commands remain rejected"
+            workspace
+                .workspace_tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .all(|pane| {
+                    WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart)
+                        || pane
+                            .instrument
+                            .as_ref()
+                            .is_some_and(|instrument| instrument.provider == "hyperliquid")
+                })
         );
-
-        state.account().set_authenticated_for_test(true);
-        wait_for_resource_mode(&state, ResourceMode::Warm);
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        client
-            .attach_client(51)
-            .expect("authenticated client attaches");
-        client
-            .register_consumer(51, 1, 501)
-            .expect("chart consumer registers through production IPC");
-        client
-            .set_series_demand(501, 1, series.clone())
-            .expect("chart demand crosses production IPC");
-        poll_ipc_snapshot(&mut client, 501, 1, &series);
-        publish_fixture_live_ohlcv(&harness, &mut client, 1, 2);
-
-        for completed_cycles in 0..20 {
-            if completed_cycles == 10 {
-                permit_markets_live(&state, &mut client);
-            }
-            let stopped_generation = completed_cycles + 1;
-            let resumed_mode = if completed_cycles < 10 {
-                ResourceMode::Warm
-            } else {
-                ResourceMode::MarketsLive
-            };
-            cycle_account_market_gate(
-                &state,
-                &harness,
-                &mut client,
-                stopped_generation,
-                resumed_mode,
-            );
-        }
-        assert!(
-            harness.history_fetches.load(Ordering::Acquire) >= 21,
-            "every sign-in requests fresh covering history"
-        );
-
-        drop(client);
-        server.join().expect("join account-gated IPC server");
-        shutdown.request();
-        gate.join().expect("join account market gate");
     }
 
     #[test]
-    fn account_gate_resumes_foreground_and_background_ipc_consumers() {
-        let socket_name = socket_name("account-gate-multi-client");
-        let listener = bind_listener(&socket_name).expect("bind multi-client endpoint");
-        let token = [47_u8; 32];
-        let harness = MarketService::start_fixture_realtime(vec![MarketBar {
-            source_sequence: 2,
-            exchange_timestamp_seconds: 60,
-            exchange_timestamp_unix_nanos: 60_000_000_000,
-            open: 100,
-            high: 110,
-            low: 90,
-            close: 105,
-            volume: 7,
-        }])
-        .expect("multi-client realtime fixture starts");
-        harness
-            .service
-            .set_resource_mode(ResourceMode::OfflineSuspended)
-            .expect("production startup suspension applies");
-        let state = EngineState::default();
-        state.set_resource_mode(ResourceMode::OfflineSuspended);
-        state.account().set_authenticated_for_test(true);
-        let shutdown = EngineShutdown::default();
-        let gate = start_account_market_gate(&state, &harness.service, &shutdown)
-            .expect("account market gate starts");
-        wait_for_resource_mode(&state, ResourceMode::Warm);
-        let server = serve_account_gated_test_clients(
-            listener,
-            token,
-            state.clone(),
-            harness.service.clone(),
-            shutdown.clone(),
-            2,
-        );
-
-        let mut first = EngineClient::connect(&socket_name, &token).expect("connect first window");
-        let mut second =
-            EngineClient::connect(&socket_name, &token).expect("connect second window");
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        attach_ipc_consumers(&mut first, 61, &[601, 603], &series);
-        attach_ipc_consumers(&mut second, 62, &[602], &series);
-        publish_fixture_multi_client_ohlcv(&harness, &mut first, &mut second, 1, 2, &[602]);
-        second
-            .set_market_visibility(602, false)
-            .expect("second window moves to background");
-        second
-            .restore_workspace()
-            .expect("background transition synchronization fence");
-
-        state.account().set_authenticated_for_test(false);
-        expect_fixture_stop(&harness, 1);
-        wait_for_resource_mode(&state, ResourceMode::OfflineSuspended);
-        state.account().set_authenticated_for_test(true);
-        wait_for_resource_mode(&state, ResourceMode::Warm);
-        publish_fixture_multi_client_ohlcv(&harness, &mut first, &mut second, 2, 3, &[]);
-        second
-            .set_market_visibility(602, true)
-            .expect("second window returns to foreground");
-        poll_ipc_live_updates(&mut second, &[602], 2, &expected_fixture_ohlcv(3));
-
-        drop(first);
-        drop(second);
-        server.join().expect("join multi-client IPC server");
-        shutdown.request();
-        gate.join().expect("join account market gate");
-    }
-
-    fn serve_account_gated_test_clients(
-        listener: LocalSocketListener,
-        token: [u8; 32],
-        state: EngineState,
-        market: MarketService,
-        shutdown: EngineShutdown,
-        client_count: usize,
-    ) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let mut clients = Vec::with_capacity(client_count);
-            for _ in 0..client_count {
-                let pair = accept_session_pair(&listener, &token);
-                let state = state.clone();
-                let market = market.clone();
-                let shutdown = shutdown.clone();
-                clients.push(thread::spawn(move || {
-                    serve_client_with_account_gate(pair, 59, &state, &market, &shutdown)
-                        .expect("serve account-gated test client");
-                }));
-            }
-            for client in clients {
-                client.join().expect("join account-gated test client");
-            }
-        })
-    }
-
-    fn attach_ipc_consumers(
-        client: &mut EngineClient,
-        client_id: u64,
-        consumer_ids: &[u64],
-        series: &SeriesKey,
-    ) {
-        client
-            .attach_client(client_id)
-            .expect("IPC client attaches");
-        for &consumer_id in consumer_ids {
-            client
-                .register_consumer(client_id, 1, consumer_id)
-                .expect("IPC consumer registers");
-            client
-                .set_series_demand(consumer_id, 1, series.clone())
-                .expect("IPC consumer demand applies");
-            poll_ipc_snapshot(client, consumer_id, 1, series);
-        }
-    }
-
-    fn wait_for_resource_mode(state: &EngineState, expected: ResourceMode) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while state.workspace().resource_mode != expected as i32 {
-            assert!(
-                Instant::now() < deadline,
-                "account market gate did not apply {expected:?}"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn cycle_account_market_gate(
-        state: &EngineState,
-        harness: &FixtureRealtimeHarness,
-        client: &mut EngineClient,
-        stopped_generation: u64,
-        resumed_mode: ResourceMode,
-    ) {
-        state.account().set_authenticated_for_test(false);
-        assert_eq!(
-            harness
-                .stops
-                .recv_timeout(Duration::from_secs(1))
-                .expect("sign-out stops the active provider generation")
-                .0
-                .get(),
-            stopped_generation
-        );
-        wait_for_resource_mode(state, ResourceMode::OfflineSuspended);
-
-        state.account().set_authenticated_for_test(true);
-        wait_for_resource_mode(state, resumed_mode);
-        let replacement_generation = stopped_generation + 1;
-        publish_fixture_live_ohlcv(
-            harness,
-            client,
-            replacement_generation,
-            i64::try_from(replacement_generation + 1).expect("fixture minute fits"),
-        );
-    }
-
-    fn permit_markets_live(state: &EngineState, client: &mut EngineClient) {
-        let workspace = client
-            .set_engine_lifecycle(
-                state.workspace().workspace_revision,
-                EngineLifetimeMode::KeepMarketsLive,
-                false,
-                true,
-            )
-            .expect("persist permitted MarketsLive policy through IPC");
-        assert_eq!(
-            workspace.lifetime_mode,
-            EngineLifetimeMode::KeepMarketsLive as i32
-        );
-        assert!(workspace.markets_live_permitted);
-        wait_for_resource_mode(state, ResourceMode::MarketsLive);
-    }
-
-    fn publish_fixture_live_ohlcv(
-        harness: &FixtureRealtimeHarness,
-        client: &mut EngineClient,
-        provider_generation: u64,
-        minute: i64,
-    ) {
-        assert_eq!(
-            harness
-                .generations
-                .recv_timeout(Duration::from_secs(1))
-                .expect("expected realtime generation starts")
-                .0
-                .get(),
-            provider_generation
-        );
-        assert_eq!(
-            harness
-                .configured_products
-                .recv_timeout(Duration::from_secs(1))
-                .expect("expected product set configures"),
-            ["BTC-USD"]
-        );
-        harness
-            .actions
-            .send(FixtureRealtimeAction::Connected)
-            .expect("realtime fixture connects");
-        send_fixture_ohlcv(harness, provider_generation, minute);
-        poll_ipc_live_update(
-            client,
-            501,
-            1,
-            provider_generation,
-            &expected_fixture_ohlcv(minute),
-        );
-    }
-
-    fn publish_fixture_multi_client_ohlcv(
-        harness: &FixtureRealtimeHarness,
-        first: &mut EngineClient,
-        second: &mut EngineClient,
-        provider_generation: u64,
-        minute: i64,
-        second_consumers: &[u64],
-    ) {
-        assert_eq!(
-            harness
-                .generations
-                .recv_timeout(Duration::from_secs(1))
-                .expect("shared realtime generation starts")
-                .0
-                .get(),
-            provider_generation
-        );
-        let configured = harness
-            .configured_products
-            .recv_timeout(Duration::from_secs(1))
-            .expect("shared product set configures");
-        assert_eq!(configured, ["BTC-USD"]);
-        harness
-            .actions
-            .send(FixtureRealtimeAction::Connected)
-            .expect("shared realtime connects");
-        send_fixture_ohlcv(harness, provider_generation, minute);
-        let expected = expected_fixture_ohlcv(minute);
-        poll_ipc_live_updates(first, &[601, 603], provider_generation, &expected);
-        poll_ipc_live_updates(second, second_consumers, provider_generation, &expected);
-    }
-
-    fn send_fixture_ohlcv(harness: &FixtureRealtimeHarness, provider_generation: u64, minute: i64) {
-        let sequence_base = provider_generation
-            .checked_mul(10)
-            .expect("fixture sequence fits");
-        for (offset, price) in ["2.50", "3.25", "1.75", "2.75"].into_iter().enumerate() {
-            let provider_sequence = sequence_base
-                .checked_add(u64::try_from(offset).expect("fixture offset fits"))
-                .expect("fixture sequence fits");
-            harness
-                .actions
-                .send(FixtureRealtimeAction::Trade(trade(
-                    minute,
-                    price,
-                    provider_sequence,
-                )))
-                .expect("fixture OHLCV trade arrives");
-        }
-    }
-
-    fn expected_fixture_ohlcv(minute: i64) -> IpcMarketBar {
-        // This oracle is deliberately written from the input trades rather than
-        // calling the production aggregator: open is first, close is last, high
-        // and low are extrema, and four exact base-quantity units contribute.
-        IpcMarketBar {
-            source_sequence: u64::try_from(minute).expect("fixture minute fits") + 1,
-            exchange_timestamp_seconds: minute * 60,
-            exchange_timestamp_unix_nanos: minute * 60_000_000_000,
-            open: 250,
-            high: 325,
-            low: 175,
-            close: 275,
-            volume: 4,
-        }
-    }
-
-    fn expect_fixture_stop(harness: &FixtureRealtimeHarness, provider_generation: u64) {
-        assert_eq!(
-            harness
-                .stops
-                .recv_timeout(Duration::from_secs(1))
-                .expect("account suspension stops shared realtime")
-                .0
-                .get(),
-            provider_generation
-        );
-    }
-
-    fn poll_ipc_live_updates(
-        client: &mut EngineClient,
-        consumer_ids: &[u64],
-        provider_generation: u64,
-        expected_bar: &IpcMarketBar,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut pending = consumer_ids.iter().copied().collect::<BTreeSet<_>>();
-        while !pending.is_empty() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let event = client
-                .receive_market_event_timeout(remaining.min(Duration::from_millis(50)))
-                .expect("receive multi-consumer IPC market event");
-            if let Some((consumer_id, payload)) = event
-                && pending.contains(&consumer_id)
-                && ipc_live_update_matches(&payload, 1, provider_generation, expected_bar)
-            {
-                pending.remove(&consumer_id);
-            }
-            assert!(
-                Instant::now() < deadline,
-                "live IPC update timed out for consumers {pending:?}"
-            );
-        }
-    }
-
-    fn poll_ipc_live_update(
-        client: &mut EngineClient,
-        consumer_id: u64,
-        generation: u64,
-        provider_generation: u64,
-        expected_bar: &IpcMarketBar,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if let Some(event) = receive_ipc_event(client, consumer_id, Duration::from_millis(50))
-                && ipc_live_update_matches(&event, generation, provider_generation, expected_bar)
-            {
-                return;
-            }
-            assert!(Instant::now() < deadline, "live IPC update timed out");
-        }
-    }
-
-    fn ipc_live_update_matches(
-        event: &envelope::Payload,
-        generation: u64,
-        provider_generation: u64,
-        expected_bar: &IpcMarketBar,
-    ) -> bool {
-        matches!(
-            event,
-            envelope::Payload::SeriesUpdate(update)
-                if update.generation == generation
-                    && update.provider_generation == provider_generation
-                    && update.bar.as_ref() == Some(expected_bar)
-        ) || matches!(
-            event,
-            envelope::Payload::SeriesSnapshot(snapshot)
-                if snapshot.generation == generation
-                    && snapshot.provider_generation == provider_generation
-                    && snapshot.bars.last() == Some(expected_bar)
-        )
-    }
-
-    fn socket_name(label: &str) -> String {
-        format!(
-            "axiusflow-engine-{label}-test-{}-{}",
-            std::process::id(),
-            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
-        )
-    }
-
-    /// Accepts both streams of one paired test session in any arrival order.
-    fn accept_session_pair(
-        listener: &LocalSocketListener,
-        installation_token: &[u8],
-    ) -> SessionStreams {
-        let pairer = SessionPairer::new();
-        for _ in 0..2 {
-            let stream = listener.accept().expect("accept session stream");
-            if let Some(pair) = pairer
-                .accept_one(stream, installation_token)
-                .expect("pair session stream")
-            {
-                return pair;
-            }
-        }
-        panic!("paired session never completed");
-    }
-
-    #[derive(Clone, Copy)]
-    struct Percentiles {
-        p50: u128,
-        p95: u128,
-        p99: u128,
-    }
-
-    fn percentiles(mut samples: Vec<u128>) -> Percentiles {
-        assert!(!samples.is_empty(), "performance sample set is not empty");
-        samples.sort_unstable();
-        let at = |percentile: usize| {
-            let rank = samples.len().saturating_mul(percentile).div_ceil(100);
-            samples[rank.saturating_sub(1)]
-        };
-        Percentiles {
-            p50: at(50),
-            p95: at(95),
-            p99: at(99),
-        }
-    }
-
-    fn measure(warmups: usize, measured: usize, mut operation: impl FnMut(usize)) -> Percentiles {
-        let mut timings = Vec::with_capacity(measured);
-        for sample in 0..warmups + measured {
-            let started = Instant::now();
-            operation(sample);
-            if sample >= warmups {
-                timings.push(started.elapsed().as_nanos());
-            }
-        }
-        percentiles(timings)
-    }
-
-    fn process_memory(system: &mut System, pid: Pid) -> u64 {
-        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-        system
-            .process(pid)
-            .expect("benchmark process remains observable")
-            .memory()
-    }
-
-    #[cfg(debug_assertions)]
-    fn require_release_profile() {
-        panic!("run this verifier with cargo test --release");
-    }
-
-    #[cfg(not(debug_assertions))]
-    fn require_release_profile() {}
-
-    fn cached_series(instrument_id: &str, cadence_value: u32) -> SeriesKey {
-        SeriesKey {
-            provider: "coinbase".to_string(),
-            instrument_id: instrument_id.to_string(),
-            cadence_value,
-            definition_revision: 1,
-            entitlement_id: ENTITLEMENT_CLASS.to_string(),
-            cadence: SeriesCadence::FixedSeconds as i32,
-        }
-    }
-
-    fn fixture_history() -> Vec<MarketBar> {
-        (1_u64..=350)
-            .map(|source_sequence| MarketBar {
-                source_sequence,
-                exchange_timestamp_seconds: 0,
-                exchange_timestamp_unix_nanos: 0,
-                open: 100,
-                high: 110,
-                low: 90,
-                close: 105,
-                volume: 7,
-            })
-            .collect()
-    }
-
-    fn poll_direct_snapshot(
-        market: &MarketService,
-        client_id: u64,
-        consumer_id: u64,
-        generation: u64,
-        series: &SeriesKey,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) = market
-                .poll_event(client_id, consumer_id)
-                .expect("direct market poll succeeds")
-                && snapshot.generation == generation
-            {
-                assert_eq!(snapshot.consumer_id, consumer_id);
-                assert_eq!(snapshot.series.as_ref(), Some(series));
-                assert_eq!(snapshot.bars.len(), 350);
-                return;
-            }
-            assert!(Instant::now() < deadline, "direct snapshot timed out");
-            thread::yield_now();
-        }
-    }
-
-    fn poll_ipc_snapshot(
-        client: &mut EngineClient,
-        consumer_id: u64,
-        generation: u64,
-        series: &SeriesKey,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) =
-                receive_ipc_event(client, consumer_id, Duration::from_millis(50))
-                && snapshot.generation == generation
-            {
-                assert_eq!(snapshot.consumer_id, consumer_id);
-                assert_eq!(snapshot.series.as_ref(), Some(series));
-                assert!(!snapshot.bars.is_empty(), "IPC snapshot is usable");
-                return;
-            }
-            assert!(Instant::now() < deadline, "IPC snapshot timed out");
-            thread::yield_now();
-        }
-    }
-
-    fn receive_ipc_event(
-        client: &mut EngineClient,
-        consumer_id: u64,
-        timeout: Duration,
-    ) -> Option<envelope::Payload> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let event = client
-                .receive_market_event_timeout(remaining)
-                .expect("receive pushed IPC market event");
-            match event {
-                Some((target, payload)) if target == consumer_id => return Some(payload),
-                Some(_) if Instant::now() < deadline => {}
-                Some(_) | None => return None,
-            }
-        }
-    }
-
-    fn assert_rithmic_hot_metadata(state: &EngineState) {
-        let hot = state
-            .workspace()
-            .hot_series
-            .into_iter()
-            .find(|series| series.provider == "rithmic")
-            .expect("Rithmic demand becomes durable hot metadata");
-        assert_eq!(hot.instrument_id, "instrument:rithmic:CME:MNQU6");
-        assert_eq!(hot.account_id, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID);
-        assert_eq!(hot.provider_symbol, "MNQU6");
-        assert_eq!(hot.venue_id, "CME");
-        assert_eq!(hot.entitlement_id, "rithmic-test:CME:MNQU6");
-        assert_eq!(hot.cadence, SeriesCadence::Trades as i32);
-        assert_eq!(hot.cadence_value, 100);
-        assert_eq!(hot.workspace_ids, vec![1]);
-    }
-
-    fn rithmic_fixture_instrument() -> InstallProviderInstrument {
-        InstallProviderInstrument {
-            provider: "rithmic".to_string(),
-            session_generation: 7,
-            selection_generation: 9,
-            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
-            provider_symbol: "MNQU6".to_string(),
-            display_symbol: "MNQU6".to_string(),
-            venue_id: "CME".to_string(),
-            price_scale: 2,
-            quantity_scale: 0,
-            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
-        }
-    }
-
-    #[test]
-    fn published_catalog_selection_records_metadata_before_following_demand() {
-        let state = EngineState::default();
-        state.record_consumer(51, 1, 61);
-        let instrument = InstallProviderInstrument {
-            provider: "coinbase".to_string(),
-            session_generation: 1,
-            selection_generation: 7,
-            instrument_id: "instrument:coinbase:sol:usd".to_string(),
-            provider_symbol: "SOL-USD".to_string(),
-            display_symbol: "SOL/USD".to_string(),
-            venue_id: "coinbase".to_string(),
-            price_scale: 4,
-            quantity_scale: 6,
-            entitlement_id: ENTITLEMENT_CLASS.to_string(),
-        };
-
-        state
-            .record_published_market_event(&envelope::Payload::ProviderInstrumentSelection(
-                ProviderInstrumentSelection {
-                    consumer_id: 61,
-                    instrument: Some(instrument.clone()),
-                },
-            ))
-            .expect("catalog selection crosses the poll state boundary");
-        state
-            .record_series_demand(
-                61,
-                &SeriesKey {
-                    provider: instrument.provider,
-                    instrument_id: instrument.instrument_id,
-                    cadence_value: 60,
-                    definition_revision: 1,
-                    entitlement_id: instrument.entitlement_id,
-                    cadence: SeriesCadence::FixedSeconds as i32,
-                },
-            )
-            .expect("following demand uses selected catalog metadata");
-
-        let hot = state
-            .workspace()
-            .hot_series
-            .into_iter()
-            .find(|series| series.instrument_id == "instrument:coinbase:sol:usd")
-            .expect("selected series enters the hot set");
-        assert_eq!(hot.provider_symbol, "SOL-USD");
-        assert_eq!(hot.display_symbol, "SOL/USD");
-        assert_eq!(hot.price_scale, 4);
-        assert_eq!(hot.quantity_scale, 6);
-    }
-
-    #[test]
-    fn current_coinbase_precision_survives_workspace_restore() {
+    fn unsupported_persisted_workspace_is_replaced_during_migration() {
         let mut workspace = default_workspace();
-        workspace.hot_series[0].price_scale = 4;
-        workspace.hot_series[0].quantity_scale = 6;
-        let instrument = workspace.workspace_tabs[0].panes[0]
-            .instrument
-            .as_mut()
-            .expect("default pane has an instrument");
-        instrument.price_scale = 4;
-        instrument.quantity_scale = 6;
+        workspace.hot_series[0].provider = "retired-provider".to_string();
+
+        assert!(migrate_workspace(&mut workspace));
+        assert!(
+            workspace
+                .hot_series
+                .iter()
+                .all(|series| series.provider == "hyperliquid")
+        );
+    }
+
+    #[test]
+    fn migration_preserves_valid_rithmic_and_hyperliquid_selections() {
+        let mut workspace = default_workspace();
+        workspace.hot_series[0].provider = "rithmic".to_string();
+        workspace.hot_series[0].market = "MNQ".to_string();
 
         assert!(!migrate_workspace(&mut workspace));
-        assert_eq!(workspace.hot_series[0].price_scale, 4);
-        assert_eq!(workspace.hot_series[0].quantity_scale, 6);
-        let instrument = workspace.workspace_tabs[0].panes[0]
-            .instrument
-            .as_ref()
-            .expect("restored pane keeps its instrument");
-        assert_eq!(instrument.price_scale, 4);
-        assert_eq!(instrument.quantity_scale, 6);
-    }
-
-    fn measure_direct_demand(market: &MarketService, series: &SeriesKey) -> Percentiles {
-        market.attach(1).expect("direct client attaches");
-        market
-            .register_consumer(1, 1, 1)
-            .expect("direct consumer registers");
-        market
-            .set_demand(1, 1, 1, series)
-            .expect("initial direct demand succeeds");
-        poll_direct_snapshot(market, 1, 1, 1, series);
-        measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
-            let generation = u64::try_from(sample).expect("sample fits") + 2;
-            market
-                .set_demand(1, 1, generation, series)
-                .expect("cached direct demand succeeds");
-            poll_direct_snapshot(market, 1, 1, generation, series);
-        })
-    }
-
-    fn prime_cached_switch_series(market: &MarketService) {
-        market.attach(3).expect("switch prime client attaches");
-        market
-            .register_consumer(3, 1, 3)
-            .expect("switch prime consumer registers");
-        for (generation, series) in [
-            cached_series(BTC_INSTRUMENT, 300),
-            cached_series(ETH_INSTRUMENT, 60),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let generation = u64::try_from(generation).expect("prime generation fits") + 1;
-            market
-                .set_demand(3, 3, generation, series)
-                .expect("switch series primes");
-            poll_direct_snapshot(market, 3, 3, generation, series);
-        }
-        market.detach(3).expect("switch prime client detaches");
-    }
-
-    fn measure_ipc_demand(
-        market: &MarketService,
-        series: &SeriesKey,
-    ) -> (Percentiles, Percentiles, Percentiles, Percentiles) {
-        let performance_socket_name = socket_name("performance");
-        let listener = bind_listener(&performance_socket_name).expect("bind performance endpoint");
-        let token = [11_u8; 32];
-        let server_market = market.clone();
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            let state = EngineState::default();
-            state.record_installed_instrument(&InstallProviderInstrument {
-                provider: "coinbase".to_string(),
-                session_generation: 1,
-                selection_generation: 1,
-                instrument_id: ETH_INSTRUMENT.to_string(),
-                provider_symbol: "ETH-USD".to_string(),
-                display_symbol: "ETH/USD".to_string(),
-                venue_id: "coinbase".to_string(),
-                price_scale: COINBASE_PRICE_SCALE,
-                quantity_scale: COINBASE_QUANTITY_SCALE,
-                entitlement_id: ENTITLEMENT_CLASS.to_string(),
-            });
-            serve_client_with_market(pair, 1, &state, &server_market)
-                .expect("serve performance client");
-        });
-        let mut client = EngineClient::connect(&performance_socket_name, &token)
-            .expect("connect performance client");
-        client.attach_client(2).expect("IPC client attaches");
-        client
-            .register_consumer(2, 1, 2)
-            .expect("IPC consumer registers");
-        client.restore_workspace().expect("IPC registration fence");
-        let ipc = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
-            let generation = u64::try_from(sample).expect("sample fits") + 1;
-            client
-                .set_series_demand(2, generation, series.clone())
-                .expect("cached IPC demand succeeds");
-            poll_ipc_snapshot(&mut client, 2, generation, series);
-        });
-        let (timeframe, symbol) = measure_cached_switches(&mut client);
-
-        for consumer_id in 100..100 + MULTI_CONSUMERS {
-            client
-                .register_consumer(2, 1, consumer_id)
-                .expect("multi-consumer registration succeeds");
-        }
-        client
-            .restore_workspace()
-            .expect("multi-consumer registration fence");
-        let multi = measure(MULTI_WARMUP_SAMPLES, MULTI_MEASURED_SAMPLES, |sample| {
-            let generation = u64::try_from(sample).expect("sample fits") + 1;
-            for consumer_id in 100..100 + MULTI_CONSUMERS {
-                client
-                    .set_series_demand(consumer_id, generation, series.clone())
-                    .expect("multi-consumer demand succeeds");
-            }
-            for consumer_id in 100..100 + MULTI_CONSUMERS {
-                poll_ipc_snapshot(&mut client, consumer_id, generation, series);
-            }
-        });
-        drop(client);
-        server.join().expect("join performance server");
-        (ipc, timeframe, symbol, multi)
-    }
-
-    fn measure_cached_switches(client: &mut EngineClient) -> (Percentiles, Percentiles) {
-        let btc_minute = cached_series(BTC_INSTRUMENT, 60);
-        let btc_five_minute = cached_series(BTC_INSTRUMENT, 300);
-        let eth_minute = cached_series(ETH_INSTRUMENT, 60);
-        let measured_end = WARMUP_SAMPLES + MEASURED_SAMPLES;
-        let mut generation = u64::try_from(measured_end).expect("sample count fits") + 1;
-        let timeframe = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
-            let series = if sample % 2 == 0 {
-                &btc_minute
-            } else {
-                &btc_five_minute
-            };
-            let current = generation + u64::try_from(sample).expect("sample fits");
-            client
-                .set_series_demand(2, current, series.clone())
-                .expect("cached timeframe switch succeeds");
-            poll_ipc_snapshot(client, 2, current, series);
-        });
-        generation += u64::try_from(measured_end).expect("sample count fits");
-        let symbol = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
-            let series = if sample % 2 == 0 {
-                &btc_minute
-            } else {
-                &eth_minute
-            };
-            let current = generation + u64::try_from(sample).expect("sample fits");
-            client
-                .set_series_demand(2, current, series.clone())
-                .expect("cached symbol switch succeeds");
-            poll_ipc_snapshot(client, 2, current, series);
-        });
-        (timeframe, symbol)
-    }
-
-    fn measure_ipc_attach(market: &MarketService) -> Percentiles {
-        let attach_socket_name = socket_name("attach-performance");
-        let attach_listener =
-            bind_listener(&attach_socket_name).expect("bind attach performance endpoint");
-        let token = [11_u8; 32];
-        let attach_market = market.clone();
-        let attach_samples = WARMUP_SAMPLES + MEASURED_SAMPLES;
-        let attach_server = thread::spawn(move || {
-            let state = EngineState::default();
-            for _ in 0..attach_samples {
-                let pair = accept_session_pair(&attach_listener, &token);
-                serve_client_with_market(pair, 1, &state, &attach_market)
-                    .expect("serve attach client");
-            }
-        });
-        let attach = measure(WARMUP_SAMPLES, MEASURED_SAMPLES, |sample| {
-            let mut attached =
-                EngineClient::connect(&attach_socket_name, &token).expect("connect attach client");
-            attached
-                .attach_client(u64::try_from(sample).expect("sample fits") + 10_000)
-                .expect("attach command succeeds");
-            attached
-                .restore_workspace()
-                .expect("attach synchronization fence");
-            drop(attached);
-        });
-        attach_server.join().expect("join attach server");
-        attach
-    }
-
-    #[test]
-    #[ignore = "release-only local engine performance evidence"]
-    fn release_cached_demand_ipc_and_multi_consumer_performance() {
-        require_release_profile();
-        let pid = sysinfo::get_current_pid().expect("benchmark process id is available");
-        let mut system = System::new();
-        let memory_baseline = process_memory(&mut system, pid);
-        let market =
-            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let memory_engine_started = process_memory(&mut system, pid);
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        prime_cached_switch_series(&market);
-        let direct = measure_direct_demand(&market, &series);
-        let memory_direct = process_memory(&mut system, pid);
-        let (ipc, timeframe, symbol, multi) = measure_ipc_demand(&market, &series);
-        let memory_ipc = process_memory(&mut system, pid);
-        let attach = measure_ipc_attach(&market);
-        let memory_current = process_memory(&mut system, pid);
-        let memory_high_water = [
-            memory_baseline,
-            memory_engine_started,
-            memory_direct,
-            memory_ipc,
-            memory_current,
-        ]
-        .into_iter()
-        .max()
-        .expect("memory sample set is not empty");
-
-        println!(
-            "AXIUSFLOW_ENGINE_PERFORMANCE schema=3 samples={} warmups={} bars=350 direct_demand_snapshot_p50_ns={} direct_demand_snapshot_p95_ns={} direct_demand_snapshot_p99_ns={} ipc_demand_snapshot_p50_ns={} ipc_demand_snapshot_p95_ns={} ipc_demand_snapshot_p99_ns={} ipc_timeframe_switch_p50_ns={} ipc_timeframe_switch_p95_ns={} ipc_timeframe_switch_p99_ns={} ipc_symbol_switch_p50_ns={} ipc_symbol_switch_p95_ns={} ipc_symbol_switch_p99_ns={} ipc_attach_restore_p50_ns={} ipc_attach_restore_p95_ns={} ipc_attach_restore_p99_ns={} multi_consumers={} multi_samples={} ipc_multi_batch_p50_ns={} ipc_multi_batch_p95_ns={} ipc_multi_batch_p99_ns={} ipc_multi_per_consumer_p50_ns={} process_memory_baseline_bytes={} process_memory_engine_started_bytes={} process_memory_direct_bytes={} process_memory_ipc_multi_bytes={} process_memory_current_bytes={} process_memory_sampled_high_water_bytes={} process_memory_sampled_growth_bytes={} process_memory_workload_growth_bytes={}",
-            MEASURED_SAMPLES,
-            WARMUP_SAMPLES,
-            direct.p50,
-            direct.p95,
-            direct.p99,
-            ipc.p50,
-            ipc.p95,
-            ipc.p99,
-            timeframe.p50,
-            timeframe.p95,
-            timeframe.p99,
-            symbol.p50,
-            symbol.p95,
-            symbol.p99,
-            attach.p50,
-            attach.p95,
-            attach.p99,
-            MULTI_CONSUMERS,
-            MULTI_MEASURED_SAMPLES,
-            multi.p50,
-            multi.p95,
-            multi.p99,
-            multi.p50 / u128::from(MULTI_CONSUMERS),
-            memory_baseline,
-            memory_engine_started,
-            memory_direct,
-            memory_ipc,
-            memory_current,
-            memory_high_water,
-            memory_high_water.saturating_sub(memory_baseline),
-            memory_high_water.saturating_sub(memory_engine_started)
-        );
-        assert!(memory_baseline > 0, "process memory baseline is observable");
         assert!(
-            memory_high_water >= memory_current,
-            "sampled memory high-water contains the final sample"
-        );
-        assert_local_interaction_target("cached IPC demand-to-snapshot", ipc);
-        assert_local_interaction_target("cached timeframe switch", timeframe);
-        assert_local_interaction_target("cached symbol switch", symbol);
-    }
-
-    fn assert_local_interaction_target(label: &str, latency: Percentiles) {
-        assert!(
-            latency.p50 < 20_000_000,
-            "{label} p50 exceeded 20 ms: {} ns",
-            latency.p50
-        );
-        assert!(
-            latency.p95 < 50_000_000,
-            "{label} p95 exceeded 50 ms: {} ns",
-            latency.p95
+            workspace
+                .hot_series
+                .iter()
+                .any(|series| series.provider == "rithmic")
         );
     }
 
     #[test]
-    fn authenticated_lifecycle_commands_update_mode_and_request_shutdown() {
-        let socket_name = socket_name("lifecycle");
-        let listener = bind_listener(&socket_name).expect("bind lifecycle endpoint");
-        let token = [13_u8; 32];
-        let state = EngineState::default();
-        let server_state = state.clone();
+    fn shutdown_request_is_monotonic() {
         let shutdown = EngineShutdown::default();
-        let server_shutdown = shutdown.clone();
-        let market =
-            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_market_and_shutdown(
-                pair,
-                17,
-                &server_state,
-                &market,
-                &server_shutdown,
-            )
-            .expect("serve lifecycle client");
-        });
-
-        let mut client = EngineClient::connect(&socket_name, &token).expect("connect lifecycle");
-        let interactive = client
-            .set_engine_resource_mode(ResourceMode::Interactive)
-            .expect("set interactive resource mode");
-        assert_eq!(interactive.resource_mode, ResourceMode::Interactive as i32);
-        let lifecycle = client
-            .set_engine_lifecycle(
-                interactive.workspace_revision,
-                EngineLifetimeMode::KeepMarketsLive,
-                false,
-                true,
-            )
-            .expect("persist markets-live lifecycle policy");
-        assert_eq!(
-            lifecycle.lifetime_mode,
-            EngineLifetimeMode::KeepMarketsLive as i32
-        );
-        assert!(lifecycle.markets_live_permitted);
-        let status = client.engine_status().expect("read bounded engine status");
-        assert_eq!(status.process_id, std::process::id());
-        assert_eq!(status.resource_mode, ResourceMode::MarketsLive as i32);
-        assert_eq!(status.connected_desktop_clients, 0);
-        assert_eq!(status.shutdown_state, EngineShutdownState::Running as i32);
-        client.shutdown_engine().expect("request engine shutdown");
-        server.join().expect("join lifecycle server");
-
+        assert!(!shutdown.is_requested());
+        shutdown.request();
         assert!(shutdown.is_requested());
-        assert_eq!(
-            state.workspace().resource_mode,
-            ResourceMode::OfflineSuspended as i32
-        );
-    }
-
-    #[test]
-    fn authenticated_engine_attach_precedes_market_provider_readiness() {
-        let socket_name = socket_name("attach-before-provider");
-        let listener = bind_listener(&socket_name).expect("bind pre-provider endpoint");
-        let token = [29_u8; 32];
-        let market = MarketService::start_fixture(fixture_history())
-            .expect("engine market owner starts without a realtime provider");
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_market(pair, 41, &EngineState::default(), &market)
-                .expect("serve pre-provider client");
-        });
-
-        let mut client =
-            EngineClient::connect(&socket_name, &token).expect("engine IPC is ready independently");
-        assert_eq!(client.ready().engine_epoch, 41);
-        client
-            .attach_client(41)
-            .expect("desktop attaches before provider readiness");
-        client
-            .restore_workspace()
-            .expect("attached client remains responsive without provider readiness");
-
-        drop(client);
-        server.join().expect("join pre-provider server");
-    }
-
-    #[test]
-    fn authenticated_remove_consumer_keeps_another_chart_live() {
-        let socket_name = socket_name("remove-consumer");
-        let listener = bind_listener(&socket_name).expect("bind consumer cleanup endpoint");
-        let token = [17_u8; 32];
-        let market =
-            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let server_market = market.clone();
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_market(pair, 21, &EngineState::default(), &server_market)
-                .expect("serve consumer cleanup client");
-        });
-
-        let mut client =
-            EngineClient::connect(&socket_name, &token).expect("connect consumer cleanup client");
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        client.attach_client(21).expect("IPC client attaches");
-        for (workspace_id, consumer_id) in [(1, 101), (2, 102)] {
-            client
-                .register_consumer(21, workspace_id, consumer_id)
-                .expect("chart consumer registers");
-            client
-                .set_series_demand(consumer_id, 1, series.clone())
-                .expect("chart demand succeeds");
-            poll_ipc_snapshot(&mut client, consumer_id, 1, &series);
-        }
-        client
-            .set_market_visibility(101, false)
-            .expect("first workspace chart becomes inactive");
-        client
-            .set_market_visibility(102, true)
-            .expect("second workspace chart remains active");
-
-        client
-            .remove_market_consumer(101)
-            .expect("first chart consumer removes");
-        client
-            .restore_workspace()
-            .expect("consumer removal synchronization fence");
-        assert!(
-            market.poll_event(21, 101).is_err(),
-            "removed chart publication is unavailable"
-        );
-
-        client
-            .set_series_demand(102, 2, series.clone())
-            .expect("remaining chart demand succeeds");
-        poll_ipc_snapshot(&mut client, 102, 2, &series);
-
-        drop(client);
-        server.join().expect("join consumer cleanup server");
-    }
-
-    #[test]
-    fn authenticated_multi_consumer_push_stays_aligned_after_a_command_fault() {
-        let socket_name = socket_name("market-response-realignment");
-        let listener = bind_listener(&socket_name).expect("bind realignment endpoint");
-        let token = [31_u8; 32];
-        let market =
-            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let server_market = market.clone();
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_market(pair, 23, &EngineState::default(), &server_market)
-                .expect("serve realignment client");
-        });
-
-        let mut client =
-            EngineClient::connect(&socket_name, &token).expect("connect realignment client");
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        client.attach_client(23).expect("IPC client attaches");
-        for consumer_id in [101, 102] {
-            client
-                .register_consumer(23, 1, consumer_id)
-                .expect("consumer registers");
-            client
-                .set_series_demand(consumer_id, 1, series.clone())
-                .expect("consumer demand succeeds");
-            poll_ipc_snapshot(&mut client, consumer_id, 1, &series);
-            while receive_ipc_event(&mut client, consumer_id, Duration::from_millis(5)).is_some() {}
-        }
-
-        client
-            .set_market_visibility(999, false)
-            .expect("unknown-consumer visibility command crosses IPC");
-        assert_eq!(
-            receive_ipc_event(&mut client, 101, Duration::from_millis(50)),
-            None
-        );
-        assert_eq!(
-            receive_ipc_event(&mut client, 102, Duration::from_millis(5)),
-            None
-        );
-        assert_eq!(
-            receive_ipc_event(&mut client, 101, Duration::from_millis(5)),
-            None
-        );
-
-        drop(client);
-        server.join().expect("join realignment server");
-    }
-
-    #[test]
-    fn authenticated_connection_drop_retires_detached_client_consumers() {
-        let socket_name = socket_name("disconnect-cleanup");
-        let listener = bind_listener(&socket_name).expect("bind disconnect cleanup endpoint");
-        let token = [19_u8; 32];
-        let market =
-            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let server_market = market.clone();
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_market(pair, 23, &EngineState::default(), &server_market)
-                .expect("serve disconnect cleanup client");
-        });
-
-        let mut client =
-            EngineClient::connect(&socket_name, &token).expect("connect disconnect cleanup client");
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        client.attach_client(23).expect("IPC client attaches");
-        client
-            .register_consumer(23, 1, 103)
-            .expect("chart consumer registers");
-        client
-            .set_series_demand(103, 1, series.clone())
-            .expect("chart demand succeeds");
-        poll_ipc_snapshot(&mut client, 103, 1, &series);
-
-        drop(client);
-        server.join().expect("join disconnected client server");
-
-        assert!(
-            market.poll_event(23, 103).is_err(),
-            "disconnect removes detached publication state"
-        );
-        market.attach(23).expect("client identity can reattach");
-        market
-            .register_consumer(23, 1, 103)
-            .expect("detached consumer identity was fully retired");
-        market.detach(23).expect("reattached client detaches");
-    }
-
-    #[test]
-    fn dormant_market_client_does_not_starve_another_clients_control() {
-        let socket_name = socket_name("independent-control");
-        let listener = bind_listener(&socket_name).expect("bind independent control endpoint");
-        let token = [23_u8; 32];
-        let state = EngineState::default();
-        let server_state = state.clone();
-        let market =
-            MarketService::start_fixture(fixture_history()).expect("fixture market starts");
-        let server_market = market.clone();
-        let server = thread::spawn(move || {
-            let pairer = SessionPairer::new();
-            let mut sessions = Vec::new();
-            for _ in 0..4 {
-                let stream = listener.accept().expect("accept local client");
-                let pairer = pairer.clone();
-                if let Some(pair) = pairer
-                    .accept_one(stream, &token)
-                    .expect("pair local client session")
-                {
-                    let state = server_state.clone();
-                    let market = server_market.clone();
-                    sessions.push(thread::spawn(move || {
-                        serve_client_with_market(pair, 29, &state, &market)
-                            .expect("serve local client");
-                    }));
-                }
-            }
-            for session in sessions {
-                session.join().expect("join local client session");
-            }
-        });
-
-        let series = cached_series(BTC_INSTRUMENT, 60);
-        let mut dormant =
-            EngineClient::connect(&socket_name, &token).expect("connect dormant market client");
-        dormant.attach_client(31).expect("dormant client attaches");
-        dormant
-            .register_consumer(31, 1, 201)
-            .expect("dormant consumer registers");
-        dormant
-            .set_series_demand(201, 1, series.clone())
-            .expect("dormant demand succeeds");
-        dormant
-            .restore_workspace()
-            .expect("dormant demand synchronization fence");
-
-        let mut control =
-            EngineClient::connect(&socket_name, &token).expect("connect independent control");
-        let interactive = control
-            .set_engine_resource_mode(ResourceMode::Interactive)
-            .expect("independent control remains responsive");
-        assert_eq!(interactive.resource_mode, ResourceMode::Interactive as i32);
-        control.attach_client(32).expect("second client attaches");
-        control
-            .register_consumer(32, 1, 202)
-            .expect("second consumer registers");
-        control
-            .set_series_demand(202, 1, series.clone())
-            .expect("second demand succeeds");
-        poll_ipc_snapshot(&mut control, 202, 1, &series);
-
-        drop(control);
-        drop(dormant);
-        server.join().expect("join independent control server");
-        assert_eq!(
-            state.workspace().resource_mode,
-            ResourceMode::Interactive as i32
-        );
-    }
-
-    #[test]
-    fn authenticated_market_demand_crosses_ipc_and_returns_engine_snapshot() {
-        let socket_name = socket_name("market");
-        let listener = bind_listener(&socket_name).expect("bind market endpoint");
-        let token = [7_u8; 32];
-        let market = MarketService::start_fixture(vec![MarketBar {
-            source_sequence: 1,
-            exchange_timestamp_seconds: 60,
-            exchange_timestamp_unix_nanos: 60_000_000_000,
-            open: 100,
-            high: 110,
-            low: 90,
-            close: 105,
-            volume: 7,
-        }])
-        .expect("fixture market starts");
-        let state = EngineState::default();
-        let server_state = state.clone();
-        let server = thread::spawn(move || {
-            let pair = accept_session_pair(&listener, &token);
-            serve_client_with_market(pair, 9, &server_state, &market).expect("serve market client");
-        });
-        let mut client =
-            EngineClient::connect(&socket_name, &token).expect("connect market client");
-        let installed = client
-            .install_provider_instrument(rithmic_fixture_instrument())
-            .expect("install provider instrument");
-        assert_eq!(installed.session_generation, 7);
-        assert_eq!(installed.selection_generation, 9);
-        assert_eq!(installed.instrument_id, "instrument:rithmic:CME:MNQU6");
-        client.attach_client(1).expect("attach client");
-        client
-            .register_consumer(1, 1, 1)
-            .expect("register consumer");
-        client
-            .set_series_demand(
-                1,
-                1,
-                SeriesKey {
-                    provider: "rithmic".to_string(),
-                    instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
-                    cadence_value: 100,
-                    definition_revision: 1,
-                    entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
-                    cadence: axiusflow_engine_protocol::SeriesCadence::Trades as i32,
-                },
-            )
-            .expect("send demand");
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut snapshot_received = false;
-        let mut ready_received = false;
-        let mut order_book_received = false;
-        while !snapshot_received || !ready_received || !order_book_received {
-            if let Some(event) = receive_ipc_event(&mut client, 1, Duration::from_millis(50)) {
-                match event {
-                    envelope::Payload::SeriesSnapshot(snapshot) => {
-                        snapshot_received = snapshot.bars.len() == 1
-                            && snapshot.provider_generation == 7
-                            && snapshot.price_scale == 2
-                            && snapshot.quantity_scale == 0;
-                    }
-                    envelope::Payload::SeriesState(state) => {
-                        ready_received = state.generation == 1
-                            && state.state
-                                == axiusflow_engine_protocol::SeriesLoadState::Ready as i32;
-                    }
-                    envelope::Payload::OrderBookSnapshot(snapshot) => {
-                        order_book_received = snapshot.consumer_id == 1
-                            && snapshot.generation == 1
-                            && snapshot.provider_generation == 7
-                            && snapshot.selection_generation == 9
-                            && snapshot.state
-                                == axiusflow_engine_protocol::OrderBookState::AwaitingSnapshot
-                                    as i32
-                            && snapshot.bids.is_empty()
-                            && snapshot.asks.is_empty();
-                    }
-                    _ => {}
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "market snapshot receive timed out"
-            );
-        }
-        drop(client);
-        server.join().expect("join market server");
-        assert_rithmic_hot_metadata(&state);
-    }
-
-    #[test]
-    fn closing_a_workspace_preserves_bounded_recency_metadata() {
-        let mut workspace = default_workspace();
-        let mut recent = workspace.hot_series[0].clone();
-        recent.workspace_ids.clear();
-        workspace.workspace_tabs.clear();
-
-        sync_layout_hot_series(&mut workspace);
-
-        assert_eq!(workspace.hot_series, vec![recent]);
-        assert!(workspace.hot_series[0].workspace_ids.is_empty());
+        shutdown.request();
+        assert!(shutdown.is_requested());
     }
 }

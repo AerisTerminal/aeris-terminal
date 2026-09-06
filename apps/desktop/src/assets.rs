@@ -226,18 +226,18 @@ impl BrandIcon {
 pub enum ExchangeLogo {
     Binance,
     #[default]
-    Coinbase,
+    Rithmic,
     Hyperliquid,
 }
 
 impl ExchangeLogo {
-    pub const ALL: [Self; 3] = [Self::Coinbase, Self::Hyperliquid, Self::Binance];
+    pub const ALL: [Self; 3] = [Self::Rithmic, Self::Hyperliquid, Self::Binance];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Binance => "Binance",
-            Self::Coinbase => "Coinbase",
+            Self::Rithmic => "Rithmic",
             Self::Hyperliquid => "Hyperliquid",
         }
     }
@@ -246,7 +246,7 @@ impl ExchangeLogo {
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::Binance => "binance.svg",
-            Self::Coinbase => "coinbase.svg",
+            Self::Rithmic => "rithmic.svg",
             Self::Hyperliquid => "hyperliquid.svg",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
@@ -362,7 +362,7 @@ fn brand_asset(path: &str) -> Option<&'static [u8]> {
 fn exchange_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(EXCHANGE_ASSET_PREFIX)? {
         "binance.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/binance.svg"),
-        "coinbase.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/coinbase.svg"),
+        "rithmic.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/rithmic.svg"),
         "hyperliquid.svg" => {
             include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.svg")
         }

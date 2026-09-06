@@ -965,7 +965,7 @@ pub fn native_installation_inventory(
             },
             VaultEntry {
                 service: "com.axiusflow.engine.history".to_string(),
-                key: "coinbase-public-bars-key-v1".to_string(),
+                key: "rithmic-public-bars-key-v1".to_string(),
             },
             VaultEntry {
                 service: "com.axiusflow.terminal".to_string(),

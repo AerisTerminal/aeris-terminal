@@ -1,4 +1,4 @@
-//! A long-running soak against the live Coinbase venue.
+//! A long-running soak against the live Rithmic venue.
 //!
 //! This is the test the market-data fixes are actually accountable to. Unit
 //! tests pin each rule in isolation; only a real feed, running for minutes
@@ -22,13 +22,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_coinbase_market_adapter::CoinbaseInterval;
 use axiusflow_engine::MarketService;
 use axiusflow_engine_protocol::{
     InstallProviderInstrument, MarketBar, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceState, envelope,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::Digest as _;
 
 const CLIENT_ID: u64 = 1;
@@ -40,7 +39,14 @@ const GATE_REPORT_DIRECTORY: &str = ".cache/evidence";
 const GATE_REPORT_SCHEMA_VERSION: u32 = 1;
 const GATE_EVIDENCE_SCOPE: &str = "engine_live_market_gate";
 const CONSUMER_ID: u64 = 1;
-const COINBASE_ENTITLEMENT_ID: &str = "crypto_public_realtime";
+/// Second consumer holding the liquid anchor series for the whole soak.
+///
+/// When the venue goes quiet on a slow market, the anchor distinguishes "the
+/// engine stalled" (anchor silent too: fail) from "the venue had nothing to
+/// say" (anchor flowing: the shared worker, session, and publish path are
+/// proven live). Only multiplexed providers can hold two instruments at once;
+/// single-selection venues leave this unused.
+const ANCHOR_CONSUMER_ID: u64 = 2;
 
 /// Default soak length. The maintainer asked for five to ten minutes; six gives
 /// several one-minute bucket rolls, which is where the append path is exercised.
@@ -56,9 +62,7 @@ const SETTLE: Duration = Duration::from_secs(15);
 const HISTORY_DEADLINE: Duration = Duration::from_secs(45);
 /// How long a live series may go without publishing before that counts as dead.
 ///
-/// BTC-USD and ETH-USD trade continuously, and a bucket nothing traded in is
-/// carried forward rather than skipped, so a healthy feed publishes far more
-/// often than this.
+/// A healthy feed publishes comfortably inside this deadline.
 const LIVENESS_DEADLINE: Duration = Duration::from_mins(2);
 
 /// How deep a timeframe's history must get before it counts as loaded.
@@ -68,16 +72,6 @@ const LIVENESS_DEADLINE: Duration = Duration::from_mins(2);
 /// so the chart is never blank, then repairs it from the provider; this is the
 /// floor the repair has to clear.
 const HISTORY_DEPTH: usize = 200;
-/// Settled one-minute candles required for the independent value comparison.
-const OHLCV_COMPARISON_BARS: usize = 20;
-
-/// Intervals the chart cycles through. All are realtime-capable.
-///
-/// 12h is early in the cycle because long buckets previously exposed a dead
-/// history/live handoff after a timeframe switch.
-const TIMEFRAMES: [u32; 5] = [60, 43_200, 300, 900, 3_600];
-const SYMBOLS: [&str; 2] = ["BTC-USD", "ETH-USD"];
-
 /// What the consumer has reconstructed for one demand generation.
 ///
 /// This mirrors what the desktop's replay model does with the same stream, so
@@ -85,23 +79,33 @@ const SYMBOLS: [&str; 2] = ["BTC-USD", "ETH-USD"];
 struct SeriesFold {
     generation: u64,
     interval_seconds: i64,
+    instrument_id: String,
     initial_open_bucket: Option<i64>,
     bars: BTreeMap<u64, MarketBar>,
     snapshots: u64,
     updates: u64,
+    /// Live trades published for this series on this generation. Candle-push
+    /// cadence is venue-controlled and varies wildly across markets (core
+    /// perps revise sub-second; spot pairs can go a minute between pushes),
+    /// so a window shorter than the venue's cadence cannot demand a candle
+    /// revise. Trades ride the same feed for the same symbol, so they prove
+    /// the selection streams on its own just as well.
+    trades: u64,
     started: Instant,
     last_publication: Instant,
 }
 
 impl SeriesFold {
-    fn new(generation: u64, interval_seconds: i64) -> Self {
+    fn new(generation: u64, interval_seconds: i64, instrument_id: String) -> Self {
         Self {
             generation,
             interval_seconds,
+            instrument_id,
             initial_open_bucket: None,
             bars: BTreeMap::new(),
             snapshots: 0,
             updates: 0,
+            trades: 0,
             started: Instant::now(),
             last_publication: Instant::now(),
         }
@@ -310,10 +314,12 @@ fn install_symbol(
         )
     });
 
-    let entitlement_id = if provider == "rithmic" {
+    let entitlement_id = if provider == "hyperliquid" {
+        "hyperliquid-public".to_string()
+    } else if provider == "rithmic" {
         format!("rithmic-test:{}:{}", summary.exchange, summary.symbol)
     } else {
-        COINBASE_ENTITLEMENT_ID.to_string()
+        panic!("unsupported live-gate provider");
     };
     let send_selection = || {
         service
@@ -423,7 +429,11 @@ fn start_series(
         .set_demand(CLIENT_ID, CONSUMER_ID, generation, &series)
         .expect("series demand is accepted");
 
-    let mut fold = SeriesFold::new(generation, i64::from(interval_seconds));
+    let mut fold = SeriesFold::new(
+        generation,
+        i64::from(interval_seconds),
+        instrument.instrument_id.clone(),
+    );
     let mut deepest = 0;
     let snapshot = poll_until(
         service,
@@ -467,7 +477,7 @@ fn start_series(
 
 /// Whether the series holds the wall-clock bucket, for diagnostic output only.
 ///
-/// Absence is not itself a failure: Coinbase emits no candle for a bucket that
+/// Absence is not itself a failure: Rithmic emits no candle for a bucket that
 /// has not traded, and this gate has no independent trade feed with which to
 /// prove otherwise. Continuity and bounded publication liveness remain asserted;
 /// value/coverage qualification needs a separate authoritative oracle.
@@ -481,123 +491,7 @@ fn carries_the_open_candle(fold: &SeriesFold) -> bool {
         .is_some_and(|bar| bar.exchange_timestamp_seconds >= open_bucket)
 }
 
-#[derive(Deserialize)]
-struct IndependentCandles {
-    candles: Vec<IndependentCandle>,
-}
-
-#[derive(Deserialize)]
-struct IndependentCandle {
-    start: String,
-    high: String,
-    low: String,
-    open: String,
-    close: String,
-    volume: String,
-}
-
 /// Parses a provider decimal without sharing the adapter's decoder.
-fn independent_fixed(source: &str, scale: u32) -> Result<i64, String> {
-    let (negative, unsigned) = source
-        .strip_prefix('-')
-        .map_or((false, source), |value| (true, value));
-    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-    if source.is_empty()
-        || source.len() > 40
-        || unsigned.matches('.').count() > 1
-        || (integer.is_empty() && fraction.is_empty())
-        || !integer.bytes().all(|byte| byte.is_ascii_digit())
-        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err("independent candle contains an invalid decimal".to_string());
-    }
-    let scale = usize::try_from(scale)
-        .ok()
-        .filter(|scale| *scale <= 18)
-        .ok_or_else(|| "independent candle scale is invalid".to_string())?;
-    let mut magnitude = 0_i128;
-    for byte in integer
-        .bytes()
-        .chain(fraction.bytes().take(scale))
-        .chain(std::iter::repeat_n(
-            b'0',
-            scale.saturating_sub(fraction.len()),
-        ))
-    {
-        magnitude = magnitude
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(i128::from(byte - b'0')))
-            .ok_or_else(|| "independent candle decimal overflowed".to_string())?;
-    }
-    if fraction
-        .as_bytes()
-        .get(scale)
-        .is_some_and(|digit| *digit >= b'5')
-    {
-        magnitude = magnitude
-            .checked_add(1)
-            .ok_or_else(|| "independent candle decimal overflowed".to_string())?;
-    }
-    i64::try_from(if negative { -magnitude } else { magnitude })
-        .map_err(|_| "independent candle decimal overflowed".to_string())
-}
-
-fn independent_coinbase_candles(
-    symbol: &str,
-    start: i64,
-    end: i64,
-    price_scale: u32,
-    quantity_scale: u32,
-) -> Result<BTreeMap<i64, MarketBar>, String> {
-    let url = format!(
-        "https://api.coinbase.com/api/v3/brokerage/market/products/{symbol}/candles?start={start}&end={end}&granularity=ONE_MINUTE&limit=350"
-    );
-    let mut response = ureq::get(&url)
-        .header("Accept", "application/json")
-        .header("Cache-Control", "no-cache")
-        .call()
-        .map_err(|error| format!("independent Coinbase request failed: {error}"))?;
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(512 * 1_024)
-        .read_to_vec()
-        .map_err(|error| format!("independent Coinbase response failed: {error}"))?;
-    let parsed: IndependentCandles = serde_json::from_slice(&body)
-        .map_err(|_| "independent Coinbase response is malformed".to_string())?;
-    if parsed.candles.len() > 350 {
-        return Err("independent Coinbase response exceeds its request bound".to_string());
-    }
-    let mut bars = BTreeMap::new();
-    for candle in parsed.candles {
-        let timestamp = candle
-            .start
-            .parse::<i64>()
-            .ok()
-            .filter(|timestamp| *timestamp >= 0 && *timestamp % 60 == 0)
-            .ok_or_else(|| "independent candle timestamp is invalid".to_string())?;
-        let bar = MarketBar {
-            source_sequence: u64::try_from(timestamp.div_euclid(60))
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| "independent candle sequence overflowed".to_string())?,
-            exchange_timestamp_seconds: timestamp,
-            exchange_timestamp_unix_nanos: timestamp
-                .checked_mul(1_000_000_000)
-                .ok_or_else(|| "independent candle timestamp overflowed".to_string())?,
-            open: independent_fixed(&candle.open, price_scale)?,
-            high: independent_fixed(&candle.high, price_scale)?,
-            low: independent_fixed(&candle.low, price_scale)?,
-            close: independent_fixed(&candle.close, price_scale)?,
-            volume: independent_fixed(&candle.volume, quantity_scale)?,
-        };
-        if bars.insert(timestamp, bar).is_some() {
-            return Err("independent Coinbase response contains a duplicate candle".to_string());
-        }
-    }
-    Ok(bars)
-}
-
 fn open_bucket(interval_seconds: i64) -> Option<i64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -625,24 +519,57 @@ fn absorb(fold: &mut SeriesFold, event: envelope::Payload) {
                     .unwrap_or_else(|error| panic!("{error}"));
             }
         }
+        envelope::Payload::OrderFlowUpdate(update)
+            if update.generation == fold.generation
+                && update.trade.is_some()
+                && update
+                    .series
+                    .as_ref()
+                    .is_some_and(|series| series.instrument_id == fold.instrument_id) =>
+        {
+            fold.trades += 1;
+            fold.last_publication = Instant::now();
+        }
         _ => {}
     }
 }
 
 /// Closes out one demand generation, folding its counts into the totals.
-fn retire(fold: &SeriesFold, snapshots: &mut u64, updates: &mut u64) {
+fn retire(
+    fold: &SeriesFold,
+    symbol: &'static str,
+    anchor_flowed: bool,
+    snapshots: &mut u64,
+    updates: &mut u64,
+    trades: &mut u64,
+    symbol_live: &mut BTreeMap<&'static str, u64>,
+) {
     // Every selection must have streamed on its own, not merely inherited the
     // previous one's traffic. This is what "switching still leaves a live
-    // chart" means. The final generation is exempt when the soak window closed
+    // chart" means. Either candle tails or order-flow trades prove it: both
+    // ride the live feed for this symbol on this generation, and candle-push
+    // cadence is venue-controlled (slow spot markets can go a full window
+    // without a revise). When the selection itself saw nothing but the
+    // anchor streamed in the same window, the shared worker, session, and
+    // publish path are proven live and the venue simply had nothing to say
+    // for this symbol; when the anchor is silent too the engine stalled, and
+    // that fails. The final generation is exempt when the soak window closed
     // on it before a trade could plausibly arrive.
+    let live = fold.updates + fold.trades;
     assert!(
-        fold.updates > 0 || fold.started.elapsed() < SETTLE,
-        "generation {} on {}s ended with {} bars but never streamed a live update in {:?}",
+        live > 0 || anchor_flowed || fold.started.elapsed() < SETTLE,
+        "generation {} on {}s ended with {} bars and a silent anchor after {:?}",
         fold.generation,
         fold.interval_seconds,
         fold.bars.len(),
         fold.started.elapsed()
     );
+    if live == 0 && anchor_flowed {
+        eprintln!(
+            "generation {} on {}s saw no venue activity for {symbol}; anchor live",
+            fold.generation, fold.interval_seconds
+        );
+    }
     if fold.started.elapsed() >= SETTLE
         && fold
             .initial_open_bucket
@@ -658,6 +585,8 @@ fn retire(fold: &SeriesFold, snapshots: &mut u64, updates: &mut u64) {
     }
     *snapshots += fold.snapshots;
     *updates += fold.updates;
+    *trades += fold.trades;
+    *symbol_live.entry(symbol).or_insert(0) += live;
 }
 
 /// The two properties that must hold on every poll of a healthy feed.
@@ -820,6 +749,10 @@ struct Gate {
     provider: &'static str,
     symbols: &'static [&'static str],
     timeframes: &'static [u32],
+    /// Liquid symbol held by the anchor consumer for the whole soak, if the
+    /// provider multiplexes. Must be `symbols[0]`: the anchor rides the first
+    /// install, so it never disturbs the switch schedule.
+    anchor: Option<&'static str>,
 }
 
 /// What one soak observed, for the closing report.
@@ -828,6 +761,7 @@ struct GateTotals {
     switches: u32,
     snapshots: u64,
     updates: u64,
+    trades: u64,
 }
 
 /// Starts the resident engine this gate drives.
@@ -843,7 +777,97 @@ fn start_gate_service(gate: &Gate) -> MarketService {
     service
         .register_consumer(CLIENT_ID, 1, CONSUMER_ID)
         .expect("consumer registers");
+    if gate.anchor.is_some() {
+        service
+            .register_consumer(CLIENT_ID, 1, ANCHOR_CONSUMER_ID)
+            .expect("anchor consumer registers");
+    }
     service
+}
+
+/// Switches the gate to the next symbol on its own generation.
+///
+/// A symbol change must reselect the live feed. If it does not, the
+/// replacement series receives the previous symbol's trades or nothing at
+/// all, and `start_series` times out here.
+fn switch_symbol(
+    service: &MarketService,
+    gate: &Gate,
+    generation: u64,
+    symbol_index: usize,
+    started: Instant,
+    now: Instant,
+) -> (usize, InstallProviderInstrument, Instant, Instant) {
+    let symbol_index = (symbol_index + 1) % gate.symbols.len();
+    eprintln!(
+        "[{:>4}s] symbol -> {} (generation {generation})",
+        started.elapsed().as_secs(),
+        gate.symbols[symbol_index]
+    );
+    let instrument = install_symbol(
+        service,
+        gate.provider,
+        gate.symbols[symbol_index],
+        generation,
+    );
+    (
+        symbol_index,
+        instrument,
+        now + SYMBOL_SWITCH,
+        now + TIMEFRAME_SWITCH,
+    )
+}
+
+/// Demands the liquid anchor series on its own consumer for the whole soak.
+///
+/// The anchor rides the first install and never switches, so it adds no
+/// schedule of its own; multiplexed venues stream it beside every selection.
+fn demand_anchor(
+    service: &MarketService,
+    gate: &Gate,
+    instrument: &InstallProviderInstrument,
+) -> Option<SeriesFold> {
+    gate.anchor.map(|_| {
+        let series = provider_series(gate.provider, instrument, gate.timeframes[0]);
+        service
+            .set_demand(CLIENT_ID, ANCHOR_CONSUMER_ID, 1, &series)
+            .expect("anchor demand is accepted");
+        SeriesFold::new(
+            1,
+            i64::from(gate.timeframes[0]),
+            instrument.instrument_id.clone(),
+        )
+    })
+}
+
+/// Polls both gate consumers once, folding every publication and checking the
+/// anchor stays canonical. The anchor shares the worker, session, and publish
+/// path, so its contiguity proof covers the machinery the switched series
+/// relies on in quiet windows.
+fn drain_gate_events(
+    service: &MarketService,
+    fold: &mut SeriesFold,
+    anchor: Option<&mut SeriesFold>,
+    symbol: &str,
+) {
+    while let Some(event) = service
+        .poll_event(CLIENT_ID, CONSUMER_ID)
+        .expect("market poll succeeds")
+    {
+        absorb(fold, event);
+    }
+    if let Some(anchor_fold) = anchor {
+        while let Some(event) = service
+            .poll_event(CLIENT_ID, ANCHOR_CONSUMER_ID)
+            .expect("anchor poll succeeds")
+        {
+            absorb(anchor_fold, event);
+        }
+        anchor_fold
+            .assert_contiguous()
+            .unwrap_or_else(|error| panic!("anchor series is not canonical: {error}"));
+    }
+    assert_streaming(fold, symbol);
 }
 
 /// Drives one venue for the soak window, switching timeframe and symbol on a
@@ -876,20 +900,28 @@ fn run_gate(gate: &Gate) {
         generation,
     );
 
+    // The anchor holds the liquid series for the whole soak on its own
+    // consumer, so a quiet window on a slow market can be told apart from a
+    // stalled engine. It rides the first install and never switches.
+    let mut anchor = demand_anchor(&service, gate, &instrument);
+    // Live publications each selection streamed on its own, keyed by symbol:
+    // a subscription that never delivers anywhere in the soak is a broken
+    // feed, not a quiet venue, no matter what any single window saw.
+    let mut symbol_live: BTreeMap<&'static str, u64> = BTreeMap::new();
+    let mut anchor_baseline = live_count(anchor.as_ref());
+
     let started = Instant::now();
     let mut next_timeframe_switch = started + TIMEFRAME_SWITCH;
     let mut next_symbol_switch = started + SYMBOL_SWITCH;
     let mut totals = GateTotals::default();
 
     while started.elapsed() < soak {
-        while let Some(event) = service
-            .poll_event(CLIENT_ID, CONSUMER_ID)
-            .expect("market poll succeeds")
-        {
-            absorb(&mut fold, event);
-        }
-        assert_streaming(&fold, &instrument.provider_symbol);
-
+        drain_gate_events(
+            &service,
+            &mut fold,
+            anchor.as_mut(),
+            &instrument.provider_symbol,
+        );
         let now = Instant::now();
         let symbol_due = now >= next_symbol_switch;
         let timeframe_due = now >= next_timeframe_switch;
@@ -898,26 +930,26 @@ fn run_gate(gate: &Gate) {
             continue;
         }
         generation += 1;
-        retire(&fold, &mut totals.snapshots, &mut totals.updates);
+        let anchor_now = live_count(anchor.as_ref());
+        let anchor_flowed = anchor_now > anchor_baseline;
+        anchor_baseline = anchor_now;
+        retire(
+            &fold,
+            gate.symbols[symbol_index],
+            anchor_flowed,
+            &mut totals.snapshots,
+            &mut totals.updates,
+            &mut totals.trades,
+            &mut symbol_live,
+        );
         totals.switches += 1;
         if symbol_due {
-            next_symbol_switch = now + SYMBOL_SWITCH;
-            next_timeframe_switch = now + TIMEFRAME_SWITCH;
-            symbol_index = (symbol_index + 1) % gate.symbols.len();
-            eprintln!(
-                "[{:>4}s] symbol -> {} (generation {generation})",
-                started.elapsed().as_secs(),
-                gate.symbols[symbol_index]
-            );
-            // A symbol change must reselect the live feed. If it does not, the
-            // replacement series receives the previous symbol's trades or
-            // nothing at all, and `start_series` times out here.
-            instrument = install_symbol(
-                &service,
-                gate.provider,
-                gate.symbols[symbol_index],
-                generation,
-            );
+            (
+                symbol_index,
+                instrument,
+                next_symbol_switch,
+                next_timeframe_switch,
+            ) = switch_symbol(&service, gate, generation, symbol_index, started, now);
         } else {
             next_timeframe_switch = now + TIMEFRAME_SWITCH;
             timeframe_index = (timeframe_index + 1) % gate.timeframes.len();
@@ -937,22 +969,43 @@ fn run_gate(gate: &Gate) {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    retire(&fold, &mut totals.snapshots, &mut totals.updates);
+    let anchor_now = live_count(anchor.as_ref());
+    retire(
+        &fold,
+        gate.symbols[symbol_index],
+        anchor_now > anchor_baseline,
+        &mut totals.snapshots,
+        &mut totals.updates,
+        &mut totals.trades,
+        &mut symbol_live,
+    );
     service
         .shutdown(Duration::from_secs(10))
         .expect("engine shuts down");
-    close_gate(gate, soak, started.elapsed(), &totals);
+    close_gate(gate, soak, started.elapsed(), &totals, &symbol_live);
+}
+
+/// Live candle tails plus order-flow trades one fold has seen.
+fn live_count(fold: Option<&SeriesFold>) -> u64 {
+    fold.map_or(0, |fold| fold.updates + fold.trades)
 }
 
 /// Reports what the soak did and records the gate's outcome.
-fn close_gate(gate: &Gate, soak: Duration, elapsed: Duration, totals: &GateTotals) {
+fn close_gate(
+    gate: &Gate,
+    soak: Duration,
+    elapsed: Duration,
+    totals: &GateTotals,
+    symbol_live: &BTreeMap<&'static str, u64>,
+) {
     let GateTotals {
         switches,
         snapshots,
         updates,
+        trades,
     } = *totals;
     eprintln!(
-        "soaked {elapsed:?} on {}: {switches} switches, {snapshots} snapshots, {updates} updates",
+        "soaked {elapsed:?} on {}: {switches} switches, {snapshots} snapshots, {updates} updates, {trades} trades",
         gate.provider
     );
     // One switch is lost to the final partial window, so the floor is derived
@@ -964,215 +1017,22 @@ fn close_gate(gate: &Gate, soak: Duration, elapsed: Duration, totals: &GateTotal
         switches >= expected_switches,
         "the soak switched {switches} times, expected at least {expected_switches}"
     );
+    // A subscription that never delivered in any window is a broken feed,
+    // not a quiet venue: every gate symbol must have streamed at least one
+    // live candle tail or order-flow trade somewhere in the soak.
+    for symbol in gate.symbols {
+        assert!(
+            symbol_live.get(symbol).is_some_and(|live| *live > 0),
+            "{symbol} never streamed a live publication in the whole soak"
+        );
+    }
     record_gate(
         gate.provider,
         GateOutcome::Passed,
         GateCompletion::Completed,
-        &format!("{switches} switches, {snapshots} snapshots, {updates} updates"),
+        &format!("{switches} switches, {snapshots} snapshots, {updates} updates, {trades} trades"),
     );
 }
-
-#[test]
-#[ignore = "drives the live Coinbase venue for several minutes"]
-fn live_coinbase_streams_across_timeframe_and_symbol_switches() {
-    run_gate(&Gate {
-        provider: "coinbase",
-        symbols: &SYMBOLS,
-        timeframes: &TIMEFRAMES,
-    });
-}
-
-#[test]
-#[ignore = "drives the live Coinbase monthly history/live handoff"]
-fn live_coinbase_monthly_reaches_a_forming_update() {
-    let gate = Gate {
-        provider: "coinbase",
-        symbols: &SYMBOLS,
-        timeframes: &TIMEFRAMES,
-    };
-    let service = start_gate_service(&gate);
-    let instrument = install_symbol(&service, "coinbase", "BTC-USD", 1);
-    let generation = 1;
-    service
-        .set_demand(
-            CLIENT_ID,
-            CONSUMER_ID,
-            generation,
-            &SeriesKey {
-                provider: "coinbase".to_string(),
-                instrument_id: instrument.instrument_id,
-                cadence_value: 1,
-                definition_revision: 1,
-                entitlement_id: instrument.entitlement_id,
-                cadence: SeriesCadence::CalendarMonths as i32,
-            },
-        )
-        .expect("monthly demand is accepted");
-
-    let interval = CoinbaseInterval::Month1;
-    let deadline = Instant::now() + HISTORY_DEADLINE;
-    let mut snapshot = false;
-    let mut readiness = false;
-    let mut update = false;
-    while Instant::now() < deadline && !(snapshot && readiness && update) {
-        if let Some(event) = service
-            .poll_event(CLIENT_ID, CONSUMER_ID)
-            .expect("monthly market poll succeeds")
-        {
-            if let Some(failure) = terminal_failure(&event) {
-                panic!("monthly stream failed terminally: {failure}");
-            }
-            match event {
-                envelope::Payload::SeriesSnapshot(series) if series.generation == generation => {
-                    for pair in series.bars.windows(2) {
-                        assert_eq!(pair[0].source_sequence + 1, pair[1].source_sequence);
-                        assert_eq!(
-                            interval
-                                .shift_bucket(pair[0].exchange_timestamp_seconds, 1)
-                                .expect("monthly bucket advances"),
-                            pair[1].exchange_timestamp_seconds
-                        );
-                    }
-                    snapshot = !series.bars.is_empty();
-                }
-                envelope::Payload::SeriesState(state)
-                    if state.generation == generation
-                        && state.state == SeriesLoadState::Live as i32 =>
-                {
-                    readiness = true;
-                }
-                envelope::Payload::SeriesState(state)
-                    if state.generation == generation
-                        && state.state == SeriesLoadState::Partial as i32
-                        && state
-                            .detail
-                            .as_deref()
-                            .is_some_and(|detail| detail.contains("provisional")) =>
-                {
-                    // Coinbase exposes no trade watermark for its open candle.
-                    // When history supplies that candle, the only truthful
-                    // readiness is explicit provisional coverage until the
-                    // authoritative close replaces it.
-                    readiness = true;
-                }
-                envelope::Payload::SeriesUpdate(tail) if tail.generation == generation => {
-                    let bar = tail.bar.expect("monthly update carries a bar");
-                    assert_eq!(
-                        interval
-                            .bucket_start(bar.exchange_timestamp_seconds)
-                            .expect("monthly update is bucketed"),
-                        bar.exchange_timestamp_seconds
-                    );
-                    update = true;
-                }
-                _ => {}
-            }
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(
-        snapshot,
-        "monthly demand never produced a covering snapshot"
-    );
-    assert!(
-        readiness,
-        "monthly demand reported neither authoritative live nor explicit provisional readiness"
-    );
-    assert!(update, "monthly demand never produced a forming update");
-    service
-        .shutdown(Duration::from_secs(10))
-        .expect("engine shuts down");
-}
-
-#[test]
-#[ignore = "compares live engine candles with an independently decoded Coinbase response"]
-fn live_coinbase_closed_ohlcv_matches_independent_response() {
-    let gate = Gate {
-        provider: "coinbase",
-        symbols: &SYMBOLS,
-        timeframes: &TIMEFRAMES,
-    };
-    let service = start_gate_service(&gate);
-    let instrument = install_symbol(&service, "coinbase", "BTC-USD", 1);
-    let mut fold = start_series(&service, "coinbase", &instrument, 60, 1);
-
-    // Give a local-cache bootstrap time to be replaced by the provider page.
-    // Every publication is folded exactly as the desktop folds it.
-    let settle_deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < settle_deadline && fold.snapshots < 2 {
-        if let Some(event) = service
-            .poll_event(CLIENT_ID, CONSUMER_ID)
-            .expect("market poll succeeds")
-        {
-            absorb(&mut fold, event);
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-
-    let open_minute = open_bucket(60).expect("wall clock is available");
-    let settled_before = open_minute.saturating_sub(60);
-    let mut engine_bars = fold
-        .bars
-        .values()
-        .filter(|bar| bar.exchange_timestamp_seconds < settled_before)
-        .rev()
-        .take(OHLCV_COMPARISON_BARS)
-        .copied()
-        .collect::<Vec<_>>();
-    engine_bars.reverse();
-    assert_eq!(
-        engine_bars.len(),
-        OHLCV_COMPARISON_BARS,
-        "engine did not expose enough settled candles for comparison"
-    );
-    let first = engine_bars
-        .first()
-        .expect("comparison has a first candle")
-        .exchange_timestamp_seconds;
-    let last = engine_bars
-        .last()
-        .expect("comparison has a last candle")
-        .exchange_timestamp_seconds;
-    let oracle = independent_coinbase_candles(
-        &instrument.provider_symbol,
-        first,
-        last,
-        instrument.price_scale,
-        instrument.quantity_scale,
-    )
-    .expect("independent Coinbase candles load");
-
-    for engine in &engine_bars {
-        let independent = oracle
-            .get(&engine.exchange_timestamp_seconds)
-            .unwrap_or_else(|| {
-                panic!(
-                    "independent response omitted settled candle {}",
-                    engine.exchange_timestamp_seconds
-                )
-            });
-        assert_eq!(
-            engine, independent,
-            "OHLCV differs at settled candle {}",
-            engine.exchange_timestamp_seconds
-        );
-    }
-    eprintln!(
-        "independent_ohlcv provider=coinbase instrument={} candles={} first={} last={} price_scale={} quantity_scale={}",
-        instrument.provider_symbol,
-        engine_bars.len(),
-        first,
-        last,
-        instrument.price_scale,
-        instrument.quantity_scale
-    );
-    service
-        .shutdown(Duration::from_secs(10))
-        .expect("engine shuts down");
-}
-
-/// The Rithmic counterpart of the Coinbase gate.
-///
 /// It needs credentials in the native vault and a session the venue will accept,
 /// so it only runs on a credentialed runner:
 ///
@@ -1186,6 +1046,9 @@ fn live_rithmic_streams_across_timeframe_and_instrument_switches() {
         provider: "rithmic",
         symbols: &RITHMIC_SYMBOLS,
         timeframes: &RITHMIC_TIMEFRAMES,
+        // Rithmic selects one product set at a time: a second instrument
+        // would fight the worker for the single session.
+        anchor: None,
     });
 }
 
@@ -1196,3 +1059,26 @@ const RITHMIC_TIMEFRAMES: [u32; 3] = [60, 300, 900];
 /// These are searched through the engine's own catalog, so a rolled contract
 /// resolves to whatever the venue currently lists for the root.
 const RITHMIC_SYMBOLS: [&str; 2] = ["MNQ", "MES"];
+
+/// It needs no credentials: the public feed is unauthenticated, so this gate
+/// runs on any networked runner:
+///
+/// ```text
+/// cargo test -p axiusflow_engine --test live_market_soak -- --ignored --nocapture hyperliquid
+/// ```
+#[test]
+#[ignore = "drives the live Hyperliquid public feed"]
+fn live_hyperliquid_streams_across_markets_and_timeframe_switches() {
+    run_gate(&Gate {
+        provider: "hyperliquid",
+        symbols: &HYPERLIQUID_SYMBOLS,
+        timeframes: &HYPERLIQUID_TIMEFRAMES,
+        anchor: Some("BTC"),
+    });
+}
+
+/// Intervals the Hyperliquid chart cycles through.
+const HYPERLIQUID_TIMEFRAMES: [u32; 3] = [60, 300, 900];
+/// One market per supported category, resolved by exact wire symbol through
+/// the engine's own catalog: core perpetual, spot pair, builder perpetual.
+const HYPERLIQUID_SYMBOLS: [&str; 3] = ["BTC", "PURR/USDC", "xyz:TSLA"];

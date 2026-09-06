@@ -843,8 +843,8 @@ mod tests {
 
     fn series() -> SeriesKey {
         SeriesKey {
-            provider: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            provider: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
             cadence_value: 60,
             definition_revision: 1,
             entitlement_id: "crypto_public_realtime".to_string(),
@@ -854,13 +854,13 @@ mod tests {
 
     fn instrument() -> InstallProviderInstrument {
         InstallProviderInstrument {
-            provider: "coinbase".to_string(),
+            provider: "rithmic".to_string(),
             session_generation: 1,
             selection_generation: 1,
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
             provider_symbol: "BTC-USD".to_string(),
             display_symbol: "BTC/USD".to_string(),
-            venue_id: "coinbase".to_string(),
+            venue_id: "rithmic".to_string(),
             price_scale: 2,
             quantity_scale: 8,
             entitlement_id: "crypto_public_realtime".to_string(),
@@ -883,7 +883,11 @@ mod tests {
             venue_id: provider.to_string(),
             price_scale: 2,
             quantity_scale: 8,
-            entitlement_id: format!("{provider}:{instrument_id}"),
+            entitlement_id: if provider == "hyperliquid" {
+                "hyperliquid-public".to_string()
+            } else {
+                format!("{provider}:{instrument_id}")
+            },
         }
     }
 
@@ -942,10 +946,16 @@ mod tests {
     }
 
     fn configure_generation_ordered_restore(supervisor: &mut EngineSupervisor) {
-        let coinbase_old_z = provider_instrument("coinbase", "z-contract", 4, 1);
-        let coinbase_old_a = provider_instrument("coinbase", "a-contract", 4, 2);
-        let coinbase_current_z = provider_instrument("coinbase", "z-contract", 5, 1);
-        let coinbase_current_a = provider_instrument("coinbase", "a-contract", 5, 2);
+        // Two providers restore together: the multiplexed Hyperliquid catalog
+        // accumulates installed instruments across sessions, while the
+        // single-selection Rithmic session keeps only its latest install.
+        let hyperliquid_old_z = provider_instrument("hyperliquid", "hyperliquid:perp:BTC", 4, 1);
+        let hyperliquid_old_a =
+            provider_instrument("hyperliquid", "hyperliquid:spot:1:BTC/USDC", 4, 2);
+        let hyperliquid_current_z =
+            provider_instrument("hyperliquid", "hyperliquid:perp:BTC", 5, 1);
+        let hyperliquid_current_a =
+            provider_instrument("hyperliquid", "hyperliquid:spot:1:BTC/USDC", 5, 2);
         let rithmic_old_z = provider_instrument("rithmic", "z-obsolete", 7, 1);
         let rithmic_old_a = provider_instrument("rithmic", "a-obsolete", 7, 2);
         let rithmic_new_z = provider_instrument("rithmic", "z-replaced-session", 8, 1);
@@ -956,22 +966,22 @@ mod tests {
                 .expect("register restore consumer");
         }
         supervisor
-            .install_provider_instrument(coinbase_old_z)
+            .install_provider_instrument(hyperliquid_old_z)
             .expect("install first concurrent instrument");
         supervisor
-            .set_series_demand(11, 1, provider_series(&coinbase_current_z, 60))
+            .set_series_demand(11, 1, provider_series(&hyperliquid_current_z, 60))
             .expect("set first concurrent demand");
         supervisor
-            .install_provider_instrument(coinbase_old_a)
+            .install_provider_instrument(hyperliquid_old_a)
             .expect("install second concurrent instrument");
         supervisor
-            .set_series_demand(12, 1, provider_series(&coinbase_current_a, 300))
+            .set_series_demand(12, 1, provider_series(&hyperliquid_current_a, 300))
             .expect("set second concurrent demand");
         supervisor
-            .install_provider_instrument(coinbase_current_z)
+            .install_provider_instrument(hyperliquid_current_z)
             .expect("advance concurrent provider session");
         supervisor
-            .install_provider_instrument(coinbase_current_a)
+            .install_provider_instrument(hyperliquid_current_a)
             .expect("restore second current-session instrument");
         for instrument in [rithmic_old_z, rithmic_old_a] {
             supervisor
@@ -1020,8 +1030,8 @@ mod tests {
         assert_eq!(
             installed,
             vec![
-                ("coinbase", 5, 1, "z-contract"),
-                ("coinbase", 5, 2, "a-contract"),
+                ("hyperliquid", 5, 1, "hyperliquid:perp:BTC"),
+                ("hyperliquid", 5, 2, "hyperliquid:spot:1:BTC/USDC"),
                 ("rithmic", 8, 2, "a-current"),
             ]
         );
@@ -1042,8 +1052,8 @@ mod tests {
         assert_eq!(
             demands,
             vec![
-                (11, 1, "coinbase", "z-contract"),
-                (12, 1, "coinbase", "a-contract"),
+                (11, 1, "hyperliquid", "hyperliquid:perp:BTC"),
+                (12, 1, "hyperliquid", "hyperliquid:spot:1:BTC/USDC"),
                 (13, 4, "rithmic", "a-current"),
                 (14, 9, "rithmic", "a-current"),
             ]

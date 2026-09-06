@@ -557,7 +557,7 @@ pub(super) fn header_controls(
                     enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 },
                 provider: state.provider,
-                catalog_exchange: assets::ExchangeLogo::Coinbase,
+                catalog_exchange: assets::ExchangeLogo::Rithmic,
                 menu: InstrumentSelectorMenu {
                     exchange_open: false,
                     keyboard_selection: 0,
@@ -1109,8 +1109,8 @@ pub(super) fn connection_presentation(
     delayed: bool,
 ) -> (String, ConnectionColor) {
     let provider = match provider {
-        TerminalProvider::Coinbase => "Coinbase",
         TerminalProvider::Rithmic => "Test",
+        TerminalProvider::Hyperliquid => "Public",
     };
     // Provider connectivity outranks chart readiness. Buffered publications and
     // history transitions can continue while the transport is offline; letting

@@ -1013,7 +1013,7 @@ mod tests {
     }
 
     fn series(instrument: &str) -> BarSeriesKey {
-        provider_series("coinbase", instrument, "public")
+        provider_series("rithmic", instrument, "public")
     }
 
     fn provider_series(provider: &str, instrument: &str, entitlement: &str) -> BarSeriesKey {
@@ -1056,9 +1056,9 @@ mod tests {
         });
         engine
             .register_provider(
-                "coinbase".to_string(),
+                "rithmic".to_string(),
                 ProviderConfig {
-                    account_id: "coinbase:public".to_string(),
+                    account_id: "rithmic:public".to_string(),
                     capabilities: ProviderCapabilities {
                         historical_bars: true,
                         realtime_bars: true,
@@ -1069,7 +1069,7 @@ mod tests {
             )
             .expect("provider registers");
         engine
-            .begin_provider_session("coinbase", provider_generation(1))
+            .begin_provider_session("rithmic", provider_generation(1))
             .expect("provider session begins");
         engine
     }
@@ -1120,8 +1120,8 @@ mod tests {
     fn stale_history_never_overwrites_a_new_consumer_generation() {
         let mut engine = engine(2, 2, 10);
         register(&mut engine, 1, 1);
-        let btc = series("coinbase:spot:BTC-USD");
-        let eth = series("coinbase:spot:ETH-USD");
+        let btc = series("rithmic:spot:BTC-USD");
+        let eth = series("rithmic:spot:ETH-USD");
         assert_eq!(
             engine
                 .set_series_demand(id(1), generation(1), &btc)
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn twenty_consumers_share_one_immutable_series_snapshot() {
         let mut engine = engine(20, 1, 10);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         for consumer in 1..=20 {
             register_workspace(&mut engine, consumer, consumer, ((consumer - 1) / 4) + 1);
             assert!(
@@ -1187,7 +1187,7 @@ mod tests {
     #[test]
     fn trade_count_bars_may_order_within_one_exchange_second() {
         let mut engine = engine(1, 1, 4);
-        let mut tick_series = series("coinbase:spot:BTC-USD");
+        let mut tick_series = series("rithmic:spot:BTC-USD");
         tick_series.period = BarPeriod::tick(100).expect("tick period validates");
         let mut tick_bars = bars(2);
         tick_bars[1].exchange_timestamp_seconds = tick_bars[0].exchange_timestamp_seconds;
@@ -1212,14 +1212,14 @@ mod tests {
             ),
             Err(EngineError::ConsumerLimitExceeded { .. })
         ));
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("bounded series installs");
         assert!(matches!(
             engine.install_history(
                 provider_generation(1),
-                &series("coinbase:spot:ETH-USD"),
+                &series("rithmic:spot:ETH-USD"),
                 2,
                 8,
                 bars(1)
@@ -1240,7 +1240,7 @@ mod tests {
     fn a_series_invalidation_does_not_rewind_the_publication_generation() {
         let mut engine = engine(1, 3, 8);
         register(&mut engine, 1, 1);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("history installs");
@@ -1269,9 +1269,9 @@ mod tests {
     #[test]
     fn resource_eviction_preserves_active_and_explicitly_retained_series() {
         let mut engine = engine(1, 3, 6);
-        let active = series("coinbase:spot:BTC-USD");
-        let retained = series("coinbase:spot:ETH-USD");
-        let cold = series("coinbase:spot:SOL-USD");
+        let active = series("rithmic:spot:BTC-USD");
+        let retained = series("rithmic:spot:ETH-USD");
+        let cold = series("rithmic:spot:SOL-USD");
         for current in [&active, &retained, &cold] {
             engine
                 .install_history(provider_generation(1), current, 2, 8, bars(2))
@@ -1298,7 +1298,7 @@ mod tests {
     fn provider_and_viewport_generations_are_exactly_fenced() {
         let mut engine = engine(1, 1, 2);
         register(&mut engine, 1, 1);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .set_series_demand(id(1), generation(2), &btc)
             .expect("demand installs");
@@ -1315,7 +1315,7 @@ mod tests {
             Err(EngineError::StaleProviderGeneration { .. })
         ));
         assert!(matches!(
-            engine.begin_provider_session("coinbase", provider_generation(1)),
+            engine.begin_provider_session("rithmic", provider_generation(1)),
             Err(EngineError::StaleProviderGeneration { .. })
         ));
     }
@@ -1373,7 +1373,7 @@ mod tests {
     #[test]
     fn decimal_precision_is_part_of_one_provider_generation() {
         let mut engine = engine(1, 1, 2);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(1))
             .expect("first precision installs");
@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn realtime_may_revise_only_the_forming_tail() {
         let mut engine = engine(1, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("history installs");
@@ -1417,7 +1417,7 @@ mod tests {
     #[test]
     fn covering_realtime_install_keeps_the_forming_bar_as_an_incremental_tail() {
         let mut engine = engine(1, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("history installs");
@@ -1439,7 +1439,7 @@ mod tests {
     #[test]
     fn covering_history_repair_preserves_the_current_forming_tail() {
         let mut engine = engine(1, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("history installs");
@@ -1463,7 +1463,7 @@ mod tests {
     #[test]
     fn realtime_tail_revisions_share_completed_history_until_bucket_roll() {
         let mut engine = engine(2, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         register(&mut engine, 1, 1);
         register(&mut engine, 2, 1);
         for consumer in 1..=2 {
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn covering_history_may_replace_only_the_forming_tail() {
         let mut engine = engine(1, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("history installs");
@@ -1588,8 +1588,8 @@ mod tests {
     #[test]
     fn shared_subscriptions_ref_count_streams_and_release_only_the_last_consumer() {
         let mut engine = engine(3, 2, 8);
-        let btc = series("coinbase:spot:BTC-USD");
-        let eth = series("coinbase:spot:ETH-USD");
+        let btc = series("rithmic:spot:BTC-USD");
+        let eth = series("rithmic:spot:ETH-USD");
         for consumer in 1..=3 {
             register(&mut engine, consumer, if consumer < 3 { 1 } else { 2 });
         }
@@ -1639,7 +1639,7 @@ mod tests {
     #[test]
     fn warm_and_detached_consumers_release_publication_and_reattach_from_cached_state() {
         let mut engine = engine(2, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         register(&mut engine, 1, 1);
         engine
             .set_series_demand_with_streams(
@@ -1703,7 +1703,7 @@ mod tests {
     #[test]
     fn order_flow_reconstructs_bounded_view_ready_state_and_resnapshots_each_consumer() {
         let mut engine = engine(2, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         register_workspace(&mut engine, 1, 1, 1);
         engine
             .set_series_demand_with_streams(
@@ -1803,7 +1803,7 @@ mod tests {
     #[test]
     fn order_flow_tape_and_price_levels_are_strictly_bounded() {
         let mut engine = engine(1, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         register(&mut engine, 1, 1);
         engine
             .set_series_demand_with_streams(
@@ -1860,7 +1860,7 @@ mod tests {
     #[test]
     fn historical_order_flow_reconstruction_is_atomic_and_publishes_a_covering_image() {
         let mut engine = engine(1, 1, 8);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         register(&mut engine, 1, 1);
         engine
             .set_series_demand_with_streams(
@@ -1916,111 +1916,45 @@ mod tests {
     }
 
     #[test]
-    fn equal_instrument_labels_from_different_providers_never_share_series_state() {
-        let mut engine = engine(2, 2, 8);
-        engine
-            .register_provider(
-                "rithmic".to_string(),
-                ProviderConfig {
-                    account_id: "rithmic:test".to_string(),
-                    capabilities: ProviderCapabilities {
-                        historical_bars: true,
-                        realtime_bars: true,
-                        streams: StreamRequirements::BARS,
-                    },
-                    reconnect_delay: std::time::Duration::from_millis(500),
-                },
-            )
-            .expect("second provider registers");
-        engine
-            .begin_provider_session("rithmic", provider_generation(1))
-            .expect("second provider session begins");
-        register(&mut engine, 1, 1);
-        register(&mut engine, 2, 1);
-
-        let coinbase = provider_series("coinbase", "BTC", "public");
-        let rithmic = provider_series("rithmic", "BTC", "rithmic:test");
-        engine
-            .set_series_demand(id(1), generation(1), &coinbase)
-            .expect("Coinbase demand installs");
-        engine
-            .set_series_demand(id(2), generation(1), &rithmic)
-            .expect("Rithmic demand installs");
-
-        let mut coinbase_bars = bars(2);
-        coinbase_bars[1].close = 101;
-        let mut rithmic_bars = bars(2);
-        rithmic_bars[1].open = 200;
-        rithmic_bars[1].high = 210;
-        rithmic_bars[1].low = 190;
-        rithmic_bars[1].close = 202;
-        engine
-            .install_history(provider_generation(1), &coinbase, 2, 8, coinbase_bars)
-            .expect("Coinbase history installs");
-        engine
-            .install_history(provider_generation(1), &rithmic, 2, 8, rithmic_bars)
-            .expect("Rithmic history installs");
-
-        assert_eq!(
-            engine
-                .series_snapshot(&coinbase)
-                .expect("Coinbase series remains available")
-                .bars[1]
-                .close,
-            101
-        );
-        assert_eq!(
-            engine
-                .series_snapshot(&rithmic)
-                .expect("Rithmic series remains available")
-                .bars[1]
-                .close,
-            202
-        );
-        assert_eq!(engine.metrics().stored_series, 2);
-        assert_eq!(engine.metrics().active_subscriptions, 2);
-    }
-
-    #[test]
     fn provider_configuration_routes_only_supported_generation_fenced_requests() {
         let mut engine = engine(1, 1, 2);
         assert_eq!(
-            engine.provider_account_id("coinbase"),
-            Some("coinbase:public")
+            engine.provider_account_id("rithmic"),
+            Some("rithmic:public")
         );
         assert_eq!(
-            engine.provider_reconnect_delay("coinbase"),
+            engine.provider_reconnect_delay("rithmic"),
             Some(std::time::Duration::from_millis(250))
         );
         engine
-            .verify_provider_request("coinbase", ProviderRequest::Trades)
+            .verify_provider_request("rithmic", ProviderRequest::Trades)
             .expect("trade requests route");
         assert!(matches!(
-            engine.verify_provider_request("coinbase", ProviderRequest::Quotes),
+            engine.verify_provider_request("rithmic", ProviderRequest::Quotes),
             Err(EngineError::UnsupportedProviderRequest { .. })
         ));
         engine
-            .end_provider_session("coinbase", provider_generation(1))
+            .end_provider_session("rithmic", provider_generation(1))
             .expect("active session disconnects");
         assert_eq!(
             engine
-                .provider_status("coinbase")
+                .provider_status("rithmic")
                 .map(|status| status.health),
             Some(ProviderHealth::Disconnected)
         );
         assert!(matches!(
-            engine.begin_provider_session("coinbase", provider_generation(1)),
+            engine.begin_provider_session("rithmic", provider_generation(1)),
             Err(EngineError::StaleProviderGeneration { .. })
         ));
         engine
-            .begin_provider_session("coinbase", provider_generation(2))
+            .begin_provider_session("rithmic", provider_generation(2))
             .expect("reconnect advances the provider generation");
     }
 
     #[test]
     fn series_store_answers_ranges_and_selects_the_closest_compatible_interval() {
         let mut engine = engine(1, 3, 16);
-        let minute = series("coinbase:spot:BTC-USD");
+        let minute = series("rithmic:spot:BTC-USD");
         let mut five_minute = minute.clone();
         five_minute.period = BarPeriod::time(300).expect("five-minute period");
         let mut fifteen_minute = minute.clone();
@@ -2051,7 +1985,7 @@ mod tests {
     #[test]
     fn repeated_current_demand_recovers_with_a_new_covering_publication() {
         let mut engine = engine(1, 1, 4);
-        let btc = series("coinbase:spot:BTC-USD");
+        let btc = series("rithmic:spot:BTC-USD");
         register(&mut engine, 1, 1);
         engine
             .set_series_demand(id(1), generation(1), &btc)

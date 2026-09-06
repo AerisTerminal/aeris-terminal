@@ -42,8 +42,7 @@ impl RithmicShellState {
 }
 
 pub(crate) const MAXIMUM_SYMBOL_QUERY_BYTES: usize = 64;
-pub(crate) const MAXIMUM_RITHMIC_SYMBOL_RESULTS: usize = 64;
-pub(crate) const MAXIMUM_COINBASE_SYMBOL_RESULTS: usize = 256;
+pub(crate) const MAXIMUM_RITHMIC_SYMBOL_RESULTS: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicSymbolSearchRequest {
@@ -92,9 +91,9 @@ impl Default for RithmicSymbolBrowser {
 }
 
 impl RithmicSymbolBrowser {
-    pub(crate) fn coinbase_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
+    pub(crate) fn rithmic_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
         Self {
-            maximum_results: MAXIMUM_COINBASE_SYMBOL_RESULTS,
+            maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,
             allow_empty_query: true,
             next_search_id: request_id.get(),
             pending_search_id: Some(request_id),
@@ -340,15 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn coinbase_catalog_keeps_empty_query_and_dynamic_result_capacity() {
+    fn rithmic_catalog_keeps_empty_query_and_dynamic_result_capacity() {
         let mut browser =
-            RithmicSymbolBrowser::coinbase_catalog_awaiting_search(NonZeroUsize::MIN, "");
-        assert_eq!(browser.maximum_results(), MAXIMUM_COINBASE_SYMBOL_RESULTS);
+            RithmicSymbolBrowser::rithmic_catalog_awaiting_search(NonZeroUsize::MIN, "");
+        assert_eq!(browser.maximum_results(), MAXIMUM_RITHMIC_SYMBOL_RESULTS);
         assert!(browser.apply_results(
             NonZeroUsize::MIN,
-            vec![result("BTC-USD"); MAXIMUM_COINBASE_SYMBOL_RESULTS],
+            vec![result("BTC-USD"); MAXIMUM_RITHMIC_SYMBOL_RESULTS],
         ));
-        assert_eq!(browser.results().len(), MAXIMUM_COINBASE_SYMBOL_RESULTS);
+        assert_eq!(browser.results().len(), MAXIMUM_RITHMIC_SYMBOL_RESULTS);
         assert!(browser.begin_search("").is_ok());
     }
 
@@ -406,9 +405,9 @@ mod tests {
     }
 
     #[test]
-    fn coinbase_startup_search_and_rapid_typing_dispatch_only_the_latest_query() {
+    fn rithmic_startup_search_and_rapid_typing_dispatch_only_the_latest_query() {
         let startup = NonZeroUsize::MIN;
-        let mut browser = RithmicSymbolBrowser::coinbase_catalog_awaiting_search(startup, "");
+        let mut browser = RithmicSymbolBrowser::rithmic_catalog_awaiting_search(startup, "");
         browser
             .retain_latest_search("B")
             .expect("first typed query validates");
@@ -495,7 +494,7 @@ mod tests {
     #[test]
     fn consuming_completed_search_prevents_reusing_selection_authorization() {
         let mut browser =
-            RithmicSymbolBrowser::coinbase_catalog_awaiting_search(NonZeroUsize::MIN, "");
+            RithmicSymbolBrowser::rithmic_catalog_awaiting_search(NonZeroUsize::MIN, "");
         assert!(browser.apply_results(NonZeroUsize::MIN, vec![result("BTC-USD")]));
         let selection = browser.select(0).expect("catalog result is selectable");
         assert!(browser.confirm_selection(selection.generation));

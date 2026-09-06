@@ -2,8 +2,8 @@
 members = [
     "apps/engine",
     "apps/desktop",
-    "crates/adapters/coinbase_market",
     "crates/adapters/rithmic_protocol",
+    "crates/adapters/hyperliquid_market",
     "crates/application",
     "crates/market_engine",
     "crates/domain/account",
@@ -20,8 +20,6 @@ members = [
     "crates/ui/chart_integration",
     "crates/ui/design_system",
     "crates/ui/terminal_ui",
-    "tools/diagnostics_overhead",
-    "tools/market_data_performance",
     "tools/naming_check",
 ]
 resolver = "3"
@@ -71,9 +69,9 @@ prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
-nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69", version = "=0.1.0" }
-nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69", version = "=0.1.0" }
-nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69", version = "=0.1.0", features = ["gpui-backend"] }
+nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "a21796ffef2c9c3831242e8c355ad4259e10d34c", version = "=0.1.0" }
+nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "a21796ffef2c9c3831242e8c355ad4259e10d34c", version = "=0.1.0" }
+nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "a21796ffef2c9c3831242e8c355ad4259e10d34c", version = "=0.1.0", features = ["gpui-backend"] }
 
 [patch.crates-io]
 # Nucleus Charts pins the published `gpui = 0.2.2`; replace it with the exact same reviewed Git

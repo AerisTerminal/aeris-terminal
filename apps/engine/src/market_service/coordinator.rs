@@ -1,16 +1,15 @@
 use super::{
-    ActiveViewport, Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId,
-    Command, ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter,
-    Duration, EMPTY_REPAIR_RETRY_DELAY, EngineError, EngineResourceMode, FailureStage,
-    HistoryRange, InstallProviderInstrument, Instant, LiveHandoff, MAXIMUM_SERIES, MarketEngine,
-    MarketServiceStatus, MarketStream, Ordering, PendingLiveEdgeRepair,
-    PendingViewportHistoryRetry, PersistenceState, ProviderConnectionState, ProviderDispatch,
+    Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
+    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter, Duration,
+    EMPTY_REPAIR_RETRY_DELAY, EngineError, EngineResourceMode, FailureStage, HistoryRange,
+    HyperliquidLiveHandoff, InstallProviderInstrument, Instant, MAXIMUM_SERIES, MarketEngine,
+    MarketServiceStatus, MarketStream, Ordering, ProviderConnectionState, ProviderDispatch,
     ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
     ProviderRuntimeRegistry, ProviderState, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError,
     Reply, ResourceMode, ResourcePolicyDecision, ResourcePolicyInput, RithmicLiveHandoff,
     StorageRequest, StoredHistory, SyncSender, WarmSeries, authorize_consumer,
-    chart_stream_requirements, decide_resource_policy, envelope, local_history_failure_stage,
-    publish_ready, resource_policy_mode, thread,
+    chart_stream_requirements, decide_resource_policy, envelope, publish_ready,
+    resource_policy_mode, thread,
 };
 
 pub(super) struct OwnedCoordinatorChannels {
@@ -82,14 +81,8 @@ fn run_coordinator(
         consumer_clients: BTreeMap::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeMap::new(),
-        pending_live_edge_repairs: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
         suspended_history: BTreeSet::new(),
-        history_coverage: BTreeMap::new(),
-        viewport_history_ranges: BTreeMap::new(),
-        viewport_history_retries: BTreeMap::new(),
-        active_viewports: BTreeMap::new(),
-        viewport_history_local_inflight: BTreeSet::new(),
         deferred_publications: BTreeSet::new(),
         pending_empty_repairs: BTreeMap::new(),
         empty_repair_retry_at: Instant::now(),
@@ -103,17 +96,19 @@ fn run_coordinator(
         prewarmed: BTreeSet::new(),
         retained_live: BTreeSet::new(),
         warm_rithmic_search_generation: 0,
+        warm_hyperliquid_search_generation: 0,
         events: BTreeMap::new(),
-        live: BTreeMap::new(),
         rithmic_live: BTreeMap::new(),
+        hyperliquid_live: BTreeMap::new(),
         order_books: BTreeMap::new(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
-        realtime_connected: false,
         rithmic_selection: None,
         rithmic_pending_selection: None,
-        realtime_products: BTreeSet::new(),
+        hyperliquid_engaged: false,
+        hyperliquid_demand_dirty: false,
+        hyperliquid_catalog_degraded: None,
     };
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -121,24 +116,15 @@ fn run_coordinator(
             return;
         }
         drain_coordinator_events(&mut coordinator);
-        if coordinator.providers.coinbase_overflowed() {
-            coordinator
-                .realtime_interrupted(FailureStage::Handoff, "Coinbase realtime queue overflowed");
-        }
-        coordinator.publish_live();
         coordinator.publish_rithmic_live();
+        coordinator.publish_hyperliquid_live();
         coordinator.recover_overflowed_series_queues();
         coordinator.flush_attached_events();
         coordinator.flush_rithmic_selection();
-        if !coordinator.live.is_empty() {
-            let _ = coordinator.sync_coinbase_realtime();
-        }
+        coordinator.flush_hyperliquid_demand();
         coordinator.expire_local_history_reads();
         coordinator.retry_pending_empty_repairs();
         coordinator.retry_history();
-        coordinator.retry_viewport_history();
-        coordinator.flush_coinbase_live_edge_repairs();
-        coordinator.recover_stalled_depth_snapshots();
         coordinator.enforce_resource_policy();
         match commands.recv_timeout(COORDINATOR_TICK) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
@@ -161,17 +147,17 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) {
                 break;
             };
             match event {
-                ProviderRuntimeEvent::CoinbaseRealtime(event) => {
-                    coordinator.handle_realtime(event);
-                }
                 ProviderRuntimeEvent::RithmicRealtime(event) => {
                     coordinator.handle_rithmic_realtime(event);
                 }
-                ProviderRuntimeEvent::CoinbaseCatalog(event) => {
-                    coordinator.handle_coinbase_catalog(event);
-                }
                 ProviderRuntimeEvent::RithmicCatalog(event) => {
                     coordinator.handle_rithmic_catalog(event);
+                }
+                ProviderRuntimeEvent::HyperliquidRealtime(event) => {
+                    coordinator.handle_hyperliquid_realtime(event);
+                }
+                ProviderRuntimeEvent::HyperliquidCatalog(event) => {
+                    coordinator.handle_hyperliquid_catalog(event);
                 }
             }
         }
@@ -192,19 +178,10 @@ pub(super) struct Coordinator<'a> {
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     pub(super) history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
-    pub(super) pending_live_edge_repairs:
-        BTreeMap<(BarSeriesKey, ProviderGeneration), PendingLiveEdgeRepair>,
     pub(super) history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
     /// Requests canceled by account/lifecycle suspension. Their response may be
     /// internally valid but belongs to retired market access and cannot install.
     pub(super) suspended_history: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
-    pub(super) history_coverage: BTreeMap<BarSeriesKey, Vec<HistoryRange>>,
-    pub(super) viewport_history_ranges: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
-    pub(super) viewport_history_retries:
-        BTreeMap<(BarSeriesKey, ProviderGeneration), PendingViewportHistoryRetry>,
-    pub(super) active_viewports: BTreeMap<ConsumerId, ActiveViewport>,
-    pub(super) viewport_history_local_inflight:
-        BTreeSet<(BarSeriesKey, ProviderGeneration, HistoryRange)>,
     pub(super) deferred_publications: BTreeSet<BarSeriesKey>,
     pub(super) pending_empty_repairs: BTreeMap<BarSeriesKey, HistoryRange>,
     pub(super) empty_repair_retry_at: Instant,
@@ -218,14 +195,14 @@ pub(super) struct Coordinator<'a> {
     pub(super) prewarmed: BTreeSet<BarSeriesKey>,
     pub(super) retained_live: BTreeSet<BarSeriesKey>,
     pub(super) warm_rithmic_search_generation: u64,
+    pub(super) warm_hyperliquid_search_generation: u64,
     pub(super) events: BTreeMap<ConsumerId, ConsumerEvents>,
-    pub(super) live: BTreeMap<BarSeriesKey, LiveHandoff>,
     pub(super) rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
+    pub(super) hyperliquid_live: BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
     pub(super) catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     pub(super) catalog_sessions: BTreeMap<String, u64>,
     pub(super) catalog_selections: BTreeMap<String, u64>,
-    pub(super) realtime_connected: bool,
     /// The instrument the Rithmic live worker is currently selected on.
     ///
     /// A boolean here could only say "a selection was sent once", so changing
@@ -241,7 +218,19 @@ pub(super) struct Coordinator<'a> {
     /// selections, so a switch that arrives while the channel is full only has
     /// to survive until the next tick rather than fail the demand behind it.
     pub(super) rithmic_pending_selection: Option<InstallProviderInstrument>,
-    pub(super) realtime_products: BTreeSet<String>,
+    /// Whether the Hyperliquid worker currently holds a subscription set.
+    ///
+    /// Unlike the single-instrument Rithmic worker there is no per-symbol
+    /// selection to track: the coordinator rebuilds the whole desired set
+    /// and the worker diffs it. The flag only decides idle shutdown.
+    pub(super) hyperliquid_engaged: bool,
+    /// Set whenever live handoffs or depth demand change the desired
+    /// Hyperliquid subscriptions; cleared once the worker accepts the set.
+    pub(super) hyperliquid_demand_dirty: bool,
+    /// Engine generation at which a catalog refresh failure downgraded
+    /// provider state. A later catalog success restores Online only when the
+    /// session has not moved on meanwhile, so worker-driven states win.
+    pub(super) hyperliquid_catalog_degraded: Option<ProviderGeneration>,
 }
 
 /// The Rithmic live worker's current instrument selection.
@@ -254,11 +243,9 @@ pub(super) struct RithmicSelection {
 impl Coordinator<'_> {
     pub(super) fn detach_client(&mut self, client_id: ClientId) {
         for consumer_id in self.engine.detach_client(client_id) {
-            self.providers.release_catalog_consumer(consumer_id.0.get());
             self.events.remove(&consumer_id);
             self.consumer_clients.remove(&consumer_id);
             self.remove_waiter(consumer_id);
-            self.active_viewports.remove(&consumer_id);
         }
     }
 
@@ -266,38 +253,20 @@ impl Coordinator<'_> {
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
         }
-        self.providers.stop("coinbase");
         self.providers.stop("rithmic");
+        self.providers.stop("hyperliquid");
     }
 
     pub(super) fn handle_command(&mut self, command: Command) {
         match command {
-            Command::HistoryCompleted(series, generation, range, kind, result) => {
-                self.history_completed(&series, generation, range, kind, result);
+            Command::HistoryCompleted(series, generation, range, result) => {
+                self.history_completed(&series, generation, range, result);
             }
             Command::LocalHistoryCompleted(series, generation, result) => {
                 self.local_history_completed(&series, generation, result);
             }
-            Command::ViewportHistoryLocalCompleted(series, generation, range, result) => {
-                self.viewport_history_local_completed(&series, generation, range, result);
-            }
             Command::PersistenceCompleted(series, generation, result, elapsed_millis) => {
                 self.persistence_completed(&series, generation, result, elapsed_millis);
-            }
-            Command::ConfirmedEmptyRecorded(series, result) => {
-                if let Err(error) = result {
-                    self.broadcast_persistence_for(
-                        &series,
-                        PersistenceState::Degraded,
-                        Some("Confirmed-empty history persistence is degraded"),
-                    );
-                    self.broadcast_demand_error_for(
-                        &series,
-                        local_history_failure_stage(error),
-                        &error.to_string(),
-                        None,
-                    );
-                }
             }
             Command::ConfirmedEmptyResolved(series, range, result) => {
                 if result.is_err() {
@@ -407,9 +376,7 @@ impl Coordinator<'_> {
             }
             Command::HistoryCompleted(..)
             | Command::LocalHistoryCompleted(..)
-            | Command::ViewportHistoryLocalCompleted(..)
             | Command::PersistenceCompleted(..)
-            | Command::ConfirmedEmptyRecorded(..)
             | Command::ConfirmedEmptyResolved(..)
             | Command::RestoreHotSet(..)
             | Command::SetResourceMode(..)
@@ -426,13 +393,6 @@ impl Coordinator<'_> {
         self.engine
             .register_consumer(identity, true)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = self
-            .providers
-            .authorize_catalog_consumer(identity.consumer_id.0.get())
-        {
-            self.engine.remove_consumer(identity.consumer_id);
-            return Err(error);
-        }
         self.events
             .insert(identity.consumer_id, ConsumerEvents::default());
         self.consumer_clients
@@ -449,9 +409,7 @@ impl Coordinator<'_> {
         self.events.remove(&consumer_id);
         self.consumer_clients.remove(&consumer_id);
         self.remove_waiter(consumer_id);
-        self.active_viewports.remove(&consumer_id);
         self.engine.remove_consumer(consumer_id);
-        self.providers.release_catalog_consumer(consumer_id.0.get());
         self.release_unused_live_market_data();
         Ok(())
     }
@@ -539,7 +497,7 @@ impl Coordinator<'_> {
             && self.last_consumer_activity.elapsed()
                 >= Duration::from_secs(self.resource_policy.warm_retention_seconds);
         let retained_market_series = if self.resource_mode == ResourceMode::MarketsLive {
-            self.live.len().saturating_add(self.rithmic_live.len())
+            self.rithmic_live.len() + self.hyperliquid_live.len()
         } else {
             0
         };
@@ -561,9 +519,9 @@ impl Coordinator<'_> {
             self.resource_policy.maximum_derived_series
         };
         let protected = self
-            .live
+            .rithmic_live
             .keys()
-            .chain(self.rithmic_live.keys())
+            .chain(self.hyperliquid_live.keys())
             .chain(self.warm_priority.iter().take(warm_limit))
             .cloned()
             .collect::<Vec<_>>();
@@ -672,14 +630,15 @@ impl Coordinator<'_> {
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
         }
-        self.providers.stop("coinbase");
         self.providers.stop("rithmic");
-        self.realtime_connected = false;
         self.rithmic_selection = None;
         self.rithmic_pending_selection = None;
-        self.realtime_products.clear();
-        self.live.clear();
         self.rithmic_live.clear();
+        self.providers.stop("hyperliquid");
+        self.hyperliquid_engaged = false;
+        self.hyperliquid_demand_dirty = false;
+        self.hyperliquid_catalog_degraded = None;
+        self.hyperliquid_live.clear();
         self.order_books.clear();
     }
 
@@ -688,7 +647,7 @@ impl Coordinator<'_> {
         MarketServiceStatus {
             resource_mode: self.resource_mode,
             connected_desktop_clients: self.attached.len(),
-            providers: ["coinbase", "rithmic"]
+            providers: ["rithmic", "hyperliquid"]
                 .into_iter()
                 .filter_map(|provider| self.provider_state(provider))
                 .collect(),
@@ -736,10 +695,17 @@ impl Coordinator<'_> {
             .map_err(|error| error.to_string())?;
         self.reconcile_order_books();
         self.remove_waiter(waiter.consumer_id);
+        let provider_state = self
+            .provider_state(&series.provider_id)
+            .map(envelope::Payload::ProviderState);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             events.clear_series();
             events.series_state = None;
             events.demand_error = None;
+            // Demand can attach to an already-online resident session. Replay
+            // its current state so a reconnecting desktop does not wait for a
+            // provider transition that may never occur.
+            events.provider = provider_state;
         }
         Ok((provider_generation, publication))
     }
@@ -757,10 +723,6 @@ impl Coordinator<'_> {
             ));
             return;
         }
-        if let Err(error) = self.validate_coinbase_realtime_capacity(series, waiter.consumer_id) {
-            let _ = reply.send(Err(error));
-            return;
-        }
         let (provider_generation, publication) =
             match self.accept_series_demand(client_id, series, &waiter) {
                 Ok(accepted) => accepted,
@@ -769,7 +731,6 @@ impl Coordinator<'_> {
                     return;
                 }
             };
-        self.active_viewports.remove(&waiter.consumer_id);
         self.prune_unused_live_series();
         self.prune_history_tracking();
         // The live handoff, and the bounded trade buffer inside it, must exist

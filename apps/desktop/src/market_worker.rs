@@ -94,12 +94,12 @@ pub struct MarketWorkerBootstrap {
 
 pub enum MarketWorkerStartup {
     Rithmic,
-    Loading(Box<CoinbaseWorkerStartup>),
+    Loading(Box<EngineWorkerStartup>),
 }
 
-pub struct CoinbaseWorkerStartup {
-    pub coinbase_product: InstallProviderInstrument,
-    pub coinbase_interval: ChartInterval,
+pub struct EngineWorkerStartup {
+    pub product: InstallProviderInstrument,
+    pub interval: ChartInterval,
     pub restored_viewport: Option<(i64, i64)>,
     pub subscription_id: String,
     pub worker_label: String,
@@ -275,10 +275,9 @@ pub enum MarketWorkerMessage {
         update: ReplayStreamUpdate,
     },
     RithmicDom(DomFrame),
-    CoinbaseSwitchMarker {
+    EngineSwitchMarker {
         sequence: u64,
     },
-    CoinbaseDom(DomFrame),
     ChartViewport {
         start_unix_nanos: i64,
         end_unix_nanos: i64,
@@ -426,10 +425,6 @@ impl MarketWorkerSender {
                 self.send_rithmic_dom(queue, message);
                 None
             }
-            message @ MarketWorkerMessage::CoinbaseDom(_) => {
-                self.send_coinbase_dom(queue, message);
-                None
-            }
             message => Some(message),
         }
     }
@@ -550,7 +545,7 @@ impl MarketWorkerSender {
             queue.push_back(message);
             return;
         }
-        // Same contract as the Coinbase tail: announce the gap rather than let
+        // Same contract as the Rithmic tail: announce the gap rather than let
         // the bridge discover it.
         self.record_coalesced_message(&message);
         for queued in queue.iter() {
@@ -578,42 +573,6 @@ impl MarketWorkerSender {
                 ) => {
                     (next.selection_generation, next.revision)
                         >= (current.selection_generation, current.revision)
-                }
-                _ => false,
-            };
-            if replace {
-                queue[index] = message;
-            }
-            return;
-        }
-        if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue
-                .iter()
-                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-        {
-            queue.remove(index);
-        }
-        if queue.len() < self.mailbox.capacity {
-            queue.push_back(message);
-        }
-    }
-
-    fn send_coinbase_dom(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        if let Some(index) = queue
-            .iter()
-            .position(|queued| matches!(queued, MarketWorkerMessage::CoinbaseDom(_)))
-        {
-            let replace = match (&queue[index], &message) {
-                (
-                    MarketWorkerMessage::CoinbaseDom(current),
-                    MarketWorkerMessage::CoinbaseDom(next),
-                ) => {
-                    (next.session_generation, next.revision)
-                        >= (current.session_generation, current.revision)
                 }
                 _ => false,
             };
@@ -848,7 +807,6 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
         MarketWorkerMessage::Update(_)
             | MarketWorkerMessage::RithmicLive { .. }
             | MarketWorkerMessage::RithmicDom(_)
-            | MarketWorkerMessage::CoinbaseDom(_)
     )
 }
 
@@ -907,8 +865,7 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<NonZe
         | MarketWorkerMessage::RithmicHistory { .. }
         | MarketWorkerMessage::RithmicLive { .. }
         | MarketWorkerMessage::RithmicDom(_)
-        | MarketWorkerMessage::CoinbaseSwitchMarker { .. }
-        | MarketWorkerMessage::CoinbaseDom(_)
+        | MarketWorkerMessage::EngineSwitchMarker { .. }
         | MarketWorkerMessage::ChartViewport { .. } => None,
     }
 }
@@ -1057,14 +1014,14 @@ pub enum MarketWorkerCommand {
     ProviderSearch(SearchProviderInstruments),
     ProviderSelect(SelectProviderInstrument),
     EngineSeries(EngineSeriesRequest),
-    CoinbaseSelect(Box<CoinbaseSelectionRequest>),
+    EngineSelect(Box<EngineSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
     ResourceClass(ConsumerResourceClass),
     Shutdown,
 }
 
 #[derive(Clone, Debug)]
-pub struct CoinbaseSelectionRequest {
+pub struct EngineSelectionRequest {
     pub sequence: u64,
     pub product: InstallProviderInstrument,
     pub interval: ChartInterval,
@@ -1265,7 +1222,7 @@ pub struct MarketDataWorker {
     shutdown_complete: Option<Receiver<()>>,
     connected: bool,
     ui_diagnostics: Option<UiDiagnosticsSender>,
-    coinbase_sequence: Option<Arc<AtomicU64>>,
+    engine_selection_sequence: Option<Arc<AtomicU64>>,
 }
 
 impl MarketDataWorker {
@@ -1275,7 +1232,7 @@ impl MarketDataWorker {
         messages: MarketWorkerReceiver,
         shutdown_complete: Receiver<()>,
         ui_diagnostics: Option<UiDiagnosticsSender>,
-        coinbase_sequence: Option<Arc<AtomicU64>>,
+        engine_selection_sequence: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             commands: Some(commands),
@@ -1284,7 +1241,7 @@ impl MarketDataWorker {
             shutdown_complete: Some(shutdown_complete),
             connected: true,
             ui_diagnostics,
-            coinbase_sequence,
+            engine_selection_sequence,
         }
     }
 
@@ -1297,20 +1254,21 @@ impl MarketDataWorker {
         self
     }
 
-    /// Requests a Coinbase selection without blocking.
+    /// Requests a Rithmic selection without blocking.
     ///
     /// # Errors
     /// Returns the request when the command mailbox is full or disconnected.
-    pub fn try_select_coinbase(
+    pub fn try_select_engine(
         &self,
         product: InstallProviderInstrument,
         interval: ChartInterval,
-    ) -> Result<u64, TrySendError<Box<CoinbaseSelectionRequest>>> {
-        let (Some(commands), Some(sequence)) =
-            (self.commands.as_ref(), self.coinbase_sequence.as_ref())
-        else {
+    ) -> Result<u64, TrySendError<Box<EngineSelectionRequest>>> {
+        let (Some(commands), Some(sequence)) = (
+            self.commands.as_ref(),
+            self.engine_selection_sequence.as_ref(),
+        ) else {
             return Err(TrySendError::Disconnected(Box::new(
-                CoinbaseSelectionRequest {
+                EngineSelectionRequest {
                     sequence: 0,
                     product,
                     interval,
@@ -1318,20 +1276,20 @@ impl MarketDataWorker {
             )));
         };
         let next = sequence.load(Ordering::Acquire).saturating_add(1);
-        let request = Box::new(CoinbaseSelectionRequest {
+        let request = Box::new(EngineSelectionRequest {
             sequence: next,
             product,
             interval,
         });
         commands
-            .try_send(MarketWorkerCommand::CoinbaseSelect(request))
+            .try_send(MarketWorkerCommand::EngineSelect(request))
             .map_err(|error| {
                 let (full, command) = match error {
                     TrySendError::Full(command) => (true, command),
                     TrySendError::Disconnected(command) => (false, command),
                 };
-                let MarketWorkerCommand::CoinbaseSelect(request) = command else {
-                    unreachable!("Coinbase selection send errors retain the selection command");
+                let MarketWorkerCommand::EngineSelect(request) = command else {
+                    unreachable!("Rithmic selection send errors retain the selection command");
                 };
                 if full {
                     TrySendError::Full(request)
@@ -1359,7 +1317,7 @@ impl MarketDataWorker {
         end_unix_nanos: i64,
     ) -> Result<(), TrySendError<ChartViewportUpdate>> {
         let selection_generation = self
-            .coinbase_sequence
+            .engine_selection_sequence
             .as_ref()
             .map_or(0, |sequence| sequence.load(Ordering::Acquire));
         let update = ChartViewportUpdate {
@@ -1478,7 +1436,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::EngineSeries(_)
-                    | MarketWorkerCommand::CoinbaseSelect(_)
+                    | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::ResourceClass(_),
                 )
@@ -1487,7 +1445,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::EngineSeries(_)
-                    | MarketWorkerCommand::CoinbaseSelect(_)
+                    | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::ResourceClass(_),
                 ) => {
@@ -2050,7 +2008,7 @@ mod tests {
             market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
         let snapshot = |generation| {
             let mut diagnostics = FeedDiagnostics::new(
-                FeedIdentity::try_new("coinbase", "advanced_trade_public", "production")
+                FeedIdentity::try_new("rithmic", "advanced_trade_public", "production")
                     .expect("identity validates"),
                 None,
             );
@@ -2178,7 +2136,7 @@ mod tests {
         }));
         for sequence in 1..=3 {
             sender
-                .send(MarketWorkerMessage::CoinbaseSwitchMarker { sequence })
+                .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
                 .expect("switch marker sends");
         }
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
@@ -2585,7 +2543,7 @@ mod tests {
                 .is_ok()
         );
         let mut diagnostics = FeedDiagnostics::new(
-            FeedIdentity::try_new("coinbase", "advanced_trade_public", "production")
+            FeedIdentity::try_new("rithmic", "advanced_trade_public", "production")
                 .expect("identity validates"),
             None,
         );
@@ -2758,7 +2716,7 @@ mod tests {
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         sender
-            .send(MarketWorkerMessage::CoinbaseSwitchMarker { sequence: 7 })
+            .send(MarketWorkerMessage::EngineSwitchMarker { sequence: 7 })
             .expect("switch marker sends");
         sender
             .send(MarketWorkerMessage::Update(MarketWorkerPublication {
@@ -2781,7 +2739,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [
-                MarketWorkerMessage::CoinbaseSwitchMarker { sequence: 7 },
+                MarketWorkerMessage::EngineSwitchMarker { sequence: 7 },
                 MarketWorkerMessage::Update(MarketWorkerPublication {
                     update: ReplayStreamUpdate::Snapshot(_),
                     ..

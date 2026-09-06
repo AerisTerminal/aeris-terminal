@@ -141,7 +141,7 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
             interval_seconds: 300,
             workspace_revision: 3,
             selection_generation: 4,
-            provider: "coinbase".into(),
+            provider: "rithmic".into(),
         }),
         envelope::Payload::SetWatchlist(SetWatchlist {
             markets: vec!["ETH-USD".into()],
@@ -172,7 +172,7 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
             resource_mode: ResourceMode::MarketsLive as i32,
             connected_desktop_clients: 2,
             providers: vec![ProviderState {
-                provider: "coinbase".into(),
+                provider: "rithmic".into(),
                 state: ProviderConnectionState::Online as i32,
                 generation: 3,
                 detail: None,
@@ -189,19 +189,19 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
 
 fn workspace_tab() -> WorkspaceTabState {
     let instrument = InstallProviderInstrument {
-        provider: "coinbase".into(),
+        provider: "rithmic".into(),
         session_generation: 2,
         selection_generation: 3,
-        instrument_id: "coinbase:spot:BTC-USD".into(),
+        instrument_id: "rithmic:spot:BTC-USD".into(),
         provider_symbol: "BTC-USD".into(),
         display_symbol: "BTC/USD".into(),
-        venue_id: "coinbase".into(),
+        venue_id: "rithmic".into(),
         price_scale: 2,
         quantity_scale: 8,
-        entitlement_id: "coinbase-public-market-data".into(),
+        entitlement_id: "rithmic-public-market-data".into(),
     };
     let series = SeriesKey {
-        provider: "coinbase".into(),
+        provider: "rithmic".into(),
         instrument_id: instrument.instrument_id.clone(),
         cadence_value: 60,
         definition_revision: 1,
@@ -234,7 +234,7 @@ fn workspace_tab() -> WorkspaceTabState {
 
 fn workspace_state() -> WorkspaceState {
     WorkspaceState {
-        provider: "coinbase".into(),
+        provider: "rithmic".into(),
         market: "BTC-USD".into(),
         interval_seconds: 60,
         watchlist: vec!["BTC-USD".into()],
@@ -244,7 +244,7 @@ fn workspace_state() -> WorkspaceState {
         schema_revision: 1,
         cache_manifest_revision: 1,
         hot_series: vec![HotSeries {
-            provider: "coinbase".into(),
+            provider: "rithmic".into(),
             market: "BTC-USD".into(),
             interval_seconds: 60,
             score: 1,
@@ -253,9 +253,9 @@ fn workspace_state() -> WorkspaceState {
             series_watermark: 3,
             viewport_start_unix_nanos: Some(4),
             viewport_end_unix_nanos: Some(5),
-            account_id: "coinbase-public".into(),
-            instrument_id: "coinbase:spot:BTC-USD".into(),
-            entitlement_id: "coinbase-public-market-data".into(),
+            account_id: "rithmic-public".into(),
+            instrument_id: "rithmic:spot:BTC-USD".into(),
+            entitlement_id: "rithmic-public-market-data".into(),
             cadence: SeriesCadence::FixedSeconds as i32,
             cadence_value: 60,
             definition_revision: 1,
@@ -264,7 +264,7 @@ fn workspace_state() -> WorkspaceState {
             coverage_start_unix_nanos: Some(1),
             coverage_end_unix_nanos: Some(2),
             provider_symbol: "BTC-USD".into(),
-            venue_id: "coinbase".into(),
+            venue_id: "rithmic".into(),
             display_symbol: "BTC-USD".into(),
             price_scale: 2,
             quantity_scale: 8,
@@ -278,11 +278,11 @@ fn workspace_state() -> WorkspaceState {
 
 fn market_payloads() -> Vec<envelope::Payload> {
     let series = SeriesKey {
-        provider: "coinbase".into(),
-        instrument_id: "coinbase:spot:BTC-USD".into(),
+        provider: "rithmic".into(),
+        instrument_id: "rithmic:spot:BTC-USD".into(),
         cadence_value: 60,
         definition_revision: 1,
-        entitlement_id: "coinbase-public-market-data".into(),
+        entitlement_id: "rithmic-public-market-data".into(),
         cadence: SeriesCadence::FixedSeconds as i32,
     };
     let bar = MarketBar {
@@ -354,7 +354,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
             operation: axiusflow_engine_protocol::SeriesUpdateOperation::ReviseTail as i32,
         }),
         envelope::Payload::ProviderState(ProviderState {
-            provider: "coinbase".into(),
+            provider: "rithmic".into(),
             state: ProviderConnectionState::Online as i32,
             generation: 2,
             detail: None,
@@ -605,8 +605,8 @@ fn worst_case_working_window_snapshot_fits_one_bounded_frame() {
         consumer_id: u64::MAX,
         generation: u64::MAX,
         series: Some(SeriesKey {
-            provider: "coinbase".into(),
-            instrument_id: "instrument:coinbase:btc:usd".into(),
+            provider: "rithmic".into(),
+            instrument_id: "instrument:rithmic:btc:usd".into(),
             cadence_value: u32::MAX,
             definition_revision: u32::MAX,
             entitlement_id: "crypto_public_realtime".into(),

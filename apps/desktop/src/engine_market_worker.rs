@@ -1,4 +1,4 @@
-//! Desktop-side client for engine-owned Coinbase historical and realtime bars.
+//! Desktop-side client for engine-owned Rithmic historical and realtime bars.
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -47,8 +47,10 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
 const RETAINED_BAR_CAPACITY: usize = 32_768;
-const SUBSCRIPTION_ID: &str = "desktop_engine_coinbase_bars";
-const WORKER_LABEL: &str = "Coinbase engine - history and realtime IPC";
+const SUBSCRIPTION_ID: &str = "desktop_engine_rithmic_bars";
+const WORKER_LABEL: &str = "Rithmic engine - history and realtime IPC";
+const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_engine_hyperliquid_bars";
+const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid engine - history and realtime IPC";
 /// Recovery notice sent when the worker observes an engine replacement.
 /// The UI matches on this to reset generation-fenced views back to loading
 /// instead of holding books from a dead engine incarnation.
@@ -163,18 +165,18 @@ pub(super) fn start() -> Result<
     ),
     String,
 > {
-    let product = default_coinbase_product("BTC-USD");
+    let product = default_hyperliquid_product();
     let (mut workers, factory) = start_group(vec![(DEFAULT_WORKSPACE_ID, product)])?;
     let (startup, worker) = workers
         .pop()
-        .ok_or_else(|| "Coinbase engine worker group is empty".to_string())?;
+        .ok_or_else(|| "Hyperliquid engine worker group is empty".to_string())?;
     Ok((startup, worker, factory))
 }
 
 pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
-    let btc = default_coinbase_product("BTC-USD");
-    let eth = default_coinbase_product("ETH-USD");
-    let (workers, _factory) = start_group(vec![(1, btc), (2, eth)])?;
+    let mnq = default_product("MNQ");
+    let es = default_product("ES");
+    let (workers, _factory) = start_group(vec![(1, mnq), (2, es)])?;
     Ok(workers)
 }
 
@@ -263,11 +265,11 @@ fn pane_interval(series: Option<&SeriesKey>) -> Result<ChartInterval, String> {
             28_800 => Ok(ChartInterval::Hour8),
             43_200 => Ok(ChartInterval::Hour12),
             86_400 => Ok(ChartInterval::Day1),
-            _ => Err("workspace chart cadence is unsupported by Coinbase".to_string()),
+            _ => Err("workspace chart cadence is unsupported by Rithmic".to_string()),
         },
         Ok(SeriesCadence::CalendarWeeks) if series.cadence_value == 1 => Ok(ChartInterval::Week1),
         Ok(SeriesCadence::CalendarMonths) if series.cadence_value == 1 => Ok(ChartInterval::Month1),
-        _ => Err("workspace chart cadence is unsupported by Coinbase".to_string()),
+        _ => Err("workspace chart cadence is unsupported by Rithmic".to_string()),
     }
 }
 
@@ -342,13 +344,21 @@ fn worker_endpoint(
     restored_viewport: Option<(i64, i64)>,
     initial_generation: u64,
 ) -> (WorkspaceMarketPane, EndpointRecord) {
+    let (subscription_id, worker_label) = if product.provider == "hyperliquid" {
+        (
+            HYPERLIQUID_SUBSCRIPTION_ID.to_string(),
+            HYPERLIQUID_WORKER_LABEL.to_string(),
+        )
+    } else {
+        (SUBSCRIPTION_ID.to_string(), WORKER_LABEL.to_string())
+    };
     let startup = MarketWorkerStartup::Loading(Box::new(
-        axiusflow_desktop::market_worker::CoinbaseWorkerStartup {
-            coinbase_product: product.clone(),
-            coinbase_interval: interval,
+        axiusflow_desktop::market_worker::EngineWorkerStartup {
+            product: product.clone(),
+            interval,
             restored_viewport,
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: WORKER_LABEL.to_string(),
+            subscription_id,
+            worker_label,
         },
     ));
     let (message_tx, message_rx) =
@@ -602,7 +612,8 @@ fn receive_and_apply_event(
         return Ok(true);
     };
     let endpoint = &mut record.endpoint;
-    let (catalog, event) = classify_provider_catalog_event(event, "coinbase", endpoint.consumer_id);
+    let (catalog, event) =
+        classify_provider_catalog_event(event, &record.product.provider, endpoint.consumer_id);
     let event = match catalog {
         Some(event) => {
             let _ = endpoint
@@ -634,6 +645,15 @@ fn receive_and_apply_event(
     Ok(true)
 }
 
+/// User-visible provider name for worker status and error messages.
+fn provider_display_name(provider: &str) -> &str {
+    match provider {
+        "rithmic" => "Rithmic",
+        "hyperliquid" => "Hyperliquid",
+        _ => provider,
+    }
+}
+
 fn process_pending_resource_class(client: &mut EngineSupervisor, endpoint: &mut WorkerEndpoint) {
     let pending = endpoint
         .pending_resource_class
@@ -663,6 +683,7 @@ fn initialize_endpoint(
     });
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
     client.install_provider_instrument(product.clone())?;
+    let provider_name = provider_display_name(product.provider.as_str());
     let series = series_key(product, interval)?;
     let mut attempt = 1_u8;
     let result = loop {
@@ -677,7 +698,7 @@ fn initialize_endpoint(
             Err(_error) if attempt < MAXIMUM_STARTUP_ATTEMPTS => {
                 attempt += 1;
                 let Some(generation) = endpoint.active_generation.checked_add(1) else {
-                    break Err("Coinbase startup generation exhausted".to_string());
+                    break Err(format!("{provider_name} startup generation exhausted"));
                 };
                 endpoint.active_generation = generation;
                 endpoint
@@ -685,7 +706,7 @@ fn initialize_endpoint(
                     .store(generation, Ordering::Release);
                 let _ = endpoint.messages.send(MarketWorkerMessage::State {
                     state: ChartState::Loading,
-                    message: "Retrying initial Coinbase market load".to_string(),
+                    message: format!("Retrying initial {provider_name} market load"),
                 });
                 thread::sleep(STARTUP_RETRY_DELAY);
             }
@@ -701,11 +722,6 @@ fn initialize_endpoint(
                 publication,
             )?;
             endpoint.publication = Some(publication);
-            let (state, message) = snapshot_connection_state(interval);
-            let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-                state,
-                message: message.to_string(),
-            });
         }
         Err(error) => {
             let _ = endpoint.messages.send(MarketWorkerMessage::State {
@@ -717,9 +733,9 @@ fn initialize_endpoint(
     client.search_provider_instruments(SearchProviderInstruments {
         consumer_id: endpoint.consumer_id,
         search_generation: 1,
-        provider: "coinbase".to_string(),
+        provider: product.provider.clone(),
         query: String::new(),
-        maximum_results: u32::try_from(crate::rithmic_shell::MAXIMUM_COINBASE_SYMBOL_RESULTS)
+        maximum_results: u32::try_from(crate::rithmic_shell::MAXIMUM_RITHMIC_SYMBOL_RESULTS)
             .unwrap_or(u32::MAX),
     })?;
     Ok(())
@@ -738,20 +754,20 @@ fn process_command(
     } = record;
     match command {
         MarketWorkerCommand::ProviderSearch(mut request) => {
-            if request.provider != "coinbase" {
+            if request.provider != product.provider {
                 return Err("unsupported provider catalog command".to_string());
             }
             request.consumer_id = endpoint.consumer_id;
             client.search_provider_instruments(request)
         }
         MarketWorkerCommand::ProviderSelect(mut request) => {
-            if request.provider != "coinbase" {
+            if request.provider != product.provider {
                 return Err("unsupported provider catalog command".to_string());
             }
             request.consumer_id = endpoint.consumer_id;
             client.select_provider_instrument(request)
         }
-        MarketWorkerCommand::CoinbaseSelect(request) => {
+        MarketWorkerCommand::EngineSelect(request) => {
             let series = match series_key(&request.product, request.interval) {
                 Ok(series) => series,
                 Err(error) => {
@@ -764,12 +780,15 @@ fn process_command(
             };
             let _ = endpoint
                 .messages
-                .send(MarketWorkerMessage::CoinbaseSwitchMarker {
+                .send(MarketWorkerMessage::EngineSwitchMarker {
                     sequence: request.sequence,
                 });
             let _ = endpoint.messages.send(MarketWorkerMessage::State {
                 state: ChartState::Loading,
-                message: "Loading Coinbase history through the resident engine".to_string(),
+                message: format!(
+                    "Loading {} history through the resident engine",
+                    provider_display_name(&request.product.provider)
+                ),
             });
             endpoint.publication = None;
             endpoint.live = false;
@@ -800,7 +819,7 @@ fn process_command(
             Ok(())
         }
         MarketWorkerCommand::EngineSeries(_) => {
-            Err("Rithmic commands cannot enter the Coinbase engine client".to_string())
+            Err("Rithmic commands cannot enter the Rithmic engine client".to_string())
         }
     }
 }
@@ -840,11 +859,13 @@ struct PushedEventContext<'a> {
 /// being a loading state at that point.
 fn apply_series_state(
     state: SeriesState,
+    provider: &str,
     realtime: bool,
     published: bool,
     live: &mut bool,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
+    let provider_name = provider_display_name(provider);
     let load_state = SeriesLoadState::try_from(state.state)
         .map_err(|_| "engine returned an invalid realtime state".to_string())?;
     let announce = |chart_state: ChartState, message: String| {
@@ -858,7 +879,9 @@ fn apply_series_state(
     match load_state {
         SeriesLoadState::Live => {
             if !realtime {
-                return Err("engine marked a Coinbase calendar-history series live".to_string());
+                return Err(format!(
+                    "engine marked a {provider_name} calendar-history series live"
+                ));
             }
             if !published {
                 return Err("engine marked history live without a covering snapshot".to_string());
@@ -866,13 +889,13 @@ fn apply_series_state(
             *live = true;
             announce(
                 ChartState::Ready,
-                "Coinbase history/live handoff is current".to_string(),
+                format!("{provider_name} history/live handoff is current"),
             )?;
             Ok(())
         }
         SeriesLoadState::Failed => Err(state
             .detail
-            .unwrap_or_else(|| "Coinbase realtime failed".to_string())),
+            .unwrap_or_else(|| format!("{provider_name} realtime failed"))),
         SeriesLoadState::Ready if !published => {
             Err("engine marked history ready without a covering snapshot".to_string())
         }
@@ -882,14 +905,14 @@ fn apply_series_state(
         SeriesLoadState::Ready if realtime => {
             announce(
                 ChartState::Loading,
-                "Coinbase history is loaded; connecting the live edge".to_string(),
+                format!("{provider_name} history is loaded; connecting the live edge"),
             )?;
             Ok(())
         }
         SeriesLoadState::Ready => {
             announce(
                 ChartState::Ready,
-                "Coinbase provider history is current".to_string(),
+                format!("{provider_name} provider history is current"),
             )?;
             Ok(())
         }
@@ -897,7 +920,7 @@ fn apply_series_state(
             announce(
                 ChartState::Loading,
                 state.detail.unwrap_or_else(|| {
-                    "Resident engine is loading current Coinbase coverage".to_string()
+                    format!("Resident engine is loading current {provider_name} coverage")
                 }),
             )?;
             Ok(())
@@ -941,7 +964,7 @@ fn apply_pushed_event(
             let tail = replay_tail_update(&update)?;
             let status = tail_publication(
                 publication.ok_or_else(|| {
-                    "engine sent a Coinbase update before a covering snapshot".to_string()
+                    "engine sent a Rithmic update before a covering snapshot".to_string()
                 })?,
                 &tail,
             );
@@ -949,14 +972,21 @@ fn apply_pushed_event(
             send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
         }
         envelope::Payload::ProviderState(state) => {
-            apply_provider_state(&state, realtime, messages)?;
+            apply_provider_state(&state, instrument.provider.as_str(), realtime, messages)?;
             Ok(())
         }
         envelope::Payload::SeriesState(state) => {
             if state.consumer_id != consumer_id || state.generation != active_generation {
                 return Err("engine realtime state identity mismatched".to_string());
             }
-            apply_series_state(state, realtime, publication.is_some(), live, messages)
+            apply_series_state(
+                state,
+                instrument.provider.as_str(),
+                realtime,
+                publication.is_some(),
+                live,
+                messages,
+            )
         }
         envelope::Payload::DemandError(error) => Err(demand_error(&error)),
         envelope::Payload::OrderBookSnapshot(snapshot) => {
@@ -980,7 +1010,7 @@ fn apply_pushed_event(
                 return Ok(());
             };
             messages
-                .send(MarketWorkerMessage::CoinbaseDom(frame))
+                .send(MarketWorkerMessage::RithmicDom(frame))
                 .map_err(|error| error.to_string())?;
             Ok(())
         }
@@ -992,42 +1022,45 @@ fn apply_pushed_event(
 
 fn apply_provider_state(
     state: &ProviderState,
+    expected_provider: &str,
     realtime: bool,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
-    if state.provider != "coinbase" {
+    if state.provider != expected_provider {
         return Err("engine provider state identity mismatched".to_string());
     }
     if !realtime {
         return Ok(());
     }
+    let provider_name = provider_display_name(expected_provider);
     let provider_state = ProviderConnectionState::try_from(state.state)
         .map_err(|_| "engine returned an invalid provider state".to_string())?;
     let (connection, detail) = match provider_state {
         ProviderConnectionState::Disconnected => (
             FeedConnectionState::Disconnected,
-            "Coinbase realtime is disconnected",
+            format!("{provider_name} realtime is disconnected"),
         ),
         ProviderConnectionState::Connecting => (
             FeedConnectionState::Discovering,
-            "Coinbase realtime is connecting",
+            format!("{provider_name} realtime is connecting"),
         ),
         ProviderConnectionState::Online => (
             FeedConnectionState::Streaming,
-            "Coinbase history and realtime are current",
+            format!("{provider_name} history and realtime are current"),
         ),
         ProviderConnectionState::Recovering => (
             FeedConnectionState::Recovering,
-            "Coinbase realtime is recovering; retained history remains visible",
+            format!("{provider_name} realtime is recovering; retained history remains visible"),
         ),
-        ProviderConnectionState::Failed => {
-            (FeedConnectionState::Stopped, "Coinbase realtime stopped")
-        }
+        ProviderConnectionState::Failed => (
+            FeedConnectionState::Stopped,
+            format!("{provider_name} realtime stopped"),
+        ),
     };
     messages
         .send(MarketWorkerMessage::Connection {
             state: connection,
-            message: state.detail.clone().unwrap_or_else(|| detail.to_string()),
+            message: state.detail.clone().unwrap_or(detail),
         })
         .map_err(|error| error.to_string())
 }
@@ -1040,6 +1073,7 @@ fn request_snapshot(
     messages: &MarketWorkerSender,
 ) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
     let realtime = series_supports_realtime(&series);
+    let provider = series.provider.clone();
     client.set_series_demand(consumer_id, generation, series)?;
     loop {
         let poll = client.receive_market_event_for(consumer_id, Duration::from_millis(250))?;
@@ -1054,12 +1088,14 @@ fn request_snapshot(
         };
         // Catalog results are delivered once, so they are forwarded rather than
         // dropped while a snapshot is outstanding.
-        let (catalog, event) = classify_provider_catalog_event(event, "coinbase", consumer_id);
+        let (catalog, event) =
+            classify_provider_catalog_event(event, provider.as_str(), consumer_id);
         if let Some(catalog) = catalog {
             let _ = messages.send(MarketWorkerMessage::ProviderCatalog(catalog));
             continue;
         }
         let Some(event) = event else { continue };
+        let provider_name = provider_display_name(provider.as_str());
         match event {
             envelope::Payload::SeriesState(state) => {
                 let load_state = SeriesLoadState::try_from(state.state)
@@ -1068,7 +1104,9 @@ fn request_snapshot(
                     SeriesLoadState::Resolving => {
                         let _ = messages.send(MarketWorkerMessage::State {
                             state: ChartState::Loading,
-                            message: "Resident engine is resolving Coinbase history".to_string(),
+                            message: format!(
+                                "Resident engine is resolving {provider_name} history"
+                            ),
                         });
                     }
                     SeriesLoadState::Ready | SeriesLoadState::Live => {
@@ -1078,17 +1116,17 @@ fn request_snapshot(
                     }
                     SeriesLoadState::Failed => {
                         return Err(state.detail.unwrap_or_else(|| {
-                            "resident engine could not resolve Coinbase history".to_string()
+                            format!("resident engine could not resolve {provider_name} history")
                         }));
                     }
                     SeriesLoadState::Superseded => {
-                        return Err("Coinbase history demand was superseded".to_string());
+                        return Err(format!("{provider_name} history demand was superseded"));
                     }
                     SeriesLoadState::Empty | SeriesLoadState::Partial => {}
                 }
             }
             envelope::Payload::ProviderState(state) => {
-                apply_provider_state(&state, realtime, messages)?;
+                apply_provider_state(&state, provider.as_str(), realtime, messages)?;
             }
             envelope::Payload::SeriesSnapshot(snapshot) => {
                 if snapshot.consumer_id != consumer_id || snapshot.generation != generation {
@@ -1168,40 +1206,43 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         .series
         .clone()
         .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
-    if series.provider != "coinbase"
+    if series.provider != "rithmic" && series.provider != "hyperliquid"
         || !matches!(
             SeriesCadence::try_from(series.cadence),
             Ok(SeriesCadence::FixedSeconds
                 | SeriesCadence::CalendarWeeks
                 | SeriesCadence::CalendarMonths)
         )
-        || series.entitlement_id != "crypto_public_realtime"
-        || !series.instrument_id.starts_with("instrument:coinbase:")
     {
-        return Err("engine Coinbase snapshot identity is invalid".to_string());
+        return Err(format!(
+            "engine {} snapshot identity is invalid",
+            provider_display_name(series.provider.as_str())
+        ));
+    }
+    if series.provider == "rithmic" {
+        if !series.entitlement_id.starts_with("rithmic-test:")
+            || !series.instrument_id.starts_with("instrument:rithmic:")
+        {
+            return Err("engine Rithmic snapshot identity is invalid".to_string());
+        }
+    } else if !series.entitlement_id.starts_with("hyperliquid-")
+        || !series.instrument_id.starts_with("hyperliquid:")
+    {
+        return Err("engine Hyperliquid snapshot identity is invalid".to_string());
     }
     let price_scale = u8::try_from(snapshot.price_scale)
         .map_err(|_| "engine price scale is invalid".to_string())?;
     let quantity_scale = u8::try_from(snapshot.quantity_scale)
         .map_err(|_| "engine quantity scale is invalid".to_string())?;
-    let (base, quote) = series
-        .instrument_id
-        .strip_prefix("instrument:coinbase:")
-        .and_then(|value| value.split_once(':'))
-        .filter(|(base, quote)| !base.is_empty() && !quote.is_empty() && !quote.contains(':'))
-        .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+    let (venue, symbol, asset_class, trading_currency) = snapshot_instrument(&series)?;
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_revision),
-        asset_class: AssetClass::CryptoAsset,
-        symbol: format!(
-            "{}/{}",
-            base.to_ascii_uppercase(),
-            quote.to_ascii_uppercase()
-        ),
-        venue_id: "COINBASE".to_string(),
-        trading_currency: quote.to_ascii_uppercase(),
+        asset_class,
+        symbol,
+        venue_id: venue,
+        trading_currency,
         precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
@@ -1230,6 +1271,75 @@ fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> 
         bars,
     )
     .map_err(|error| error.to_string())
+}
+
+/// Splits a canonical engine instrument identity into presentation metadata.
+///
+/// Rithmic identities carry `instrument:rithmic:VENUE:SYMBOL`; Hyperliquid
+/// identities carry `hyperliquid:perp:COIN`, `hyperliquid:spot:INDEX:BASE/QUOTE`,
+/// or `hyperliquid:builder:DEX:COIN`. Anything else fails closed instead of
+/// rendering a misrouted instrument.
+fn snapshot_instrument(series: &SeriesKey) -> Result<(String, String, AssetClass, String), String> {
+    if series.provider == "rithmic" {
+        let (venue, symbol) = series
+            .instrument_id
+            .strip_prefix("instrument:rithmic:")
+            .and_then(|value| value.split_once(':'))
+            .filter(|(venue, symbol)| {
+                !venue.is_empty() && !symbol.is_empty() && !symbol.contains(':')
+            })
+            .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+        return Ok((
+            venue.to_string(),
+            symbol.to_string(),
+            AssetClass::Future,
+            "USD".to_string(),
+        ));
+    }
+    let path = series
+        .instrument_id
+        .strip_prefix("hyperliquid:")
+        .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+    let (kind, rest) = path
+        .split_once(':')
+        .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+    match kind {
+        "perp" if !rest.is_empty() && !rest.contains(':') && !rest.contains('/') => Ok((
+            "Hyperliquid".to_string(),
+            rest.to_string(),
+            AssetClass::Future,
+            "USDC".to_string(),
+        )),
+        "spot" => {
+            let (_, pair) = rest
+                .split_once(':')
+                .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+            let quote = pair
+                .split_once('/')
+                .filter(|(base, quote)| !base.is_empty() && !quote.is_empty())
+                .map(|(_, quote)| quote)
+                .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+            Ok((
+                "Hyperliquid Spot".to_string(),
+                pair.to_string(),
+                AssetClass::CryptoAsset,
+                quote.to_string(),
+            ))
+        }
+        "builder" => {
+            let (dex, coin) = rest
+                .split_once(':')
+                .filter(|(dex, coin)| !dex.is_empty() && !coin.is_empty())
+                .ok_or_else(|| "engine snapshot instrument identity is invalid".to_string())?;
+            Ok((
+                dex.to_string(),
+                format!("{dex}:{coin}"),
+                AssetClass::Future,
+                "USDC".to_string(),
+            ))
+        }
+        _ => Err("engine snapshot instrument identity is invalid".to_string()),
+    }
 }
 
 fn generation_from_snapshot(
@@ -1283,7 +1393,7 @@ fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String>
         .series
         .as_ref()
         .ok_or_else(|| "engine update has no series identity".to_string())?;
-    if series.provider != "coinbase"
+    if series.provider != "rithmic" && series.provider != "hyperliquid"
         || series.cadence_value == 0
         || !matches!(
             SeriesCadence::try_from(series.cadence),
@@ -1292,12 +1402,15 @@ fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String>
                 | SeriesCadence::CalendarMonths)
         )
     {
-        return Err("engine Coinbase update identity is invalid".to_string());
+        return Err(format!(
+            "engine {} update identity is invalid",
+            provider_display_name(series.provider.as_str())
+        ));
     }
     let bar = update
         .bar
         .as_ref()
-        .ok_or_else(|| "engine Coinbase update has no bar".to_string())?;
+        .ok_or_else(|| "engine update has no bar".to_string())?;
     let item = provenanced_engine_bar(
         series,
         update.provider_generation,
@@ -1376,13 +1489,33 @@ fn series_key(
     product: &InstallProviderInstrument,
     interval: ChartInterval,
 ) -> Result<SeriesKey, String> {
-    if product.provider != "coinbase"
-        || product.venue_id != "coinbase"
-        || product.entitlement_id != "crypto_public_realtime"
+    // The provider field must agree with the installed instrument identity:
+    // a Hyperliquid product can never demand a Rithmic series and vice
+    // versa, so a mismatch fails here instead of misrouting demand.
+    if product.provider != "rithmic" && product.provider != "hyperliquid"
+        || product.venue_id.trim().is_empty()
         || product.price_scale > 18
         || product.quantity_scale > 18
     {
-        return Err("Coinbase installed instrument identity is invalid".to_string());
+        return Err(format!(
+            "{} installed instrument identity is invalid",
+            provider_display_name(product.provider.as_str())
+        ));
+    }
+    if product.provider == "rithmic" {
+        if !product.entitlement_id.starts_with("rithmic-test:") {
+            return Err("Rithmic installed instrument identity is invalid".to_string());
+        }
+    } else if product.entitlement_id != "hyperliquid-public" {
+        return Err("Hyperliquid installed instrument identity is invalid".to_string());
+    }
+    if product.provider == "rithmic" && !product.instrument_id.starts_with("instrument:rithmic:")
+        || product.provider == "hyperliquid" && !product.instrument_id.starts_with("hyperliquid:")
+    {
+        return Err(format!(
+            "{} installed instrument identity is invalid",
+            provider_display_name(product.provider.as_str())
+        ));
     }
     let (cadence, cadence_value) = match interval {
         ChartInterval::Minute1 => (SeriesCadence::FixedSeconds, 60),
@@ -1398,12 +1531,19 @@ fn series_key(
         ChartInterval::Day1 => (SeriesCadence::FixedSeconds, 86_400),
         ChartInterval::Week1 => (SeriesCadence::CalendarWeeks, 1),
         ChartInterval::Month1 => (SeriesCadence::CalendarMonths, 1),
+        // Hyperliquid serves a native 3-day candle; Rithmic has no Day3
+        // series. Tick candles exist on neither public path: Hyperliquid
+        // exposes no tick history and the Rithmic test feed prints none.
+        ChartInterval::Day3 if product.provider == "hyperliquid" => (SeriesCadence::SessionDays, 3),
         ChartInterval::Tick100 | ChartInterval::Day3 => {
-            return Err("Coinbase chart interval is unsupported".to_string());
+            return Err(format!(
+                "{} chart interval is unsupported",
+                provider_display_name(product.provider.as_str())
+            ));
         }
     };
     Ok(SeriesKey {
-        provider: "coinbase".to_string(),
+        provider: product.provider.clone(),
         instrument_id: product.instrument_id.clone(),
         cadence_value,
         definition_revision: 1,
@@ -1433,7 +1573,7 @@ fn replay_bar_definition(series: &SeriesKey) -> Result<BarDefinition, String> {
                 0,
                 Some(series.cadence_value),
             ),
-            _ => return Err("engine Coinbase bar definition is invalid".to_string()),
+            _ => return Err("engine bar definition is invalid".to_string()),
         };
     Ok(BarDefinition {
         definition_id: format!("{}:{}:{cadence_id}", series.provider, series.instrument_id),
@@ -1454,41 +1594,40 @@ fn series_supports_realtime(series: &SeriesKey) -> bool {
         )
 }
 
-const fn snapshot_connection_state(
-    _interval: ChartInterval,
-) -> (FeedConnectionState, &'static str) {
-    (
-        FeedConnectionState::Discovering,
-        "Historical bars are visible; Coinbase realtime is connecting",
-    )
-}
-
-fn default_coinbase_product(product_id: &str) -> InstallProviderInstrument {
-    let (base, quote) = product_id.split_once('-').unwrap_or(("BTC", "USD"));
+fn default_product(product_id: &str) -> InstallProviderInstrument {
     InstallProviderInstrument {
-        provider: "coinbase".to_string(),
+        provider: "rithmic".to_string(),
         session_generation: 1,
         selection_generation: 1,
-        instrument_id: format!(
-            "instrument:coinbase:{}:{}",
-            base.to_ascii_lowercase(),
-            quote.to_ascii_lowercase()
-        ),
+        instrument_id: format!("instrument:rithmic:CME:{product_id}"),
         provider_symbol: product_id.to_string(),
-        display_symbol: format!("{base}/{quote}"),
-        venue_id: "coinbase".to_string(),
+        display_symbol: product_id.to_string(),
+        venue_id: "CME".to_string(),
         price_scale: 2,
+        quantity_scale: 0,
+        entitlement_id: format!("rithmic-test:CME:{product_id}"),
+    }
+}
+
+/// Fresh-install default: Hyperliquid BTC perpetual, one-minute candles.
+fn default_hyperliquid_product() -> InstallProviderInstrument {
+    InstallProviderInstrument {
+        provider: "hyperliquid".to_string(),
+        session_generation: 1,
+        selection_generation: 1,
+        instrument_id: "hyperliquid:perp:BTC".to_string(),
+        provider_symbol: "BTC".to_string(),
+        display_symbol: "BTC-PERP".to_string(),
+        venue_id: "Hyperliquid".to_string(),
+        price_scale: 8,
         quantity_scale: 8,
-        entitlement_id: "crypto_public_realtime".to_string(),
+        entitlement_id: "hyperliquid-public".to_string(),
     }
 }
 
 #[cfg(test)]
-fn coinbase_products() -> Vec<InstallProviderInstrument> {
-    ["BTC-USD", "ETH-USD"]
-        .into_iter()
-        .map(default_coinbase_product)
-        .collect()
+fn products() -> Vec<InstallProviderInstrument> {
+    ["MNQ", "ES"].into_iter().map(default_product).collect()
 }
 
 fn demand_error(error: &DemandError) -> String {
@@ -1559,12 +1698,12 @@ mod tests {
         ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
     };
 
-    fn handle_coinbase_catalog_event(
+    fn handle_rithmic_catalog_event(
         endpoint: &mut WorkerEndpoint,
         event: envelope::Payload,
     ) -> Option<envelope::Payload> {
         let (catalog, event) =
-            classify_provider_catalog_event(event, "coinbase", endpoint.consumer_id);
+            classify_provider_catalog_event(event, "rithmic", endpoint.consumer_id);
         match catalog {
             Some(event) => {
                 let _ = endpoint
@@ -1587,7 +1726,7 @@ mod tests {
         assert!(allocate_consumer_id(&exhausted).is_err());
         assert_eq!(allocate_pane_id(&next_pane_id), Ok(9));
 
-        let product = coinbase_products().remove(0);
+        let product = products().remove(0);
         let (_worker, record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
         assert_eq!(record.workspace_id, 2);
@@ -1597,27 +1736,27 @@ mod tests {
     }
 
     #[test]
-    fn coinbase_worker_startup_routes_catalog_events() {
-        let product = coinbase_products().remove(0);
+    fn rithmic_worker_startup_routes_catalog_events() {
+        let product = products().remove(0);
         let (mut pane, mut record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
         let MarketWorkerStartup::Loading(startup) = &pane.startup else {
-            panic!("Coinbase endpoint must start in loading state");
+            panic!("Rithmic endpoint must start in loading state");
         };
-        assert_eq!(startup.coinbase_product, product);
-        assert_eq!(startup.coinbase_interval, ChartInterval::Minute5);
+        assert_eq!(startup.product, product);
+        assert_eq!(startup.interval, ChartInterval::Minute5);
 
         assert!(
-            handle_coinbase_catalog_event(
+            handle_rithmic_catalog_event(
                 &mut record.endpoint,
                 envelope::Payload::ProviderInstrumentSearchResult(ProviderInstrumentSearchResult {
                     consumer_id: 41,
-                    provider: "coinbase".to_string(),
+                    provider: "rithmic".to_string(),
                     provider_generation: 1,
                     search_generation: 3,
                     instruments: vec![ProviderInstrumentSummary {
-                        symbol: "BTC-USD".to_string(),
-                        exchange: "coinbase".to_string(),
+                        symbol: "MNQ".to_string(),
+                        exchange: "CME".to_string(),
                         ..ProviderInstrumentSummary::default()
                     }],
                 },),
@@ -1636,7 +1775,7 @@ mod tests {
         let mut selected = product.clone();
         selected.selection_generation = 5;
         assert!(
-            handle_coinbase_catalog_event(
+            handle_rithmic_catalog_event(
                 &mut record.endpoint,
                 envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
                     consumer_id: 41,
@@ -1697,7 +1836,7 @@ mod tests {
             generation: 1,
             series: Some(
                 series_key(
-                    coinbase_products().first().expect("BTC product"),
+                    products().first().expect("BTC product"),
                     ChartInterval::Minute1,
                 )
                 .expect("series"),
@@ -1732,7 +1871,7 @@ mod tests {
             generation: 2,
             series: Some(
                 series_key(
-                    coinbase_products().first().expect("BTC product"),
+                    products().first().expect("BTC product"),
                     ChartInterval::Minute1,
                 )
                 .expect("series"),
@@ -1794,6 +1933,7 @@ mod tests {
                 SeriesLoadState::Partial,
                 Some("Showing retained local history while provider coverage repairs"),
             ),
+            "rithmic",
             true,
             true,
             &mut live,
@@ -1811,6 +1951,7 @@ mod tests {
 
         apply_series_state(
             state(SeriesLoadState::Ready, None),
+            "rithmic",
             true,
             true,
             &mut live,
@@ -1821,13 +1962,14 @@ mod tests {
             drained_states(&receiver),
             vec![(
                 ChartState::Loading,
-                "Coinbase history is loaded; connecting the live edge".to_string()
+                "Rithmic history is loaded; connecting the live edge".to_string()
             )],
             "the replacement stays covered until the trade handoff is live"
         );
 
         apply_series_state(
             state(SeriesLoadState::Live, None),
+            "rithmic",
             true,
             true,
             &mut live,
@@ -1848,6 +1990,7 @@ mod tests {
         // every viewport repair.
         apply_series_state(
             state(SeriesLoadState::Partial, Some("visible coverage repairs")),
+            "rithmic",
             true,
             true,
             &mut live,
@@ -1866,7 +2009,7 @@ mod tests {
     #[test]
     fn covering_snapshots_are_forwarded_to_the_chart_validator() {
         let series = series_key(
-            coinbase_products().first().expect("BTC product"),
+            products().first().expect("BTC product"),
             ChartInterval::Minute1,
         )
         .expect("series");
@@ -1899,7 +2042,7 @@ mod tests {
             consumer_id: 1,
             active_generation: 1,
             realtime: true,
-            instrument: &default_coinbase_product("BTC-USD"),
+            instrument: &default_product("MNQ"),
         };
 
         assert_eq!(
@@ -1936,7 +2079,7 @@ mod tests {
     #[test]
     fn non_contiguous_engine_tail_is_left_for_the_chart_validator() {
         let series = series_key(
-            coinbase_products().first().expect("BTC product"),
+            products().first().expect("BTC product"),
             ChartInterval::Minute1,
         )
         .expect("series");
@@ -1971,7 +2114,7 @@ mod tests {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
-                    instrument: &default_coinbase_product("BTC-USD"),
+                    instrument: &default_product("MNQ"),
                 },
                 &mut publication,
                 &mut live,
@@ -2005,7 +2148,7 @@ mod tests {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
-                    instrument: &default_coinbase_product("BTC-USD"),
+                    instrument: &default_product("MNQ"),
                 },
                 &mut publication,
                 &mut live,
@@ -2033,7 +2176,7 @@ mod tests {
         /// Comfortably more than one frame's drain, and more than three seconds
         /// of the old one-event-per-16ms budget.
         const BURST: u64 = 200;
-        let product = default_coinbase_product("BTC-USD");
+        let product = default_product("MNQ");
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
@@ -2188,7 +2331,7 @@ mod tests {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
-                instrument: &default_coinbase_product("BTC-USD"),
+                instrument: &default_product("MNQ"),
             },
             &mut publication,
             &mut live,
@@ -2206,11 +2349,12 @@ mod tests {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
-                provider: "coinbase".to_string(),
+                provider: "rithmic".to_string(),
                 state: ProviderConnectionState::Recovering as i32,
                 generation: 2,
                 detail: None,
             },
+            "rithmic",
             true,
             &sender,
         )
@@ -2227,7 +2371,7 @@ mod tests {
 
     #[test]
     fn engine_restore_failure_stays_recovering_without_killing_the_worker() {
-        let product = coinbase_products().remove(0);
+        let product = products().remove(0);
         let (mut live_pane, live_record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
         let (mut dead_pane, mut dead_record) =
@@ -2257,10 +2401,7 @@ mod tests {
 
     #[test]
     fn phase_four_series_keys_cover_required_symbols_and_intervals() {
-        let products = vec![
-            default_coinbase_product("BTC-USD"),
-            default_coinbase_product("SOL-USD"),
-        ];
+        let products = vec![default_product("MNQ"), default_product("ES")];
         for product in &products {
             for (interval, seconds) in [
                 (ChartInterval::Minute1, 60),
@@ -2292,7 +2433,7 @@ mod tests {
 
     #[test]
     fn calendar_month_replay_is_explicit_instead_of_approximated_as_thirty_days() {
-        let product = default_coinbase_product("BTC-USD");
+        let product = default_product("MNQ");
         let week = replay_bar_definition(
             &series_key(&product, ChartInterval::Week1).expect("week series"),
         )
@@ -2313,20 +2454,15 @@ mod tests {
 
     #[test]
     fn calendar_snapshot_connects_to_the_shared_realtime_session() {
-        for interval in [ChartInterval::Week1, ChartInterval::Month1] {
-            let (state, message) = snapshot_connection_state(interval);
-            assert_eq!(state, FeedConnectionState::Discovering);
-            assert!(message.contains("realtime is connecting"));
-        }
-
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         apply_provider_state(
             &ProviderState {
-                provider: "coinbase".to_string(),
+                provider: "rithmic".to_string(),
                 state: ProviderConnectionState::Connecting as i32,
                 generation: 1,
                 detail: None,
             },
+            "rithmic",
             true,
             &sender,
         )
@@ -2342,7 +2478,7 @@ mod tests {
 
     #[test]
     fn calendar_series_accepts_the_engine_live_handoff() {
-        let product = default_coinbase_product("BTC-USD");
+        let product = default_product("MNQ");
         let series = series_key(&product, ChartInterval::Week1).expect("calendar series");
         let snapshot = SeriesSnapshot {
             consumer_id: 1,
@@ -2373,7 +2509,7 @@ mod tests {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
-                instrument: &default_coinbase_product("BTC-USD"),
+                instrument: &default_product("MNQ"),
             },
             &mut publication,
             &mut live,
@@ -2392,7 +2528,7 @@ mod tests {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
-                instrument: &default_coinbase_product("BTC-USD"),
+                instrument: &default_product("MNQ"),
             },
             &mut publication,
             &mut live,
@@ -2404,7 +2540,7 @@ mod tests {
 
     #[test]
     fn replacement_engine_resets_application_generation_fence() {
-        let product = default_coinbase_product("BTC-USD");
+        let product = default_product("MNQ");
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let snapshot = |provider_generation, publication_generation, source_sequence| {
             envelope::Payload::SeriesSnapshot(SeriesSnapshot {
@@ -2440,7 +2576,7 @@ mod tests {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
-                    instrument: &default_coinbase_product("BTC-USD"),
+                    instrument: &default_product("MNQ"),
                 },
                 &mut publication,
                 &mut live,
@@ -2458,7 +2594,7 @@ mod tests {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
-                    instrument: &default_coinbase_product("BTC-USD"),
+                    instrument: &default_product("MNQ"),
                 },
                 &mut publication,
                 &mut live,
@@ -2473,9 +2609,14 @@ mod tests {
     }
 
     #[test]
-    fn coinbase_series_keys_reject_conflicting_provider_metadata() {
-        let mut product = coinbase_products().remove(0);
-        product.provider = "rithmic".to_string();
+    fn rithmic_series_keys_reject_conflicting_provider_metadata() {
+        // A Hyperliquid provider claiming a Rithmic instrument identity (and
+        // vice versa) must fail here instead of misrouting demand.
+        let mut product = products().remove(0);
+        product.provider = "hyperliquid".to_string();
+        assert!(series_key(&product, ChartInterval::Minute1).is_err());
+        let mut product = products().remove(0);
+        product.instrument_id = "hyperliquid:perp:BTC".to_string();
         assert!(series_key(&product, ChartInterval::Minute1).is_err());
     }
 
@@ -2498,12 +2639,13 @@ mod tests {
         );
     }
 
-    /// The Coinbase DOM panel stayed empty because the engine's order-book
-    /// snapshot had no arm here: `CoinbaseDom` was declared, coalesced, and
-    /// rendered, but never constructed. Levels are real BTC-USD top-of-book.
+    /// The Rithmic DOM panel stayed empty because the engine's order-book
+    /// snapshot had no arm here: `RithmicDom` was declared, coalesced, and
+    /// rendered, but never constructed. Levels are a real MNQ top-of-book fixture
+    /// with accurate Rithmic integer-contract volumes.
     #[test]
-    fn coinbase_order_book_snapshot_uses_the_consumers_selection_identity() {
-        let product = default_coinbase_product("BTC-USD");
+    fn rithmic_order_book_snapshot_uses_the_consumers_selection_identity() {
+        let product = default_product("MNQ");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let mut publication = None;
@@ -2513,7 +2655,7 @@ mod tests {
             envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
                 consumer_id: 1,
                 generation: 1,
-                provider: "coinbase".to_string(),
+                provider: "rithmic".to_string(),
                 instrument_id: product.instrument_id.clone(),
                 entitlement_id: product.entitlement_id.clone(),
                 provider_generation: 1,
@@ -2528,7 +2670,7 @@ mod tests {
                         price: 7_798_670,
                         quantity: 653_408,
                         order_count: None,
-                        traded_volume: 125_000_000,
+                        traded_volume: 125,
                     },
                     IpcOrderBookLevel {
                         price: 7_798_514,
@@ -2542,7 +2684,7 @@ mod tests {
                         price: 7_798_671,
                         quantity: 22_517_771,
                         order_count: None,
-                        traded_volume: 75_000_000,
+                        traded_volume: 75,
                     },
                     IpcOrderBookLevel {
                         price: 7_798_727,
@@ -2568,13 +2710,13 @@ mod tests {
         let frame = messages
             .into_iter()
             .find_map(|message| match message {
-                MarketWorkerMessage::CoinbaseDom(frame) => Some(frame),
+                MarketWorkerMessage::RithmicDom(frame) => Some(frame),
                 _ => None,
             })
-            .expect("Coinbase depth must reach the DOM panel");
+            .expect("Rithmic depth must reach the DOM panel");
         assert!(
             !frame.rows.is_empty(),
-            "a projected Coinbase DOM frame must carry price rows"
+            "a projected Rithmic DOM frame must carry price rows"
         );
         assert_eq!(frame.selection_generation, product.selection_generation);
         assert_eq!(
@@ -2582,14 +2724,167 @@ mod tests {
                 .bid
                 .as_ref()
                 .map(|level| level.traded_volume_text.as_str()),
-            Some("1.25")
+            Some("125")
         );
         assert_eq!(
             frame.rows[0]
                 .ask
                 .as_ref()
                 .map(|level| level.traded_volume_text.as_str()),
-            Some("0.75")
+            Some("75")
+        );
+    }
+
+    #[test]
+    fn hyperliquid_series_keys_cover_supported_intervals() {
+        let product = default_hyperliquid_product();
+        for (interval, seconds) in [
+            (ChartInterval::Minute1, 60),
+            (ChartInterval::Minute5, 300),
+            (ChartInterval::Hour1, 3_600),
+            (ChartInterval::Day1, 86_400),
+        ] {
+            let series = series_key(&product, interval).expect("HL series validates");
+            assert_eq!(series.provider, "hyperliquid");
+            assert_eq!(series.cadence_value, seconds);
+            assert_eq!(series.instrument_id, product.instrument_id);
+            assert_eq!(series.entitlement_id, "hyperliquid-public");
+        }
+        // Native 3-day candles exist on Hyperliquid but not on Rithmic.
+        let day3 = series_key(&product, ChartInterval::Day3).expect("HL day3 series");
+        assert_eq!(day3.cadence, SeriesCadence::SessionDays as i32);
+        // Tick candles exist on neither public path.
+        assert!(series_key(&product, ChartInterval::Tick100).is_err());
+        // Rithmic intervals stay Rithmic-only.
+        assert!(series_key(&default_product("MNQ"), ChartInterval::Day3).is_err());
+    }
+
+    #[test]
+    fn snapshot_instrument_parses_all_hyperliquid_identities() {
+        let perp = SeriesKey {
+            provider: "hyperliquid".to_string(),
+            instrument_id: "hyperliquid:perp:BTC".to_string(),
+            cadence_value: 60,
+            definition_revision: 1,
+            entitlement_id: "hyperliquid-public".to_string(),
+            cadence: SeriesCadence::FixedSeconds as i32,
+        };
+        assert_eq!(
+            snapshot_instrument(&perp).expect("perp parses"),
+            (
+                "Hyperliquid".to_string(),
+                "BTC".to_string(),
+                AssetClass::Future,
+                "USDC".to_string()
+            )
+        );
+        let spot = SeriesKey {
+            instrument_id: "hyperliquid:spot:7:HFUN/USDC".to_string(),
+            ..perp.clone()
+        };
+        assert_eq!(
+            snapshot_instrument(&spot).expect("spot parses"),
+            (
+                "Hyperliquid Spot".to_string(),
+                "HFUN/USDC".to_string(),
+                AssetClass::CryptoAsset,
+                "USDC".to_string()
+            )
+        );
+        let builder = SeriesKey {
+            instrument_id: "hyperliquid:builder:xyz:TSLA".to_string(),
+            ..perp.clone()
+        };
+        assert_eq!(
+            snapshot_instrument(&builder).expect("builder parses"),
+            (
+                "xyz".to_string(),
+                "xyz:TSLA".to_string(),
+                AssetClass::Future,
+                "USDC".to_string()
+            )
+        );
+        // Misrouted or truncated identities fail closed.
+        for bad in [
+            "hyperliquid:perp:BTC:EXTRA",
+            "hyperliquid:spot:7:HFUNUSDC",
+            "hyperliquid:spot:HFUN/USDC",
+            "hyperliquid:builder:TSLA",
+            "instrument:rithmic:CME:MNQ",
+            "hyperliquid:",
+            "",
+        ] {
+            let mut series = perp.clone();
+            series.instrument_id = bad.to_string();
+            assert!(
+                snapshot_instrument(&series).is_err(),
+                "{bad} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn hyperliquid_snapshot_converts_with_eight_place_precision() {
+        let product = default_hyperliquid_product();
+        let series = series_key(&product, ChartInterval::Minute1).expect("HL series");
+        let snapshot = replay_snapshot(&SeriesSnapshot {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series),
+            provider_generation: 7,
+            price_scale: 8,
+            quantity_scale: 8,
+            bars: vec![IpcMarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 6_700_050_000_000,
+                high: 6_700_100_000_000,
+                low: 6_699_900_000_000,
+                close: 6_700_075_000_000,
+                volume: 98_639_000,
+            }],
+            publication_generation: 1,
+            forming: false,
+        })
+        .expect("HL snapshot converts");
+        assert_eq!(snapshot.instrument().precision.price_scale(), 8);
+        assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
+        assert_eq!(snapshot.instrument().symbol, "BTC");
+    }
+
+    #[test]
+    fn provider_state_mismatch_is_rejected_per_endpoint() {
+        let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
+        // A Hyperliquid state update on a Rithmic endpoint misroutes.
+        assert!(
+            apply_provider_state(
+                &ProviderState {
+                    provider: "hyperliquid".to_string(),
+                    state: ProviderConnectionState::Online as i32,
+                    generation: 1,
+                    detail: None,
+                },
+                "rithmic",
+                true,
+                &sender,
+            )
+            .is_err()
+        );
+        // And the reverse misroutes identically.
+        assert!(
+            apply_provider_state(
+                &ProviderState {
+                    provider: "rithmic".to_string(),
+                    state: ProviderConnectionState::Online as i32,
+                    generation: 1,
+                    detail: None,
+                },
+                "hyperliquid",
+                true,
+                &sender,
+            )
+            .is_err()
         );
     }
 }

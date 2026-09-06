@@ -752,7 +752,7 @@ mod tests {
         has_rows: bool,
     ) -> DomFrame {
         DomFrame {
-            provider_id: "coinbase".into(),
+            provider_id: "rithmic".into(),
             instrument_id: "BTC-USD".into(),
             entitlement_id: "public".into(),
             session_generation,

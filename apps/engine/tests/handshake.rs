@@ -11,9 +11,9 @@ use axiusflow_engine::{
     EngineState, SessionPairer, bind_listener, serve_client, serve_client_with_state,
 };
 use axiusflow_engine_protocol::{
-    ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, HotSeries,
-    PROTOCOL_VERSION, ResourceMode, StreamRole, WorkspaceLayoutState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    ClientHello, ClientKind, EngineFaultCode, Envelope, EnvelopeDecoder, PROTOCOL_VERSION,
+    ResourceMode, StreamRole, WorkspaceLayoutState, WorkspaceSplitAxis, WorkspaceTabState,
+    encode_envelope, envelope,
 };
 use axiusflow_local_engine_client::{EngineClient, load_or_create_installation_token};
 use axiusflow_platform_runtime::CredentialVault;
@@ -261,14 +261,14 @@ fn authenticated_client_restores_engine_owned_workspace() {
     let mut client = EngineClient::connect(&name, &token).expect("connect engine client");
     assert_eq!(client.ready().engine_epoch, 73);
     let workspace = client.restore_workspace().expect("restore workspace");
-    assert_eq!(workspace.provider, "coinbase");
-    assert_eq!(workspace.market, "BTC-USD");
+    assert_eq!(workspace.provider, "hyperliquid");
+    assert_eq!(workspace.market, "BTC-PERP");
     assert_eq!(workspace.interval_seconds, 60);
     let instrument = workspace.workspace_tabs[0].panes[0]
         .instrument
         .as_ref()
         .expect("fresh workspace has a canonical chart instrument");
-    assert_eq!(instrument.price_scale, 2);
+    assert_eq!(instrument.price_scale, 8);
     assert_eq!(instrument.quantity_scale, 8);
     drop(client);
     server.join().expect("join server");
@@ -292,52 +292,13 @@ fn framed_session_survives_repeated_handshake_burst_and_reconnect() {
             let workspace = client
                 .restore_workspace()
                 .expect("restore workspace in burst");
-            assert_eq!(workspace.provider, "coinbase");
-            assert_eq!(workspace.market, "BTC-USD");
+            assert_eq!(workspace.provider, "hyperliquid");
+            assert_eq!(workspace.market, "BTC-PERP");
         }
         drop(client);
         server.join().expect("join server");
     }
 }
-
-#[test]
-fn schema_four_coinbase_precision_is_repaired_before_workspace_restore() {
-    let directory = TestDirectory::new();
-    let mut stale = EngineState::default().workspace();
-    stale.workspace_revision = 14;
-    stale.hot_series[0].price_scale = 0;
-    stale.hot_series[0].quantity_scale = 0;
-    let instrument = stale.workspace_tabs[0].panes[0]
-        .instrument
-        .as_mut()
-        .expect("default workspace has an instrument");
-    instrument.price_scale = 0;
-    instrument.quantity_scale = 0;
-    let bytes = encode_envelope(&Envelope {
-        protocol_version: PROTOCOL_VERSION,
-        target_consumer_id: 0,
-        payload: Some(envelope::Payload::WorkspaceState(stale)),
-    })
-    .expect("encode stale schema-four workspace");
-    fs::write(
-        directory.0.join("workspace-00000000000000000014.frame"),
-        bytes,
-    )
-    .expect("write stale schema-four workspace");
-
-    let repaired = EngineState::open(&directory.0).expect("repair workspace precision");
-    let workspace = repaired.workspace();
-    assert_eq!(workspace.workspace_revision, 15);
-    assert_eq!(workspace.hot_series[0].price_scale, 2);
-    assert_eq!(workspace.hot_series[0].quantity_scale, 8);
-    let instrument = workspace.workspace_tabs[0].panes[0]
-        .instrument
-        .as_ref()
-        .expect("repaired workspace has an instrument");
-    assert_eq!(instrument.price_scale, 2);
-    assert_eq!(instrument.quantity_scale, 8);
-}
-
 #[test]
 fn operational_resource_mode_updates_without_revising_user_workspace() {
     let state = EngineState::default();
@@ -383,7 +344,7 @@ fn workspace_selection_is_durable_across_engine_restart() {
     assert_eq!(reopened.workspace().schema_revision, 5);
     assert!(reopened.workspace().workspace_tabs[0].layout.is_some());
     assert_eq!(reopened.workspace().cache_manifest_revision, 1);
-    assert_eq!(reopened.workspace().hot_series[0].provider, "coinbase");
+    assert_eq!(reopened.workspace().hot_series[0].provider, "rithmic");
 }
 
 #[test]
@@ -444,7 +405,7 @@ fn chart_viewport_is_generation_fenced_and_persisted_independently() {
         .workspace()
         .hot_series
         .into_iter()
-        .find(|series| series.market == "BTC-USD" && series.interval_seconds == 60)
+        .find(|series| series.market == "BTC-PERP" && series.interval_seconds == 60)
         .expect("active hot series");
     assert_eq!(active.viewport_start_unix_nanos, Some(3_000));
     assert_eq!(active.viewport_end_unix_nanos, Some(4_000));
@@ -534,8 +495,15 @@ fn shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation() {
         workspace
             .hot_series
             .iter()
-            .all(|series| series.provider == "coinbase"),
-        "legacy selection without exact Rithmic metadata is not fabricated into the hot set"
+            .any(|series| series.provider == "hyperliquid"),
+        "the persisted hot set retains the Hyperliquid default"
+    );
+    assert!(
+        workspace
+            .hot_series
+            .iter()
+            .any(|series| series.provider == "rithmic" && series.market == "MNQU6"),
+        "the persisted hot set retains the Rithmic selection"
     );
     let manifests = fs::read_dir(&directory.0)
         .expect("read workspace directory")
@@ -562,142 +530,6 @@ fn corrupt_latest_workspace_is_quarantined_and_falls_back() {
             .exists()
     );
 }
-
-#[test]
-fn legacy_workspace_migrates_to_a_revisioned_hot_set() {
-    let directory = TestDirectory::new();
-    let legacy = WorkspaceState {
-        provider: "coinbase".to_string(),
-        market: "ETH-USD".to_string(),
-        interval_seconds: 300,
-        watchlist: vec!["ETH-USD".to_string()],
-        workspace_revision: 7,
-        warm_mode_enabled: true,
-        resource_mode: ResourceMode::Warm as i32,
-        schema_revision: 0,
-        cache_manifest_revision: 0,
-        hot_series: Vec::new(),
-        lifetime_mode: 0,
-        autostart_enabled: false,
-        markets_live_permitted: false,
-        ..WorkspaceState::default()
-    };
-    let bytes = encode_envelope(&Envelope {
-        protocol_version: PROTOCOL_VERSION,
-        target_consumer_id: 0,
-        payload: Some(envelope::Payload::WorkspaceState(legacy)),
-    })
-    .expect("encode legacy workspace");
-    fs::write(
-        directory.0.join("workspace-00000000000000000007.frame"),
-        bytes,
-    )
-    .expect("write legacy workspace");
-    let migrated = EngineState::open(&directory.0).expect("migrate workspace");
-    let workspace = migrated.workspace();
-    assert_eq!(workspace.workspace_revision, 8);
-    assert_eq!(workspace.schema_revision, 5);
-    assert!(workspace.workspace_tabs[0].layout.is_some());
-    assert_eq!(workspace.cache_manifest_revision, 1);
-    assert_eq!(workspace.hot_series.len(), 1);
-    assert_eq!(workspace.hot_series[0].market, "ETH-USD");
-    assert_eq!(
-        workspace.hot_series[0].instrument_id,
-        "instrument:coinbase:eth:usd"
-    );
-    assert_eq!(
-        workspace.hot_series[0].entitlement_id,
-        "crypto_public_realtime"
-    );
-    assert!(
-        directory
-            .0
-            .join("workspace-00000000000000000008.frame")
-            .exists()
-    );
-}
-
-#[test]
-fn schema_two_migration_keeps_supported_coinbase_and_discards_incomplete_rithmic() {
-    let directory = TestDirectory::new();
-    let legacy_series =
-        |provider: &str, market: &str, interval_seconds: u32, score: u32| HotSeries {
-            provider: provider.to_string(),
-            market: market.to_string(),
-            interval_seconds,
-            score,
-            last_used_unix_seconds: u64::from(score),
-            provider_watermark: 9,
-            series_watermark: 11,
-            viewport_start_unix_nanos: Some(1_000),
-            viewport_end_unix_nanos: Some(2_000),
-            account_id: String::new(),
-            instrument_id: String::new(),
-            entitlement_id: String::new(),
-            cadence: 0,
-            cadence_value: 0,
-            definition_revision: 0,
-            pinned: false,
-            workspace_ids: Vec::new(),
-            coverage_start_unix_nanos: None,
-            coverage_end_unix_nanos: None,
-            provider_symbol: String::new(),
-            venue_id: String::new(),
-            display_symbol: String::new(),
-            price_scale: 0,
-            quantity_scale: 0,
-        };
-    let legacy = WorkspaceState {
-        provider: "rithmic".to_string(),
-        market: "MNQU6".to_string(),
-        interval_seconds: 300,
-        watchlist: vec!["BTC-USD".to_string(), "MNQU6".to_string()],
-        workspace_revision: 12,
-        warm_mode_enabled: true,
-        resource_mode: ResourceMode::Warm as i32,
-        schema_revision: 2,
-        cache_manifest_revision: 3,
-        hot_series: vec![
-            legacy_series("coinbase", "BTC-USD", 300, 1),
-            legacy_series("rithmic", "MNQU6", 300, 2),
-        ],
-        lifetime_mode: axiusflow_engine_protocol::EngineLifetimeMode::KeepEngineWarm as i32,
-        autostart_enabled: false,
-        markets_live_permitted: false,
-        ..WorkspaceState::default()
-    };
-    let bytes = encode_envelope(&Envelope {
-        protocol_version: PROTOCOL_VERSION,
-        target_consumer_id: 0,
-        payload: Some(envelope::Payload::WorkspaceState(legacy)),
-    })
-    .expect("encode schema-two workspace");
-    fs::write(
-        directory.0.join("workspace-00000000000000000012.frame"),
-        bytes,
-    )
-    .expect("write schema-two workspace");
-
-    let migrated = EngineState::open(&directory.0).expect("migrate schema-two workspace");
-    let workspace = migrated.workspace();
-
-    assert_eq!(workspace.schema_revision, 5);
-    assert!(workspace.workspace_tabs[0].layout.is_some());
-    assert_eq!(workspace.workspace_revision, 13);
-    assert_eq!(workspace.hot_series.len(), 1);
-    let series = &workspace.hot_series[0];
-    assert_eq!(series.provider, "coinbase");
-    assert_eq!(series.instrument_id, "instrument:coinbase:btc:usd");
-    assert_eq!(series.account_id, "coinbase_public_market_data");
-    assert_eq!(series.entitlement_id, "crypto_public_realtime");
-    assert_eq!(series.provider_watermark, 9);
-    assert_eq!(series.series_watermark, 11);
-    assert_eq!(series.viewport_start_unix_nanos, Some(1_000));
-    assert_eq!(series.viewport_end_unix_nanos, Some(2_000));
-    assert_eq!(workspace.workspace_tabs.len(), 1);
-    assert_eq!(workspace.workspace_tabs[0].panes[0].consumer_id, 1);
-}
-
 #[test]
 fn workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_writes_fail() {
     let directory = TestDirectory::new();
@@ -748,7 +580,7 @@ fn workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_write
         },
         WorkspaceTabState {
             workspace_id: 3,
-            label: "Crypto".to_string(),
+            label: "Futures".to_string(),
             split_axis: WorkspaceSplitAxis::Horizontal as i32,
             panes: vec![third],
             active_pane_id: 9,

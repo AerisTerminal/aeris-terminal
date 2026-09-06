@@ -385,11 +385,6 @@ impl ConsumerEvents {
         self.series_overflowed = false;
     }
 
-    #[cfg(test)]
-    pub(super) fn queued_series(&self) -> Option<&envelope::Payload> {
-        self.series.front()
-    }
-
     /// Queues one incremental bar update.
     ///
     /// Two foldings keep the queue short without losing a bar: repeated updates
@@ -546,19 +541,7 @@ impl Coordinator<'_> {
         let needs_covering_repair =
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
-            if needs_covering_repair && series.provider_id == "coinbase" {
-                // A dormant Coinbase series can belong to the current provider
-                // session while still ending several buckets behind the market.
-                // Keep it inside the engine as fallback, but do not establish a
-                // chart baseline until provider history has repaired the edge.
-                events.series_state = Some(series_state(
-                    waiter.consumer_id,
-                    waiter.generation,
-                    ipc_series(series),
-                    SeriesLoadState::Resolving,
-                    Some("Refreshing cached history to the Coinbase live edge".to_string()),
-                ));
-            } else if needs_covering_repair {
+            if needs_covering_repair {
                 publish_state(
                     events,
                     publication,
@@ -580,35 +563,6 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn flush_deferred_publication(&mut self, series: &BarSeriesKey) {
-        if !self.deferred_publications.remove(series) {
-            return;
-        }
-        match self.engine.publish_series_snapshot(series) {
-            Ok(publications) => {
-                for publication in publications {
-                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        publish_state(
-                            events,
-                            &publication,
-                            SeriesLoadState::Ready,
-                            PersistenceState::Pending,
-                            None,
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                eprintln!("Axiusflow engine deferred history publication failed: {error}");
-            }
-        }
-    }
-
-    /// Resolves one failed Coinbase repair page without stranding the live feed.
-    ///
-    /// The live handoff is never held open for a repair, so a page the provider
-    /// refuses to serve costs the consumer visible history and nothing else: the
-    /// series is reported `Partial` and keeps receiving bars.
     pub(super) fn broadcast_persistence_for(
         &mut self,
         selected: &BarSeriesKey,
@@ -621,7 +575,7 @@ impl Coordinator<'_> {
             .and_then(|status| status.generation)
             .unwrap_or(ProviderGeneration(NonZeroU64::MIN));
         let local_loaded = &self.local_loaded;
-        let live = &self.live;
+        let live = &self.rithmic_live;
         let engine = &self.engine;
         for (consumer_id, events) in &mut self.events {
             let Some(demand) = self.engine.current_demand(*consumer_id) else {
@@ -637,7 +591,7 @@ impl Coordinator<'_> {
                     SeriesLoadState::Partial
                 } else if live
                     .get(series)
-                    .is_some_and(|live| live.connected && live.history.is_authoritative())
+                    .is_some_and(|live| live.connected && live.history_ready)
                 {
                     SeriesLoadState::Live
                 } else if engine.has_publication(*consumer_id) {
@@ -804,12 +758,6 @@ impl Coordinator<'_> {
         }
     }
 
-    /// Publishes every Coinbase series that has bars the consumer has not seen.
-    ///
-    /// A series whose viewport sits back in history still publishes: the bars go
-    /// into the canonical series and the consumer's own viewport decides what is
-    /// drawn. Withholding them used to stall the feed permanently, because
-    /// nothing re-armed publication when the viewport came back to the edge.
     pub(super) fn broadcast_provider_for(
         &mut self,
         provider: &str,
@@ -831,50 +779,6 @@ impl Coordinator<'_> {
                 .is_some_and(|series| series.provider_id == provider)
             {
                 events.provider = Some(payload.clone());
-            }
-        }
-    }
-
-    pub(super) fn broadcast_provider(
-        &mut self,
-        state: ProviderConnectionState,
-        generation: ProviderGeneration,
-        detail: Option<&str>,
-    ) {
-        self.broadcast_provider_for("coinbase", state, generation, detail);
-    }
-
-    #[cfg(test)]
-    pub(super) fn broadcast_rithmic_provider(
-        &mut self,
-        state: ProviderConnectionState,
-        generation: ProviderGeneration,
-        detail: Option<&str>,
-    ) {
-        self.broadcast_provider_for("rithmic", state, generation, detail);
-    }
-
-    pub(super) fn broadcast_series_state_for(
-        &mut self,
-        selected: &BarSeriesKey,
-        state: SeriesLoadState,
-    ) {
-        for (consumer_id, events) in &mut self.events {
-            let Some(demand) = self.engine.current_demand(*consumer_id) else {
-                continue;
-            };
-            let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
-            else {
-                continue;
-            };
-            if series == selected {
-                events.series_state = Some(series_state(
-                    *consumer_id,
-                    generation,
-                    ipc_series(series),
-                    state,
-                    None,
-                ));
             }
         }
     }

@@ -36,27 +36,11 @@ pub(crate) struct RithmicSeriesRequest {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RithmicSeriesBrowser {
-    next_generation: usize,
     pending: Option<RithmicSeriesRequest>,
     selected: Option<RithmicSeriesRequest>,
 }
 
 impl RithmicSeriesBrowser {
-    pub(crate) fn select(
-        &mut self,
-        selection_generation: NonZeroUsize,
-        series: RithmicSeries,
-    ) -> RithmicSeriesRequest {
-        self.next_generation = self.next_generation.saturating_add(1).max(1);
-        let request = RithmicSeriesRequest {
-            selection_generation,
-            series_generation: NonZeroUsize::new(self.next_generation).unwrap_or(NonZeroUsize::MIN),
-            series,
-        };
-        self.pending = Some(request);
-        request
-    }
-
     pub(crate) fn accept(
         &mut self,
         selection_generation: NonZeroUsize,
@@ -78,12 +62,6 @@ impl RithmicSeriesBrowser {
             .is_some()
     }
 
-    /// Puts back a request whose dispatch failed, so a switch that never left
-    /// the desktop does not also cancel the one already in flight.
-    pub(crate) const fn restore_pending(&mut self, request: RithmicSeriesRequest) {
-        self.pending = Some(request);
-    }
-
     pub(crate) fn reset(&mut self) {
         self.pending = None;
         self.selected = None;
@@ -100,67 +78,67 @@ impl RithmicSeriesBrowser {
 
 #[cfg(test)]
 mod tests {
-    use super::{RithmicSeries, RithmicSeriesBrowser};
+    use super::{RithmicSeries, RithmicSeriesBrowser, RithmicSeriesRequest};
     use axiusflow_market_data::ChartInterval;
     use std::num::NonZeroUsize;
 
-    /// Rapid switching lands on the newest request, and only that one.
-    ///
-    /// Refusing a switch while one is loading meant the trader's last click was
-    /// discarded; accepting them without fencing meant an older reply could swap
-    /// the chart. The browser has to do both: take the newest, and accept only
-    /// the newest.
-    #[test]
-    fn rapid_series_switches_leave_only_the_newest_request_acceptable() {
-        let mut browser = RithmicSeriesBrowser::default();
-        let selection = NonZeroUsize::MIN;
-        let first = browser.select(selection, RithmicSeries::Minute1);
-        let second = browser.select(selection, RithmicSeries::from(ChartInterval::Minute5));
-        let third = browser.select(selection, RithmicSeries::from(ChartInterval::Minute15));
+    fn request(series: RithmicSeries, series_generation: usize) -> RithmicSeriesRequest {
+        RithmicSeriesRequest {
+            selection_generation: NonZeroUsize::MIN,
+            series_generation: NonZeroUsize::new(series_generation).unwrap_or(NonZeroUsize::MIN),
+            series,
+        }
+    }
 
-        assert!(!browser.accept(selection, first.series_generation));
-        assert!(!browser.accept(selection, second.series_generation));
-        assert!(browser.accept(selection, third.series_generation));
+    /// Only the exact pending generations complete a selection, so a stale
+    /// history reply can never swap the chart.
+    #[test]
+    fn mismatched_generations_do_not_complete_selection() {
+        let mut browser = RithmicSeriesBrowser {
+            pending: Some(request(RithmicSeries::Minute1, 3)),
+            ..RithmicSeriesBrowser::default()
+        };
+
+        assert!(!browser.accept(
+            NonZeroUsize::MIN,
+            NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN)
+        ));
+        assert_eq!(browser.pending(), Some(request(RithmicSeries::Minute1, 3)));
+        assert!(browser.accept(
+            NonZeroUsize::MIN,
+            NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN)
+        ));
         assert_eq!(
             browser.selected().map(|request| request.series),
-            Some(third.series)
+            Some(RithmicSeries::Minute1)
         );
     }
 
-    /// A dispatch that never left the desktop must not cancel the one in flight.
+    /// Rejecting clears only the matching request; anything else stays
+    /// pending so a superseded reply cannot strand the browser.
     #[test]
-    fn a_rejected_dispatch_restores_the_request_still_loading() {
-        let mut browser = RithmicSeriesBrowser::default();
-        let selection = NonZeroUsize::MIN;
-        let inflight = browser.select(selection, RithmicSeries::Minute1);
-        let rejected = browser.select(selection, RithmicSeries::from(ChartInterval::Minute5));
+    fn reject_clears_only_the_matching_request() {
+        let mut browser = RithmicSeriesBrowser {
+            pending: Some(request(RithmicSeries::from(ChartInterval::Minute5), 4)),
+            ..RithmicSeriesBrowser::default()
+        };
 
-        assert!(browser.reject(rejected.series_generation));
-        browser.restore_pending(inflight);
-
-        assert_eq!(browser.pending(), Some(inflight));
-        assert!(browser.accept(selection, inflight.series_generation));
+        assert!(!browser.reject(NonZeroUsize::new(5).unwrap_or(NonZeroUsize::MIN)));
+        assert_eq!(
+            browser.pending(),
+            Some(request(RithmicSeries::from(ChartInterval::Minute5), 4))
+        );
+        assert!(browser.reject(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN)));
+        assert_eq!(browser.pending(), None);
     }
 
+    /// Reset drops both pending and selected state for session retirement.
     #[test]
-    fn series_browser_fences_replaced_selection_and_series_generations() {
-        let mut browser = RithmicSeriesBrowser::default();
-        let selection = NonZeroUsize::MIN;
-        let first = browser.select(selection, RithmicSeries::Minute1);
-        assert_eq!(browser.pending(), Some(first));
-        let second = browser.select(selection, RithmicSeries::from(ChartInterval::Minute5));
-        assert_eq!(browser.pending(), Some(second));
-        assert!(!browser.accept(first.selection_generation, first.series_generation));
-        assert!(browser.accept(second.selection_generation, second.series_generation));
-        let replacement = browser.select(
-            NonZeroUsize::new(2).expect("selection generation is nonzero"),
-            RithmicSeries::from(ChartInterval::Day1),
-        );
-        assert!(!browser.accept(second.selection_generation, second.series_generation));
-        assert!(browser.accept(
-            replacement.selection_generation,
-            replacement.series_generation
-        ));
+    fn reset_clears_pending_and_selected_state() {
+        let mut browser = RithmicSeriesBrowser {
+            pending: Some(request(RithmicSeries::Minute1, 3)),
+            selected: Some(request(RithmicSeries::Minute1, 2)),
+        };
         browser.reset();
         assert_eq!(browser.pending(), None);
         assert_eq!(browser.selected(), None);

@@ -55,7 +55,7 @@ fn segment_key() -> SegmentEncryptionKey {
 
 fn scope(account: &str, entitlement: &str) -> HistoryScope {
     HistoryScope {
-        provider_id: "coinbase".to_string(),
+        provider_id: "rithmic".to_string(),
         account_id: account.to_string(),
         entitlement_revision: entitlement.to_string(),
     }
@@ -1188,7 +1188,7 @@ fn corruption_quarantines_only_the_affected_segment() {
     ));
     let deletion = store
         .secure_delete_account(
-            "coinbase",
+            "rithmic",
             "account-a",
             &Revocations(BTreeSet::from(["segment-key-v1".to_string()])),
         )
@@ -1398,7 +1398,7 @@ fn entitlement_and_account_invalidations_preserve_other_accounts() {
     assert_eq!(
         store
             .invalidate(&Invalidation::Account {
-                provider_id: "coinbase".to_string(),
+                provider_id: "rithmic".to_string(),
                 account_id: "account-a".to_string(),
             })
             .expect("account invalidation succeeds"),
@@ -1435,7 +1435,7 @@ fn secure_deletion_requires_key_revocation_before_removing_scope() {
         RecoveryAction::LiveOnly,
     );
     assert!(matches!(
-        store.secure_delete_account("coinbase", "account-a", &Revocations(BTreeSet::new())),
+        store.secure_delete_account("rithmic", "account-a", &Revocations(BTreeSet::new())),
         Err(LocalStorageError::KeyRevocationMissing { .. })
     ));
     assert_eq!(
@@ -1445,7 +1445,7 @@ fn secure_deletion_requires_key_revocation_before_removing_scope() {
 
     let report = store
         .secure_delete_account(
-            "coinbase",
+            "rithmic",
             "account-a",
             &Revocations(BTreeSet::from(["segment-key-v1".to_string()])),
         )
@@ -1484,7 +1484,7 @@ fn secure_deletion_rejects_keys_shared_with_other_accounts() {
     }
     assert!(matches!(
         store.secure_delete_account(
-            "coinbase",
+            "rithmic",
             "account-a",
             &Revocations(BTreeSet::from(["segment-key-v1".to_string()])),
         ),

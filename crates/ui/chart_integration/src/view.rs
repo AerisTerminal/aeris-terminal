@@ -3,8 +3,8 @@
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::nucleus_bridge::{
     ProductPriceBars, apply_merged_chart_data, chart_data_queue_capacity,
-    install_product_price_series, install_replay, install_volume_series, replay_legend_title,
-    replay_price_divisor, replay_quantity_divisor,
+    install_product_price_series, install_replay, install_volume_series, price_display_precision,
+    replay_display_precision, replay_legend_title, replay_price_divisor, replay_quantity_divisor,
 };
 use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
 use axiusflow_application::ReplayRecoveryCommand;
@@ -620,6 +620,7 @@ pub struct NucleusChartView {
     pending_context_menu: Option<ChartContextRequest>,
     pending_activate: ActivationRequest,
     instrument_price_precision: u8,
+    instrument_price_scale: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
     product_bars: ProductPriceBars,
@@ -695,6 +696,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
             instrument_price_precision: 2,
+            instrument_price_scale: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
             product_bars: ProductPriceBars::default(),
@@ -795,7 +797,8 @@ impl NucleusChartView {
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
-            instrument_price_precision: replay.instrument().precision.price_scale(),
+            instrument_price_precision: replay_display_precision(replay),
+            instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
             product_bars,
@@ -846,7 +849,8 @@ impl NucleusChartView {
         self.asset_legend_title = replay_legend_title(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
-        self.instrument_price_precision = replay.instrument().precision.price_scale();
+        self.instrument_price_precision = replay_display_precision(replay);
+        self.instrument_price_scale = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
         self.fitted = false;
@@ -1916,7 +1920,8 @@ impl NucleusChartView {
         self.asset_legend_title = replay_legend_title(replay);
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
-        self.instrument_price_precision = replay.instrument().precision.price_scale();
+        self.instrument_price_precision = replay_display_precision(replay);
+        self.instrument_price_scale = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
         Ok(true)
@@ -1977,8 +1982,18 @@ impl NucleusChartView {
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
                     self.asset_legend_title = replay_legend_title(snapshot);
-                    self.instrument_price_precision = snapshot.instrument().precision.price_scale();
+                    self.instrument_price_precision = replay_display_precision(snapshot);
+                    self.instrument_price_scale = snapshot.instrument().precision.price_scale();
                 }
+                let previous_precision = self.instrument_price_precision;
+                self.instrument_price_precision =
+                    self.instrument_price_precision.max(price_display_precision(
+                        update.accepted_deltas().iter().flat_map(|item| {
+                            let bar = item.value();
+                            [bar.open, bar.high, bar.low, bar.close]
+                        }),
+                        self.instrument_price_scale,
+                    ));
                 self.displayed_provenance.extend(update.accepted_deltas());
                 apply_merged_chart_data(
                     &mut self.engine,
@@ -1992,6 +2007,10 @@ impl NucleusChartView {
                 if mutation == SeriesMutation::Snapshot {
                     self.sync_brushable_interaction();
                     self.apply_price_series_kind();
+                }
+                if mutation == SeriesMutation::Snapshot
+                    || previous_precision != self.instrument_price_precision
+                {
                     self.apply_selected_price_format();
                 }
                 if mutation == SeriesMutation::TailReplace {
@@ -3146,23 +3165,45 @@ impl NucleusChartView {
 
         let layout = self.engine.options.get().layout.clone();
         let font_size = layout.font_size.to_f32().unwrap_or(12.0);
-        let measure = |text: &str| {
-            f64::from(measure_text(window, text, &layout.font_family, font_size, 400, false).width)
+        let measure = |text: &str, bold: bool| {
+            let weight = if bold { 600 } else { 400 };
+            f64::from(
+                measure_text(window, text, &layout.font_family, font_size, weight, false).width,
+            )
+        };
+        let countdown_font_size = self.engine.countdown_font_size().to_f32().unwrap_or(10.0);
+        let countdown_measure = |text: &str, bold: bool| {
+            let weight = if bold { 600 } else { 400 };
+            f64::from(
+                measure_text(
+                    window,
+                    text,
+                    &layout.font_family,
+                    countdown_font_size,
+                    weight,
+                    false,
+                )
+                .width,
+            )
         };
 
         if layout_recomputed {
-            self.engine.recompute_layout_with_measure(true, measure);
+            self.engine
+                .recompute_layout_with_measure(true, measure, countdown_measure);
             if !self.fitted {
                 self.engine.fit_content();
                 self.fitted = true;
-                self.engine.recompute_layout_with_measure(true, measure);
+                self.engine
+                    .recompute_layout_with_measure(true, measure, countdown_measure);
             }
             self.layout_dirty = false;
         }
 
         let max_label_width = (layout.font_size + 4.0) * 5.0 / 8.0
             * f64::from(self.engine.tick_mark_max_character_length.max(1));
-        let axis_frame = self.engine.build_axis_frame(max_label_width, measure);
+        let axis_frame = self
+            .engine
+            .build_axis_frame(max_label_width, measure, countdown_measure);
         self.engine.build_frame_into(&mut self.frame);
         self.engine
             .build_axis_primitives_into(&axis_frame, &mut self.axis_prims, |_| 0.0);
@@ -3575,9 +3616,13 @@ mod tests {
 
     fn interactive_chart() -> NucleusChartView {
         let mut chart = NucleusChartView::new();
-        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
         chart.engine.fit_content();
-        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
         chart.fitted = true;
         chart
     }
@@ -3729,7 +3774,9 @@ mod tests {
             chart.engine.feature_series_kind(0),
             Some(nucleuscharts_engine::FeatureSeriesKind::BrushableArea)
         );
-        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
         let start = chart.engine.time_scale.index_to_coordinate(2);
         let end = chart.engine.time_scale.index_to_coordinate(8);
         chart.begin_drag(start, 200.0, 1);
@@ -3773,7 +3820,7 @@ mod tests {
             })
             .collect();
         let mut definition = baseline.bar_definition().clone();
-        definition.definition_id = "coinbase:fixture:calendar-months:1".to_string();
+        definition.definition_id = "rithmic:fixture:calendar-months:1".to_string();
         definition.interval_seconds = 0;
         definition.trades_per_bar = None;
         definition.calendar_months = Some(1);
@@ -3961,15 +4008,17 @@ mod tests {
             .time
             .to_f64()
             .expect("bar time fits f64");
-        let measure = |text: &str| f64::from(u32::try_from(text.len()).unwrap_or(u32::MAX)) * 7.0;
-        let _ = chart.engine.build_axis_frame(80.0, measure);
+        let measure = |text: &str, _bold: bool| {
+            f64::from(u32::try_from(text.len()).unwrap_or(u32::MAX)) * 7.0
+        };
+        let _ = chart.engine.build_axis_frame(80.0, measure, measure);
         assert!(!chart.engine.frame_requires_axis());
         chart.pin_host_clock();
         assert!(chart.engine.frame_requires_axis());
         chart.engine.set_now_seconds(last_time + 10.0);
         let texts: Vec<String> = chart
             .engine
-            .build_axis_frame(80.0, measure)
+            .build_axis_frame(80.0, measure, measure)
             .labels
             .into_iter()
             .map(|label| label.text)
@@ -4576,7 +4625,9 @@ mod tests {
         for width in [1280.0_f32, 420.0] {
             chart.engine.css_width = f64::from(width);
             chart.engine.css_height = 720.0;
-            chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+            chart
+                .engine
+                .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
             assert!(chart.sync_legend_pane_layout() || !chart.legend_panes.is_empty());
             let plot_width = chart.engine.pane_w.to_f32().expect("plot width");
             assert!(
@@ -4605,7 +4656,9 @@ mod tests {
         let macd = chart
             .add_indicator(ChartIndicator::Macd)
             .expect("MACD is created");
-        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
 
         let rows = chart.legend_rows();
         let asset = rows.first().expect("asset legend is always first");
@@ -4785,7 +4838,9 @@ mod tests {
         let indicator = chart
             .add_indicator(ChartIndicator::Sma)
             .expect("SMA is created")[0];
-        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
         let (x, y) = visible_series_point(&chart, indicator);
         assert_eq!(chart.engine.hit_test_series(x, y), Some(indicator));
 
@@ -5325,7 +5380,9 @@ mod tests {
         chart
             .add_indicator(ChartIndicator::Rsi)
             .expect("RSI creates its indicator pane");
-        chart.engine.recompute_layout_with_measure(true, |_| 48.0);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
         assert_eq!(chart.engine.panes.len(), 2);
         let separator_y = chart.engine.panes[1].top;
         let first_stretch = chart.engine.panes[0].stretch_factor;

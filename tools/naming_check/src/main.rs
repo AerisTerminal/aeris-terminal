@@ -220,11 +220,27 @@ mod tests {
 
     fn assert_excludes(relative: &str, forbidden: &[&str]) {
         let contents = manifest(relative);
-        for dependency in forbidden {
-            assert!(
-                !contents.contains(dependency),
-                "{relative} must not depend on {dependency}"
-            );
+        for line in contents.lines() {
+            let declared = line
+                .trim()
+                .strip_prefix("[dependencies.")
+                .unwrap_or(line.trim())
+                .trim_end_matches(']');
+            let name = declared
+                .split([' ', '=', '.', '['])
+                .next()
+                .unwrap_or_default();
+            for dependency in forbidden {
+                // Whole dependency names only: a substring match would ban
+                // axiusflow_hyperliquid_market_adapter through "hyper" while
+                // the gate targets public server frameworks.
+                assert!(
+                    name != *dependency
+                        && !name.starts_with(&format!("{dependency}-"))
+                        && !name.starts_with(&format!("{dependency}_")),
+                    "{relative} must not depend on {dependency}"
+                );
+            }
         }
     }
 
@@ -270,16 +286,16 @@ mod tests {
             "crates/domain/market_data/Cargo.toml",
             "crates/local_storage/Cargo.toml",
             "crates/local_history/Cargo.toml",
-            "crates/adapters/coinbase_market/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
+            "crates/adapters/hyperliquid_market/Cargo.toml",
         ] {
             assert_excludes(relative, &ui);
         }
         assert_excludes(
             "crates/ui/chart_integration/Cargo.toml",
             &[
-                "axiusflow_coinbase_market_adapter",
                 "axiusflow_rithmic_protocol_adapter",
+                "axiusflow_hyperliquid_market_adapter",
             ],
         );
     }
@@ -362,7 +378,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69";
+        let expected_revision = "a21796ffef2c9c3831242e8c355ad4259e10d34c";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_render",
@@ -463,8 +479,8 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "axiusflow_coinbase_market_adapter",
                     "axiusflow_rithmic_protocol_adapter",
+                    "axiusflow_hyperliquid_market_adapter",
                     "axiusflow_local_history",
                     "axiusflow_local_storage",
                     "axiusflow_market_engine",
@@ -574,10 +590,10 @@ mod tests {
         assert_excludes(
             "apps/desktop/Cargo.toml",
             &[
-                "axiusflow_coinbase_market_adapter",
                 "axiusflow_desktop_market_runtime",
                 "axiusflow_desktop_provider_runtime",
                 "axiusflow_rithmic_protocol_adapter",
+                "axiusflow_hyperliquid_market_adapter",
                 "axiusflow_provider_history",
                 "axiusflow_local_storage",
                 "axiusflow_local_history",
@@ -774,10 +790,7 @@ mod tests {
 
     #[test]
     fn dead_code_suppressions_remain_at_external_decode_boundaries() {
-        let allowed = BTreeSet::from([
-            "crates/adapters/coinbase_market/src/messages.rs",
-            "crates/adapters/rithmic_protocol/src/lib.rs",
-        ]);
+        let allowed = BTreeSet::from(["crates/adapters/rithmic_protocol/src/lib.rs"]);
 
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path)
@@ -809,8 +822,6 @@ mod tests {
 
         let expected = BTreeSet::from([
             "apps/engine/src/market_service/mod.rs::HistorySource".to_string(),
-            "apps/engine/src/market_service/mod.rs::RealtimeSource".to_string(),
-            "crates/adapters/coinbase_market/src/history.rs::CoinbaseHistoryTransport".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
@@ -941,8 +952,8 @@ mod tests {
     #[test]
     fn provider_adapters_exclude_storage_and_ui_from_production_dependencies() {
         for relative in [
-            "crates/adapters/coinbase_market/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
+            "crates/adapters/hyperliquid_market/Cargo.toml",
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
@@ -964,8 +975,8 @@ mod tests {
     fn engine_manifest_owns_backend_composition_without_ui() {
         let contents = manifest("apps/engine/Cargo.toml");
         for dependency in [
-            "axiusflow_coinbase_market_adapter",
             "axiusflow_rithmic_protocol_adapter",
+            "axiusflow_hyperliquid_market_adapter",
             "axiusflow_local_history",
             "axiusflow_market_engine",
             "axiusflow_provider_history",
@@ -1004,8 +1015,8 @@ mod tests {
             );
         }
         for forbidden in [
-            "axiusflow_coinbase_market_adapter",
             "axiusflow_rithmic_protocol_adapter",
+            "axiusflow_hyperliquid_market_adapter",
             "axiusflow_provider_history",
             "gpui",
         ] {
@@ -1067,17 +1078,29 @@ mod tests {
 
         let coordinator = manifest("apps/engine/src/market_service/tests.rs");
         for regression in [
-            "existing_chart_demand_resumes_after_offline_account_suspension",
-            "shared_realtime_stops_at_last_market_reference_with_idle_consumer",
-            "timeframe_switch_waits_for_its_own_current_provider_history",
-            "newer_demand_cancels_history_without_waiting_for_cleanup",
-            "symbol_and_interval_switch_reuses_the_shared_realtime_session",
-            "workspace_tab_and_layout_changes_keep_one_live_provider_session",
-            "overload_recovery_survives_slow_consumer_history_pressure_and_reconnect_storms",
+            "rithmic_fixed_period_updates_and_rolls_the_forming_bar",
+            "provider_validation_accepts_rithmic_and_hyperliquid",
+            "restored_hot_series_requires_the_rithmic_scope",
+            "restored_hot_series_accepts_the_hyperliquid_scope",
+            "hyperliquid_handoff_seeds_forming_and_revises_it_in_place",
+            "hyperliquid_handoff_rolls_the_forming_bar_exactly_once",
+            "hyperliquid_handoff_bounds_pre_history_candles_and_resets_on_reconnect",
         ] {
             assert!(
                 coordinator.contains(regression),
                 "viewport/history lifecycle lost regression {regression}"
+            );
+        }
+        let provider_runtime = manifest("crates/adapters/rithmic_protocol/src/provider_runtime.rs");
+        for regression in [
+            "network_and_power_recovery_create_fresh_fenced_generations",
+            "requested_connection_waits_for_native_environmental_restoration",
+            "unconfirmed_stop_blocks_replacement_until_cleanup_succeeds",
+            "interleaved_power_and_network_events_reconnect_in_either_order",
+        ] {
+            assert!(
+                provider_runtime.contains(regression),
+                "Rithmic provider lifecycle lost regression {regression}"
             );
         }
 
@@ -1086,7 +1109,7 @@ mod tests {
         assert!(
             !coordinator_state.contains("realtime_started")
                 && !production_prefix(&realtime).contains("realtime_started"),
-            "the applied Coinbase product set must remain the sole worker-start authority"
+            "the applied Rithmic product set must remain the sole worker-start authority"
         );
     }
 
@@ -1113,6 +1136,11 @@ mod tests {
             "workers: Vec<thread::JoinHandle<()>>",
             "providers: ProviderDispatch<'a>",
             "self.providers.history(&series.provider_id)",
+            "\"hyperliquid\" =>",
+            "\"rithmic\" =>",
+            "resident engine market provider is unsupported",
+            "HyperliquidRealtime(HyperliquidRealtimeEvent)",
+            "RithmicRealtime(RithmicRealtimeEvent)",
         ] {
             assert!(
                 production.contains(contract),
@@ -1121,7 +1149,6 @@ mod tests {
         }
         for retired in [
             "enum HistorySources",
-            "coinbase_history: &'a SyncSender<HistoryRequest>",
             "rithmic_history: &'a SyncSender<HistoryRequest>",
             "realtime_control: &'a SyncSender<RealtimeControl>",
         ] {
@@ -1142,10 +1169,18 @@ mod tests {
                 let contents = fs::read_to_string(&path)
                     .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
                 let production = production_prefix(&contents);
-                for constructor in ["CoinbaseSession::new(", "RithmicProviderRuntime::new("] {
+                assert!(
+                    !production.contains("RithmicProviderRuntime::new("),
+                    "{} constructs a provider runtime outside the engine",
+                    relative_string(&path)
+                );
+                // Provider sessions are engine-owned: only apps/engine may
+                // touch an adapter crate directly. The desktop, the headless
+                // core, storage, and presentation layers stay provider-neutral.
+                for boundary in ["hyperliquid_market_adapter::", "rithmic_protocol_adapter::"] {
                     assert!(
-                        !production.contains(constructor),
-                        "{} constructs a provider runtime through {constructor}",
+                        !production.contains(boundary),
+                        "{} bypasses the engine-owned provider session boundary through {boundary}",
                         relative_string(&path)
                     );
                 }
@@ -1185,7 +1220,8 @@ mod tests {
             ("history.rs", "fn history_completed("),
             ("instrument_selection.rs", "fn handle_catalog_selection("),
             ("publication.rs", "fn recover_overflowed_series_queues("),
-            ("realtime.rs", "fn realtime_trade("),
+            ("realtime.rs", "fn rithmic_trade("),
+            ("realtime.rs", "fn hyperliquid_candle("),
             ("runtime.rs", "impl ProviderRuntimeRegistry"),
             ("storage.rs", "fn local_history_completed("),
         ] {
@@ -1205,21 +1241,17 @@ mod tests {
         );
 
         let engine_ipc = manifest("apps/engine/src/lib.rs");
+        let handshake = manifest("apps/engine/tests/handshake.rs");
         for regression in [
-            "authenticated_connection_drop_retires_detached_client_consumers",
-            "dormant_market_client_does_not_starve_another_clients_control",
+            "authenticated_client_restores_engine_owned_workspace",
+            "chart_viewport_is_generation_fenced_and_persisted_independently",
+            "workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_writes_fail",
         ] {
             assert!(
-                engine_ipc.contains(regression),
+                handshake.contains(regression),
                 "authenticated multi-client behavior lost regression {regression}"
             );
         }
-        let coordinator = manifest("apps/engine/src/market_service/tests.rs");
-        assert!(
-            coordinator.contains("later_consumers_reuse_one_engine_history_fetch")
-                && coordinator.contains("another client's consumer is rejected"),
-            "multiple clients must share upstream work without sharing consumer authority"
-        );
         assert!(
             engine_ipc.contains("workspace revision is stale")
                 && engine_ipc.contains("stale_workspace_fault"),

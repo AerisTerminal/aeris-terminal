@@ -20,17 +20,17 @@ use zeroize::{Zeroize, Zeroizing};
 
 const VAULT_SERVICE: &str = "com.axiusflow.engine.history";
 const CATALOG_KEY_ID: &str = "history-catalog-key-v1";
-const SEGMENT_KEY_ID: &str = "coinbase-public-bars-key-v1";
+const SEGMENT_KEY_ID: &str = "rithmic-public-bars-key-v1";
 const LOCAL_BAR_SEGMENT_MAGIC: &[u8; 8] = b"AXLBAR02";
 const LOCAL_BAR_SEGMENT_HEADER_BYTES: usize = LOCAL_BAR_SEGMENT_MAGIC.len() + 4;
 const LOCAL_BAR_BYTES: usize = 8 * 8;
 const MAXIMUM_LOCAL_HISTORY_BARS: usize = 10_000;
 const CURRENT_HISTORY_SCHEMA_REVISION: u32 = 2;
 const LEGACY_HISTORY_SCHEMA_REVISION: u32 = 1;
-const LEGACY_COINBASE_SEGMENT_MAGIC: &[u8; 6] = b"AXCBS1";
-const LEGACY_COINBASE_PAYLOAD_MAGIC: &[u8; 6] = b"AXCBH1";
-const LEGACY_COINBASE_PAYLOAD_BYTES: usize = LEGACY_COINBASE_PAYLOAD_MAGIC.len() + 7 * 8;
-const LEGACY_COINBASE_HEADER_BYTES: usize = LEGACY_COINBASE_SEGMENT_MAGIC.len() + 4;
+const LEGACY_RITHMIC_SEGMENT_MAGIC: &[u8; 6] = b"AXCBS1";
+const LEGACY_RITHMIC_PAYLOAD_MAGIC: &[u8; 6] = b"AXCBH1";
+const LEGACY_RITHMIC_PAYLOAD_BYTES: usize = LEGACY_RITHMIC_PAYLOAD_MAGIC.len() + 7 * 8;
+const LEGACY_RITHMIC_HEADER_BYTES: usize = LEGACY_RITHMIC_SEGMENT_MAGIC.len() + 4;
 const DEFAULT_CACHE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const NANOS_PER_DAY: i64 = 86_400 * 1_000_000_000;
 
@@ -680,7 +680,7 @@ fn encode_local_history_segment(bars: &[MarketBar]) -> Result<Vec<u8>, LocalHist
 
 fn decode_local_history_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, LocalHistoryError> {
     if !encoded.starts_with(LOCAL_BAR_SEGMENT_MAGIC) {
-        return decode_legacy_coinbase_segment(encoded);
+        return decode_legacy_rithmic_segment(encoded);
     }
     let count_bytes = encoded
         .get(LOCAL_BAR_SEGMENT_MAGIC.len()..LOCAL_BAR_SEGMENT_HEADER_BYTES)
@@ -723,14 +723,14 @@ fn decode_local_history_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, LocalH
     Ok(bars)
 }
 
-fn decode_legacy_coinbase_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, LocalHistoryError> {
-    if encoded.len() < LEGACY_COINBASE_HEADER_BYTES
-        || !encoded.starts_with(LEGACY_COINBASE_SEGMENT_MAGIC)
+fn decode_legacy_rithmic_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, LocalHistoryError> {
+    if encoded.len() < LEGACY_RITHMIC_HEADER_BYTES
+        || !encoded.starts_with(LEGACY_RITHMIC_SEGMENT_MAGIC)
     {
         return Err(LocalHistoryError::InvalidSegment);
     }
     let count_bytes = encoded
-        .get(LEGACY_COINBASE_SEGMENT_MAGIC.len()..LEGACY_COINBASE_HEADER_BYTES)
+        .get(LEGACY_RITHMIC_SEGMENT_MAGIC.len()..LEGACY_RITHMIC_HEADER_BYTES)
         .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
         .ok_or(LocalHistoryError::InvalidSegment)?;
     let count = usize::try_from(u32::from_le_bytes(count_bytes))
@@ -738,9 +738,9 @@ fn decode_legacy_coinbase_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, Loca
     if count == 0 || count > MAXIMUM_LOCAL_HISTORY_BARS {
         return Err(LocalHistoryError::InvalidSegment);
     }
-    let expected = LEGACY_COINBASE_HEADER_BYTES
+    let expected = LEGACY_RITHMIC_HEADER_BYTES
         .checked_add(
-            LEGACY_COINBASE_PAYLOAD_BYTES
+            LEGACY_RITHMIC_PAYLOAD_BYTES
                 .checked_mul(count)
                 .ok_or(LocalHistoryError::InvalidSegment)?,
         )
@@ -750,14 +750,14 @@ fn decode_legacy_coinbase_segment(encoded: &[u8]) -> Result<Vec<MarketBar>, Loca
     }
     let mut bars = Vec::with_capacity(count);
     let mut previous = None;
-    for payload in encoded[LEGACY_COINBASE_HEADER_BYTES..]
-        .as_chunks::<LEGACY_COINBASE_PAYLOAD_BYTES>()
+    for payload in encoded[LEGACY_RITHMIC_HEADER_BYTES..]
+        .as_chunks::<LEGACY_RITHMIC_PAYLOAD_BYTES>()
         .0
     {
-        if !payload.starts_with(LEGACY_COINBASE_PAYLOAD_MAGIC) {
+        if !payload.starts_with(LEGACY_RITHMIC_PAYLOAD_MAGIC) {
             return Err(LocalHistoryError::InvalidSegment);
         }
-        let mut offset = LEGACY_COINBASE_PAYLOAD_MAGIC.len();
+        let mut offset = LEGACY_RITHMIC_PAYLOAD_MAGIC.len();
         let source_sequence = read_u64(payload, &mut offset)?;
         let exchange_timestamp_seconds = read_i64(payload, &mut offset)?;
         let exchange_timestamp_unix_nanos = exchange_timestamp_seconds
@@ -910,7 +910,7 @@ mod tests {
     use super::*;
     use std::{fs, path::PathBuf, process};
 
-    const COINBASE_ENTITLEMENT: &str = "crypto_public_realtime";
+    const RITHMIC_ENTITLEMENT: &str = "crypto_public_realtime";
 
     struct TempRoot(PathBuf);
 
@@ -957,9 +957,9 @@ mod tests {
     fn encrypted_history_is_available_after_store_restart() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -977,25 +977,25 @@ mod tests {
             let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
                 .expect("fixture store opens");
             storage
-                .persist(&coinbase_scope(), &series, &bars, false)
+                .persist(&rithmic_scope(), &series, &bars, false)
                 .expect("history persists");
             let mut derived = bars.clone();
             derived[0].close = 106;
             storage
-                .persist(&coinbase_scope(), &series, &derived, true)
+                .persist(&rithmic_scope(), &series, &derived, true)
                 .expect("derived history persists");
         }
         let mut reopened = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
             .expect("fixture store reopens");
         let retained = reopened
-            .read_latest(&coinbase_scope(), &series)
+            .read_latest(&rithmic_scope(), &series)
             .expect("history reads")
             .expect("history exists");
         assert_eq!(retained.bars[0].close, 105);
         assert!(!retained.derived);
         assert!(retained.durable);
         let ranged = reopened
-            .read_range(&coinbase_scope(), &series, 60_000_000_000, 120_000_000_000)
+            .read_range(&rithmic_scope(), &series, 60_000_000_000, 120_000_000_000)
             .expect("range reads")
             .expect("range exists");
         assert_eq!(ranged.bars[0].close, 105);
@@ -1006,9 +1006,9 @@ mod tests {
     fn exact_derived_series_is_used_when_native_history_is_absent() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:eth:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:eth:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1025,10 +1025,10 @@ mod tests {
         let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
             .expect("fixture store opens");
         storage
-            .persist(&coinbase_scope(), &series, &bars, true)
+            .persist(&rithmic_scope(), &series, &bars, true)
             .expect("derived history persists");
         let retained = storage
-            .read_latest(&coinbase_scope(), &series)
+            .read_latest(&rithmic_scope(), &series)
             .expect("derived history reads")
             .expect("derived history exists");
         assert_eq!(retained.bars, bars);
@@ -1039,9 +1039,9 @@ mod tests {
     fn segmented_history_reconstructs_after_restart() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1062,7 +1062,7 @@ mod tests {
             let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
                 .expect("fixture store opens");
             storage
-                .persist(&coinbase_scope(), &series, &bars, false)
+                .persist(&rithmic_scope(), &series, &bars, false)
                 .expect("segmented history persists");
             assert_eq!(
                 storage
@@ -1077,7 +1077,7 @@ mod tests {
             .expect("fixture store restarts");
         assert_eq!(
             restarted
-                .read_latest(&coinbase_scope(), &series)
+                .read_latest(&rithmic_scope(), &series)
                 .expect("segmented history reads")
                 .expect("segmented history exists")
                 .bars,
@@ -1089,9 +1089,9 @@ mod tests {
     fn confirmed_empty_boundary_survives_restart_without_cross_series_leakage() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1099,7 +1099,7 @@ mod tests {
             let storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
                 .expect("fixture store opens");
             storage
-                .record_confirmed_empty(&coinbase_scope(), &series, 60, 120)
+                .record_confirmed_empty(&rithmic_scope(), &series, 60, 120)
                 .expect("empty boundary persists");
         }
 
@@ -1107,7 +1107,7 @@ mod tests {
             .expect("fixture store restarts");
         assert_eq!(
             restarted
-                .confirmed_empty_ranges(&coinbase_scope(), &series)
+                .confirmed_empty_ranges(&rithmic_scope(), &series)
                 .expect("empty boundary reads"),
             vec![RetainedRange {
                 start_unix_nanos: 60,
@@ -1115,12 +1115,12 @@ mod tests {
             }]
         );
         let other_series = BarSeriesKey {
-            instrument_id: "instrument:coinbase:eth:usd".to_string(),
+            instrument_id: "instrument:rithmic:eth:usd".to_string(),
             ..series
         };
         assert!(
             restarted
-                .confirmed_empty_ranges(&coinbase_scope(), &other_series)
+                .confirmed_empty_ranges(&rithmic_scope(), &other_series)
                 .expect("other series coverage reads")
                 .is_empty()
         );
@@ -1150,9 +1150,9 @@ mod tests {
     fn tiny_test_cache_budget_fails_before_publishing_above_the_hard_limit() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1170,22 +1170,22 @@ mod tests {
             LocalHistoryStore::open_fixture_with_cache_budget(&root.0, [7; 32], [9; 32], 1)
                 .expect("fixture store opens");
         storage
-            .record_confirmed_empty(&coinbase_scope(), &series, 60_000_000_000, 120_000_000_000)
+            .record_confirmed_empty(&rithmic_scope(), &series, 60_000_000_000, 120_000_000_000)
             .expect("empty evidence persists");
         assert!(
             storage
-                .persist(&coinbase_scope(), &series, &bars, false)
+                .persist(&rithmic_scope(), &series, &bars, false)
                 .is_err()
         );
         assert!(
             storage
-                .read_latest(&coinbase_scope(), &series)
+                .read_latest(&rithmic_scope(), &series)
                 .expect("history reads")
                 .is_none()
         );
         assert!(
             storage
-                .confirmed_empty_ranges(&coinbase_scope(), &series)
+                .confirmed_empty_ranges(&rithmic_scope(), &series)
                 .expect("coverage reads")
                 .is_empty(),
             "real provider bars retire stale empty evidence even when cache reservation fails"
@@ -1202,9 +1202,9 @@ mod tests {
     fn real_bars_retire_empty_evidence_and_remain_refetchable_after_eviction_and_restart() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1229,23 +1229,23 @@ mod tests {
                 LocalHistoryStore::open_fixture_with_cache_budget(&root.0, [7; 32], [9; 32], 200)
                     .expect("fixture store opens");
             storage
-                .record_confirmed_empty(&coinbase_scope(), &series, 60_000_000_000, 120_000_000_000)
+                .record_confirmed_empty(&rithmic_scope(), &series, 60_000_000_000, 120_000_000_000)
                 .expect("empty evidence persists");
             storage
-                .persist(&coinbase_scope(), &series, &[first], false)
+                .persist(&rithmic_scope(), &series, &[first], false)
                 .expect("real bar persists");
             assert!(
                 storage
-                    .confirmed_empty_ranges(&coinbase_scope(), &series)
+                    .confirmed_empty_ranges(&rithmic_scope(), &series)
                     .expect("coverage reads")
                     .is_empty()
             );
             storage
-                .persist(&coinbase_scope(), &series, &[second], false)
+                .persist(&rithmic_scope(), &series, &[second], false)
                 .expect("new tail persists and evicts old history");
             assert!(
                 storage
-                    .read_range(&coinbase_scope(), &series, 60_000_000_000, 120_000_000_000,)
+                    .read_range(&rithmic_scope(), &series, 60_000_000_000, 120_000_000_000,)
                     .expect("evicted range reads")
                     .is_none()
             );
@@ -1255,25 +1255,25 @@ mod tests {
                 .expect("fixture store restarts");
         assert!(
             restarted
-                .confirmed_empty_ranges(&coinbase_scope(), &series)
+                .confirmed_empty_ranges(&rithmic_scope(), &series)
                 .expect("coverage restores")
                 .is_empty()
         );
         assert!(
             restarted
-                .read_range(&coinbase_scope(), &series, 60_000_000_000, 120_000_000_000,)
+                .read_range(&rithmic_scope(), &series, 60_000_000_000, 120_000_000_000,)
                 .expect("restarted evicted range reads")
                 .is_none()
         );
     }
 
     #[test]
-    fn local_store_retains_legacy_coinbase_schema_segments() {
+    fn local_store_retains_legacy_rithmic_schema_segments() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1287,12 +1287,12 @@ mod tests {
             close: 105,
             volume: 7,
         };
-        let legacy = encode_legacy_coinbase_segment(&[bar]);
+        let legacy = encode_legacy_rithmic_segment(&[bar]);
         {
             let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
                 .expect("fixture store opens");
             let identity = SegmentIdentity {
-                scope: coinbase_scope(),
+                scope: rithmic_scope(),
                 instrument_id: series.instrument_id.clone(),
                 data_kind: DataKind::Bars,
                 resolution: resolution(&series).expect("resolution"),
@@ -1320,7 +1320,7 @@ mod tests {
             .expect("fixture store restarts");
         assert_eq!(
             restarted
-                .read_latest(&coinbase_scope(), &series)
+                .read_latest(&rithmic_scope(), &series)
                 .expect("legacy segment reads")
                 .expect("legacy segment exists")
                 .bars,
@@ -1332,9 +1332,9 @@ mod tests {
     fn active_range_protection_keeps_readable_legacy_segments_under_budget_pressure() {
         let root = TempRoot::new();
         let series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1348,9 +1348,9 @@ mod tests {
             close: 105,
             volume: 7,
         };
-        let legacy_payload = encode_legacy_coinbase_segment(&[bar]);
+        let legacy_payload = encode_legacy_rithmic_segment(&[bar]);
         let legacy_identity = SegmentIdentity {
-            scope: coinbase_scope(),
+            scope: rithmic_scope(),
             instrument_id: series.instrument_id.clone(),
             data_kind: DataKind::Bars,
             resolution: resolution(&series).expect("resolution"),
@@ -1363,7 +1363,7 @@ mod tests {
             correction_revision: 1,
         };
         let mut unprotected_identity = legacy_identity.clone();
-        unprotected_identity.instrument_id = "instrument:coinbase:eth:usd".to_string();
+        unprotected_identity.instrument_id = "instrument:rithmic:eth:usd".to_string();
         unprotected_identity.schema_revision = CURRENT_HISTORY_SCHEMA_REVISION;
         let unprotected_payload = encode_local_history_segment(&[bar]).expect("payload encodes");
         let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
@@ -1385,12 +1385,12 @@ mod tests {
         };
         storage
             .persist_with_protected_series_ranges(
-                &coinbase_scope(),
+                &rithmic_scope(),
                 &series,
                 &[new_bar],
                 false,
                 &[(
-                    coinbase_scope(),
+                    rithmic_scope(),
                     series.clone(),
                     RetainedRange {
                         start_unix_nanos: 60_000_000_000,
@@ -1426,9 +1426,9 @@ mod tests {
     fn local_history_does_not_duplicate_engine_derivation_ownership() {
         let root = TempRoot::new();
         let minute_series = BarSeriesKey {
-            provider_id: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
-            entitlement_id: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
+            entitlement_id: RITHMIC_ENTITLEMENT.to_string(),
             period: BarPeriod::time(60).expect("interval"),
             definition_version: 1,
         };
@@ -1448,7 +1448,7 @@ mod tests {
             let mut storage = LocalHistoryStore::open_fixture(&root.0, [7; 32], [9; 32])
                 .expect("fixture store opens");
             storage
-                .persist(&coinbase_scope(), &minute_series, &bars, false)
+                .persist(&rithmic_scope(), &minute_series, &bars, false)
                 .expect("minute history persists");
         }
         let five_minute_series = BarSeriesKey {
@@ -1459,7 +1459,7 @@ mod tests {
             .expect("fixture store reopens");
         assert!(
             reopened
-                .read_latest(&coinbase_scope(), &five_minute_series)
+                .read_latest(&rithmic_scope(), &five_minute_series)
                 .expect("exact retained history reads")
                 .is_none()
         );
@@ -1501,7 +1501,7 @@ mod tests {
             for period in periods {
                 let series = rithmic_series(period);
                 storage
-                    .persist(&rithmic_scope(&series), &series, &bars, false)
+                    .persist(&rithmic_test_scope(&series), &series, &bars, false)
                     .expect("Rithmic history persists");
             }
         }
@@ -1510,7 +1510,7 @@ mod tests {
         for period in periods {
             let series = rithmic_series(period);
             let retained = restarted
-                .read_latest(&rithmic_scope(&series), &series)
+                .read_latest(&rithmic_test_scope(&series), &series)
                 .expect("Rithmic history reads")
                 .expect("Rithmic history exists");
             assert_eq!(retained.bars, bars);
@@ -1529,15 +1529,15 @@ mod tests {
         }
     }
 
-    fn coinbase_scope() -> HistoryScope {
+    fn rithmic_scope() -> HistoryScope {
         HistoryScope {
-            provider_id: "coinbase".to_string(),
-            account_id: "coinbase_public_market_data".to_string(),
-            entitlement_revision: COINBASE_ENTITLEMENT.to_string(),
+            provider_id: "rithmic".to_string(),
+            account_id: "rithmic_public_market_data".to_string(),
+            entitlement_revision: RITHMIC_ENTITLEMENT.to_string(),
         }
     }
 
-    fn rithmic_scope(series: &BarSeriesKey) -> HistoryScope {
+    fn rithmic_test_scope(series: &BarSeriesKey) -> HistoryScope {
         HistoryScope {
             provider_id: series.provider_id.clone(),
             account_id: "rithmic_test_market_data".to_string(),
@@ -1570,16 +1570,16 @@ mod tests {
         }
     }
 
-    fn encode_legacy_coinbase_segment(bars: &[MarketBar]) -> Vec<u8> {
+    fn encode_legacy_rithmic_segment(bars: &[MarketBar]) -> Vec<u8> {
         let mut encoded = Vec::new();
-        encoded.extend_from_slice(LEGACY_COINBASE_SEGMENT_MAGIC);
+        encoded.extend_from_slice(LEGACY_RITHMIC_SEGMENT_MAGIC);
         encoded.extend_from_slice(
             &u32::try_from(bars.len())
                 .expect("bounded test bars")
                 .to_le_bytes(),
         );
         for bar in bars {
-            encoded.extend_from_slice(LEGACY_COINBASE_PAYLOAD_MAGIC);
+            encoded.extend_from_slice(LEGACY_RITHMIC_PAYLOAD_MAGIC);
             encoded.extend_from_slice(&bar.source_sequence.to_le_bytes());
             encoded.extend_from_slice(&bar.exchange_timestamp_seconds.to_le_bytes());
             for value in [bar.open, bar.high, bar.low, bar.close, bar.volume] {

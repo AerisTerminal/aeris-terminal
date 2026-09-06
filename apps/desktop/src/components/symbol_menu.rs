@@ -12,14 +12,15 @@ pub(super) fn instrument_selector(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
-        .when(state.provider == TerminalProvider::Coinbase, |trigger| {
-            trigger.leading(exchange_mark(
-                assets::ExchangeLogo::Coinbase,
-                px(16.0),
-                false,
-                &theme.colors,
-            ))
-        })
+        .leading(exchange_mark(
+            match state.provider {
+                TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
+                TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
+            },
+            px(16.0),
+            false,
+            &theme.colors,
+        ))
         .loading_icon(header_icon(HugeIcon::Loader))
         .label(state.label.clone())
         .caret(header_icon(HugeIcon::ChevronDown))
@@ -46,8 +47,8 @@ pub(super) fn instrument_selector(
         format!(
             "Search or select a {} market",
             match state.provider {
-                TerminalProvider::Coinbase => "Coinbase spot",
                 TerminalProvider::Rithmic => "Rithmic",
+                TerminalProvider::Hyperliquid => "Hyperliquid",
             }
         ),
         button_activation(
@@ -104,8 +105,8 @@ pub(super) fn instrument_dialog_content(
         .enumerate()
         .filter(|(_, instrument)| !instrument.checked);
     let market_heading = match state.provider {
-        TerminalProvider::Coinbase => "Coinbase markets",
         TerminalProvider::Rithmic => "Rithmic markets",
+        TerminalProvider::Hyperliquid => "Hyperliquid markets",
     };
     let trailing = state
         .instruments
@@ -113,19 +114,26 @@ pub(super) fn instrument_dialog_content(
         .find(|instrument| instrument.checked)
         .map_or_else(
             || match state.provider {
-                TerminalProvider::Coinbase => "Coinbase public spot".to_string(),
                 TerminalProvider::Rithmic => "Rithmic Test".to_string(),
+                TerminalProvider::Hyperliquid => "Hyperliquid public feed".to_string(),
             },
             |instrument| format!("Current stream: {}", instrument.symbol),
         );
     let mut list = chrome_menu_scroll_body();
     if count == 0 {
-        let (title, detail) = if state.provider == TerminalProvider::Coinbase
-            && state.catalog_exchange != assets::ExchangeLogo::Coinbase
+        let (title, detail) = if state.provider == TerminalProvider::Rithmic
+            && state.catalog_exchange != assets::ExchangeLogo::Rithmic
         {
             (
                 "No markets for this exchange",
-                "This terminal currently lists Coinbase spot. Switch the filter back to Coinbase.",
+                "This terminal currently lists Rithmic spot. Switch the filter back to Rithmic.",
+            )
+        } else if state.provider == TerminalProvider::Hyperliquid
+            && state.catalog_exchange != assets::ExchangeLogo::Hyperliquid
+        {
+            (
+                "No markets for this exchange",
+                "This terminal currently lists Hyperliquid. Switch the filter back to Hyperliquid.",
             )
         } else {
             (
@@ -199,14 +207,12 @@ pub(super) fn instrument_dialog_row(
             });
         }
     });
-    if state.provider == TerminalProvider::Coinbase {
-        row = row.leading(exchange_mark(
-            state.catalog_exchange,
-            px(CHROME_MENU_ROW_ICON_WELL),
-            true,
-            &theme.colors,
-        ));
-    }
+    row = row.leading(exchange_mark(
+        state.catalog_exchange,
+        px(CHROME_MENU_ROW_ICON_WELL),
+        true,
+        &theme.colors,
+    ));
     if checked {
         row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
     }
@@ -221,7 +227,7 @@ pub(super) fn instrument_search_header(
     state: &InstrumentSelectorState,
 ) -> Div {
     let colors = theme.colors;
-    let coinbase = state.provider == TerminalProvider::Coinbase;
+    let rithmic = state.provider == TerminalProvider::Rithmic;
     div()
         .h(px(CHROME_MENU_SEARCH_HEIGHT))
         .relative()
@@ -234,7 +240,7 @@ pub(super) fn instrument_search_header(
         .border_color(gpui_color(colors.border))
         .text_sm()
         .text_color(gpui_color(colors.text_primary))
-        .when(coinbase, |header| {
+        .when(rithmic, |header| {
             let toggle_app = app.clone();
             let selected = state.catalog_exchange;
             header.child(
@@ -257,10 +263,13 @@ pub(super) fn instrument_search_header(
                 ),
             )
         })
-        .when(!coinbase, |header| {
-            header.child(
-                header_icon(HugeIcon::SearchIcon01).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)),
-            )
+        .when(!rithmic, |header| {
+            header.child(exchange_mark(
+                assets::ExchangeLogo::Hyperliquid,
+                px(CHROME_MENU_SEARCH_ICON_SIZE),
+                false,
+                &colors,
+            ))
         })
         .child(
             Input::new(input)

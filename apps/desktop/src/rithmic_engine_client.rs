@@ -342,7 +342,7 @@ fn process_command(
         }
         MarketWorkerCommand::Shutdown
         | MarketWorkerCommand::Recovery(_)
-        | MarketWorkerCommand::CoinbaseSelect(_)
+        | MarketWorkerCommand::EngineSelect(_)
         | MarketWorkerCommand::ChartViewport(_) => {}
     }
 }

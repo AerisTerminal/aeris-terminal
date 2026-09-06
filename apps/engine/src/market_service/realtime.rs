@@ -1,22 +1,16 @@
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey,
-    COINBASE_PROVIDER_GENERATION, CanonicalOrderBookState, CanonicalTrade,
-    CoinbaseHistoryReadiness, CoinbaseRealtimeWorkerState, ConsumerId, Coordinator, DepthSnapshot,
-    DepthSnapshotWatch, Duration, FailureStage, FormingBar, HISTORY_BARS_PER_SERIES, HistoryRange,
-    HistoryRequestKind, InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY,
-    LIVE_EDGE_REPAIR_RETRY_DELAY, LiveHandoff, LiveSeriesPublication,
-    MAXIMUM_LIVE_EDGE_REPAIR_RETRIES, MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS,
-    MarketBar, MarketStream, MarketTrade, NonZeroU64, NonZeroUsize, OrderBook,
-    OrderBookApplyOutcome, OrderBookRecoveryReason, Ordering, PendingLiveEdgeRepair,
-    PersistenceState, ProviderConnectionState, ProviderGeneration, ProviderHealth,
-    ProviderOrderBook, ProviderRequest, ProviderRuntimeLifecycle, PublishedTailState,
-    RealtimeControl, RealtimeEvent, RealtimeProduct, RealtimeSource, Receiver, ResourceMode,
+    BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CanonicalOrderBookState, ConsumerId, Coordinator,
+    DepthSnapshot, FailureStage, FormingBar, HISTORY_BARS_PER_SERIES, HyperliquidCandleDemand,
+    HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
+    HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
+    LIVE_BUFFER_CAPACITY, LiveSeriesPublication, MAXIMUM_PUBLISHED_DEPTH_LEVELS,
+    MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
+    OrderBookApplyOutcome, Ordering, PersistenceState, ProviderConnectionState, ProviderGeneration,
+    ProviderHealth, ProviderOrderBook, ProviderRequest, PublishedTailState, ResourceMode,
     RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff,
-    RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection, SeriesLoadState, SyncSender,
-    TrySendError, VecDeque, chart_stream_requirements, coinbase_aggregator, coinbase_instrument_id,
-    coinbase_live_edge_repair_range, coinbase_series_profile, current_unix_nanos, id, ipc_series,
+    RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection, SeriesLoadState, VecDeque,
+    chart_stream_requirements, hyperliquid_interval_for_period, id, ipc_series, merge_live_candle,
     order_flow_payload, publish_state, series_state_with_persistence, series_update_message,
-    snapshot_message, thread,
 };
 
 impl ProviderOrderBook {
@@ -27,7 +21,6 @@ impl ProviderOrderBook {
                 NonZeroUsize::new(MAXIMUM_PUBLISHED_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
             traded_volumes: BTreeMap::new(),
-            watch: DepthSnapshotWatch::default(),
         }
     }
 
@@ -366,151 +359,160 @@ pub(super) fn started_rithmic_bar(
     })
 }
 
-impl LiveHandoff {
-    pub(super) fn try_new(
-        series: &BarSeriesKey,
+impl HyperliquidLiveHandoff {
+    pub(super) fn new(
+        series: BarSeriesKey,
         generation: ProviderGeneration,
-        installed: &InstallProviderInstrument,
-    ) -> Result<Self, String> {
-        let profile = coinbase_series_profile(series, installed)?;
-        Ok(Self {
+        wire_coin: String,
+        interval: String,
+    ) -> Self {
+        Self {
+            series,
             generation,
-            aggregator: coinbase_aggregator(profile)?,
+            wire_coin,
+            interval,
+            price_scale: 0,
+            quantity_scale: 0,
+            bars: Vec::new(),
+            forming: None,
             buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
             connected: false,
-            history: CoinbaseHistoryReadiness::Pending,
+            history_ready: false,
             dirty: false,
-            published_completed: None,
-        })
+            published: None,
+        }
     }
 
     pub(super) fn reset(&mut self, generation: ProviderGeneration) {
         self.generation = generation;
-        self.aggregator.reset();
+        self.bars.clear();
+        self.forming = None;
         self.buffered.clear();
         self.connected = false;
-        self.history = CoinbaseHistoryReadiness::Pending;
+        self.history_ready = false;
         self.dirty = false;
-        self.published_completed = None;
+        self.published = None;
     }
 
-    /// Every bar the canonical series has not seen yet, oldest first, ending in
-    /// the still-forming bucket.
+    /// Closes the history/live seam with provider candles.
     ///
-    /// Sequences come from the bucket, so this run always continues the series
-    /// the engine holds — including after a repair reseeded this aggregator from
-    /// a longer window.
+    /// `bars` are the periods the provider has closed and the engine has
+    /// installed as canonical history. `forming` is the period it caught
+    /// open, held here rather than in history and published as the tail the
+    /// chart opens on. Live replacements that arrived during the fetch replay
+    /// in open-timestamp order; anything at or before the installed tail is
+    /// already inside it, so replaying it would count it twice.
+    pub(super) fn seed(
+        &mut self,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: &[MarketBar],
+        forming: Option<FormingBar>,
+    ) -> Result<(), String> {
+        let forming = forming.map(|forming| forming.bar).filter(|forming| {
+            bars.last()
+                .is_none_or(|last| last.source_sequence < forming.source_sequence)
+        });
+        let working = bars.to_vec();
+        if working.is_empty() && forming.is_none() {
+            return Err("Hyperliquid live handoff requires history".to_string());
+        }
+        self.price_scale = price_scale;
+        self.quantity_scale = quantity_scale;
+        self.published = working
+            .last()
+            .map(|bar| PublishedTailState::Covering(bar.source_sequence));
+        self.bars = working;
+        self.forming = forming;
+        // The open period has to reach the consumer even if no candle arrives
+        // next: it is the candle the chart opens on.
+        self.dirty = self.forming.is_some();
+        let buffered = std::mem::take(&mut self.buffered);
+        self.history_ready = true;
+        for candle in &buffered {
+            if self.ingest(candle)? {
+                self.dirty = true;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
-        if !self.connected || !self.history.is_ready() || !self.dirty {
+        if !self.connected || !self.history_ready || !self.dirty {
             return None;
         }
-        let mut bars = self
-            .aggregator
-            .completed_after(self.published_completed.unwrap_or(0));
-        if let Some(newest) = bars.last() {
-            self.published_completed = Some(newest.source_sequence);
-        }
-        bars.extend(self.aggregator.in_flight());
+        let active = self.forming.or_else(|| self.bars.last().copied())?;
         self.dirty = false;
-        (!bars.is_empty()).then_some(LiveSeriesPublication::Tails(bars))
-    }
-}
-
-pub(super) fn spawn_realtime_worker(
-    realtime: Box<dyn RealtimeSource>,
-    controls: Receiver<RealtimeControl>,
-    events: SyncSender<RealtimeEvent>,
-    reconnect_delay: Duration,
-    state: &CoinbaseRealtimeWorkerState,
-) -> Result<thread::JoinHandle<()>, String> {
-    let overflow = Arc::clone(&state.overflow);
-    let stop = Arc::clone(&state.stop);
-    let lifecycle = Arc::clone(&state.lifecycle);
-    let active_workers = Arc::clone(&state.active_workers);
-    thread::Builder::new()
-        .name("axiusflow-coinbase-realtime".to_string())
-        .spawn(move || {
-            let _activity =
-                ActiveWorkerGuard::register("axiusflow-coinbase-realtime", active_workers);
-            run_realtime_worker(
-                realtime,
-                &controls,
-                &events,
-                &overflow,
-                &stop,
-                reconnect_delay,
-                &lifecycle,
-            );
-        })
-        .map_err(|error| error.to_string())
-}
-
-pub(super) fn run_realtime_worker(
-    mut source: Box<dyn RealtimeSource>,
-    control: &Receiver<RealtimeControl>,
-    events: &SyncSender<RealtimeEvent>,
-    overflow: &AtomicBool,
-    stop: &Arc<AtomicBool>,
-    reconnect_delay: Duration,
-    lifecycle: &ProviderRuntimeLifecycle,
-) {
-    let mut generation = ProviderGeneration(
-        NonZeroU64::new(COINBASE_PROVIDER_GENERATION).unwrap_or(NonZeroU64::MIN),
-    );
-    loop {
-        let Ok(RealtimeControl::Start(products)) = control.recv() else {
-            return;
-        };
-        stop.store(false, Ordering::Release);
-        if source.configure(products).is_err() {
-            lifecycle.mark_terminal_failure("Coinbase realtime configuration failed");
-            return;
-        }
-        loop {
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            if events.send(RealtimeEvent::Connecting(generation)).is_err() {
-                return;
-            }
-            lifecycle.observe_generation(generation.0.get(), true);
-            let connected = source.run_generation(generation, control, events, overflow, stop);
-            if connected {
-                lifecycle.observe_generation(generation.0.get(), false);
-            }
-            let stopped = stop.load(Ordering::Acquire);
-            if events
-                .send(RealtimeEvent::Disconnected(generation))
-                .is_err()
+        let covering = requires_covering_publication(self.published, active.source_sequence);
+        self.published = Some(PublishedTailState::Forming(active.source_sequence));
+        if covering {
+            let mut bars = self.bars.clone();
+            if self
+                .forming
+                .is_some_and(|forming| forming.source_sequence == active.source_sequence)
             {
-                return;
+                bars.push(active);
             }
-            if connected {
-                let Some(next) = generation.0.get().checked_add(1).and_then(NonZeroU64::new) else {
-                    return;
-                };
-                generation = ProviderGeneration(next);
-            }
-            if stopped {
-                break;
-            }
-            thread::park_timeout(reconnect_delay);
+            Some(LiveSeriesPublication::Covering(bars))
+        } else {
+            Some(LiveSeriesPublication::Tails(vec![active]))
         }
     }
-}
 
-pub(super) fn try_emit_realtime(
-    events: &SyncSender<RealtimeEvent>,
-    overflow: &AtomicBool,
-    event: RealtimeEvent,
-) -> bool {
-    match events.try_send(event) {
-        Ok(()) => true,
-        Err(TrySendError::Full(_)) => {
-            overflow.store(true, Ordering::Release);
-            false
+    pub(super) fn accept_candle(&mut self, candle: &HyperliquidLiveCandle) -> Result<(), String> {
+        if self.history_ready {
+            if self.ingest(candle)? {
+                self.dirty = true;
+            }
+        } else if self.buffered.len() == LIVE_BUFFER_CAPACITY {
+            return Err("Hyperliquid history/live buffer overflowed".to_string());
+        } else {
+            self.buffered.push_back(*candle);
         }
-        Err(TrySendError::Disconnected(_)) => false,
+        Ok(())
+    }
+
+    /// Merges one live replacement, owning the sequence deterministically.
+    ///
+    /// The same open timestamp keeps the forming sequence; a newer period
+    /// extends it. A redelivered update therefore resolves to the identical
+    /// bar instead of looking like a new one.
+    fn ingest(&mut self, candle: &HyperliquidLiveCandle) -> Result<bool, String> {
+        let active = self.forming.or_else(|| self.bars.last().copied());
+        if let (Some(active), Some(duration)) = (active, self.series.period.duration_nanos())
+            && candle.open_nanos > active.exchange_timestamp_unix_nanos
+            && active.exchange_timestamp_unix_nanos.checked_add(duration) != Some(candle.open_nanos)
+        {
+            return Err("Hyperliquid live candle has a time gap".to_string());
+        }
+        let sequence = match &self.forming {
+            Some(forming) if forming.exchange_timestamp_unix_nanos == candle.open_nanos => {
+                forming.source_sequence
+            }
+            Some(forming) => forming
+                .source_sequence
+                .checked_add(1)
+                .ok_or_else(|| "Hyperliquid live sequence overflowed".to_string())?,
+            None => self
+                .bars
+                .last()
+                .map_or(0, |bar| bar.source_sequence)
+                .checked_add(1)
+                .ok_or_else(|| "Hyperliquid live sequence overflowed".to_string())?,
+        };
+        let bar = MarketBar {
+            source_sequence: sequence,
+            exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
+            exchange_timestamp_unix_nanos: candle.open_nanos,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+        };
+        bar.validate().map_err(|error| error.to_string())?;
+        merge_live_candle(&mut self.bars, &mut self.forming, bar)?;
+        Ok(true)
     }
 }
 
@@ -594,67 +596,33 @@ impl Coordinator<'_> {
             }
             return Ok(());
         }
-        if series.provider_id != "coinbase" {
-            return Err("resident engine realtime provider is unsupported".to_string());
-        }
-        if !self.live.contains_key(series) {
-            let instrument = self.coinbase_instrument(series)?.clone();
-            let mut handoff =
-                LiveHandoff::try_new(series, self.coinbase_provider_generation(), &instrument)?;
-            handoff.connected = self.realtime_connected;
-            self.live.insert(series.clone(), handoff);
-        }
-        self.sync_coinbase_realtime()?;
-        Ok(())
-    }
-
-    pub(super) fn validate_coinbase_realtime_capacity(
-        &self,
-        series: &BarSeriesKey,
-        consumer_id: ConsumerId,
-    ) -> Result<(), String> {
-        if series.provider_id != "coinbase"
-            || !chart_stream_requirements(series).contains(MarketStream::Trades)
-        {
+        if series.provider_id == "hyperliquid" {
+            // Hyperliquid multiplexes every demand over one connection, so a
+            // timeframe change only changes this series' candle feed and a
+            // symbol change only adds its feeds: neither reconnects. The full
+            // desired set is rebuilt below and flushed on the next tick.
+            let instrument = self.hyperliquid_instrument(series)?.clone();
+            let interval = hyperliquid_interval_for_period(series.period)
+                .map_err(|_| "Hyperliquid history is unavailable for this interval".to_string())?
+                .to_string();
+            let generation = self.provider_generation_for_series(series)?;
+            if !self.hyperliquid_live.contains_key(series) {
+                let mut handoff = HyperliquidLiveHandoff::new(
+                    series.clone(),
+                    generation,
+                    instrument.provider_symbol.clone(),
+                    interval,
+                );
+                handoff.connected = self
+                    .engine
+                    .provider_status("hyperliquid")
+                    .is_some_and(|status| status.health == ProviderHealth::Online);
+                self.hyperliquid_live.insert(series.clone(), handoff);
+            }
+            self.hyperliquid_demand_dirty = true;
             return Ok(());
         }
-        let replaced = self
-            .engine
-            .current_demand(consumer_id)
-            .and_then(|demand| demand.series.as_ref());
-        let mut products = BTreeSet::new();
-        for active in self.live.keys() {
-            let replaced_last_reference = replaced == Some(active)
-                && self
-                    .engine
-                    .subscription_status(active)
-                    .is_some_and(|status| status.consumer_count == 1);
-            if !replaced_last_reference {
-                products.insert(self.coinbase_instrument(active)?.provider_symbol.clone());
-            }
-        }
-        products.insert(self.coinbase_instrument(series)?.provider_symbol.clone());
-        if products.len() > axiusflow_coinbase_market_adapter::MAXIMUM_PRODUCTS {
-            return Err("Coinbase realtime product capacity is exhausted".to_string());
-        }
-        Ok(())
-    }
-
-    pub(super) fn handle_realtime(&mut self, event: RealtimeEvent) {
-        match event {
-            RealtimeEvent::Connecting(generation) => self.realtime_connecting(generation),
-            RealtimeEvent::Connected(generation) => self.realtime_connected(generation),
-            RealtimeEvent::Trade(generation, trade) => self.realtime_trade(generation, &trade),
-            RealtimeEvent::Depth(generation, snapshot) => {
-                self.provider_depth("coinbase", generation.0.get(), &snapshot);
-            }
-            RealtimeEvent::Heartbeat(generation) => self.realtime_heartbeat(generation),
-            RealtimeEvent::Disconnected(generation) => {
-                if generation == self.coinbase_provider_generation() {
-                    self.realtime_disconnected("Coinbase realtime disconnected");
-                }
-            }
-        }
+        Err("resident engine realtime provider is unsupported".to_string())
     }
 
     pub(super) fn handle_rithmic_realtime(&mut self, event: RithmicRealtimeEvent) {
@@ -676,6 +644,299 @@ impl Coordinator<'_> {
                 self.rithmic_pending_selection = None;
                 self.rithmic_recovering(generation, "Rithmic live session is recovering");
             }
+        }
+    }
+
+    pub(super) fn handle_hyperliquid_realtime(&mut self, event: HyperliquidRealtimeEvent) {
+        match event {
+            HyperliquidRealtimeEvent::Connecting(generation) => {
+                self.hyperliquid_connecting(generation);
+            }
+            HyperliquidRealtimeEvent::Connected(generation)
+            | HyperliquidRealtimeEvent::Heartbeat(generation) => {
+                self.hyperliquid_online(generation);
+            }
+            HyperliquidRealtimeEvent::Candle(generation, wire_coin, interval, candle) => {
+                self.hyperliquid_candle(generation, &wire_coin, &interval, &candle);
+            }
+            HyperliquidRealtimeEvent::Trades(generation, trades) => {
+                for trade in &trades {
+                    self.hyperliquid_trade(generation, trade);
+                }
+            }
+            HyperliquidRealtimeEvent::Depth(generation, snapshot) => {
+                self.provider_depth("hyperliquid", generation, &snapshot);
+            }
+            HyperliquidRealtimeEvent::Recovering(generation) => {
+                self.hyperliquid_recovering(generation, "Hyperliquid live session is recovering");
+            }
+            HyperliquidRealtimeEvent::Disconnected(generation) => {
+                self.hyperliquid_engaged = false;
+                self.hyperliquid_recovering(generation, "Hyperliquid live session is recovering");
+            }
+        }
+    }
+
+    pub(super) fn hyperliquid_connecting(&mut self, generation: u64) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        let current = self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation);
+        if current.is_some_and(|current| generation < current) {
+            return;
+        }
+        if current.is_none_or(|current| generation > current)
+            && self
+                .engine
+                .begin_provider_session("hyperliquid", generation)
+                .is_err()
+        {
+            return;
+        }
+        if current.is_some_and(|current| generation > current) {
+            for ((series, _), stop) in &self.history_cancellations {
+                if series.provider_id == "hyperliquid" {
+                    stop.store(true, Ordering::Release);
+                }
+            }
+            let series = self.hyperliquid_live.keys().cloned().collect::<Vec<_>>();
+            for selected in &series {
+                if let Some(live) = self.hyperliquid_live.get_mut(selected) {
+                    live.reset(generation);
+                }
+                self.broadcast_series_recovery_for(
+                    selected,
+                    "Hyperliquid live session changed; covering history is reloading",
+                );
+            }
+            for selected in series {
+                let _ = self.enqueue_local_history(&selected, generation);
+            }
+        }
+        let _ =
+            self.engine
+                .set_provider_health("hyperliquid", generation, ProviderHealth::Connecting);
+        self.broadcast_provider_for(
+            "hyperliquid",
+            ProviderConnectionState::Connecting,
+            generation,
+            None,
+        );
+    }
+
+    pub(super) fn hyperliquid_online(&mut self, generation: u64) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let _ = self
+            .engine
+            .set_provider_health("hyperliquid", generation, ProviderHealth::Online);
+        self.broadcast_provider_for(
+            "hyperliquid",
+            ProviderConnectionState::Online,
+            generation,
+            None,
+        );
+        let missing = self
+            .hyperliquid_live
+            .iter_mut()
+            .filter_map(|(series, live)| {
+                if live.generation != generation {
+                    return None;
+                }
+                live.connected = true;
+                (!live.history_ready).then(|| series.clone())
+            })
+            .collect::<Vec<_>>();
+        for series in missing {
+            if !self
+                .history_inflight
+                .contains_key(&(series.clone(), generation))
+            {
+                let _ = self.enqueue_history_recovery(&series, generation);
+            }
+        }
+    }
+
+    pub(super) fn hyperliquid_candle(
+        &mut self,
+        generation: u64,
+        wire_coin: &str,
+        interval: &str,
+        candle: &HyperliquidLiveCandle,
+    ) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let failed = self
+            .hyperliquid_live
+            .iter_mut()
+            .filter(|(_, live)| {
+                live.generation == generation
+                    && live.connected
+                    && live.wire_coin == wire_coin
+                    && live.interval == interval
+            })
+            .filter_map(|(series, live)| {
+                live.accept_candle(candle).is_err().then(|| series.clone())
+            })
+            .collect::<Vec<_>>();
+        for series in failed {
+            self.hyperliquid_series_recovering(
+                &series,
+                generation,
+                FailureStage::Aggregation,
+                "Hyperliquid candle replacement requires covering history",
+            );
+        }
+    }
+
+    pub(super) fn hyperliquid_trade(&mut self, generation: u64, trade: &MarketTrade) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        if trade.metadata.provider_id != "hyperliquid"
+            || trade.metadata.session_generation != generation.0.get()
+        {
+            self.hyperliquid_recovering(
+                generation.0.get(),
+                "Hyperliquid live session identity requires recovery",
+            );
+            for live in self.hyperliquid_live.values_mut() {
+                live.history_ready = false;
+                live.dirty = false;
+                live.buffered.clear();
+            }
+            return;
+        }
+        self.record_order_book_trade(
+            "hyperliquid",
+            &trade.metadata.instrument_id,
+            trade.price,
+            trade.quantity,
+        );
+        let order_flow_series = self
+            .hyperliquid_live
+            .keys()
+            .filter(|series| {
+                series.instrument_id == trade.metadata.instrument_id
+                    && series.entitlement_id == trade.metadata.entitlement_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut order_flow_failed = BTreeSet::new();
+        for series in order_flow_series {
+            match self
+                .engine
+                .install_order_flow_trade(generation, &series, trade)
+            {
+                Ok(publications) => {
+                    for publication in publications {
+                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                            events.order_flow = Some(order_flow_payload(&publication));
+                        }
+                    }
+                }
+                Err(_) => {
+                    order_flow_failed.insert(series);
+                }
+            }
+        }
+        for series in &order_flow_failed {
+            self.hyperliquid_series_recovering(
+                series,
+                generation,
+                FailureStage::CanonicalValidation,
+                "Hyperliquid order-flow reconstruction requires covering history",
+            );
+        }
+    }
+
+    pub(super) fn hyperliquid_series_recovering(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        stage: FailureStage,
+        detail: &str,
+    ) {
+        if let Some(live) = self.hyperliquid_live.get_mut(series) {
+            live.history_ready = false;
+            live.dirty = false;
+            live.buffered.clear();
+        }
+        self.broadcast_demand_error_for(series, stage, detail, None);
+        self.broadcast_series_recovery_for(series, detail);
+        if !self
+            .history_inflight
+            .contains_key(&(series.clone(), generation))
+        {
+            let _ = self.enqueue_history_recovery(series, generation);
+        }
+    }
+
+    pub(super) fn hyperliquid_recovering(&mut self, generation: u64, detail: &'static str) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let _ =
+            self.engine
+                .set_provider_health("hyperliquid", generation, ProviderHealth::Recovering);
+        self.broadcast_provider_for(
+            "hyperliquid",
+            ProviderConnectionState::Recovering,
+            generation,
+            Some(detail),
+        );
+        for live in self.hyperliquid_live.values_mut() {
+            live.connected = false;
+        }
+        let stale_books = self
+            .order_books
+            .iter_mut()
+            .filter(|((provider, _), _)| provider == "hyperliquid")
+            .filter_map(|(identity, order_book)| {
+                order_book.book.mark_stale();
+                matches!(order_book.book.state(), CanonicalOrderBookState::Stale)
+                    .then(|| identity.clone())
+            })
+            .collect::<Vec<_>>();
+        for (provider, instrument_id) in stale_books {
+            self.broadcast_order_book(&provider, &instrument_id);
         }
     }
 
@@ -918,102 +1179,6 @@ impl Coordinator<'_> {
         }
     }
 
-    /// A demanded Coinbase book waiting this long for its first snapshot is
-    /// stalled: the venue snapshot was missed and later deltas cannot build
-    /// the book. Triggers one resubscribe dance; see
-    /// `MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES`.
-    const DEPTH_SNAPSHOT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
-    /// Bounded resubscribe dances per stalled book before going quiet.
-    /// Recovery then waits for a fresh demand, product change, or session
-    /// reconnect, each of which advances or replaces the book and re-arms
-    /// the watch.
-    pub(super) const MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES: u32 = 5;
-    /// Minimum spacing between resubscribe dances for one book, so a full
-    /// control channel degrades to one attempt per second instead of one per
-    /// tick.
-    const DEPTH_RESUBSCRIBE_SPACING: Duration = Duration::from_secs(1);
-
-    /// Resubscribes Coinbase books stalled awaiting their first snapshot.
-    ///
-    /// Rithmic books are skipped: their history and backfill legitimately
-    /// take tens of seconds, so a wall-clock bound cannot tell a stall from
-    /// a slow load.
-    pub(super) fn recover_stalled_depth_snapshots(&mut self) {
-        if self.resource_mode == ResourceMode::OfflineSuspended {
-            return;
-        }
-        let now = Instant::now();
-        let mut stalled = Vec::new();
-        for (identity, order_book) in &mut self.order_books {
-            if order_book.instrument.provider != "coinbase" {
-                continue;
-            }
-            if order_book.book.state()
-                != CanonicalOrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot)
-            {
-                order_book.watch = DepthSnapshotWatch::default();
-                continue;
-            }
-            let awaited = *order_book.watch.awaited_since.get_or_insert(now);
-            if now.duration_since(awaited) < Self::DEPTH_SNAPSHOT_STALL_TIMEOUT
-                || order_book.watch.resubscribes >= Self::MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES
-                || order_book.watch.last_attempt.is_some_and(|attempt| {
-                    now.duration_since(attempt) < Self::DEPTH_RESUBSCRIBE_SPACING
-                })
-            {
-                continue;
-            }
-            stalled.push((
-                identity.clone(),
-                order_book.instrument.provider_symbol.clone(),
-            ));
-        }
-        if stalled.is_empty() {
-            return;
-        }
-        let Ok(products) = self.coinbase_live_products() else {
-            return;
-        };
-        let stalled_symbols: BTreeSet<String> = stalled
-            .iter()
-            .map(|(_, symbol)| symbol.clone())
-            .filter(|symbol| products.contains_key(symbol))
-            .collect();
-        if stalled_symbols.is_empty() {
-            return;
-        }
-        // Exclude-then-restore: the venue re-sends snapshots only on
-        // subscribe, so the stalled products leave and rejoin while every
-        // other product keeps its Ready book untouched.
-        let reduced = products
-            .iter()
-            .filter(|(symbol, _)| !stalled_symbols.contains(*symbol))
-            .map(|(_, product)| product.clone())
-            .collect::<Vec<_>>();
-        let full = products.into_values().collect::<Vec<_>>();
-        let completed = match self.providers.start_coinbase_realtime(reduced) {
-            Err(_) => return,
-            Ok(sent) => sent && matches!(self.providers.start_coinbase_realtime(full), Ok(true)),
-        };
-        for (identity, _) in &stalled {
-            let Some(order_book) = self.order_books.get_mut(identity) else {
-                continue;
-            };
-            order_book.watch.last_attempt = Some(now);
-            if !completed {
-                continue;
-            }
-            order_book.watch.resubscribes = order_book.watch.resubscribes.saturating_add(1);
-            order_book.watch.awaited_since = Some(now);
-            if order_book.watch.resubscribes >= Self::MAXIMUM_DEPTH_SNAPSHOT_RESUBSCRIBES {
-                eprintln!(
-                    "Axiusflow engine depth snapshot unavailable for {} after bounded resubscribes; waiting for fresh demand",
-                    order_book.instrument.instrument_id,
-                );
-            }
-        }
-    }
-
     pub(super) fn rithmic_recovering(&mut self, generation: u64, detail: &'static str) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
@@ -1066,511 +1231,6 @@ impl Coordinator<'_> {
             .is_some_and(|order_book| order_book.record_trade(price, quantity));
         if recorded {
             self.broadcast_order_book(provider, instrument_id);
-        }
-    }
-
-    pub(super) fn realtime_connecting(&mut self, generation: ProviderGeneration) {
-        let current = self.coinbase_provider_generation();
-        if generation < current {
-            return;
-        }
-        if generation > current {
-            if self
-                .engine
-                .begin_provider_session("coinbase", generation)
-                .is_err()
-            {
-                return;
-            }
-            for ((series, request_generation), stop) in &self.history_cancellations {
-                if series.provider_id == "coinbase" && *request_generation < generation {
-                    stop.store(true, Ordering::Release);
-                }
-            }
-            for live in self.live.values_mut() {
-                live.reset(generation);
-            }
-        } else {
-            let _ =
-                self.engine
-                    .set_provider_health("coinbase", generation, ProviderHealth::Connecting);
-        }
-        let state = if generation.0.get() == COINBASE_PROVIDER_GENERATION {
-            ProviderConnectionState::Connecting
-        } else {
-            ProviderConnectionState::Recovering
-        };
-        self.realtime_connected = false;
-        self.broadcast_provider(state, generation, None);
-    }
-
-    pub(super) fn realtime_connected(&mut self, generation: ProviderGeneration) {
-        if generation != self.coinbase_provider_generation() {
-            return;
-        }
-        self.realtime_connected = true;
-        let mut missing = Vec::new();
-        for (series, live) in &mut self.live {
-            live.connected = true;
-            if !live.history.is_ready() {
-                missing.push(series.clone());
-            }
-        }
-        for series in missing {
-            let _ = self.enqueue_history_recovery(&series, generation);
-        }
-        self.provider_online_if_all_series_ready();
-    }
-
-    /// Applies one live trade to every series seeded against this generation.
-    ///
-    /// A quiet stretch is not a seam. While the socket is up the trade feed is
-    /// authoritative for "nothing traded", so a bucket the feed skipped is empty
-    /// rather than missing and the aggregator carries the close across it. Real
-    /// holes come from losing the socket, and that path reconnects on a fresh
-    /// generation and reseeds from history instead of repairing a seam here.
-    pub(super) fn realtime_trade(
-        &mut self,
-        generation: ProviderGeneration,
-        trade: &CanonicalTrade,
-    ) {
-        if generation != self.coinbase_provider_generation() {
-            return;
-        }
-        if let Ok(instrument_id) = coinbase_instrument_id(&trade.product_id)
-            && let Some(instrument) = self
-                .order_books
-                .get(&("coinbase".to_string(), instrument_id.clone()))
-                .map(|order_book| order_book.instrument.clone())
-            && let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(instrument.price_scale),
-                u8::try_from(instrument.quantity_scale),
-            )
-            && let Ok(projected) = trade.to_market_trade(
-                price_scale,
-                quantity_scale,
-                generation.0.get(),
-                current_unix_nanos().unwrap_or(trade.provider_timestamp_unix_nanos),
-            )
-        {
-            self.record_order_book_trade(
-                "coinbase",
-                &instrument_id,
-                projected.price,
-                projected.quantity,
-            );
-        }
-        let mut interrupted = None;
-        let mut rolled = Vec::new();
-        for (series, live) in self.live.iter_mut().filter(|(_, live)| {
-            live.generation == generation
-                && live.connected
-                && live.aggregator.product_id() == trade.product_id
-        }) {
-            if live.history.is_ready() {
-                match live.aggregator.apply_trade(trade) {
-                    Ok(Some(completed)) => {
-                        if let Some(current) = live.aggregator.in_flight() {
-                            rolled.push((series.clone(), completed, current));
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        interrupted = Some("Coinbase realtime aggregation failed");
-                        break;
-                    }
-                }
-                live.dirty = true;
-            } else if live.buffered.len() == LIVE_BUFFER_CAPACITY {
-                interrupted = Some("Coinbase history/live buffer overflowed");
-                break;
-            } else {
-                live.buffered.push_back(trade.clone());
-            }
-        }
-        if let Some(detail) = interrupted {
-            self.realtime_interrupted(FailureStage::Aggregation, detail);
-            return;
-        }
-        for (series, completed, current) in rolled {
-            self.schedule_coinbase_live_edge_repair(&series, generation, &completed, &current);
-        }
-    }
-
-    /// Reconciles every newly closed live candle with Coinbase's own OHLCV.
-    ///
-    /// Trades keep the forming candle responsive, but the public stream cannot
-    /// prove that it observed every trade in a bucket. A short provider page at
-    /// each roll replaces the closed edge before drift can accumulate into flat
-    /// candles followed by a discontinuous open.
-    pub(super) fn schedule_coinbase_live_edge_repair(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        completed: &MarketBar,
-        current: &MarketBar,
-    ) {
-        let key = (series.clone(), generation);
-        let Ok(range) = coinbase_live_edge_repair_range(series, completed, current) else {
-            return;
-        };
-        if let Some(live) = self.live.get_mut(series)
-            && live.generation == generation
-            && live.history.is_ready()
-        {
-            live.history = CoinbaseHistoryReadiness::Provisional;
-            self.broadcast_series_resolution_for(
-                series,
-                SeriesLoadState::Partial,
-                PersistenceState::Durable,
-                Some("The closed Coinbase candle is awaiting authoritative verification"),
-            );
-        }
-        self.pending_live_edge_repairs
-            .entry(key)
-            .and_modify(|pending| {
-                pending.range.start_unix_nanos =
-                    pending.range.start_unix_nanos.min(range.start_unix_nanos);
-                pending.range.end_unix_nanos =
-                    pending.range.end_unix_nanos.max(range.end_unix_nanos);
-                pending.attempt = 0;
-                pending.ready_at = Instant::now();
-            })
-            .or_insert(PendingLiveEdgeRepair {
-                range,
-                attempt: 0,
-                ready_at: Instant::now(),
-            });
-        self.flush_coinbase_live_edge_repair(series, generation);
-    }
-
-    pub(super) fn retry_coinbase_live_edge_repair(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        range: Option<HistoryRange>,
-        attempt: u8,
-    ) {
-        let Some(range) = range else {
-            self.coinbase_live_edge_repair_exhausted(series);
-            return;
-        };
-        let Some(next_attempt) = attempt.checked_add(1) else {
-            self.coinbase_live_edge_repair_exhausted(series);
-            return;
-        };
-        if next_attempt > MAXIMUM_LIVE_EDGE_REPAIR_RETRIES {
-            self.coinbase_live_edge_repair_exhausted(series);
-            return;
-        }
-        let delay =
-            LIVE_EDGE_REPAIR_RETRY_DELAY.saturating_mul(2_u32.saturating_pow(u32::from(attempt)));
-        let retry = PendingLiveEdgeRepair {
-            range,
-            attempt: next_attempt,
-            ready_at: Instant::now() + delay,
-        };
-        self.pending_live_edge_repairs
-            .entry((series.clone(), generation))
-            .and_modify(|pending| {
-                pending.range.start_unix_nanos =
-                    pending.range.start_unix_nanos.min(range.start_unix_nanos);
-                pending.range.end_unix_nanos =
-                    pending.range.end_unix_nanos.max(range.end_unix_nanos);
-                pending.attempt = pending.attempt.min(next_attempt);
-                pending.ready_at = pending.ready_at.min(retry.ready_at);
-            })
-            .or_insert(retry);
-    }
-
-    fn coinbase_live_edge_repair_exhausted(&mut self, series: &BarSeriesKey) {
-        const DETAIL: &str = "Coinbase could not verify the closed candle after bounded retries; retrying at the next candle close";
-        self.broadcast_series_resolution_for(
-            series,
-            SeriesLoadState::Partial,
-            PersistenceState::Durable,
-            Some(DETAIL),
-        );
-        self.broadcast_demand_error_for(series, FailureStage::ProviderHistory, DETAIL, None);
-    }
-
-    pub(super) fn flush_coinbase_live_edge_repair(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-    ) {
-        let key = (series.clone(), generation);
-        if self.history_inflight.contains_key(&key) {
-            return;
-        }
-        let Some(pending) = self.pending_live_edge_repairs.get(&key).copied() else {
-            return;
-        };
-        if pending.ready_at > Instant::now() {
-            return;
-        }
-        self.pending_live_edge_repairs.remove(&key);
-        if self
-            .enqueue_history_request(
-                series,
-                generation,
-                Some(pending.range),
-                HistoryRequestKind::LiveEdgeRepair(pending.attempt),
-            )
-            .is_err()
-        {
-            self.pending_live_edge_repairs.insert(key, pending);
-        }
-    }
-
-    pub(super) fn flush_coinbase_live_edge_repairs(&mut self) {
-        let repairs = self
-            .pending_live_edge_repairs
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for (series, generation) in repairs {
-            self.flush_coinbase_live_edge_repair(&series, generation);
-        }
-    }
-
-    pub(super) fn realtime_heartbeat(&mut self, generation: ProviderGeneration) {
-        let missing = self
-            .live
-            .iter()
-            .filter(|(_, live)| {
-                live.generation == generation && live.connected && !live.history.is_ready()
-            })
-            .map(|(series, _)| series.clone())
-            .collect::<Vec<_>>();
-        for series in missing {
-            let _ = self.enqueue_history_recovery(&series, generation);
-        }
-    }
-
-    /// Rebuilds every Coinbase history/live seam after an interruption that
-    /// affects the whole provider — a realtime queue overflow, or aggregation
-    /// refusing a trade.
-    ///
-    /// `connected` stays owned by the socket lifecycle. Clearing it here left
-    /// the feed permanently down whenever the socket had not actually dropped:
-    /// nothing but a reconnect set it back, and no reconnect was coming. What an
-    /// interruption really invalidates is the seam, so this clears
-    /// `history_ready` and refetches, which the heartbeat also retries.
-    pub(super) fn realtime_interrupted(&mut self, _stage: FailureStage, detail: &str) {
-        let generation = self.invalidate_coinbase_seams(detail);
-        // The socket is still up, so nobody else is going to reseed these: the
-        // refetch has to start here. Clearing `connected` instead — which is what
-        // this used to do — left the feed down for good, because only a reconnect
-        // set it back and no reconnect was coming.
-        for series in self.live.keys().cloned().collect::<Vec<_>>() {
-            self.broadcast_series_resolution_for(
-                &series,
-                SeriesLoadState::Partial,
-                PersistenceState::Durable,
-                Some(detail),
-            );
-            if let Err(error) = self.enqueue_history_recovery(&series, generation) {
-                self.broadcast_demand_error_for(&series, FailureStage::Handoff, error, None);
-            }
-        }
-    }
-
-    /// The socket dropped. The worker reconnects on a fresh generation and
-    /// `realtime_connected` reseeds every series then, so this only marks the
-    /// seams stale — refetching now would fetch against a generation that is
-    /// already being retired.
-    pub(super) fn realtime_disconnected(&mut self, detail: &'static str) {
-        self.invalidate_coinbase_seams(detail);
-        self.realtime_connected = false;
-        for live in self.live.values_mut() {
-            live.connected = false;
-        }
-    }
-
-    /// Marks every Coinbase history/live seam as needing a reseed and reports the
-    /// provider as recovering. Returns the current provider generation.
-    pub(super) fn invalidate_coinbase_seams(&mut self, detail: &str) -> ProviderGeneration {
-        let generation = self.coinbase_provider_generation();
-        let _ = self
-            .engine
-            .set_provider_health("coinbase", generation, ProviderHealth::Recovering);
-        for live in self.live.values_mut() {
-            live.history = CoinbaseHistoryReadiness::Pending;
-            live.dirty = false;
-            live.published_completed = None;
-            live.buffered.clear();
-            live.aggregator.reset();
-        }
-        self.broadcast_provider(
-            ProviderConnectionState::Recovering,
-            generation,
-            Some(detail),
-        );
-        generation
-    }
-
-    pub(super) fn provider_online_if_all_series_ready(&mut self) {
-        if !self.realtime_connected
-            || self.live.is_empty()
-            || self.live.values().any(|live| !live.history.is_ready())
-        {
-            return;
-        }
-        let generation = self.coinbase_provider_generation();
-        let _ = self
-            .engine
-            .set_provider_health("coinbase", generation, ProviderHealth::Online);
-        self.broadcast_provider(ProviderConnectionState::Online, generation, None);
-        let series = self.live.keys().cloned().collect::<Vec<_>>();
-        for series in series {
-            if self
-                .live
-                .get(&series)
-                .is_some_and(|live| !live.history.is_authoritative())
-            {
-                self.broadcast_series_resolution_for(
-                    &series,
-                    SeriesLoadState::Partial,
-                    PersistenceState::Durable,
-                    Some(
-                        "The current Coinbase candle is provisional until its authoritative close",
-                    ),
-                );
-            } else {
-                self.broadcast_series_state_for(&series, SeriesLoadState::Live);
-            }
-        }
-    }
-
-    pub(super) fn series_live_if_ready(&mut self, series: &BarSeriesKey) -> bool {
-        if !self
-            .live
-            .get(series)
-            .is_some_and(|live| live.connected && live.history.is_authoritative())
-        {
-            return false;
-        }
-        if self
-            .engine
-            .provider_status("coinbase")
-            .is_some_and(|status| status.health == ProviderHealth::Online)
-        {
-            self.broadcast_series_state_for(series, SeriesLoadState::Live);
-        } else {
-            self.provider_online_if_all_series_ready();
-        }
-        true
-    }
-
-    /// Replaces an overflowed consumer's queued bar stream with one covering
-    /// snapshot.
-    ///
-    /// The queue only overflows when a consumer falls further behind than
-    /// [`CONSUMER_SERIES_QUEUE_CAPACITY`] distinct bars, which a healthy chart
-    /// never does. Recovering with the current series — rather than dropping
-    /// the oldest update — keeps the strict `+1` sequence contract intact, and
-    /// costs exactly one snapshot.
-    pub(super) fn publish_live(&mut self) {
-        let ready = self
-            .live
-            .iter_mut()
-            .filter_map(|(series, live)| {
-                Some((
-                    series.clone(),
-                    live.generation,
-                    live.aggregator.price_scale(),
-                    live.aggregator.quantity_scale(),
-                    live.take_publication()?,
-                ))
-            })
-            .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, update) in ready {
-            if let Err(error) = self.install_live_publication(
-                &series,
-                generation,
-                price_scale,
-                quantity_scale,
-                update,
-            ) {
-                eprintln!("Axiusflow engine Coinbase live publication failed: {error}");
-                self.reseed_coinbase_series(&series, "Coinbase live publication needs a reseed");
-            }
-        }
-    }
-
-    /// Installs one live publication into the canonical series.
-    pub(super) fn install_live_publication(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        price_scale: u8,
-        quantity_scale: u8,
-        update: LiveSeriesPublication,
-    ) -> Result<(), String> {
-        match update {
-            LiveSeriesPublication::Tails(bars) => {
-                let last = bars.len().saturating_sub(1);
-                for (index, bar) in bars.into_iter().enumerate() {
-                    let publications = self
-                        .engine
-                        .install_realtime_tail(
-                            generation,
-                            series,
-                            price_scale,
-                            quantity_scale,
-                            bar,
-                            index == last,
-                        )
-                        .map_err(|error| error.to_string())?;
-                    for publication in publications {
-                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                            events.publish_series_update(series_update_message(&publication));
-                        }
-                    }
-                }
-                Ok(())
-            }
-            LiveSeriesPublication::Covering(bars) => {
-                let publications = self
-                    .engine
-                    .install_realtime(generation, series, price_scale, quantity_scale, bars, true)
-                    .map_err(|error| error.to_string())?;
-                for publication in publications {
-                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        events.publish_snapshot(snapshot_message(&publication));
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Rearms one Coinbase series after its live publication stopped lining up
-    /// with the canonical series.
-    ///
-    /// This is deliberately per-series and recoverable. Escalating to
-    /// `realtime_interrupted` used to take every other chart down with it and
-    /// left them all down, because only a socket reconnect cleared the flags and
-    /// the socket had not dropped.
-    pub(super) fn reseed_coinbase_series(&mut self, series: &BarSeriesKey, detail: &'static str) {
-        let generation = self.coinbase_provider_generation();
-        let Some(live) = self.live.get_mut(series) else {
-            return;
-        };
-        live.history = CoinbaseHistoryReadiness::Pending;
-        live.dirty = false;
-        live.published_completed = None;
-        live.buffered.clear();
-        live.aggregator.reset();
-        self.broadcast_series_resolution_for(
-            series,
-            SeriesLoadState::Partial,
-            PersistenceState::Durable,
-            Some(detail),
-        );
-        if let Err(error) = self.enqueue_history_recovery(series, generation) {
-            self.broadcast_demand_error_for(series, FailureStage::Handoff, error, None);
         }
     }
 
@@ -1652,11 +1312,187 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn coinbase_provider_generation(&self) -> ProviderGeneration {
-        self.engine
-            .provider_status("coinbase")
-            .and_then(|status| status.generation)
-            .unwrap_or(ProviderGeneration(NonZeroU64::MIN))
+    pub(super) fn series_live_if_ready(&mut self, series: &BarSeriesKey) -> bool {
+        let ready = self
+            .rithmic_live
+            .get(series)
+            .is_some_and(|live| live.connected && live.history_ready)
+            || self
+                .hyperliquid_live
+                .get(series)
+                .is_some_and(|live| live.connected && live.history_ready);
+        if ready {
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Live,
+                PersistenceState::Durable,
+                None,
+            );
+        }
+        ready
+    }
+
+    /// Rebuilds the complete desired Hyperliquid subscription set from live
+    /// handoffs and depth demand. Candles follow chart series, trades follow
+    /// live instruments, and books follow DOM demand; nothing else subscribes.
+    pub(super) fn hyperliquid_demand(&self) -> HyperliquidDemand {
+        let mut candles = BTreeSet::new();
+        let mut trades = BTreeSet::new();
+        for (series, live) in &self.hyperliquid_live {
+            let Ok(instrument) = self.hyperliquid_instrument(series) else {
+                continue;
+            };
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            ) else {
+                continue;
+            };
+            let mapping = crate::hyperliquid_realtime::HyperliquidInstrumentDemand {
+                wire_coin: live.wire_coin.clone(),
+                instrument_id: series.instrument_id.clone(),
+                entitlement_id: series.entitlement_id.clone(),
+                price_scale,
+                quantity_scale,
+            };
+            candles.insert(HyperliquidCandleDemand {
+                instrument: mapping.clone(),
+                interval: live.interval.clone(),
+            });
+            trades.insert(mapping);
+        }
+        let mut books = BTreeSet::new();
+        for ((provider, _), book) in &self.order_books {
+            if provider != "hyperliquid" {
+                continue;
+            }
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(book.instrument.price_scale),
+                u8::try_from(book.instrument.quantity_scale),
+            ) else {
+                continue;
+            };
+            books.insert(HyperliquidInstrumentDemand {
+                wire_coin: book.instrument.provider_symbol.clone(),
+                instrument_id: book.instrument.instrument_id.clone(),
+                entitlement_id: book.instrument.entitlement_id.clone(),
+                price_scale,
+                quantity_scale,
+            });
+        }
+        HyperliquidDemand {
+            candles: candles.into_iter().collect(),
+            trades: trades.into_iter().collect(),
+            books: books.into_iter().collect(),
+        }
+    }
+
+    /// Hands the worker the rebuilt subscription set. The worker diffs it
+    /// against live subscriptions, so presentation changes never reconnect.
+    pub(super) fn flush_hyperliquid_demand(&mut self) {
+        if !self.hyperliquid_demand_dirty {
+            return;
+        }
+        let demand = self.hyperliquid_demand();
+        let empty =
+            demand.candles.is_empty() && demand.trades.is_empty() && demand.books.is_empty();
+        if empty && !self.hyperliquid_engaged {
+            self.hyperliquid_demand_dirty = false;
+            return;
+        }
+        match self
+            .providers
+            .send_hyperliquid_realtime(HyperliquidRealtimeControl::Subscribe(demand))
+        {
+            Ok(true) => {
+                self.hyperliquid_demand_dirty = false;
+                self.hyperliquid_engaged = !empty;
+            }
+            // A full channel retries on the next coordinator tick; the
+            // worker coalesces to the newest set.
+            Ok(false) => {}
+            Err(_) => {
+                self.hyperliquid_demand_dirty = false;
+            }
+        }
+    }
+
+    pub(super) fn publish_hyperliquid_live(&mut self) {
+        let ready = self
+            .hyperliquid_live
+            .values_mut()
+            .filter_map(|live| {
+                Some((
+                    live.series.clone(),
+                    live.generation,
+                    live.price_scale,
+                    live.quantity_scale,
+                    live.take_publication()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (series, generation, price_scale, quantity_scale, update) in ready {
+            let published = match update {
+                LiveSeriesPublication::Tails(bars) => bars.into_iter().try_for_each(|bar| {
+                    let publications = self.engine.install_realtime_tail(
+                        generation,
+                        &series,
+                        price_scale,
+                        quantity_scale,
+                        bar,
+                        true,
+                    )?;
+                    for publication in publications {
+                        if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                            events.publish_series_update(series_update_message(&publication));
+                            events.series_state = Some(series_state_with_persistence(
+                                publication.consumer_id,
+                                publication.generation,
+                                ipc_series(&publication.series),
+                                SeriesLoadState::Live,
+                                PersistenceState::Durable,
+                                None,
+                            ));
+                        }
+                    }
+                    Ok(())
+                }),
+                LiveSeriesPublication::Covering(bars) => self
+                    .engine
+                    .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
+                    .map(|publications| {
+                        for publication in publications {
+                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                                publish_state(
+                                    events,
+                                    &publication,
+                                    SeriesLoadState::Live,
+                                    PersistenceState::Durable,
+                                    None,
+                                );
+                            }
+                        }
+                    }),
+            };
+            if let Err(error) = published {
+                if let Some(live) = self.hyperliquid_live.get_mut(&series) {
+                    live.history_ready = false;
+                }
+                eprintln!("Axiusflow engine Hyperliquid live publication failed: {error}");
+                self.broadcast_provider_for(
+                    "hyperliquid",
+                    ProviderConnectionState::Recovering,
+                    generation,
+                    Some("Hyperliquid live publication requires covering history"),
+                );
+                self.broadcast_demand_error_for(
+                    &series,
+                    FailureStage::Publication,
+                    "Hyperliquid live publication requires covering history",
+                    None,
+                );
+            }
+        }
     }
 
     pub(super) fn remove_waiter(&mut self, consumer_id: ConsumerId) {
@@ -1696,16 +1532,31 @@ impl Coordinator<'_> {
                 }
             }
         }
-        self.live.retain(|series, _| {
-            self.engine.has_subscription(series)
-                || self.resource_mode == ResourceMode::MarketsLive
-                    && self.retained_live.contains(series)
-        });
         self.rithmic_live.retain(|series, _| {
             self.engine.has_subscription(series)
                 || self.resource_mode == ResourceMode::MarketsLive
                     && self.retained_live.contains(series)
         });
+        for series in self.hyperliquid_live.keys().filter(|series| {
+            !(self.engine.has_subscription(series)
+                || self.resource_mode == ResourceMode::MarketsLive
+                    && self.retained_live.contains(series))
+        }) {
+            for ((active, _), stop) in &self.history_cancellations {
+                if active == series {
+                    stop.store(true, Ordering::Release);
+                }
+            }
+        }
+        let retained_hyperliquid = self.hyperliquid_live.len();
+        self.hyperliquid_live.retain(|series, _| {
+            self.engine.has_subscription(series)
+                || self.resource_mode == ResourceMode::MarketsLive
+                    && self.retained_live.contains(series)
+        });
+        if self.hyperliquid_live.len() != retained_hyperliquid {
+            self.hyperliquid_demand_dirty = true;
+        }
     }
 
     pub(super) fn release_unused_live_market_data(&mut self) {
@@ -1714,54 +1565,8 @@ impl Coordinator<'_> {
             return;
         }
         self.prune_unused_live_series();
-        if !self.live.is_empty() {
-            let _ = self.sync_coinbase_realtime();
-        }
         self.stop_realtime_if_idle();
     }
-
-    pub(super) fn sync_coinbase_realtime(&mut self) -> Result<(), String> {
-        let subscriptions = self.coinbase_live_products()?;
-        let products = subscriptions.keys().cloned().collect::<BTreeSet<_>>();
-        if products.is_empty()
-            || products.len() > axiusflow_coinbase_market_adapter::MAXIMUM_PRODUCTS
-        {
-            return Err("Coinbase realtime subscription set is invalid".to_string());
-        }
-        if products != self.realtime_products
-            && self
-                .providers
-                .start_coinbase_realtime(subscriptions.into_values().collect())?
-        {
-            self.realtime_products = products;
-        }
-        Ok(())
-    }
-
-    /// Products the live series currently require, shared by subscription
-    /// sync and the stalled-depth resubscribe dance so both agree on the set.
-    fn coinbase_live_products(&self) -> Result<BTreeMap<String, RealtimeProduct>, String> {
-        let mut subscriptions = BTreeMap::new();
-        for series in self.live.keys() {
-            let instrument = self.coinbase_instrument(series)?;
-            let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(instrument.price_scale),
-                u8::try_from(instrument.quantity_scale),
-            ) else {
-                return Err("Coinbase instrument precision is invalid".to_string());
-            };
-            subscriptions.insert(
-                instrument.provider_symbol.clone(),
-                RealtimeProduct {
-                    symbol: instrument.provider_symbol.clone(),
-                    price_scale,
-                    quantity_scale,
-                },
-            );
-        }
-        Ok(subscriptions)
-    }
-
     /// Hands the worker a replacement selection the control channel refused.
     pub(super) fn flush_rithmic_selection(&mut self) {
         let Some(instrument) = self.rithmic_pending_selection.take() else {
@@ -1775,18 +1580,7 @@ impl Coordinator<'_> {
             self.rithmic_pending_selection = Some(instrument);
         }
     }
-
     pub(super) fn stop_realtime_if_idle(&mut self) {
-        // The applied product set is the worker-start authority. Keeping a
-        // second `started` flag made every start, stop, suspension, and resume
-        // update two representations of the same fact.
-        if self.live.is_empty() && !self.realtime_products.is_empty() {
-            self.providers.stop("coinbase");
-            self.realtime_connected = false;
-            self.realtime_products.clear();
-            let generation = self.coinbase_provider_generation();
-            let _ = self.engine.end_provider_session("coinbase", generation);
-        }
         if self.rithmic_live.is_empty() && self.rithmic_selection.is_some() {
             self.providers.stop("rithmic");
             self.rithmic_selection = None;
@@ -1797,6 +1591,18 @@ impl Coordinator<'_> {
                 .and_then(|status| status.generation)
             {
                 let _ = self.engine.end_provider_session("rithmic", generation);
+            }
+        }
+        if self.hyperliquid_live.is_empty() && self.hyperliquid_engaged {
+            self.providers.stop("hyperliquid");
+            self.hyperliquid_engaged = false;
+            self.hyperliquid_demand_dirty = false;
+            if let Some(generation) = self
+                .engine
+                .provider_status("hyperliquid")
+                .and_then(|status| status.generation)
+            {
+                let _ = self.engine.end_provider_session("hyperliquid", generation);
             }
         }
     }

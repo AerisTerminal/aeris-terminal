@@ -41,7 +41,10 @@ const BURST_UPDATES: usize = 10_000;
 /// repository root. A gate is a separate, credentialed, network-bound run; a
 /// missing file means it did not run, which is not a pass.
 const LIVE_GATE_REPORTS: [(&str, &str); 2] = [
-    ("coinbase", ".cache/evidence/live_market_gate_coinbase.json"),
+    (
+        "hyperliquid",
+        ".cache/evidence/live_market_gate_hyperliquid.json",
+    ),
     ("rithmic", ".cache/evidence/live_market_gate_rithmic.json"),
 ];
 const LIVE_GATE_SCHEMA_VERSION: u32 = 1;
@@ -1088,11 +1091,11 @@ mod tests {
                     .as_nanos()
             ));
             std::fs::create_dir(&directory).expect("evidence test directory is created");
-            let binary_path = directory.join("live_market_gate_coinbase.bin");
+            let binary_path = directory.join("live_market_gate_rithmic.bin");
             std::fs::write(&binary_path, b"candidate binary")
                 .expect("candidate binary fixture is written");
             let binary_sha256 = file_sha256_hex(&binary_path).expect("candidate binary is hashed");
-            let report_path = directory.join("live_market_gate_coinbase.json");
+            let report_path = directory.join("live_market_gate_rithmic.json");
             Self {
                 directory,
                 report_path,
@@ -1104,10 +1107,10 @@ mod tests {
 
         fn report(&self, outcome: &str, completion: &str) -> serde_json::Value {
             live_gate_report(
-                std::path::Path::new("live_market_gate_coinbase.bin"),
+                std::path::Path::new("live_market_gate_rithmic.bin"),
                 outcome,
                 completion,
-                "coinbase",
+                "rithmic",
                 &self.source_revision,
                 self.now,
                 &self.binary_sha256,
@@ -1146,7 +1149,7 @@ mod tests {
 
     #[test]
     fn provider_neutral_hydration_fencing_and_recovery_match_both_boundaries() {
-        for provider in ["coinbase", "rithmic"] {
+        for provider in ["hyperliquid", "rithmic"] {
             run_provider_neutral_handoff_scenario(provider);
         }
     }
@@ -1170,7 +1173,7 @@ mod tests {
         assert_eq!(
             recorded_gate(
                 &fixture.report_path,
-                "coinbase",
+                "rithmic",
                 &fixture.source_revision,
                 fixture.now
             ),
@@ -1181,7 +1184,7 @@ mod tests {
         assert_eq!(
             recorded_gate(
                 &fixture.report_path,
-                "coinbase",
+                "rithmic",
                 &fixture.source_revision,
                 fixture.now
             ),
@@ -1194,8 +1197,10 @@ mod tests {
         let fixture = LiveGateFixture::new();
         for invalid in [
             fixture.report("passed", "incomplete"),
+            // A report pointing at another provider's binary must not pass
+            // for this one, even when every other field is valid.
             live_gate_report(
-                std::path::Path::new("live_market_gate_coinbase.bin"),
+                std::path::Path::new("live_market_gate_hyperliquid.bin"),
                 "passed",
                 "completed",
                 "rithmic",
@@ -1204,28 +1209,28 @@ mod tests {
                 &fixture.binary_sha256,
             ),
             live_gate_report(
-                std::path::Path::new("live_market_gate_coinbase.bin"),
+                std::path::Path::new("live_market_gate_rithmic.bin"),
                 "passed",
                 "completed",
-                "coinbase",
+                "rithmic",
                 &"b".repeat(40),
                 fixture.now,
                 &fixture.binary_sha256,
             ),
             live_gate_report(
-                std::path::Path::new("live_market_gate_coinbase.bin"),
+                std::path::Path::new("live_market_gate_rithmic.bin"),
                 "passed",
                 "completed",
-                "coinbase",
+                "rithmic",
                 &fixture.source_revision,
                 fixture.now - super::LIVE_GATE_MAXIMUM_AGE_SECONDS - 1,
                 &fixture.binary_sha256,
             ),
             live_gate_report(
-                std::path::Path::new("live_market_gate_coinbase.bin"),
+                std::path::Path::new("live_market_gate_rithmic.bin"),
                 "passed",
                 "completed",
-                "coinbase",
+                "rithmic",
                 &fixture.source_revision,
                 fixture.now,
                 &"0".repeat(64),
@@ -1235,7 +1240,7 @@ mod tests {
             assert_eq!(
                 recorded_gate(
                     &fixture.report_path,
-                    "coinbase",
+                    "rithmic",
                     &fixture.source_revision,
                     fixture.now
                 ),
@@ -1248,7 +1253,7 @@ mod tests {
         assert_eq!(
             recorded_gate(
                 &fixture.report_path,
-                "coinbase",
+                "rithmic",
                 &fixture.source_revision,
                 fixture.now
             ),

@@ -320,15 +320,15 @@ mod tests {
     fn descriptor(symbol: &str) -> HotSetDescriptor {
         HotSetDescriptor {
             series: BarSeriesKey {
-                provider_id: "coinbase".to_string(),
-                instrument_id: format!("coinbase:spot:{symbol}"),
-                entitlement_id: "coinbase-public-market-data".to_string(),
+                provider_id: "rithmic".to_string(),
+                instrument_id: format!("rithmic:spot:{symbol}"),
+                entitlement_id: "rithmic-public-market-data".to_string(),
                 period: BarPeriod::time(60).expect("period"),
                 definition_version: 1,
             },
-            account_id: "coinbase-public".to_string(),
+            account_id: "rithmic-public".to_string(),
             provider_symbol: symbol.to_string(),
-            venue_id: "coinbase".to_string(),
+            venue_id: "rithmic".to_string(),
             display_symbol: symbol.to_string(),
             price_scale: 2,
             quantity_scale: 8,

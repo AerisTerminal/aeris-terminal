@@ -9,7 +9,7 @@ It belongs in the same product category as MotiveWave and ATAS: a workstation th
 - Native Windows, macOS, and Linux desktop
 - A resident local engine that owns provider sessions, canonical series, encrypted history, and publication
 - Professional charting through [Nucleus Charts](https://github.com/NucleusCharts/financial-charts), consumed as a pinned Git dependency
-- Coinbase and Rithmic market data
+- Rithmic market data
 - Chart types, drawings, DOM, and multi-pane workspaces
 
 Closing the window keeps the engine warm by default. Settings can instead keep markets live after the last UI client detaches, or shut the engine down completely.

@@ -1,6 +1,6 @@
 //! Physical native-transition capture recorder.
 //!
-//! This module owns the evidence state machine for the public Coinbase
+//! This module owns the evidence state machine for the public Rithmic
 //! offline-startup, network-offline, and suspend/resume capture. It is
 //! deliberately free of UI, monitor, and worker handles: the capture
 //! command feeds it observed facts (monitor callbacks, provider
@@ -29,12 +29,12 @@ use axiusflow_platform_runtime::{
 /// Schema version pinned by the external verifier.
 pub const REPORT_SCHEMA_VERSION: u32 = 2;
 /// Evidence scope pinned by the external verifier.
-pub const REPORT_EVIDENCE_SCOPE: &str = "coinbase_public_physical_native_transition_capture";
+pub const REPORT_EVIDENCE_SCOPE: &str = "rithmic_public_physical_native_transition_capture";
 /// Monitor surface pinned by the external verifier.
 pub const REPORT_CALLBACK_SOURCE: &str = "NativeNetworkMonitor_and_NativePowerMonitor";
 /// Shipping path pinned by the external verifier: the existing engine-owned
-/// Coinbase worker, never a parallel harness.
-pub const REPORT_SHIPPING_MODE: &str = "coinbase_public_existing_engine_worker";
+/// Rithmic worker, never a parallel harness.
+pub const REPORT_SHIPPING_MODE: &str = "rithmic_public_existing_engine_worker";
 /// Credential origin pinned by the external verifier.
 pub const REPORT_CREDENTIAL_SOURCE: &str = "public_feed_none";
 
@@ -294,7 +294,7 @@ impl Phase {
     const fn operator_message(self) -> &'static str {
         match self {
             Self::AwaitingOfflineStart | Self::StartupRecovery => {
-                "reconnect internet and hold it until Coinbase recovery is confirmed"
+                "reconnect internet and hold it until Rithmic recovery is confirmed"
             }
             Self::AwaitingNetworkLoss => {
                 "offline startup recovered; disconnect internet now and hold it offline"
@@ -306,7 +306,7 @@ impl Phase {
                 "network recovery confirmed; put Windows to sleep, then resume"
             }
             Self::PowerRecovery => {
-                "resume confirmed; keep internet connected until Coinbase recovery completes"
+                "resume confirmed; keep internet connected until Rithmic recovery completes"
             }
             Self::Complete => "all transition recoveries confirmed; capture is completing",
         }
@@ -1073,7 +1073,7 @@ fn lower_hex(bytes: impl IntoIterator<Item = u8>) -> String {
 // visual recovery on their own desktop window in parallel; this command
 // records the data-plane evidence.
 
-/// Stable public Coinbase product used for native transition evidence.
+/// Stable public Rithmic product used for native transition evidence.
 const CAPTURE_SYMBOL: &str = "BTC-USD";
 /// Sixty-second bars: a bucket rolls visibly inside the capture window, so
 /// handoff continuity is exercised by every transition.
@@ -1299,13 +1299,13 @@ impl CaptureDriver {
     fn demand(&mut self) -> Result<(), String> {
         self.demand_generation = self.demand_generation.saturating_add(1);
         let instrument = InstallProviderInstrument {
-            provider: "coinbase".to_string(),
+            provider: "rithmic".to_string(),
             session_generation: 1,
             selection_generation: 1,
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
             provider_symbol: CAPTURE_SYMBOL.to_string(),
             display_symbol: "BTC/USD".to_string(),
-            venue_id: "coinbase".to_string(),
+            venue_id: "rithmic".to_string(),
             price_scale: 2,
             quantity_scale: 8,
             entitlement_id: "crypto_public_realtime".to_string(),
@@ -1313,8 +1313,8 @@ impl CaptureDriver {
         self.client.install_provider_instrument(instrument)?;
         self.installed = true;
         let series = SeriesKey {
-            provider: "coinbase".to_string(),
-            instrument_id: "instrument:coinbase:btc:usd".to_string(),
+            provider: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:btc:usd".to_string(),
             cadence_value: CAPTURE_INTERVAL_SECONDS,
             definition_revision: 1,
             entitlement_id: "crypto_public_realtime".to_string(),
@@ -1384,7 +1384,7 @@ impl CaptureDriver {
                 announced_phase = Some(recorder.phase);
             }
             if !demanded && (!initial_demand_sent || online.load(Relaxed)) {
-                // Coinbase demand is installed once while offline. The
+                // Rithmic demand is installed once while offline. The
                 // engine owns bounded provider recovery and carries this
                 // demand into the fresh session after connectivity returns.
                 self.demand()?;
@@ -1480,14 +1480,14 @@ impl CaptureDriver {
                             axiusflow_engine_protocol::EngineFaultCode::Offline
                             | axiusflow_engine_protocol::EngineFaultCode::Retryable,
                         ) => Ok(true),
-                        _ => Err("Coinbase demand failed before first chart data".to_string()),
+                        _ => Err("Rithmic demand failed before first chart data".to_string()),
                     };
                 }
                 self.record_loss(recorder);
             }
             envelope::Payload::Fault(_) => {
                 if self.current_provider_generation == 0 {
-                    return Err("Coinbase demand faulted before first chart data".to_string());
+                    return Err("Rithmic demand faulted before first chart data".to_string());
                 }
                 self.record_loss(recorder);
             }

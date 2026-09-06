@@ -1729,7 +1729,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    #[ignore = "requires the optimized resident engine and a live Coinbase connection"]
+    #[ignore = "requires the optimized resident engine and a live market provider"]
     fn native_release_market_snapshot_probe() {
         use axiusflow_engine_protocol::SeriesKey;
 
@@ -1740,8 +1740,14 @@ mod tests {
         let hot = workspace
             .hot_series
             .iter()
-            .find(|series| series.provider == "coinbase")
-            .expect("Coinbase hot series is available");
+            .find(|series| series.provider == "hyperliquid")
+            .or_else(|| {
+                workspace
+                    .hot_series
+                    .iter()
+                    .find(|series| series.provider == "rithmic")
+            })
+            .expect("live-provider hot series is available");
         let series = SeriesKey {
             provider: hot.provider.clone(),
             instrument_id: hot.instrument_id.clone(),

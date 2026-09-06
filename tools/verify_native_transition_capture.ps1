@@ -3,7 +3,7 @@
 Verifies completed physical Windows offline-startup, network-offline, and suspend/resume evidence.
 
 .DESCRIPTION
-The capture is produced only by the committed launcher and public Coinbase
+The capture is produced only by the committed launcher and public Rithmic
 shipping worker. This verifier checks its finalized provenance manifest, typed native callback ordinals,
 confirmed generation retirement, complete state clearing, strictly newer native-
 vault reconnection, authentication, and restored chart/DOM/selection state. A real
@@ -156,7 +156,7 @@ catch {
     throw "Native-transition manifest is not valid JSON: $resolvedManifestPath"
 }
 Assert-True ((Get-RequiredProperty $manifest "schema_version") -eq 1) "Native-transition manifest schema_version must be 1."
-Assert-True ((Get-RequiredProperty $manifest "evidence_scope") -eq "coinbase_public_native_transition_capture_manifest") "Native-transition manifest evidence_scope is invalid."
+Assert-True ((Get-RequiredProperty $manifest "evidence_scope") -eq "rithmic_public_native_transition_capture_manifest") "Native-transition manifest evidence_scope is invalid."
 $sourceRevision = [string](Get-RequiredProperty $manifest "source_revision")
 Assert-True ($sourceRevision -match '^[0-9a-fA-F]{40}$') "Manifest source_revision must be a full Git revision."
 Assert-JsonTrue (Get-RequiredProperty $manifest "clean_worktree") "manifest.clean_worktree"
@@ -184,7 +184,7 @@ catch {
 }
 
 Assert-True ((Get-RequiredProperty $report "schema_version") -eq 2) "Native-transition schema_version must be 2."
-Assert-True ((Get-RequiredProperty $report "evidence_scope") -eq "coinbase_public_physical_native_transition_capture") "Native-transition evidence_scope is invalid."
+Assert-True ((Get-RequiredProperty $report "evidence_scope") -eq "rithmic_public_physical_native_transition_capture") "Native-transition evidence_scope is invalid."
 Assert-True ((Get-RequiredProperty $report "platform") -eq "windows") "Physical native-transition evidence must be captured on Windows."
 Assert-True ((Get-RequiredProperty $report "completion_state") -eq "completed") "Native-transition capture is incomplete."
 Assert-True ((Get-RequiredProperty $report "source_revision") -ieq $sourceRevision) "Report source revision does not match its manifest."
@@ -194,7 +194,7 @@ Assert-True ([IO.Path]::GetFullPath([string](Get-RequiredProperty $report "execu
 Assert-True ((Get-RequiredProperty $report "cargo_lock_sha256") -ieq $cargoLockHash) "Report Cargo.lock hash does not match."
 Assert-True ((Get-RequiredProperty $report "executable_sha256") -ieq $executableHash) "Report executable hash does not match."
 Assert-True ((Get-RequiredProperty $report "callback_source") -eq "NativeNetworkMonitor_and_NativePowerMonitor") "Native-transition callback source is invalid."
-Assert-True ((Get-RequiredProperty $report "shipping_mode") -eq "coinbase_public_existing_engine_worker") "Capture did not use the existing public Coinbase worker."
+Assert-True ((Get-RequiredProperty $report "shipping_mode") -eq "rithmic_public_existing_engine_worker") "Capture did not use the existing public Rithmic worker."
 Assert-True ((Get-RequiredProperty $report "credential_source") -eq "public_feed_none") "Capture credential source is invalid."
 Assert-JsonFalse (Get-RequiredProperty $report "credentials_embedded") "credentials_embedded"
 Assert-JsonFalse (Get-RequiredProperty $report "transitions_triggered_by_capture") "transitions_triggered_by_capture"
@@ -240,4 +240,4 @@ Assert-JsonTrue (Get-RequiredProperty $report "worker_clean_stop") "worker_clean
 Assert-JsonTrue (Get-RequiredProperty $report "finalized") "report.finalized"
 Assert-JsonTrue (Get-RequiredProperty $report "readiness_qualified") "readiness_qualified"
 
-Write-Output "native_transition_capture=verified physical_offline_startup=true physical_network_offline=true physical_suspend_resume=true source_ordinals=true public_coinbase=true artifact_sha256=$($actualHash.ToUpperInvariant()) artifact=$resolvedPath"
+Write-Output "native_transition_capture=verified physical_offline_startup=true physical_network_offline=true physical_suspend_resume=true source_ordinals=true public_rithmic=true artifact_sha256=$($actualHash.ToUpperInvariant()) artifact=$resolvedPath"

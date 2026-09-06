@@ -83,6 +83,32 @@ pub(crate) fn replay_quantity_divisor(replay: &ReplaySnapshot) -> f64 {
     10_f64.powi(i32::from(replay.instrument().precision.quantity_scale()))
 }
 
+/// Presentation precision, not a price tick or a change to fixed-point storage.
+/// Keep at least two places where the storage scale permits it, and never hide
+/// a significant decimal in the displayed OHLC data.
+pub(crate) fn price_display_precision(values: impl IntoIterator<Item = i64>, scale: u8) -> u8 {
+    values
+        .into_iter()
+        .fold(scale.min(2), |precision, mut value| {
+            let mut places = scale;
+            while places > 0 && value % 10 == 0 {
+                value /= 10;
+                places -= 1;
+            }
+            precision.max(places)
+        })
+}
+
+pub(crate) fn replay_display_precision(replay: &ReplaySnapshot) -> u8 {
+    price_display_precision(
+        replay.bars().iter().flat_map(|item| {
+            let bar = item.value();
+            [bar.open, bar.high, bar.low, bar.close]
+        }),
+        replay.instrument().precision.price_scale(),
+    )
+}
+
 pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
     let id = engine.add_series(SeriesKind::Histogram);
     if let Some(series) = engine
@@ -334,8 +360,8 @@ fn replay_timeframe_label(replay: &ReplaySnapshot) -> String {
 }
 
 fn replay_venue_label(venue: &str) -> &str {
-    if venue.eq_ignore_ascii_case("coinbase") {
-        "Coinbase"
+    if venue.eq_ignore_ascii_case("rithmic") {
+        "Rithmic"
     } else {
         venue
     }
@@ -356,7 +382,21 @@ fn fixed_value(value: i64, divisor: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::fixed_value;
+    use super::{fixed_value, price_display_precision};
+
+    #[test]
+    fn display_precision_removes_padding_without_hiding_significant_digits() {
+        assert_eq!(price_display_precision([7_978_500_000_000], 8), 2);
+        assert_eq!(price_display_precision([12_345, 0], 8), 8);
+        assert_eq!(price_display_precision([12_340_000], 8), 4);
+        assert_eq!(price_display_precision([-12_340_000], 8), 4);
+        assert_eq!(price_display_precision([123], 0), 0);
+        assert_eq!(price_display_precision([123], 2), 2);
+        assert_eq!(
+            price_display_precision([7_978_500_000_000, 7_978_500_000_001], 8),
+            8
+        );
+    }
 
     #[test]
     fn fixed_point_volume_uses_quantity_precision() {

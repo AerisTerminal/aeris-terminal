@@ -10,20 +10,7 @@ fn active_header_state(
         theme: *theme,
         provider: workspace.provider,
         instrument_label: terminal_instrument_label(workspace),
-        series_label: if workspace.provider == TerminalProvider::Coinbase {
-            workspace.coinbase_interval.label().to_string()
-        } else {
-            series_selector_label(
-                workspace
-                    .series_browser
-                    .selected()
-                    .map(|request| request.series),
-                workspace
-                    .series_browser
-                    .pending()
-                    .map(|request| request.series),
-            )
-        },
+        series_label: series_selector_label(workspace.selected_interval()),
         chart_type: workspace.chart_type(cx),
         chart_type_label: workspace.chart_type(cx).label().to_string(),
         instruments: workspace.instrument_entries(cx),
@@ -38,7 +25,7 @@ fn active_header_state(
         pending: HeaderPendingState {
             symbol_selection: workspace.market_state.symbol_selection_pending,
             series: workspace.series_browser.pending().is_some()
-                || workspace.coinbase_switch.in_progress(),
+                || workspace.rithmic_switch.in_progress(),
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(

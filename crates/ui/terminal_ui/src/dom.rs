@@ -304,7 +304,16 @@ fn compact_quantity_text(value: i64, scale: u8) -> String {
 }
 
 fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
-    let fixed = fixed_point_text(value, scale);
+    let mut significant_places = scale;
+    let mut significant = value;
+    while significant_places > 0 && significant % 10 == 0 {
+        significant /= 10;
+        significant_places -= 1;
+    }
+    let display_scale = significant_places.max(scale.min(2));
+    let removable_places = scale.saturating_sub(display_scale);
+    let reduced = value / 10_i64.pow(u32::from(removable_places));
+    let fixed = fixed_point_text(reduced, display_scale);
     let (whole, fraction) = fixed.split_once('.').unwrap_or((fixed.as_str(), ""));
     let (sign, digits) = whole
         .strip_prefix('-')
@@ -532,6 +541,8 @@ mod tests {
         assert_eq!(fixed_point_text(42, 0), "42");
         assert_eq!(grouped_fixed_point_text(7_796_038, 2), "77,960.38");
         assert_eq!(grouped_fixed_point_text(-123_456, 3), "-123.456");
+        assert_eq!(grouped_fixed_point_text(7_978_500_000_000, 8), "79,785.00");
+        assert_eq!(grouped_fixed_point_text(12_345, 8), "0.00012345");
         assert_eq!(compact_fixed_point_text(125_000_000, 8), "1.25");
         assert_eq!(compact_fixed_point_text(10_000, 8), "0.0001");
         assert_eq!(compact_fixed_point_text(0, 8), "0");

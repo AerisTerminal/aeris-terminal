@@ -10,9 +10,10 @@ permissions:
   contents: read
 
 jobs:
-  coinbase:
+  hyperliquid:
     # Self-hosted like every other lane: the account carries no paid Actions
-    # quota, so GitHub-hosted runners are forbidden.
+    # quota, so GitHub-hosted runners are forbidden. The public feed needs no
+    # credentials, so this gate runs on any networked lane hardware.
     runs-on: [self-hosted, axiusflow, linux]
     timeout-minutes: 45
     env:
@@ -42,18 +43,18 @@ jobs:
         run: tools/setup_linux_desktop.sh --system
       - name: Install pinned Rust toolchain
         run: rustup show
-      - name: Soak the live Coinbase feed through the engine
+      - name: Soak the live Hyperliquid feed through the engine
         env:
           AXIUSFLOW_SOAK_SECONDS: "600"
         run: >-
           cargo test -p axiusflow_engine --test live_market_soak --
-          --ignored --nocapture live_coinbase_streams_across_timeframe_and_symbol_switches
+          --ignored --nocapture live_hyperliquid_streams_across_markets_and_timeframe_switches
       - name: Upload the recorded gate
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: live-market-gate-coinbase
-          path: .cache/evidence/live_market_gate_coinbase.*
+          name: live-market-gate-hyperliquid
+          path: .cache/evidence/live_market_gate_hyperliquid.*
           retention-days: 30
       - name: Remove job-scoped git credential
         if: always()

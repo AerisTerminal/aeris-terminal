@@ -18,6 +18,38 @@ as a pinned Git dependency.
   the requirement genuinely needs it.
 - Do not weaken behavior, validation, or tests to make a change easier.
 
+## Verify contracts before implementation
+
+- Before editing, trace the real call path, identify the owner of the behavior, and inspect existing
+  reusable code. Briefly state the intended change and evidence supporting it in the conversation;
+  do not create a planning document.
+- For external integrations, verify request/response shapes and field semantics against current
+  official documentation and representative public responses when available. Do not invent protocol
+  behavior from naming conventions or another provider's implementation.
+- Resolve correctness-critical unknowns before writing dependent code: identity, precision,
+  timestamp meaning, ordering, continuity, snapshot semantics, and recovery. If evidence is
+  unavailable, state the uncertainty and continue only independent work.
+- Never treat an identifier or hash as an ordered sequence without an explicit provider guarantee.
+  Keep provider identity, local ingestion order, and evidence of continuity distinct.
+- Choose fixed-point scales from verified field requirements. Prices, quantities, rates, and
+  notional values may require different scales. Do not reject valid provider values merely to
+  simplify normalization.
+- Preserve required wire fields and validate them explicitly. Do not default missing required
+  fields to plausible values or support undocumented alternative payload shapes speculatively.
+- Base protocol tests on minimal sanitized fixtures faithful to official examples or observed public
+  responses. Preserve real nesting, field names, namespaces, indexes, and precision. Record the
+  source beside the fixture; never store credentials, private account data, or raw production
+  payload dumps.
+- Test assumptions with counterexamples: nonconsecutive IDs, already-prefixed symbols, explicit
+  indexes differing from array positions, high-precision decimals, missing fields, and actual stream
+  envelopes. Expected results must follow the verified contract, not the implementation.
+- Build and verify one coherent slice before expanding dependent integration. Run focused
+  compilation and behavioral tests as soon as the slice is testable; do not accumulate an entire
+  uncompiled adapter.
+- Before handoff, remove unused state, redundant collections, speculative wrappers, and comments
+  that claim behavior the code does not provide. Preserve meaningful regression coverage when
+  removing old implementations.
+
 ## Correctness invariants
 
 These constraints are load-bearing:
@@ -112,7 +144,7 @@ unchanged.
 | `crates/application` | Transport- and provider-neutral use-case contracts |
 | `crates/market_engine` | Headless canonical market state |
 | `crates/domain/*` | Instruments and fixed-point market-data models |
-| `crates/adapters/*` | Coinbase and Rithmic wire boundaries |
+| `crates/adapters/*` | Rithmic wire boundaries |
 | `crates/local_storage`, `crates/local_history`, `crates/provider_history` | Engine-side history |
 | `crates/engine_protocol`, `crates/local_engine_client`, `crates/transport` | Versioned local IPC |
 | `crates/platform_runtime`, `crates/observability` | OS capabilities and diagnostics |

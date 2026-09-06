@@ -1,8 +1,7 @@
 //! Single-owner resident market coordinator and provider history/realtime workers.
 
 use std::{
-    cell::Cell,
-    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
@@ -10,15 +9,9 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
-use axiusflow_coinbase_market_adapter::{
-    COINBASE_PUBLIC_ACCOUNT_ID, CanonicalTrade, CoinbaseBarAggregator, CoinbaseBarAggregatorConfig,
-    CoinbaseConfig, CoinbaseHistoryCapabilityAdapter, CoinbaseInterval, CoinbaseLevel2Book,
-    CoinbaseLevel2Outcome, CoinbaseSession, CoinbaseSpotProduct, ENTITLEMENT_CLASS,
-    aggregate_coinbase_bars, coinbase_instrument_id, decode_history_bar,
-};
 use axiusflow_engine_protocol::{
     DemandError, EngineFaultCode, FailureStage, HotSeries, InstallProviderInstrument,
     MarketBar as IpcMarketBar, OrderBookLevel as IpcOrderBookLevel,
@@ -30,6 +23,9 @@ use axiusflow_engine_protocol::{
     ProviderState, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
     SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
     SeriesUpdateOperation, WorkspaceState, envelope,
+};
+use axiusflow_hyperliquid_market_adapter::{
+    HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
 };
 use axiusflow_local_history::{
     HistoryScope, LocalHistoryError, LocalHistoryStore, RetainedRange, StoredHistory,
@@ -45,17 +41,16 @@ use axiusflow_market_engine::{
     ProviderHealth, ProviderRequest, ResourcePolicyDecision, ResourcePolicyInput, SeriesSnapshot,
     SeriesTailOperation, StreamRequirements, Viewport, WorkspaceId, decide_resource_policy,
 };
-use axiusflow_provider_history::{CoverageSnapshot, DataClass, HistoryPageRequest, HistoryRange};
+use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
 use sysinfo::System;
 
-#[cfg(test)]
-use std::sync::mpsc::TryRecvError;
-
-use crate::coinbase_catalog::{
-    CoinbaseCatalogControl, CoinbaseCatalogDispatchError, CoinbaseCatalogEvent,
+use crate::hyperliquid_realtime::{
+    HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidCandleDemand, HyperliquidCatalogControl,
+    HyperliquidCatalogEvent, HyperliquidDemand, HyperliquidInstrumentDemand,
+    HyperliquidRealtimeControl, HyperliquidRealtimeEvent,
 };
 use crate::rithmic_realtime::{
     RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, RithmicRealtimeEvent,
@@ -67,7 +62,6 @@ const STORAGE_CAPACITY: usize = 16;
 const REALTIME_CAPACITY: usize = 2_048;
 const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 const REALTIME_DRAIN_BUDGET: usize = 256;
-const LIVE_BUFFER_CAPACITY: usize = 4_096;
 /// Bar updates a consumer may fall behind by before the oldest is dropped.
 const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
@@ -76,22 +70,17 @@ const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporarily exhausted";
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
-const VIEWPORT_HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
-const MAXIMUM_VIEWPORT_HISTORY_RETRIES: u8 = 3;
-const LIVE_EDGE_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
-const MAXIMUM_LIVE_EDGE_REPAIR_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 128;
 const HISTORY_BARS_PER_SERIES: usize = 32_768;
 const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
-const VIEWPORT_BACKFILL_BARS: usize = HISTORY_BARS_PER_SERIES - VIEWPORT_LIVE_TAIL_RESERVE;
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
+const LIVE_BUFFER_CAPACITY: usize = 2_048;
 const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 50;
 const MAXIMUM_TRADED_VOLUME_LEVELS: usize = 4_096;
-const COINBASE_PROVIDER_GENERATION: u64 = 1;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -148,7 +137,6 @@ enum Command {
         BarSeriesKey,
         ProviderGeneration,
         Option<HistoryRange>,
-        HistoryRequestKind,
         Result<HistorySnapshot, String>,
     ),
     LocalHistoryCompleted(
@@ -156,13 +144,6 @@ enum Command {
         ProviderGeneration,
         Result<Option<StoredHistory>, String>,
     ),
-    ViewportHistoryLocalCompleted(
-        BarSeriesKey,
-        ProviderGeneration,
-        HistoryRange,
-        Result<LocalRangeHistory, String>,
-    ),
-    ConfirmedEmptyRecorded(BarSeriesKey, Result<(), LocalHistoryError>),
     ConfirmedEmptyResolved(BarSeriesKey, HistoryRange, Result<(), LocalHistoryError>),
     PersistenceCompleted(
         BarSeriesKey,
@@ -172,27 +153,12 @@ enum Command {
     ),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HistoryRequestKind {
-    Initial,
-    LiveEdgeRepair(u8),
-    ViewportBackfill,
-}
-
-#[derive(Clone, Copy)]
-struct PendingLiveEdgeRepair {
-    range: HistoryRange,
-    attempt: u8,
-    ready_at: Instant,
-}
-
 struct HistoryRequest {
     series: BarSeriesKey,
     provider_generation: ProviderGeneration,
     instrument: Option<InstallProviderInstrument>,
     maximum_bars: usize,
     range: Option<HistoryRange>,
-    kind: HistoryRequestKind,
     stop: Arc<AtomicBool>,
 }
 
@@ -203,16 +169,8 @@ struct WarmSeries {
     provider_watermark: u64,
 }
 
-struct ActiveViewport {
-    consumer_generation: GenerationId,
-    provider_generation: ProviderGeneration,
-    series: BarSeriesKey,
-    range: HistoryRange,
-}
-
 enum StorageRequest {
     Read(BarSeriesKey, ProviderGeneration),
-    ReadRange(BarSeriesKey, ProviderGeneration, HistoryRange),
     Persist(
         BarSeriesKey,
         ProviderGeneration,
@@ -221,7 +179,6 @@ enum StorageRequest {
         Vec<(BarSeriesKey, HistoryRange)>,
         Instant,
     ),
-    RecordConfirmedEmpty(BarSeriesKey, HistoryRange),
     ResolveConfirmedEmpty(BarSeriesKey, HistoryRange),
 }
 
@@ -240,7 +197,16 @@ struct HistorySnapshot {
     /// trader selected it.
     forming: Option<FormingBar>,
     handoff_boundary_unix_nanos: Option<i64>,
-    confirmed_empty: bool,
+}
+
+/// Everything one Hyperliquid series needs to close its history/live seam.
+struct HyperliquidHandoffSeed<'a> {
+    price_scale: u8,
+    quantity_scale: u8,
+    /// Periods the provider closed, already installed as canonical history.
+    bars: &'a [MarketBar],
+    /// The period the provider caught open, held live rather than in history.
+    forming: Option<FormingBar>,
 }
 
 /// Everything one Rithmic series needs to close its history/live seam.
@@ -265,36 +231,10 @@ pub(crate) struct FormingBar {
     pub(crate) trades: Option<u32>,
 }
 
-struct LocalRangeHistory {
-    stored: Option<StoredHistory>,
-    confirmed_empty: Vec<HistoryRange>,
-}
-
 struct DemandWaiter {
     consumer_id: ConsumerId,
     generation: GenerationId,
     started_at: Instant,
-}
-
-enum RealtimeControl {
-    Start(Vec<RealtimeProduct>),
-}
-
-/// One realtime product plus the precision Level 2 decoding needs.
-#[derive(Clone, Eq, PartialEq)]
-struct RealtimeProduct {
-    symbol: String,
-    price_scale: u8,
-    quantity_scale: u8,
-}
-
-enum RealtimeEvent {
-    Connecting(ProviderGeneration),
-    Connected(ProviderGeneration),
-    Trade(ProviderGeneration, CanonicalTrade),
-    Depth(ProviderGeneration, Box<DepthSnapshot>),
-    Heartbeat(ProviderGeneration),
-    Disconnected(ProviderGeneration),
 }
 
 /// Bounded per-consumer outbox.
@@ -325,62 +265,31 @@ struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
     traded_volumes: BTreeMap<i64, i64>,
-    watch: DepthSnapshotWatch,
-}
-
-/// Bounded recovery state for a book still awaiting its first snapshot.
-///
-/// A missed initial venue snapshot otherwise stalls the book forever: later
-/// deltas cannot build it, and nothing resubscribes while the product set is
-/// unchanged. The watchdog resubscribes a few times, then goes quiet; a new
-/// demand, product change, or session reconnect re-arms it.
-#[derive(Default)]
-struct DepthSnapshotWatch {
-    awaited_since: Option<Instant>,
-    last_attempt: Option<Instant>,
-    resubscribes: u32,
 }
 
 mod realtime;
-#[cfg(test)]
-use realtime::run_realtime_worker;
-use realtime::{spawn_realtime_worker, try_emit_realtime};
 
-struct LiveHandoff {
+/// Live candle handoff for one Hyperliquid series.
+///
+/// Unlike the trade-built Rithmic handoff, provider candles arrive whole:
+/// history seeds closed bars plus the open period, and live replacements
+/// merge by candle-open timestamp with exactly one forming candle. Sequence
+/// numbers stay engine-owned so a redelivered update can never look new.
+struct HyperliquidLiveHandoff {
+    series: BarSeriesKey,
     generation: ProviderGeneration,
-    aggregator: CoinbaseBarAggregator,
-    buffered: VecDeque<CanonicalTrade>,
+    wire_coin: String,
+    interval: String,
+    price_scale: u8,
+    quantity_scale: u8,
+    bars: Vec<MarketBar>,
+    forming: Option<MarketBar>,
+    /// Live updates that arrived before history seeded the seam, bounded.
+    buffered: VecDeque<HyperliquidLiveCandle>,
     connected: bool,
-    history: CoinbaseHistoryReadiness,
+    history_ready: bool,
     dirty: bool,
-    /// Highest sequence the canonical series already holds as a completed bar.
-    /// Everything above it in the aggregator still has to be appended.
-    published_completed: Option<u64>,
-}
-
-#[derive(Clone, Copy)]
-struct PendingViewportHistoryRetry {
-    ready_at: Instant,
-    attempts: u8,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CoinbaseHistoryReadiness {
-    Pending,
-    /// Coinbase candles expose no trade watermark. The first open candle stays
-    /// provisional until it closes and a provider repair replaces it.
-    Provisional,
-    Authoritative,
-}
-
-impl CoinbaseHistoryReadiness {
-    const fn is_ready(self) -> bool {
-        !matches!(self, Self::Pending)
-    }
-
-    const fn is_authoritative(self) -> bool {
-        matches!(self, Self::Authoritative)
-    }
+    published: Option<PublishedTailState>,
 }
 
 struct RithmicLiveHandoff {
@@ -445,26 +354,9 @@ trait HistorySource: Send + 'static {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String>;
 }
 
-trait RealtimeSource: Send + 'static {
-    fn configure(&mut self, _products: Vec<RealtimeProduct>) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn run_generation(
-        &mut self,
-        generation: ProviderGeneration,
-        controls: &Receiver<RealtimeControl>,
-        events: &SyncSender<RealtimeEvent>,
-        overflow: &AtomicBool,
-        stop: &Arc<AtomicBool>,
-    ) -> bool;
-}
-
-struct LiveCoinbaseHistory {
-    adapter: CoinbaseHistoryCapabilityAdapter,
-}
-
 struct LiveRithmicHistory;
+
+struct LiveHyperliquidHistory;
 
 struct ProviderRuntimeSpec {
     provider_id: &'static str,
@@ -472,28 +364,24 @@ struct ProviderRuntimeSpec {
     realtime: ProviderRealtimeSpec,
 }
 
-enum ProviderRealtimeSpec {
-    Coinbase(Option<Box<dyn RealtimeSource>>),
-    Rithmic { enabled: bool },
+struct ProviderRealtimeSpec {
+    enabled: bool,
 }
 
 impl ProviderRuntimeSpec {
-    fn coinbase(
-        history: Box<dyn HistorySource>,
-        realtime: Option<Box<dyn RealtimeSource>>,
-    ) -> Self {
-        Self {
-            provider_id: "coinbase",
-            history,
-            realtime: ProviderRealtimeSpec::Coinbase(realtime),
-        }
-    }
-
     fn rithmic(history: Box<dyn HistorySource>, enabled: bool) -> Self {
         Self {
             provider_id: "rithmic",
             history,
-            realtime: ProviderRealtimeSpec::Rithmic { enabled },
+            realtime: ProviderRealtimeSpec { enabled },
+        }
+    }
+
+    fn hyperliquid(history: Box<dyn HistorySource>, enabled: bool) -> Self {
+        Self {
+            provider_id: "hyperliquid",
+            history,
+            realtime: ProviderRealtimeSpec { enabled },
         }
     }
 }
@@ -534,30 +422,35 @@ impl ProviderRuntimeLifecycle {
     }
 }
 
-enum ProviderRealtimeChannels {
-    Coinbase {
-        enabled: bool,
-        controls: SyncSender<RealtimeControl>,
-        events: Receiver<RealtimeEvent>,
-        overflow: Arc<AtomicBool>,
-        stop: Arc<AtomicBool>,
-    },
+struct ProviderRealtimeChannels {
+    enabled: bool,
+    channels: ProviderRealtimeChannelSet,
+}
+
+enum ProviderRealtimeChannelSet {
     Rithmic {
-        enabled: bool,
         controls: SyncSender<RithmicRealtimeControl>,
         events: Receiver<RithmicRealtimeEvent>,
     },
+    Hyperliquid {
+        controls: SyncSender<HyperliquidRealtimeControl>,
+        events: Receiver<HyperliquidRealtimeEvent>,
+    },
 }
 
-enum ProviderCatalogChannels {
-    Coinbase {
-        controls: CoinbaseCatalogControl,
-        events: Receiver<CoinbaseCatalogEvent>,
-    },
+struct ProviderCatalogChannels {
+    enabled: bool,
+    channels: ProviderCatalogChannelSet,
+}
+
+enum ProviderCatalogChannelSet {
     Rithmic {
-        enabled: bool,
         controls: SyncSender<RithmicCatalogControl>,
         events: Receiver<RithmicCatalogEvent>,
+    },
+    Hyperliquid {
+        controls: SyncSender<HyperliquidCatalogControl>,
+        events: Receiver<HyperliquidCatalogEvent>,
     },
 }
 
@@ -583,13 +476,6 @@ impl StartedProviderRuntime {
         drop(self.history);
         join_runtime_workers(self.workers);
     }
-}
-
-struct CoinbaseRealtimeWorkerState {
-    overflow: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    lifecycle: Arc<ProviderRuntimeLifecycle>,
-    active_workers: Arc<Mutex<BTreeSet<String>>>,
 }
 
 /// Engine-owned bounded runtime records keyed by provider identity.
@@ -636,60 +522,41 @@ struct ProviderDispatchRecord<'a> {
 }
 
 enum ProviderRealtimeDispatch<'a> {
-    Coinbase {
-        controls: &'a SyncSender<RealtimeControl>,
-        events: &'a Receiver<RealtimeEvent>,
-        overflow: &'a AtomicBool,
-        stop: &'a Arc<AtomicBool>,
-    },
     Rithmic {
         controls: &'a SyncSender<RithmicRealtimeControl>,
         events: &'a Receiver<RithmicRealtimeEvent>,
     },
-    #[cfg(test)]
-    TestCoinbase {
-        controls: &'a SyncSender<RealtimeControl>,
-        stop: &'a Arc<AtomicBool>,
-    },
-    #[cfg(test)]
-    TestRithmic {
-        controls: &'a SyncSender<RithmicRealtimeControl>,
+    Hyperliquid {
+        controls: &'a SyncSender<HyperliquidRealtimeControl>,
+        events: &'a Receiver<HyperliquidRealtimeEvent>,
     },
     Disabled,
 }
 
 impl<'a> ProviderRealtimeDispatch<'a> {
-    fn coinbase_controls(&self) -> Option<&'a SyncSender<RealtimeControl>> {
-        match self {
-            Self::Coinbase { controls, .. } => Some(controls),
-            #[cfg(test)]
-            Self::TestCoinbase { controls, .. } => Some(controls),
-            _ => None,
-        }
-    }
-
     fn rithmic_controls(&self) -> Option<&'a SyncSender<RithmicRealtimeControl>> {
         match self {
             Self::Rithmic { controls, .. } => Some(controls),
-            #[cfg(test)]
-            Self::TestRithmic { controls } => Some(controls),
-            _ => None,
+            Self::Hyperliquid { .. } | Self::Disabled => None,
+        }
+    }
+
+    fn hyperliquid_controls(&self) -> Option<&'a SyncSender<HyperliquidRealtimeControl>> {
+        match self {
+            Self::Hyperliquid { controls, .. } => Some(controls),
+            Self::Rithmic { .. } | Self::Disabled => None,
         }
     }
 }
 
 enum ProviderCatalogDispatch<'a> {
-    Coinbase {
-        controls: &'a CoinbaseCatalogControl,
-        events: &'a Receiver<CoinbaseCatalogEvent>,
-    },
     Rithmic {
         controls: &'a SyncSender<RithmicCatalogControl>,
         events: &'a Receiver<RithmicCatalogEvent>,
     },
-    #[cfg(test)]
-    TestCoinbase {
-        controls: &'a CoinbaseCatalogControl,
+    Hyperliquid {
+        controls: &'a SyncSender<HyperliquidCatalogControl>,
+        events: &'a Receiver<HyperliquidCatalogEvent>,
     },
     Disabled,
 }
@@ -700,23 +567,14 @@ enum ProviderCatalogCommand {
 }
 
 enum ProviderRuntimeEvent {
-    CoinbaseRealtime(RealtimeEvent),
     RithmicRealtime(RithmicRealtimeEvent),
-    CoinbaseCatalog(CoinbaseCatalogEvent),
     RithmicCatalog(RithmicCatalogEvent),
-}
-
-struct LiveCoinbaseRealtime {
-    config: Option<CoinbaseConfig>,
-    products: Vec<RealtimeProduct>,
+    HyperliquidRealtime(HyperliquidRealtimeEvent),
+    HyperliquidCatalog(HyperliquidCatalogEvent),
 }
 
 mod runtime;
 use runtime::join_runtime_workers;
-#[cfg(test)]
-use runtime::{
-    coinbase_handoff_replay_boundary, coinbase_history_edge_is_current, forming_coinbase_bucket,
-};
 
 mod storage;
 use storage::spawn_storage_worker;
@@ -777,9 +635,9 @@ fn configured_engine() -> Result<MarketEngine, String> {
     });
     engine
         .register_provider(
-            "coinbase".to_string(),
+            "rithmic".to_string(),
             ProviderConfig {
-                account_id: COINBASE_PUBLIC_ACCOUNT_ID.to_string(),
+                account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
                 capabilities: ProviderCapabilities {
                     historical_bars: true,
                     realtime_bars: true,
@@ -792,18 +650,10 @@ fn configured_engine() -> Result<MarketEngine, String> {
         )
         .map_err(|error| error.to_string())?;
     engine
-        .begin_provider_session(
-            "coinbase",
-            ProviderGeneration(
-                NonZeroU64::new(COINBASE_PROVIDER_GENERATION).unwrap_or(NonZeroU64::MIN),
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-    engine
         .register_provider(
-            "rithmic".to_string(),
+            "hyperliquid".to_string(),
             ProviderConfig {
-                account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
+                account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID.to_string(),
                 capabilities: ProviderCapabilities {
                     historical_bars: true,
                     realtime_bars: true,
@@ -822,25 +672,17 @@ mod publication;
 use publication::{
     engine_install_failure_stage, fail_waiters, local_history_failure_stage, order_flow_payload,
     publish_ready, publish_state, series_state, series_state_with_persistence,
-    series_update_message, snapshot_message,
+    series_update_message,
 };
 
 mod instrument_selection;
 use instrument_selection::{
-    chart_stream_requirements, coinbase_catalog_dispatch_error, id, try_send_rithmic_catalog,
+    chart_stream_requirements, id, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
     validate_provider_instrument, validate_provider_search, validate_provider_selection,
 };
 
 mod history;
-#[cfg(test)]
-use history::recent_coinbase_history_range;
-use history::{
-    HistoryPrecedence, canonical_local_range, canonicalize_coinbase_history, coinbase_aggregator,
-    coinbase_bar_coverage_ranges, coinbase_interval, coinbase_live_edge_repair_range,
-    coinbase_series_interval, coinbase_series_profile, current_unix_nanos, internal_series,
-    reconcile_history_repair, record_covered_range, retained_hot_series, spawn_history_worker,
-    warm_series,
-};
+use history::{internal_series, retained_hot_series, spawn_history_worker, warm_series};
 
 fn ipc_series(series: &BarSeriesKey) -> SeriesKey {
     SeriesKey {
@@ -876,31 +718,6 @@ const fn ipc_bar(bar: MarketBar) -> IpcMarketBar {
         close: bar.close,
         volume: bar.volume,
     }
-}
-
-#[cfg(test)]
-fn test_coinbase_instrument() -> InstallProviderInstrument {
-    InstallProviderInstrument {
-        provider: "coinbase".to_string(),
-        session_generation: 1,
-        selection_generation: 1,
-        instrument_id: "instrument:coinbase:btc:usd".to_string(),
-        provider_symbol: "BTC-USD".to_string(),
-        display_symbol: "BTC/USD".to_string(),
-        venue_id: "coinbase".to_string(),
-        price_scale: 2,
-        quantity_scale: 8,
-        entitlement_id: ENTITLEMENT_CLASS.to_string(),
-    }
-}
-
-#[cfg(test)]
-fn test_coinbase_eth_instrument() -> InstallProviderInstrument {
-    let mut instrument = test_coinbase_instrument();
-    instrument.instrument_id = "instrument:coinbase:eth:usd".to_string();
-    instrument.provider_symbol = "ETH-USD".to_string();
-    instrument.display_symbol = "ETH/USD".to_string();
-    instrument
 }
 
 #[cfg(test)]

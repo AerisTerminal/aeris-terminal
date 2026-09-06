@@ -626,20 +626,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_coinbase_market_adapter"
-version = "0.1.0"
-dependencies = [
- "axiusflow_market_data",
- "axiusflow_provider_history",
- "rustls",
- "serde",
- "serde_json",
- "tungstenite",
- "ureq",
- "webpki-roots 1.0.9",
-]
-
-[[package]]
 name = "axiusflow_design_system"
 version = "0.1.0"
 
@@ -670,20 +656,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_diagnostics_overhead"
-version = "0.1.0"
-dependencies = [
- "axiusflow_coinbase_market_adapter",
- "axiusflow_observability",
-]
-
-[[package]]
 name = "axiusflow_engine"
 version = "0.1.0"
 dependencies = [
  "axiusflow_account",
- "axiusflow_coinbase_market_adapter",
  "axiusflow_engine_protocol",
+ "axiusflow_hyperliquid_market_adapter",
  "axiusflow_local_engine_client",
  "axiusflow_local_history",
  "axiusflow_market_data",
@@ -709,6 +687,19 @@ version = "0.1.0"
 dependencies = [
  "axiusflow_transport",
  "prost",
+]
+
+[[package]]
+name = "axiusflow_hyperliquid_market_adapter"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_market_data",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tungstenite",
+ "ureq",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -753,19 +744,6 @@ dependencies = [
 [[package]]
 name = "axiusflow_market_data"
 version = "0.1.0"
-
-[[package]]
-name = "axiusflow_market_data_performance"
-version = "0.1.0"
-dependencies = [
- "axiusflow_coinbase_market_adapter",
- "axiusflow_local_storage",
- "axiusflow_market_data",
- "axiusflow_provider_history",
- "serde",
- "serde_json",
- "sysinfo 0.39.6",
-]
 
 [[package]]
 name = "axiusflow_market_engine"
@@ -2124,7 +2102,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2642,7 +2620,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.20",
- "windows 0.62.2",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -3177,7 +3155,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -4015,7 +3993,7 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_core"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69#38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=a21796ffef2c9c3831242e8c355ad4259e10d34c#a21796ffef2c9c3831242e8c355ad4259e10d34c"
 dependencies = [
  "serde",
  "serde_json",
@@ -4024,7 +4002,7 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_engine"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69#38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=a21796ffef2c9c3831242e8c355ad4259e10d34c#a21796ffef2c9c3831242e8c355ad4259e10d34c"
 dependencies = [
  "nucleuscharts_core",
  "nucleuscharts_indicators",
@@ -4036,12 +4014,12 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_indicators"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69#38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=a21796ffef2c9c3831242e8c355ad4259e10d34c#a21796ffef2c9c3831242e8c355ad4259e10d34c"
 
 [[package]]
 name = "nucleuscharts_render"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69#38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=a21796ffef2c9c3831242e8c355ad4259e10d34c#a21796ffef2c9c3831242e8c355ad4259e10d34c"
 dependencies = [
  "nucleuscharts_core",
 ]
@@ -4049,7 +4027,7 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_render_gpui"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69#38a81b3453c8d1b0e32aa3bea208d8f9cd2c7b69"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=a21796ffef2c9c3831242e8c355ad4259e10d34c#a21796ffef2c9c3831242e8c355ad4259e10d34c"
 dependencies = [
  "gpui",
  "image",
@@ -5002,7 +4980,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -5625,7 +5603,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6497,7 +6475,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7627,7 +7605,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

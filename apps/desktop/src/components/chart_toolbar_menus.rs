@@ -116,7 +116,7 @@ pub(super) fn chrome_overlay_content(
     cx: &App,
 ) -> AnyElement {
     let pending =
-        app_state.series_browser.pending().is_some() || app_state.coinbase_switch.in_progress();
+        app_state.series_browser.pending().is_some() || app_state.rithmic_switch.in_progress();
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
