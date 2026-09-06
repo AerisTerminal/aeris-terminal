@@ -131,6 +131,146 @@ impl AccountService {
         }
     }
 
+    /// Creates the production account service and attempts a server-verified
+    /// restore from native-vault refresh material on a bounded worker.
+    ///
+    /// Cached entitlement state never authenticates startup. Until the refresh
+    /// grant, ID-token verification, and canonical account link all succeed,
+    /// the service remains unauthenticated and reports restoration in progress.
+    #[must_use]
+    pub fn new_restoring(config: AccountServiceConfig) -> Self {
+        let service = Self::new(config);
+        if let Ok(mut state) = service.state.lock() {
+            state.view = cleared_view(
+                AccountSessionState::Authorizing,
+                0,
+                "restoring saved sign-in",
+            );
+        }
+        let restoring = service.clone();
+        if std::thread::Builder::new()
+            .name("axiusflow-account-restore".to_string())
+            .spawn(move || restoring.restore_online_session())
+            .is_err()
+        {
+            service.complete_restore_without_session(
+                AccountSessionState::TerminalError,
+                "saved sign-in restore could not start; retry sign-in",
+            );
+        }
+        service
+    }
+
+    fn restore_online_session(&self) {
+        let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+            self.complete_restore_without_session(
+                AccountSessionState::TerminalError,
+                "credential storage is unavailable; retry sign-in",
+            );
+            return;
+        };
+        let refresh_token = match vault.load(REFRESH_VAULT_KEY) {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .ok()
+                .filter(|token| !token.is_empty())
+                .map(Zeroizing::new),
+            Ok(None) => {
+                self.complete_restore_without_session(AccountSessionState::SignedOut, "signed out");
+                return;
+            }
+            Err(_) => {
+                self.complete_restore_without_session(
+                    AccountSessionState::TerminalError,
+                    "credential storage is unavailable; retry sign-in",
+                );
+                return;
+            }
+        };
+        let Some(refresh_token) = refresh_token else {
+            self.complete_restore_without_session(
+                AccountSessionState::ReauthenticationRequired,
+                "saved sign-in expired; sign in again",
+            );
+            return;
+        };
+        let agent = oidc_agent();
+        let outcome = self.oidc_endpoints().and_then(|endpoints| {
+            refresh_grant(&endpoints, &agent, &self.config.client_id, &refresh_token).and_then(
+                |tokens| {
+                    link_subject(&endpoints, &agent, &tokens.id_token, &tokens.subject)
+                        .map(|(account, plan, profile)| (account, plan, profile, tokens))
+                },
+            )
+        });
+        let Some((account_id, tokens)) = self.apply_online_restore(&vault, outcome) else {
+            return;
+        };
+        self.refresh_lease_once(0, &tokens, &account_id, &agent, &vault);
+        let service = self.clone();
+        std::thread::Builder::new()
+            .name("axiusflow-account-lease".to_string())
+            .spawn(move || service.run_lease_worker(0))
+            .ok();
+    }
+
+    fn apply_online_restore<V>(
+        &self,
+        vault: &V,
+        outcome: Result<(AccountId, PlanId, AccountProfile, oidc::VerifiedTokens), String>,
+    ) -> Option<(AccountId, oidc::VerifiedTokens)>
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let Ok((account_id, plan, profile, tokens)) = outcome else {
+            self.complete_restore_without_session(
+                AccountSessionState::ReauthenticationRequired,
+                "saved sign-in expired; sign in again",
+            );
+            return None;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return None;
+        }
+        if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
+            let secret = Zeroizing::new(rotated.as_bytes().to_vec());
+            if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
+                state.restore_allowed = false;
+                state.view = cleared_view(
+                    AccountSessionState::TerminalError,
+                    0,
+                    "credential storage is unavailable; retry sign-in",
+                );
+                return None;
+            }
+        }
+        state.restore_allowed = false;
+        state.view = AccountView {
+            state: AccountSessionState::Active as i32,
+            account_id: account_id.as_str().to_string(),
+            plan_id: plan.as_str().to_string(),
+            detail: "signed in".to_string(),
+            request_generation: 0,
+            display_name: profile.display_name,
+            email: profile.email,
+            photo_url: profile.photo_url,
+        };
+        Some((account_id, tokens))
+    }
+
+    fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation == 0 && state.pending.is_none() && state.restore_allowed {
+            state.restore_allowed = false;
+            state.view = cleared_view(target, 0, detail);
+        }
+    }
+
     /// Returns whether a browser-confirmed online session is installed.
     /// Cached lease state never opens the platform.
     #[must_use]
@@ -1107,7 +1247,10 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountService, AccountServiceConfig, LOGIN_TIMEOUT};
+    use super::{
+        AccountService, AccountServiceConfig, LOGIN_TIMEOUT, REFRESH_VAULT_KEY, UnavailableVault,
+        oidc::{AccountProfile, VerifiedTokens},
+    };
     use axiusflow_account::{AccountId, PlanId};
     use axiusflow_engine_protocol::AccountSessionState;
     use axiusflow_platform_runtime::CredentialVault;
@@ -1192,6 +1335,104 @@ mod tests {
             .view
             .state = AccountSessionState::Active as i32;
         assert!(service.is_authenticated());
+    }
+
+    fn verified_restore(
+        account_id: &str,
+        refresh: Option<&str>,
+    ) -> (AccountId, PlanId, AccountProfile, VerifiedTokens) {
+        (
+            AccountId::try_new(account_id).expect("account fixture builds"),
+            PlanId::Starter,
+            AccountProfile {
+                display_name: "Ada Trader".to_string(),
+                email: "ada@example.test".to_string(),
+                photo_url: "https://example.test/ada.png".to_string(),
+            },
+            VerifiedTokens {
+                subject: "subject-1".to_string(),
+                access: "access-token".to_string(),
+                id_token: "verified-id-token".to_string(),
+                refresh: refresh.map(str::to_string),
+            },
+        )
+    }
+
+    #[test]
+    fn verified_online_restore_rotates_vault_material_before_activating() {
+        let service = service();
+        let vault = MemoryVault::default();
+        let restored = service.apply_online_restore(
+            &vault,
+            Ok(verified_restore("acct_restore", Some("rotated-refresh"))),
+        );
+
+        assert!(restored.is_some());
+        assert!(service.is_authenticated());
+        let view = service.account_status();
+        assert_eq!(view.account_id, "acct_restore");
+        assert_eq!(view.plan_id, "starter");
+        assert_eq!(view.display_name, "Ada Trader");
+        assert_eq!(
+            vault.load(REFRESH_VAULT_KEY).expect("vault reads"),
+            Some(b"rotated-refresh".to_vec())
+        );
+    }
+
+    #[test]
+    fn failed_or_retired_online_restore_never_authenticates() {
+        let failed = service();
+        let vault = MemoryVault::default();
+        assert!(
+            failed
+                .apply_online_restore(&vault, Err("redacted refresh failure".to_string()))
+                .is_none()
+        );
+        assert!(!failed.is_authenticated());
+        assert_eq!(
+            failed.account_status().state,
+            AccountSessionState::ReauthenticationRequired as i32
+        );
+
+        let unavailable = service();
+        assert!(
+            unavailable
+                .apply_online_restore(
+                    &UnavailableVault,
+                    Ok(verified_restore("acct_unstored", Some("rotated-refresh"))),
+                )
+                .is_none()
+        );
+        assert!(!unavailable.is_authenticated());
+        assert_eq!(
+            unavailable.account_status().state,
+            AccountSessionState::TerminalError as i32
+        );
+
+        let retired = service();
+        {
+            let mut state = retired.state.lock().expect("account state locks");
+            state.last_generation = 7;
+            state.restore_allowed = false;
+            state.view = super::cleared_view(AccountSessionState::SignedOut, 7, "signed out");
+        }
+        assert!(
+            retired
+                .apply_online_restore(
+                    &vault,
+                    Ok(verified_restore("acct_retired", Some("stale-refresh"))),
+                )
+                .is_none()
+        );
+        assert!(!retired.is_authenticated());
+        assert_eq!(retired.account_status().request_generation, 7);
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("vault reads")
+                .is_none(),
+            "a retired restore cannot rotate current vault material"
+        );
     }
 
     #[test]

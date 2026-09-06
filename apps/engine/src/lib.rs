@@ -147,6 +147,10 @@ impl EngineState {
             workspace.workspace_revision = workspace.workspace_revision.saturating_add(1);
         }
         let hot_set = hot_set_state(&workspace)?;
+        #[cfg(test)]
+        let account = AccountService::new(AccountServiceConfig::from_environment());
+        #[cfg(not(test))]
+        let account = AccountService::new_restoring(AccountServiceConfig::from_environment());
         let state = Self {
             workspace: Arc::new(Mutex::new(workspace)),
             workspace_root: Some(Arc::new(workspace_root)),
@@ -154,10 +158,10 @@ impl EngineState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             background_service: Arc::new(Mutex::new(None)),
             hot_set: Arc::new(Mutex::new(hot_set)),
-            // A browser-confirmed website session is the only authentication
-            // entry point. Never turn cached native vault material into an
-            // authenticated engine during startup.
-            account: AccountService::new(AccountServiceConfig::from_environment()),
+            // Startup may restore only through an online refresh grant whose
+            // ID token and canonical link are reverified. Cached lease state
+            // alone never authenticates or starts market work.
+            account,
         };
         if state.workspace().workspace_revision == 0 || migrated {
             state.persist(&state.workspace())?;
