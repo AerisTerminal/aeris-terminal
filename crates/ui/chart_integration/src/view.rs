@@ -48,6 +48,37 @@ const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
 const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
 const TEXT_EDIT_PAD: f32 = 4.0;
+const MAXIMUM_CALENDAR_MONTH_SECONDS: i64 = 31 * 24 * 60 * 60;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewportCadence {
+    FixedSeconds(i64),
+    CalendarMonths(i64),
+    Unsupported,
+}
+
+impl ViewportCadence {
+    fn from_replay(replay: &ReplaySnapshot) -> Self {
+        let definition = replay.bar_definition();
+        if definition.interval_seconds > 0 {
+            Self::FixedSeconds(i64::from(definition.interval_seconds))
+        } else if let Some(months) = definition.calendar_months {
+            Self::CalendarMonths(i64::from(months))
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    const fn maximum_seconds_per_bar(self) -> Option<i64> {
+        match self {
+            Self::FixedSeconds(seconds) => Some(seconds),
+            Self::CalendarMonths(months) => {
+                Some(MAXIMUM_CALENDAR_MONTH_SECONDS.saturating_mul(months))
+            }
+            Self::Unsupported => None,
+        }
+    }
+}
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
@@ -623,6 +654,7 @@ pub struct NucleusChartView {
     price_precision_override: Option<u8>,
     chart_type: ChartType,
     product_bars: ProductPriceBars,
+    viewport_cadence: ViewportCadence,
     brushable_tooltip: Option<NativePrimitiveId>,
     pending_brush_point: Option<(f64, f64)>,
     indicator_name_labels: IndicatorLabels,
@@ -698,6 +730,7 @@ impl NucleusChartView {
             price_precision_override: None,
             chart_type: ChartType::Candles,
             product_bars: ProductPriceBars::default(),
+            viewport_cadence: ViewportCadence::Unsupported,
             brushable_tooltip: None,
             pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
@@ -799,6 +832,7 @@ impl NucleusChartView {
             price_precision_override: None,
             chart_type: ChartType::Candles,
             product_bars,
+            viewport_cadence: ViewportCadence::from_replay(replay),
             brushable_tooltip: None,
             pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
@@ -847,6 +881,7 @@ impl NucleusChartView {
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
+        self.viewport_cadence = ViewportCadence::from_replay(replay);
         self.apply_selected_price_format();
         self.invalidate_series_layout();
         self.fitted = false;
@@ -1052,7 +1087,23 @@ impl NucleusChartView {
     /// Returns the settled visible time range in Unix nanoseconds.
     #[must_use]
     pub fn visible_time_range_unix_nanos(&self) -> Option<(i64, i64)> {
-        let (start, end) = self.engine.visible_time_range()?;
+        let (mut start, mut end) = self.engine.visible_time_range()?;
+        let (logical_start, logical_end) = self.engine.visible_logical_range()?;
+        let last_logical = self.engine.series_data(0).len().checked_sub(1)?.to_f64()?;
+        if let Some(seconds_per_bar) = self.viewport_cadence.maximum_seconds_per_bar() {
+            let seconds_per_bar = seconds_per_bar.to_f64()?;
+            // The strict Nucleus time range clamps at the first loaded point.
+            // Project logical whitespace past that edge so panning farther left
+            // continues to demand older history. Calendar months use their
+            // maximum width; the engine aligns the conservative overlap back
+            // to exact month buckets.
+            if logical_start < 0.0 {
+                start -= (-logical_start).ceil() * seconds_per_bar;
+            }
+            if logical_end > last_logical {
+                end += (logical_end - last_logical).ceil() * seconds_per_bar;
+            }
+        }
         let start = (start * 1_000_000_000.0).round().to_i64()?;
         let end = (end * 1_000_000_000.0).round().to_i64()?;
         (start < end).then_some((start, end))
@@ -1917,6 +1968,7 @@ impl NucleusChartView {
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay.instrument().precision.price_scale();
+        self.viewport_cadence = ViewportCadence::from_replay(replay);
         self.apply_selected_price_format();
         self.invalidate_series_layout();
         Ok(true)
@@ -1978,6 +2030,7 @@ impl NucleusChartView {
                     self.displayed_provenance.replace_snapshot(snapshot);
                     self.asset_legend_title = replay_legend_title(snapshot);
                     self.instrument_price_precision = snapshot.instrument().precision.price_scale();
+                    self.viewport_cadence = ViewportCadence::from_replay(snapshot);
                 }
                 self.displayed_provenance.extend(update.accepted_deltas());
                 apply_merged_chart_data(
@@ -3928,6 +3981,25 @@ mod tests {
         let restored = (start + 60_000_000_000, end - 60_000_000_000);
         assert!(chart.set_visible_time_range_unix_nanos(restored.0, restored.1));
         assert_eq!(chart.visible_time_range_unix_nanos(), Some(restored));
+    }
+
+    #[test]
+    fn visible_time_range_projects_scroll_past_the_oldest_loaded_bar() {
+        let mut chart = interactive_chart();
+        let first = chart.engine.series_data(0)[0]
+            .time
+            .to_i64()
+            .expect("fixture timestamp fits");
+        chart.engine.set_visible_logical_range(-20.0, 20.0);
+
+        let (start, _) = chart
+            .visible_time_range_unix_nanos()
+            .expect("logical whitespace produces a demand range");
+
+        assert!(
+            start <= (first - 20 * 60).saturating_mul(1_000_000_000),
+            "scrolling beyond index zero must keep moving history demand backward"
+        );
     }
 
     #[test]

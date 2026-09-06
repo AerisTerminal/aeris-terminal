@@ -2561,9 +2561,15 @@ impl WorkspaceSurface {
                 return;
             }
             (Some(chart), update) => {
-                let (accepted, recovery_pending) = chart.update(cx, |chart, _| {
+                let (accepted, recovery_pending) = chart.update(cx, |chart, chart_cx| {
                     let accepted = chart.try_queue_replay_update(update).is_ok();
-                    if !accepted {
+                    if accepted {
+                        // A covering history page is useful only after the
+                        // child chart drains it. Wake that entity immediately;
+                        // relying on a later pointer or countdown tick leaves
+                        // successfully fetched history looking stuck.
+                        chart_cx.notify();
+                    } else {
                         eprintln!("bounded chart queue overflowed; fixture resnapshot required");
                     }
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
