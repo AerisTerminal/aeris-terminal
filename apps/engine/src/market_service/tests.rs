@@ -3597,6 +3597,114 @@ fn split_pane_attaches_to_an_already_live_series_without_staying_at_ready() {
 }
 
 #[test]
+fn split_pane_reuses_a_provisional_calendar_series_without_staying_loading() {
+    let (history_tx, history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+    let realtime_stop = Arc::new(AtomicBool::new(false));
+    let mut protocol_series = btc();
+    protocol_series.cadence = SeriesCadence::CalendarMonths as i32;
+    protocol_series.cadence_value = 1;
+    let series = internal_series(&protocol_series).expect("monthly series");
+    let provider_generation = ProviderGeneration(NonZeroU64::MIN);
+    let first = ConsumerId(id(1).expect("first consumer"));
+    let second = ConsumerId(id(2).expect("second consumer"));
+    let generation = GenerationId(NonZeroU64::MIN);
+    let mut engine = configured_engine().expect("engine configures");
+    for consumer_id in [first, second] {
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(id(1).expect("client")),
+                    workspace_id: WorkspaceId(consumer_id.0),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+    }
+    engine
+        .set_series_demand(first, generation, &series)
+        .expect("first demand installs");
+    engine
+        .install_history(provider_generation, &series, 2, 8, vec![history_bar()])
+        .expect("shared history installs");
+    let publication = engine
+        .set_series_demand(second, generation, &series)
+        .expect("second demand installs")
+        .expect("second demand reuses the shared snapshot");
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &realtime_stop,
+        first,
+        &series,
+    );
+    coordinator.events.insert(second, ConsumerEvents::default());
+    let mut live =
+        LiveHandoff::try_new(&series, provider_generation, &coinbase_instrument(&series))
+            .expect("live handoff");
+    live.connected = true;
+    live.history = CoinbaseHistoryReadiness::Provisional;
+    coordinator.live.insert(series.clone(), live);
+
+    coordinator
+        .publish_cached_demand(
+            &series,
+            provider_generation,
+            &DemandWaiter {
+                consumer_id: second,
+                generation,
+                started_at: Instant::now(),
+            },
+            &publication,
+        )
+        .expect("shared provisional demand publishes");
+
+    assert!(matches!(
+        coordinator.events.get_mut(&second).and_then(ConsumerEvents::pop),
+        Some(envelope::Payload::SeriesSnapshot(snapshot)) if snapshot.consumer_id == 2
+    ));
+    assert!(matches!(
+        coordinator.events.get_mut(&second).and_then(ConsumerEvents::pop),
+        Some(envelope::Payload::SeriesState(state))
+            if state.state == SeriesLoadState::Partial as i32
+                && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
+    ));
+    assert!(history_rx.try_recv().is_err());
+}
+
+#[test]
+fn initial_coinbase_windows_fit_one_source_page_for_every_cadence() {
+    let cases = [
+        (SeriesCadence::FixedSeconds, 60, 349),
+        (SeriesCadence::FixedSeconds, 180, 115),
+        (SeriesCadence::FixedSeconds, 86_400, 349),
+        (SeriesCadence::CalendarWeeks, 1, 49),
+        (SeriesCadence::CalendarMonths, 1, 10),
+    ];
+    for (cadence, cadence_value, expected_bars) in cases {
+        let mut protocol_series = btc();
+        protocol_series.cadence = cadence as i32;
+        protocol_series.cadence_value = cadence_value;
+        let series = internal_series(&protocol_series).expect("supported series");
+        let bars = initial_coinbase_history_bars(&series, 350).expect("initial bound");
+        assert_eq!(bars, expected_bars);
+        let interval = coinbase_series_interval(&series).expect("Coinbase interval");
+        let range = recent_coinbase_history_range(&series, bars).expect("recent range");
+        let source_nanos = interval.source().1 * 1_000_000_000;
+        assert!(
+            range.end_unix_nanos - range.start_unix_nanos
+                <= i64::try_from(COINBASE_HISTORY_PAGE_SOURCE_BARS).expect("page bound fits")
+                    * source_nanos,
+            "{interval:?} initial range exceeded one provider page"
+        );
+    }
+}
+
+#[test]
 fn workspace_tab_and_layout_changes_keep_one_live_provider_session() {
     let harness = MarketService::start_fixture_realtime(vec![history_bar()])
         .expect("realtime fixture starts");
@@ -6004,6 +6112,7 @@ fn coinbase_handoff_keeps_ambiguous_open_bucket_trades_provisional() {
             if state.state == SeriesLoadState::Partial as i32
                 && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
     ));
+    assert_persistence_keeps_provisional(&mut coordinator, consumer_id, &series);
     let repair = history_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("cross-bucket buffered trade schedules authoritative repair");
@@ -6040,6 +6149,24 @@ fn coinbase_handoff_keeps_ambiguous_open_bucket_trades_provisional() {
     assert!(matches!(
         storage_rx.try_recv(),
         Ok(StorageRequest::Persist(_, _, ref bars, _, _, _)) if bars == &expected_closed
+    ));
+}
+
+fn assert_persistence_keeps_provisional(
+    coordinator: &mut Coordinator<'_>,
+    consumer_id: ConsumerId,
+    series: &BarSeriesKey,
+) {
+    coordinator.broadcast_persistence_for(
+        series,
+        PersistenceState::Durable,
+        Some("Coinbase history is cached"),
+    );
+    assert!(matches!(
+        coordinator.events[&consumer_id].series_state,
+        Some(envelope::Payload::SeriesState(ref state))
+            if state.state == SeriesLoadState::Partial as i32
+                && state.detail.as_deref().is_some_and(|detail| detail.contains("provisional"))
     ));
 }
 

@@ -1,14 +1,14 @@
 use super::{
     BTreeMap, BTreeSet, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, CanonicalOrderBookState,
-    ClientId, ConsumerEvents, ConsumerId, Coordinator, DemandError, DemandWaiter, DepthLevel,
-    EngineError, EngineFaultCode, FailureStage, GenerationId, IpcOrderBookLevel,
-    IpcOrderBookSnapshot, IpcOrderBookState, IpcOrderFlowLevel, IpcOrderFlowSnapshot,
-    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, LocalHistoryError, NonZeroU64,
-    OrderBookRecoveryReason, OrderFlowAggressor, OrderFlowPublicationKind, PersistenceState,
-    ProviderConnectionState, ProviderGeneration, ProviderOrderBook, ProviderState,
-    REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState, SeriesState, SeriesTailOperation,
-    SeriesUpdateOperation, SyncSender, TrySendError, authorize_consumer, envelope, ipc_bar,
-    ipc_series,
+    ClientId, CoinbaseHistoryReadiness, ConsumerEvents, ConsumerId, Coordinator, DemandError,
+    DemandWaiter, DepthLevel, EngineError, EngineFaultCode, FailureStage, GenerationId,
+    IpcOrderBookLevel, IpcOrderBookSnapshot, IpcOrderBookState, IpcOrderFlowLevel,
+    IpcOrderFlowSnapshot, IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot,
+    LocalHistoryError, NonZeroU64, OrderBookRecoveryReason, OrderFlowAggressor,
+    OrderFlowPublicationKind, PersistenceState, ProviderConnectionState, ProviderGeneration,
+    ProviderOrderBook, ProviderState, REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState,
+    SeriesState, SeriesTailOperation, SeriesUpdateOperation, SyncSender, TrySendError,
+    authorize_consumer, envelope, ipc_bar, ipc_series,
 };
 
 pub(super) fn fail_waiters(
@@ -110,17 +110,43 @@ pub(super) const fn local_history_failure_stage(error: LocalHistoryError) -> Fai
     }
 }
 
-pub(super) fn publish_ready(
+const COINBASE_PROVISIONAL_DETAIL: &str =
+    "The current Coinbase candle is provisional until its authoritative close";
+
+/// Queues a covering image with the readiness of the shared live series.
+///
+/// Re-publication happens when another consumer joins, a pane changes resource
+/// class, and a deferred viewport page becomes visible. Those presentation
+/// changes must not downgrade an already-live series to generic `Ready`.
+pub(super) fn publish_current_state(
     events: &mut ConsumerEvents,
     publication: &axiusflow_market_engine::ConsumerPublication,
+    coinbase_history: Option<CoinbaseHistoryReadiness>,
+    persistence: PersistenceState,
 ) {
-    publish_state(
-        events,
-        publication,
-        SeriesLoadState::Ready,
-        PersistenceState::NotRequested,
-        None,
-    );
+    match coinbase_history {
+        Some(CoinbaseHistoryReadiness::Authoritative) => publish_state(
+            events,
+            publication,
+            SeriesLoadState::Live,
+            persistence,
+            None,
+        ),
+        Some(CoinbaseHistoryReadiness::Provisional) => publish_state(
+            events,
+            publication,
+            SeriesLoadState::Partial,
+            persistence,
+            Some(COINBASE_PROVISIONAL_DETAIL),
+        ),
+        Some(CoinbaseHistoryReadiness::Pending) | None => publish_state(
+            events,
+            publication,
+            SeriesLoadState::Ready,
+            persistence,
+            None,
+        ),
+    }
 }
 
 pub(super) fn publish_state(
@@ -545,6 +571,7 @@ impl Coordinator<'_> {
     ) -> Result<(), String> {
         let needs_covering_repair =
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
+        let coinbase_history = self.live.get(series).map(|live| live.history);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             if needs_covering_repair && series.provider_id == "coinbase" {
                 // A dormant Coinbase series can belong to the current provider
@@ -567,7 +594,14 @@ impl Coordinator<'_> {
                     Some("Showing retained local history while provider coverage repairs"),
                 );
             } else {
-                publish_ready(events, publication);
+                // A second pane joining the same live calendar series must see
+                // the same usable provisional state as its first consumer.
+                publish_current_state(
+                    events,
+                    publication,
+                    coinbase_history,
+                    PersistenceState::Durable,
+                );
             }
         }
         // A cached snapshot is the consumer's covering baseline. If the shared
@@ -586,14 +620,14 @@ impl Coordinator<'_> {
         }
         match self.engine.publish_series_snapshot(series) {
             Ok(publications) => {
+                let coinbase_history = self.live.get(series).map(|live| live.history);
                 for publication in publications {
                     if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        publish_state(
+                        publish_current_state(
                             events,
                             &publication,
-                            SeriesLoadState::Ready,
+                            coinbase_history,
                             PersistenceState::Pending,
-                            None,
                         );
                     }
                 }
@@ -632,26 +666,34 @@ impl Coordinator<'_> {
                 continue;
             };
             if series == selected {
-                let state = if local_loaded.contains(&(series.clone(), current_provider_generation))
-                {
-                    SeriesLoadState::Partial
-                } else if live
-                    .get(series)
-                    .is_some_and(|live| live.connected && live.history.is_authoritative())
-                {
-                    SeriesLoadState::Live
-                } else if engine.has_publication(*consumer_id) {
-                    SeriesLoadState::Ready
-                } else {
-                    SeriesLoadState::Resolving
-                };
+                let (state, detail) =
+                    if local_loaded.contains(&(series.clone(), current_provider_generation)) {
+                        (SeriesLoadState::Partial, detail.map(str::to_string))
+                    } else if live
+                        .get(series)
+                        .is_some_and(|live| live.connected && live.history.is_authoritative())
+                    {
+                        (SeriesLoadState::Live, detail.map(str::to_string))
+                    } else if live
+                        .get(series)
+                        .is_some_and(|live| live.connected && live.history.is_ready())
+                    {
+                        (
+                            SeriesLoadState::Partial,
+                            Some(COINBASE_PROVISIONAL_DETAIL.to_string()),
+                        )
+                    } else if engine.has_publication(*consumer_id) {
+                        (SeriesLoadState::Ready, detail.map(str::to_string))
+                    } else {
+                        (SeriesLoadState::Resolving, detail.map(str::to_string))
+                    };
                 events.series_state = Some(series_state_with_persistence(
                     *consumer_id,
                     generation,
                     ipc_series(series),
                     state,
                     persistence,
-                    detail.map(str::to_string),
+                    detail,
                 ));
             }
         }

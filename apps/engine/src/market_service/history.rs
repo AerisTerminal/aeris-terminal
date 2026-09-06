@@ -35,6 +35,44 @@ pub(super) enum HistoryPrecedence {
     Current,
 }
 
+pub(super) const COINBASE_HISTORY_PAGE_SOURCE_BARS: usize = 350;
+
+const fn coinbase_source_bars_per_bucket(interval: CoinbaseInterval) -> usize {
+    match interval {
+        CoinbaseInterval::Minute1
+        | CoinbaseInterval::Minute5
+        | CoinbaseInterval::Minute15
+        | CoinbaseInterval::Minute30
+        | CoinbaseInterval::Hour1
+        | CoinbaseInterval::Hour2
+        | CoinbaseInterval::Day1 => 1,
+        CoinbaseInterval::Hour4 | CoinbaseInterval::Hour12 => 2,
+        CoinbaseInterval::Minute3 | CoinbaseInterval::Day3 => 3,
+        CoinbaseInterval::Hour8 => 4,
+        CoinbaseInterval::Week1 => 7,
+        CoinbaseInterval::Month1 => 31,
+    }
+}
+
+/// Keeps the initial live-edge request inside one Coinbase source page.
+///
+/// One whole target bucket is reserved for the candle currently forming. This
+/// matters for calendar candles: requesting 350 monthly bars translates to
+/// years of daily source pages even though the chart only needs its newest
+/// screen before the user scrolls left.
+pub(super) fn initial_coinbase_history_bars(
+    series: &BarSeriesKey,
+    requested_bars: usize,
+) -> Result<usize, String> {
+    let source_bars = coinbase_source_bars_per_bucket(coinbase_series_interval(series)?);
+    let single_page_buckets = COINBASE_HISTORY_PAGE_SOURCE_BARS
+        .checked_div(source_bars)
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .max(1);
+    Ok(requested_bars.max(1).min(single_page_buckets))
+}
+
 pub(super) fn reconcile_interval_history(
     current: &SeriesSnapshot,
     repair: Vec<MarketBar>,
@@ -289,24 +327,14 @@ pub(super) fn coinbase_history_page_range(
     missing: HistoryRange,
 ) -> Result<HistoryRange, String> {
     let interval = coinbase_series_interval(series)?;
-    let source_bars_per_bucket = match interval {
-        CoinbaseInterval::Minute1
-        | CoinbaseInterval::Minute5
-        | CoinbaseInterval::Minute15
-        | CoinbaseInterval::Minute30
-        | CoinbaseInterval::Hour1
-        | CoinbaseInterval::Hour2
-        | CoinbaseInterval::Day1 => 1,
-        CoinbaseInterval::Hour4 | CoinbaseInterval::Hour12 => 2,
-        CoinbaseInterval::Minute3 => 3,
-        CoinbaseInterval::Hour8 => 4,
-        CoinbaseInterval::Week1 => 7,
-        CoinbaseInterval::Month1 => 31,
-        CoinbaseInterval::Day3 => {
-            return Err("unsupported Coinbase engine interval".to_string());
-        }
-    };
-    let maximum_buckets = i64::from(350 / source_bars_per_bucket).max(1);
+    let source_bars_per_bucket = coinbase_source_bars_per_bucket(interval);
+    let maximum_buckets = i64::try_from(
+        COINBASE_HISTORY_PAGE_SOURCE_BARS
+            .checked_div(source_bars_per_bucket)
+            .unwrap_or(1),
+    )
+    .unwrap_or(1)
+    .max(1);
     let end_seconds = missing.end_unix_nanos.div_euclid(1_000_000_000);
     let page_start = interval
         .shift_bucket(end_seconds, -maximum_buckets)?
@@ -1058,7 +1086,8 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
     ) -> Result<(), &'static str> {
         let range = if series.provider_id == "coinbase" {
-            recent_coinbase_history_range(series, self.resource_policy.history_prefetch_bars.max(1))
+            initial_coinbase_history_bars(series, self.resource_policy.history_prefetch_bars.max(1))
+                .and_then(|bars| recent_coinbase_history_range(series, bars))
                 .ok()
         } else {
             None
