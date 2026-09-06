@@ -4003,6 +4003,32 @@ mod tests {
     }
 
     #[test]
+    fn chart_retains_covering_history_beyond_the_old_local_cap() {
+        let initial = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 4_096 })
+            .expect("initial fixture validates");
+        let replacement = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 5_000 })
+            .expect("expanded fixture validates")
+            .try_with_publication_generation(
+                initial.evidence().publication_generation.saturating_add(1),
+            )
+            .expect("replacement generation validates");
+        let mut chart = NucleusChartView::with_replay(&initial);
+
+        chart
+            .try_queue_replay_update(ReplayStreamUpdate::Snapshot(replacement))
+            .expect("expanded covering snapshot queues");
+        assert_eq!(chart.apply_pending_data(), SeriesMutation::Snapshot);
+
+        assert_eq!(
+            chart.engine.series_data(0).len(),
+            5_000,
+            "the chart must not discard fetched history below the application snapshot bound"
+        );
+    }
+
+    #[test]
     fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
         let chart = NucleusChartView::empty();
         let series = &chart.engine.series[0];

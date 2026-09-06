@@ -1,9 +1,14 @@
 //! Bounded displayed-provenance retention for the chart view.
 
-use axiusflow_application::{MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot};
+use axiusflow_application::{
+    MAX_STREAM_SNAPSHOT_ITEMS, MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot,
+};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
-pub(crate) const DEFAULT_CHART_SERIES_MAX_POINTS: usize = 4_096;
+/// Keep the complete canonical snapshot the application boundary has already
+/// validated. A smaller chart-local cap silently discarded the oldest bars
+/// from successful viewport backfills once a series crossed 4,096 points.
+pub(crate) const DEFAULT_CHART_SERIES_MAX_POINTS: usize = MAX_STREAM_SNAPSHOT_ITEMS;
 
 #[derive(Debug)]
 pub(crate) struct DisplayedProvenance {

@@ -20,5 +20,6 @@ pub use replay_snapshot::{
     ReplaySession, ReplaySnapshot, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
 };
 pub use stream::{
-    MarketEventProvenance, Provenanced, SequenceDecision, SnapshotEvidence, StreamDelta,
+    MAX_STREAM_SNAPSHOT_ITEMS, MarketEventProvenance, Provenanced, SequenceDecision,
+    SnapshotEvidence, StreamDelta,
 };
