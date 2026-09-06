@@ -1731,64 +1731,132 @@ mod tests {
     #[test]
     #[ignore = "requires the optimized resident engine and a live Coinbase connection"]
     fn native_release_market_snapshot_probe() {
-        use axiusflow_engine_protocol::{SeriesKey, envelope};
+        use axiusflow_engine_protocol::SeriesKey;
 
         let token = native_installation_token().expect("load native installation token");
-        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
-            .expect("connect optimized resident engine");
-        let workspace = client.restore_workspace().expect("restore hot metadata");
+        let mut first = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect first optimized resident-engine client");
+        let workspace = first.restore_workspace().expect("restore hot metadata");
         let hot = workspace
             .hot_series
             .iter()
             .find(|series| series.provider == "coinbase")
             .expect("Coinbase hot series is available");
-        let client_id = u64::from(std::process::id());
-        let consumer_id = client_id;
+        let series = SeriesKey {
+            provider: hot.provider.clone(),
+            instrument_id: hot.instrument_id.clone(),
+            cadence_value: hot.cadence_value,
+            definition_revision: hot.definition_revision,
+            entitlement_id: hot.entitlement_id.clone(),
+            cadence: hot.cadence,
+        };
+        let first_client_id = u64::from(std::process::id());
+        let first_consumer_id = first_client_id;
+        let second_client_id = first_client_id + 1;
+        let second_consumer_id = second_client_id;
+        attach_native_market_probe(&mut first, first_client_id, first_consumer_id, &series);
+        let mut second = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect second optimized resident-engine client");
+        attach_native_market_probe(&mut second, second_client_id, second_consumer_id, &series);
+
+        let first_observation = observe_native_market(&mut first, first_consumer_id);
+        let second_observation = observe_native_market(&mut second, second_consumer_id);
+        assert_eq!(
+            first_observation.snapshot_bars, second_observation.snapshot_bars,
+            "both clients receive the same canonical retained depth"
+        );
+        assert_eq!(
+            first_observation.snapshot_sequence, second_observation.snapshot_sequence,
+            "both clients receive the same canonical retained edge"
+        );
+        println!(
+            "native_market_shared instrument={} clients=2 bars={} sequence={} first_publication={} second_publication={}",
+            hot.instrument_id,
+            first_observation.snapshot_bars,
+            first_observation.snapshot_sequence,
+            first_observation.live_publication,
+            second_observation.live_publication
+        );
+
+        first
+            .remove_market_consumer(first_consumer_id)
+            .expect("remove first native probe consumer");
+        second
+            .remove_market_consumer(second_consumer_id)
+            .expect("remove second native probe consumer");
+    }
+
+    #[cfg(target_os = "windows")]
+    struct NativeMarketObservation {
+        snapshot_bars: usize,
+        snapshot_sequence: u64,
+        live_publication: u64,
+    }
+
+    #[cfg(target_os = "windows")]
+    fn attach_native_market_probe(
+        client: &mut EngineClient,
+        client_id: u64,
+        consumer_id: u64,
+        series: &axiusflow_engine_protocol::SeriesKey,
+    ) {
         client
             .attach_client(client_id)
-            .expect("attach native probe");
+            .expect("attach native probe client");
         client
             .register_consumer(client_id, 1, consumer_id)
             .expect("register native probe consumer");
         client
-            .set_series_demand(
-                consumer_id,
-                1,
-                SeriesKey {
-                    provider: hot.provider.clone(),
-                    instrument_id: hot.instrument_id.clone(),
-                    cadence_value: hot.cadence_value,
-                    definition_revision: hot.definition_revision,
-                    entitlement_id: hot.entitlement_id.clone(),
-                    cadence: hot.cadence,
-                },
-            )
-            .expect("demand native hot snapshot");
-        let deadline = Instant::now() + Duration::from_secs(2);
+            .set_series_demand(consumer_id, 1, series.clone())
+            .expect("demand native hot series");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn observe_native_market(
+        client: &mut EngineClient,
+        consumer_id: u64,
+    ) -> NativeMarketObservation {
+        use axiusflow_engine_protocol::envelope;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut snapshot = None;
         loop {
-            if let Some(envelope::Payload::SeriesSnapshot(snapshot)) =
-                receive_native_event(&mut client, consumer_id)
-                    .expect("receive native market snapshot")
-            {
-                let last = snapshot.bars.last().expect("snapshot contains bars");
-                println!(
-                    "native_market_snapshot instrument={} bars={} sequence={} timestamp={} close={} volume={} publication={}",
-                    hot.instrument_id,
-                    snapshot.bars.len(),
-                    last.source_sequence,
-                    last.exchange_timestamp_unix_nanos,
-                    last.close,
-                    last.volume,
-                    snapshot.publication_generation
-                );
-                break;
+            let event = receive_native_event(client, consumer_id)
+                .expect("receive native market publication");
+            match event {
+                Some(envelope::Payload::SeriesSnapshot(candidate)) if candidate.generation == 1 => {
+                    let last = candidate.bars.last().expect("snapshot contains bars");
+                    snapshot = Some((
+                        candidate.bars.len(),
+                        last.source_sequence,
+                        candidate.publication_generation,
+                    ));
+                }
+                Some(envelope::Payload::SeriesUpdate(update))
+                    if update.generation == 1
+                        && snapshot.is_some_and(|(_, _, publication)| {
+                            update.publication_generation > publication
+                        }) =>
+                {
+                    let (snapshot_bars, snapshot_sequence, _) =
+                        snapshot.expect("snapshot precedes live update");
+                    return NativeMarketObservation {
+                        snapshot_bars,
+                        snapshot_sequence,
+                        live_publication: update.publication_generation,
+                    };
+                }
+                Some(envelope::Payload::DemandError(error)) if error.generation == 1 => {
+                    panic!("native market demand failed: {error:?}");
+                }
+                _ => {}
             }
-            assert!(Instant::now() < deadline, "native snapshot timed out");
+            assert!(
+                Instant::now() < deadline,
+                "native snapshot and advancing live publication timed out"
+            );
             thread::sleep(Duration::from_millis(10));
         }
-        client
-            .remove_market_consumer(consumer_id)
-            .expect("remove native probe consumer");
     }
 
     #[cfg(target_os = "windows")]
