@@ -573,25 +573,18 @@ impl Coordinator<'_> {
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
         let coinbase_history = self.live.get(series).map(|live| live.history);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
-            if needs_covering_repair && series.provider_id == "coinbase" {
-                // A dormant Coinbase series can belong to the current provider
-                // session while still ending several buckets behind the market.
-                // Keep it inside the engine as fallback, but do not establish a
-                // chart baseline until provider history has repaired the edge.
-                events.series_state = Some(series_state(
-                    waiter.consumer_id,
-                    waiter.generation,
-                    ipc_series(series),
-                    SeriesLoadState::Resolving,
-                    Some("Refreshing cached history to the Coinbase live edge".to_string()),
-                ));
-            } else if needs_covering_repair {
+            if needs_covering_repair {
+                // A retained snapshot is already a valid covering baseline. Publish
+                // it immediately and repair the provider edge independently so a
+                // slow or failed refresh cannot strand this consumer on a blank
+                // chart. The repair publication will replace this snapshot when it
+                // arrives.
                 publish_state(
                     events,
                     publication,
                     SeriesLoadState::Partial,
                     PersistenceState::Durable,
-                    Some("Showing retained local history while provider coverage repairs"),
+                    Some("Showing retained local history while provider coverage refreshes"),
                 );
             } else {
                 // A second pane joining the same live calendar series must see

@@ -894,8 +894,11 @@ fn apply_pushed_event(
     } = context;
     match event {
         envelope::Payload::SeriesSnapshot(snapshot) => {
-            if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
+            if snapshot.consumer_id != consumer_id {
                 return Err("engine realtime snapshot identity mismatched".to_string());
+            }
+            if snapshot.generation != active_generation {
+                return Ok(());
             }
             let replay = replay_snapshot(&snapshot)?;
             let generation = generation_from_snapshot(&snapshot, &replay)?;
@@ -905,8 +908,11 @@ fn apply_pushed_event(
             Ok(())
         }
         envelope::Payload::SeriesUpdate(update) => {
-            if update.consumer_id != consumer_id || update.generation != active_generation {
+            if update.consumer_id != consumer_id {
                 return Err("engine realtime update identity mismatched".to_string());
+            }
+            if update.generation != active_generation {
+                return Ok(());
             }
             let tail = replay_tail_update(&update)?;
             let status = tail_publication(
@@ -923,12 +929,23 @@ fn apply_pushed_event(
             Ok(())
         }
         envelope::Payload::SeriesState(state) => {
-            if state.consumer_id != consumer_id || state.generation != active_generation {
+            if state.consumer_id != consumer_id {
                 return Err("engine realtime state identity mismatched".to_string());
+            }
+            if state.generation != active_generation {
+                return Ok(());
             }
             apply_series_state(state, realtime, publication.is_some(), live, messages)
         }
-        envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+        envelope::Payload::DemandError(error) => {
+            if error.consumer_id != consumer_id {
+                return Err("engine demand error identity mismatched".to_string());
+            }
+            if error.generation != active_generation {
+                return Ok(());
+            }
+            Err(demand_error(&error))
+        }
         envelope::Payload::OrderBookSnapshot(snapshot) => {
             if snapshot.consumer_id != consumer_id {
                 return Err("engine order-book consumer mismatched".to_string());
@@ -1530,6 +1547,67 @@ mod tests {
         ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
     };
 
+    #[test]
+    #[ignore = "requires an authenticated resident engine and live Coinbase history"]
+    fn native_monthly_workspace_delivery_probe() {
+        let product = default_coinbase_product("BTC-USD");
+        let (mut workers, factory) =
+            start_group(vec![(901, product.clone()), (902, product.clone())])
+                .expect("shared desktop workers start");
+        for (_, worker) in &workers {
+            worker
+                .try_select_coinbase(product.clone(), ChartInterval::Month1)
+                .expect("monthly selection queues");
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut snapshots = [0; 2];
+        let mut ready = [false; 2];
+        while std::time::Instant::now() < deadline
+            && (!ready.iter().all(|value| *value) || snapshots.contains(&0))
+        {
+            for (index, (_, worker)) in workers.iter_mut().enumerate() {
+                for message in worker.drain_messages().0 {
+                    match message {
+                        MarketWorkerMessage::Update(publication) => {
+                            if let ReplayStreamUpdate::Snapshot(snapshot) = publication.update
+                                && snapshot.bar_definition().calendar_months == Some(1)
+                            {
+                                snapshots[index] = snapshot.bars().len();
+                                println!("workspace={index} monthly_bars={}", snapshots[index]);
+                            }
+                        }
+                        MarketWorkerMessage::State { state, message } => {
+                            println!("workspace={index} state={state:?} detail={message}");
+                            assert_ne!(
+                                state,
+                                ChartState::Error,
+                                "monthly workspace failed: {message}"
+                            );
+                            ready[index] =
+                                matches!(state, ChartState::Ready | ChartState::Provisional);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(factory);
+        for (_, worker) in &mut workers {
+            if let Some(retirement) = worker.begin_retirement() {
+                assert!(retirement.wait());
+            }
+        }
+        assert!(
+            !snapshots.contains(&0),
+            "both monthly workspaces receive history: {snapshots:?}"
+        );
+        assert!(
+            ready.iter().all(|value| *value),
+            "both monthly states resolve: {ready:?}"
+        );
+    }
+
     fn handle_coinbase_catalog_event(
         endpoint: &mut WorkerEndpoint,
         event: envelope::Payload,
@@ -1937,6 +2015,38 @@ mod tests {
             publication.map(MarketPublicationGeneration::sequence_range),
             Some((1, 1))
         );
+    }
+
+    #[test]
+    fn superseded_series_state_is_ignored_without_failing_the_current_chart() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+        let mut publication = None;
+        let mut live = false;
+
+        assert_eq!(
+            apply_pushed_event(
+                envelope::Payload::SeriesState(SeriesState {
+                    consumer_id: 1,
+                    generation: 1,
+                    state: SeriesLoadState::Resolving as i32,
+                    ..SeriesState::default()
+                }),
+                &PushedEventContext {
+                    consumer_id: 1,
+                    active_generation: 2,
+                    realtime: true,
+                    instrument: &default_coinbase_product("BTC-USD"),
+                },
+                &mut publication,
+                &mut live,
+                &sender,
+            ),
+            Ok(())
+        );
+        assert!(receiver.drain().0.is_empty());
+        assert!(publication.is_none());
+        assert!(!live);
     }
 
     #[test]

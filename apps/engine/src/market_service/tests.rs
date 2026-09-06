@@ -3781,6 +3781,79 @@ fn split_pane_reuses_a_provisional_calendar_series_without_staying_loading() {
 }
 
 #[test]
+fn cached_coinbase_history_is_published_while_live_edge_repair_runs() {
+    let (history_tx, history_rx) = mpsc::sync_channel(1);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+    let realtime_stop = Arc::new(AtomicBool::new(false));
+    let protocol_series = btc();
+    let series = internal_series(&protocol_series).expect("series");
+    let cached_generation = ProviderGeneration(id(1).expect("cached generation"));
+    let provider_generation = ProviderGeneration(id(2).expect("provider generation"));
+    let consumer_id = ConsumerId(id(1).expect("consumer"));
+    let generation = GenerationId(id(1).expect("demand generation"));
+    let mut engine = configured_engine().expect("engine configures");
+    engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id: ClientId(id(1).expect("client")),
+                workspace_id: WorkspaceId(id(1).expect("workspace")),
+                consumer_id,
+            },
+            true,
+        )
+        .expect("consumer registers");
+    engine
+        .install_history(cached_generation, &series, 2, 8, vec![history_bar()])
+        .expect("cached history installs");
+    let publication = engine
+        .set_series_demand(consumer_id, generation, &series)
+        .expect("demand installs")
+        .expect("demand reuses cached snapshot");
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &realtime_stop,
+        consumer_id,
+        &series,
+    );
+
+    coordinator
+        .publish_cached_demand(
+            &series,
+            provider_generation,
+            &DemandWaiter {
+                consumer_id,
+                generation,
+                started_at: Instant::now(),
+            },
+            &publication,
+        )
+        .expect("cached demand publishes while repair runs");
+
+    assert!(history_rx.try_recv().is_ok(), "live-edge repair was queued");
+    assert!(matches!(
+        coordinator
+            .events
+            .get_mut(&consumer_id)
+            .and_then(ConsumerEvents::pop),
+        Some(envelope::Payload::SeriesSnapshot(snapshot))
+            if snapshot.consumer_id == consumer_id.0.get()
+    ));
+    assert!(matches!(
+        coordinator
+            .events
+            .get_mut(&consumer_id)
+            .and_then(ConsumerEvents::pop),
+        Some(envelope::Payload::SeriesState(state))
+            if state.state == SeriesLoadState::Partial as i32
+                && state.detail.as_deref().is_some_and(|detail| detail.contains("refreshes"))
+    ));
+}
+
+#[test]
 fn initial_coinbase_windows_fit_one_source_page_for_every_cadence() {
     let cases = [
         (SeriesCadence::FixedSeconds, 60, 349),

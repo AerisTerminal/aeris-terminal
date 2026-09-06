@@ -987,12 +987,21 @@ impl MarketWorkerReceiver {
         self.mailbox
             .market_publications_enabled
             .store(enabled, Ordering::Release);
+        let queued = !queue.is_empty();
         drop(queue);
-        if !enabled {
-            *background_snapshot = queued_snapshot;
-        } else if background_snapshot.is_some() {
+        if enabled {
+            let retained = background_snapshot.is_some();
             drop(background_snapshot);
-            fire_mailbox_wake(&self.mailbox);
+            // A notification raised while this workspace was hidden was
+            // handled by the window without draining this receiver. Clear
+            // that old edge when the workspace becomes foreground so queued
+            // control state or retained history can schedule an active frame.
+            self.mailbox.wake_pending.store(false, Ordering::Release);
+            if retained || queued {
+                fire_mailbox_wake(&self.mailbox);
+            }
+        } else {
+            *background_snapshot = queued_snapshot;
         }
     }
 
@@ -2052,6 +2061,30 @@ mod tests {
 
         drop(command_rx);
         let _ = worker.begin_retirement();
+    }
+
+    #[test]
+    fn activating_workspace_rearms_a_wake_consumed_while_it_was_hidden() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&wakes);
+        receiver.set_wake(Arc::new(move || {
+            observed.fetch_add(1, Ordering::AcqRel);
+        }));
+        receiver.set_market_publications_enabled(false);
+        sender
+            .send(MarketWorkerMessage::State {
+                state: ChartState::Loading,
+                message: "History is loading".to_string(),
+            })
+            .expect("hidden control state queues");
+        assert_eq!(wakes.load(Ordering::Acquire), 1);
+        // The window handles this wake but deliberately does not drain hidden
+        // workspaces. Activation must schedule another drain even if the
+        // provider is quiet and the previous mailbox wake remains pending.
+        receiver.set_market_publications_enabled(true);
+        assert_eq!(wakes.load(Ordering::Acquire), 2);
+        assert_eq!(receiver.drain().0.len(), 1);
     }
 
     #[test]
