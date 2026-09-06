@@ -519,9 +519,10 @@ impl MarketEngine {
 
     /// Applies a resource-class transition without recreating provider state.
     ///
-    /// Background consumers retain shared upstream demand without UI publication.
-    /// Warm and detached consumers also release the upstream subscription. Re-entering
-    /// foreground publishes a cached covering snapshot immediately.
+    /// Background consumers retain shared upstream demand and bounded covering
+    /// snapshots without incremental UI publication. Warm and detached consumers
+    /// also release the upstream subscription. Re-entering foreground publishes a
+    /// cached covering snapshot immediately.
     ///
     /// # Errors
     /// Returns an error for an unknown consumer or publication generation overflow.
@@ -719,8 +720,12 @@ impl MarketEngine {
         series: &BarSeriesKey,
         snapshot: &Arc<SeriesSnapshot>,
     ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        // Background workspaces retain the same bounded covering image as the
+        // foreground workspace. Downstream delivery conflates these images to
+        // one latest snapshot, so a tab switch never depends on a later
+        // resource-class round trip to reveal history that is already loaded.
         self.demands
-            .matching(series)
+            .matching_snapshots(series)
             .into_iter()
             .map(|(consumer_id, generation)| {
                 self.publications
@@ -758,7 +763,7 @@ impl MarketEngine {
             forming,
         )?;
         self.demands
-            .matching(series)
+            .matching_publications(series)
             .into_iter()
             .map(|(consumer_id, generation)| {
                 self.publications
@@ -787,7 +792,7 @@ impl MarketEngine {
                 .apply_trade(series, provider_generation, trade)?;
         let consumers = self
             .demands
-            .matching(series)
+            .matching_publications(series)
             .into_iter()
             .filter(|(consumer_id, _)| {
                 self.demands.current(*consumer_id).is_some_and(|demand| {
@@ -836,7 +841,7 @@ impl MarketEngine {
             .order_flow
             .replace_history(series, provider_generation, trades)?;
         self.demands
-            .matching(series)
+            .matching_publications(series)
             .into_iter()
             .filter(|(consumer_id, _)| {
                 self.demands.current(*consumer_id).is_some_and(|demand| {
@@ -1678,19 +1683,24 @@ mod tests {
         );
         assert!(engine.has_subscription(&btc));
         assert!(!engine.has_publication(id(1)));
-        assert!(
-            engine
-                .install_realtime(provider_generation(1), &btc, 2, 8, bars(4), true)
-                .expect("background state remains current without UI publication")
-                .is_empty()
-        );
+        let background = engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(4), true)
+            .expect("background state retains a covering snapshot");
+        assert!(matches!(
+            background.as_slice(),
+            [ConsumerPublication {
+                consumer_id,
+                snapshot,
+                ..
+            }] if *consumer_id == id(1) && snapshot.bars.len() == 4
+        ));
 
         let publication = engine
             .set_resource_class(id(1), ConsumerResourceClass::Foreground)
             .expect("foreground consumer reattaches presentation")
             .expect("cached covering state publishes immediately");
         assert_eq!(publication.snapshot.bars.len(), 4);
-        assert_eq!(publication.publication_generation, 2);
+        assert_eq!(publication.publication_generation, 3);
         assert!(engine.has_subscription(&btc));
 
         engine
@@ -1698,6 +1708,43 @@ mod tests {
             .expect("consumer detaches");
         assert!(!engine.has_subscription(&btc));
         assert!(!engine.has_publication(id(1)));
+    }
+
+    #[test]
+    fn shared_history_updates_background_workspace_without_streaming_live_tails() {
+        let mut engine = engine(2, 1, 8);
+        let btc = series("coinbase:spot:BTC-USD");
+        register_workspace(&mut engine, 1, 1, 1);
+        register_workspace(&mut engine, 2, 1, 2);
+        for consumer in [1, 2] {
+            engine
+                .set_series_demand(id(consumer), generation(1), &btc)
+                .expect("shared demand installs");
+        }
+        engine
+            .set_resource_class(id(2), ConsumerResourceClass::Background)
+            .expect("second workspace moves to background");
+
+        let publications = engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(4))
+            .expect("shared history publishes");
+        assert_eq!(
+            publications
+                .iter()
+                .map(|publication| publication.consumer_id)
+                .collect::<Vec<_>>(),
+            vec![id(1), id(2)],
+            "both retained workspaces receive the same covering image"
+        );
+
+        let live_tail = bars(5).pop().expect("live tail fixture exists");
+        let updates = engine
+            .install_realtime_tail(provider_generation(1), &btc, 2, 8, live_tail, true)
+            .expect("live tail installs");
+        assert!(matches!(
+            updates.as_slice(),
+            [ConsumerSeriesUpdate { consumer_id, .. }] if *consumer_id == id(1)
+        ));
     }
 
     #[test]

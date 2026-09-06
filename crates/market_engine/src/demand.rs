@@ -214,7 +214,10 @@ impl DemandRegistry {
         self.consumers.get(&consumer_id)
     }
 
-    pub(crate) fn matching(&self, series: &BarSeriesKey) -> Vec<(ConsumerId, GenerationId)> {
+    pub(crate) fn matching_publications(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Vec<(ConsumerId, GenerationId)> {
         self.consumers
             .values()
             .filter_map(|demand| {
@@ -222,6 +225,25 @@ impl DemandRegistry {
                     .then_some(demand.generation)
                     .flatten()
                     .map(|generation| (demand.identity.consumer_id, generation))
+            })
+            .collect()
+    }
+
+    pub(crate) fn matching_snapshots(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Vec<(ConsumerId, GenerationId)> {
+        // Background consumers do not receive live tails, depth, or order
+        // flow, but they keep one latest covering bar image ready for an
+        // immediate workspace switch.
+        self.consumers
+            .values()
+            .filter_map(|demand| {
+                (demand.resource_class.retains_subscription()
+                    && demand.series.as_ref() == Some(series))
+                .then_some(demand.generation)
+                .flatten()
+                .map(|generation| (demand.identity.consumer_id, generation))
             })
             .collect()
     }

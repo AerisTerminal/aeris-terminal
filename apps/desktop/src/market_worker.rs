@@ -289,6 +289,7 @@ pub enum MarketWorkerMessage {
 
 struct MarketWorkerMailbox {
     queue: Mutex<VecDeque<MarketWorkerMessage>>,
+    background_snapshot: Mutex<Option<MarketWorkerMessage>>,
     capacity: usize,
     sender_count: AtomicUsize,
     receiver_alive: AtomicBool,
@@ -348,17 +349,43 @@ impl MarketWorkerSender {
     ///
     /// Returns [`MailboxDisconnected`] after the receiving endpoint is dropped.
     pub fn send(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
-        self.enqueue(message)?;
-        fire_mailbox_wake(&self.mailbox);
+        if self.enqueue(message)? {
+            fire_mailbox_wake(&self.mailbox);
+        }
         Ok(())
     }
 
-    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
+    fn enqueue(&self, message: MarketWorkerMessage) -> Result<bool, MailboxDisconnected> {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(MailboxDisconnected);
         }
-        if !self.accepts_message(&message) {
-            return Ok(());
+        if !self
+            .mailbox
+            .market_publications_enabled
+            .load(Ordering::Acquire)
+            && is_market_publication(&message)
+        {
+            if is_covering_snapshot(&message) {
+                let mut retained = self
+                    .mailbox
+                    .background_snapshot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(discarded) = retained.replace(message) {
+                    self.record_coalesced_message(&discarded);
+                }
+            }
+            return Ok(false);
+        }
+        if is_covering_snapshot(&message)
+            && let Some(discarded) = self
+                .mailbox
+                .background_snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        {
+            self.record_coalesced_message(&discarded);
         }
         let mut queue = self
             .mailbox
@@ -369,7 +396,7 @@ impl MarketWorkerSender {
             return Err(MailboxDisconnected);
         }
         let Some(message) = self.send_conflated(&mut queue, message) else {
-            return Ok(());
+            return Ok(true);
         };
         if is_control_message(&message) {
             self.enqueue_control(&mut queue, message);
@@ -393,14 +420,7 @@ impl MarketWorkerSender {
         } else {
             queue.push_back(message);
         }
-        Ok(())
-    }
-
-    fn accepts_message(&self, message: &MarketWorkerMessage) -> bool {
-        self.mailbox
-            .market_publications_enabled
-            .load(Ordering::Acquire)
-            || !is_market_publication(message)
+        Ok(true)
     }
 
     fn send_conflated(
@@ -854,6 +874,16 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     )
 }
 
+fn is_covering_snapshot(message: &MarketWorkerMessage) -> bool {
+    matches!(
+        message,
+        MarketWorkerMessage::Update(MarketWorkerPublication {
+            update: ReplayStreamUpdate::Snapshot(_),
+            ..
+        })
+    )
+}
+
 fn is_control_message(message: &MarketWorkerMessage) -> bool {
     !matches!(message, MarketWorkerMessage::Diagnostics(_)) && !is_market_publication(message)
 }
@@ -945,10 +975,25 @@ impl MarketWorkerReceiver {
         {
             return;
         }
+        let mut background_snapshot = self
+            .mailbox
+            .background_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queued_snapshot = (!enabled)
+            .then(|| take_covering_snapshot(&mut queue))
+            .flatten();
         queue.retain(|message| !is_market_publication(message));
         self.mailbox
             .market_publications_enabled
             .store(enabled, Ordering::Release);
+        drop(queue);
+        if !enabled {
+            *background_snapshot = queued_snapshot;
+        } else if background_snapshot.is_some() {
+            drop(background_snapshot);
+            fire_mailbox_wake(&self.mailbox);
+        }
     }
 
     pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
@@ -979,17 +1024,33 @@ impl MarketWorkerReceiver {
     /// of provider updates cannot monopolize GPUI's event loop. Any remaining
     /// messages stay queued and trigger another wake/frame.
     pub fn drain_up_to(&self, limit: usize) -> (Vec<MarketWorkerMessage>, bool) {
+        let retained_snapshot = (limit > 0
+            && self
+                .mailbox
+                .market_publications_enabled
+                .load(Ordering::Acquire))
+        .then(|| {
+            self.mailbox
+                .background_snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        })
+        .flatten();
         let mut queue = self
             .mailbox
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let messages = if limit == usize::MAX {
-            queue.drain(..).collect::<Vec<_>>()
+        let retained_count = usize::from(retained_snapshot.is_some());
+        let queue_limit = limit.saturating_sub(retained_count);
+        let mut messages = retained_snapshot.into_iter().collect::<Vec<_>>();
+        if limit == usize::MAX {
+            messages.extend(queue.drain(..));
         } else {
-            let end = limit.min(queue.len());
-            queue.drain(..end).collect::<Vec<_>>()
-        };
+            let end = queue_limit.min(queue.len());
+            messages.extend(queue.drain(..end));
+        }
         drop(queue);
         self.mailbox.wake_pending.store(false, Ordering::Release);
         let (queued, disconnected) = {
@@ -1023,6 +1084,11 @@ impl Drop for MarketWorkerReceiver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        *self
+            .mailbox
+            .background_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -1030,6 +1096,7 @@ impl Drop for MarketWorkerReceiver {
 pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, MarketWorkerReceiver) {
     let mailbox = Arc::new(MarketWorkerMailbox {
         queue: Mutex::new(VecDeque::with_capacity(capacity.get().saturating_add(1))),
+        background_snapshot: Mutex::new(None),
         capacity: capacity.get(),
         sender_count: AtomicUsize::new(1),
         receiver_alive: AtomicBool::new(true),
@@ -1927,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_background_transition_discards_stale_ui_market_publications() {
+    fn engine_background_transition_retains_only_the_latest_covering_snapshot() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
@@ -1959,22 +2026,28 @@ mod tests {
             make_publication(fixture.publish_snapshot(2).expect("snapshot republishes"));
         message_tx
             .send(MarketWorkerMessage::Update(publication))
-            .expect("hidden publication is harmlessly suppressed");
+            .expect("hidden snapshot is retained");
+        let publication = make_publication(
+            fixture
+                .publish_snapshot(3)
+                .expect("newer snapshot republishes"),
+        );
+        message_tx
+            .send(MarketWorkerMessage::Update(publication))
+            .expect("newest hidden snapshot replaces the older image");
         let (messages, _) = worker.drain_messages();
         assert!(messages.is_empty());
 
         worker
             .try_set_market_resource_class(ConsumerResourceClass::Foreground)
             .expect("foreground transition is accepted");
-        let publication =
-            make_publication(fixture.publish_snapshot(2).expect("snapshot republishes"));
-        message_tx
-            .send(MarketWorkerMessage::Update(publication))
-            .expect("foreground publication queues");
         let (messages, _) = worker.drain_messages();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::Update(_)]
+            [MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(snapshot),
+                ..
+            })] if snapshot.bars().len() == 3
         ));
 
         drop(command_rx);
