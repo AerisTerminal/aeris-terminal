@@ -20,13 +20,14 @@ use axiusflow_platform_runtime::{
 };
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
-    ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent,
-    RithmicCatalogRejection, RithmicEnvironmentEvent, RithmicInstrumentSelection,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
-    RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeState,
-    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
-    SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
+    ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
+    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
+    RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
+    RithmicInstrumentSelection, RithmicProviderConfig, RithmicProviderDriver,
+    RithmicProviderEvents, RithmicProviderInstrument, RithmicProviderRuntime,
+    RithmicProviderRuntimeConfig, RithmicProviderRuntimeState, RithmicReadOnlySubscription,
+    RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch, SearchPattern,
+    SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 
 const CALLBACK_CAPACITY: usize = 256;
@@ -1305,7 +1306,7 @@ fn open_runtime_with_instruments(
     instruments: Vec<RithmicProviderInstrument>,
 ) -> Result<(Runtime, RithmicProviderEvents), String> {
     let provider = RithmicProviderConfig::try_new(
-        "Axiusflow",
+        RITHMIC_APPLICATION_NAME,
         env!("CARGO_PKG_VERSION"),
         RithmicSessionLimits::default(),
         MESSAGE_SILENCE,

@@ -2,10 +2,10 @@
 
 use crate::{
     DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage, DecodedTimeBar,
-    DecodedTimeBarType, HistorySource, ReplayKind, RetryDisposition, RithmicApplication,
-    RithmicCredentials, RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage,
-    RithmicTestSession, TimeBarReplayRequest, TimeBarType, endpoint::RithmicEndpoint,
-    generated::rti,
+    DecodedTimeBarType, HistorySource, RITHMIC_APPLICATION_NAME, ReplayKind, RetryDisposition,
+    RithmicApplication, RithmicCredentials, RithmicSessionError, RithmicSessionLimits,
+    RithmicSessionMessage, RithmicTestSession, TimeBarReplayRequest, TimeBarType,
+    endpoint::RithmicEndpoint, generated::rti,
 };
 use prost::Message as _;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -520,7 +520,7 @@ fn assert_login_request(frame: &[u8]) -> Result<(), String> {
         || request.template_version.as_deref() != Some(env!("RITHMIC_TEMPLATE_VERSION"))
         || request.user.as_deref() != Some(FIXTURE_USER)
         || request.password.as_deref() != Some(FIXTURE_PASSWORD)
-        || request.app_name.as_deref() != Some("Axiusflow")
+        || request.app_name.as_deref() != Some(RITHMIC_APPLICATION_NAME)
         || request.app_version.as_deref() != Some("0.1.0")
         || request.system_name.as_deref() != Some(TEST_SYSTEM)
         || request.infra_type != Some(rti::request_login::SysInfraType::TickerPlant.into())
@@ -537,7 +537,7 @@ fn assert_history_login_request(frame: &[u8]) -> Result<(), String> {
         || request.template_version.as_deref() != Some(env!("RITHMIC_TEMPLATE_VERSION"))
         || request.user.as_deref() != Some(FIXTURE_USER)
         || request.password.as_deref() != Some(FIXTURE_PASSWORD)
-        || request.app_name.as_deref() != Some("Axiusflow")
+        || request.app_name.as_deref() != Some(RITHMIC_APPLICATION_NAME)
         || request.app_version.as_deref() != Some("0.1.0")
         || request.system_name.as_deref() != Some(TEST_SYSTEM)
         || request.infra_type != Some(rti::request_login::SysInfraType::HistoryPlant.into())
@@ -735,7 +735,7 @@ const fn fixture_credentials() -> RithmicCredentials<'static> {
 
 const fn fixture_application() -> RithmicApplication<'static> {
     RithmicApplication {
-        name: "Axiusflow",
+        name: RITHMIC_APPLICATION_NAME,
         version: "0.1.0",
     }
 }

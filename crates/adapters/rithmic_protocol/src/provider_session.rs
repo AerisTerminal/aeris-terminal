@@ -41,7 +41,7 @@ use std::{
 const PROVIDER_ID: &str = "rithmic";
 const SYSTEM_ID: &str = "RITHMIC_TEST";
 const ENVIRONMENT: &str = "Test";
-/// Native credential-vault service for the `AxiusFlow` terminal.
+/// Native credential-vault service for the Axiusflow terminal.
 pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.axiusflow.terminal";
 /// Non-secret vault key for the default Rithmic Test account.
 pub const RITHMIC_TEST_VAULT_KEY: &str = "provider-rithmic-test-default-v1";
@@ -3848,7 +3848,7 @@ mod tests {
 
     fn config() -> RithmicProviderConfig {
         RithmicProviderConfig::try_new(
-            "AxiusFlow",
+            crate::RITHMIC_APPLICATION_NAME,
             "0.1.0",
             RithmicSessionLimits::default(),
             Duration::from_secs(30),
@@ -3860,7 +3860,7 @@ mod tests {
     #[test]
     fn discovery_only_configuration_does_not_require_a_guessed_instrument() {
         let config = RithmicProviderConfig::try_new(
-            "AxiusFlow",
+            crate::RITHMIC_APPLICATION_NAME,
             "0.1.0",
             RithmicSessionLimits::default(),
             Duration::from_secs(30),
@@ -4240,7 +4240,7 @@ mod tests {
         let duplicate = instrument();
         assert_eq!(
             RithmicProviderConfig::try_new(
-                "AxiusFlow",
+                crate::RITHMIC_APPLICATION_NAME,
                 "0.1.0",
                 RithmicSessionLimits::default(),
                 Duration::from_secs(30),
@@ -4255,7 +4255,7 @@ mod tests {
         unselected.order_book = false;
         assert_eq!(
             RithmicProviderConfig::try_new(
-                "AxiusFlow",
+                crate::RITHMIC_APPLICATION_NAME,
                 "0.1.0",
                 RithmicSessionLimits::default(),
                 Duration::from_secs(30),
@@ -4366,7 +4366,7 @@ mod tests {
     #[test]
     fn pending_subscription_accepts_market_data_before_provider_acknowledgement() {
         let empty = RithmicProviderConfig::try_new(
-            "AxiusFlow",
+            crate::RITHMIC_APPLICATION_NAME,
             "0.1.0",
             RithmicSessionLimits::default(),
             Duration::from_secs(30),

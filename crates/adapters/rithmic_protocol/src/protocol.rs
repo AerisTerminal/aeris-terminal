@@ -1094,7 +1094,7 @@ mod kit {
 #[cfg(all(test, rithmic_kit))]
 mod tests {
     use super::*;
-    use crate::generated::rti;
+    use crate::{RITHMIC_APPLICATION_NAME, generated::rti};
     use prost::Message;
 
     fn template_id(frame: &SensitiveFrame) -> i32 {
@@ -1111,7 +1111,7 @@ mod tests {
             OutboundRequest::Login(LoginRequest {
                 user: "fixture-user",
                 password: "fixture-password",
-                app_name: "Axiusflow",
+                app_name: RITHMIC_APPLICATION_NAME,
                 app_version: "0.1.0",
                 system_name: "Rithmic Test",
                 plant: ReadOnlyPlant::Ticker,
@@ -1303,7 +1303,7 @@ mod tests {
         let login = LoginRequest {
             user: "fixture-user",
             password: "fixture-password",
-            app_name: "Axiusflow",
+            app_name: RITHMIC_APPLICATION_NAME,
             app_version: "0.1.0",
             system_name: "Rithmic Test",
             plant: ReadOnlyPlant::History,
@@ -1379,7 +1379,7 @@ mod tests {
                 .encode(OutboundRequest::Login(LoginRequest {
                     user: "fixture-user",
                     password: "fixture-password",
-                    app_name: "Axiusflow",
+                    app_name: RITHMIC_APPLICATION_NAME,
                     app_version: "0.1.0",
                     system_name: "Rithmic Test",
                     plant,

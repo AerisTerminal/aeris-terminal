@@ -19,10 +19,10 @@ use axiusflow_provider_history::HistoryRange;
 
 use crate::market_service::{FormingBar, HistoryFetchWindow};
 use axiusflow_rithmic_protocol_adapter::{
-    InstrumentDescriptor, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication,
-    RithmicCredentialBytes, RithmicHistorySessionTransport, RithmicProviderInstrument,
-    RithmicSessionLimits, RithmicTestSession, collect_rithmic_chart_history,
-    collect_rithmic_trade_history,
+    InstrumentDescriptor, RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
+    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSessionLimits,
+    RithmicTestSession, collect_rithmic_chart_history, collect_rithmic_trade_history,
 };
 use zeroize::Zeroize;
 
@@ -326,7 +326,7 @@ fn connect(
     RithmicTestSession::discover_and_login_history(
         credentials,
         RithmicApplication {
-            name: "Axiusflow",
+            name: RITHMIC_APPLICATION_NAME,
             version: env!("CARGO_PKG_VERSION"),
         },
         RithmicSessionLimits::default(),

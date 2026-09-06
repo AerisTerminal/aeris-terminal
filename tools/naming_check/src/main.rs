@@ -1740,6 +1740,34 @@ mod tests {
     }
 
     #[test]
+    fn rithmic_application_name_has_one_canonical_source() {
+        let adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
+        assert!(
+            adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Axiusflow\";"),
+            "Rithmic application identity must remain the confirmed canonical Axiusflow value"
+        );
+
+        for relative in [
+            "crates/adapters/rithmic_protocol/src/provider_session.rs",
+            "crates/adapters/rithmic_protocol/src/protocol.rs",
+            "crates/adapters/rithmic_protocol/src/session_tests.rs",
+            "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
+            "apps/engine/src/rithmic_realtime.rs",
+            "apps/engine/src/rithmic_history.rs",
+        ] {
+            let source = manifest(relative);
+            assert!(
+                !source.contains("\"AxiusFlow\""),
+                "{relative} reintroduced the non-canonical Rithmic application identity AxiusFlow"
+            );
+            assert!(
+                source.contains("RITHMIC_APPLICATION_NAME"),
+                "{relative} must use the shared Rithmic application-name constant"
+            );
+        }
+    }
+
+    #[test]
     fn phase_five_account_surface_remains_bounded() {
         // Phase 4 is maintainer-approved closed, so the phase 5 account
         // boundary is now allowed exactly in its owning modules. Better Auth,

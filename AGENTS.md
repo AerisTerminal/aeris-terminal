@@ -152,8 +152,7 @@ unchanged.
 
 ## Workflow and verification
 
-Work on `development` by default. Do not work on or push directly to `main`. Open a PR to `main`
-only when the maintainer requests release review; merging requires maintainer acceptance.
+Work directly on `main` unless the maintainer explicitly requests another branch.
 Inspect `git status` before and after edits, preserve unrelated work, and stage only files owned
 by the task.
 
@@ -244,7 +243,7 @@ document that can drift.
 
 - Never use destructive Git commands, force-push, or broad path deletion.
 - Commit one completed batch using the existing `type(scope): outcome` style.
-- Push a locally verified completed batch to `development` once, without force; do not use pushes as CI
+- Push a locally verified completed batch directly to `main` once, without force; do not use pushes as CI
   probes or push after every intermediate commit.
 - Report the outcome, verification performed, running binary state when relevant, and any remaining
   maintainer validation.

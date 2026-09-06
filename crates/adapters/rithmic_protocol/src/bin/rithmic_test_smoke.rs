@@ -1,16 +1,18 @@
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_rithmic_protocol_adapter::{
     AuthenticationState, CollectionProgress, DecodedCatalogMessage, DecodedControlMessage,
-    DecodedMarketMessage, DecodedTimeBarType, HistoryBars, HistoryCollectionRequest,
+    DecodedMarketMessage, DecodedTimeBarType, DepthByOrderSnapshotMessage,
+    DepthByOrderSnapshotRequest, DepthByOrderSubscription, HistoryBars, HistoryCollectionRequest,
     HistoryCollector, HistorySeries, InstrumentReferenceRequest, MarketDataSubscription,
     ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication,
-    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCredentialBytes,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicSessionError,
-    RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming, RithmicTestSession,
-    SearchPattern, SessionGeneration, SubscriptionAction, SymbolSearchCollectionRequest,
-    SymbolSearchCollector, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
-    TimeBarType, collect_rithmic_covering_recovery_evidence,
+    RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
+    RithmicApplication, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
+    RithmicCredentialBytes, RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents,
+    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming,
+    RithmicTestSession, SearchPattern, SessionGeneration, SubscriptionAction,
+    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
+    TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
+    collect_rithmic_covering_recovery_evidence,
 };
 use std::{
     io::{self, Write},
@@ -48,6 +50,7 @@ const SUBSCRIPTION_PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 enum RunMode {
     Smoke,
     HistoryOnly,
+    MboOnly,
     AuthorizedClientLocalSilence,
     ProviderObservedSilence {
         expected: ExpectedSilence,
@@ -92,6 +95,24 @@ fn main() -> Result<(), String> {
             run_history(&credentials, application(), &selected)?;
             println!(
                 "rithmic_history_only=passed symbol={} exchange={}",
+                selected.symbol, selected.exchange
+            );
+            return Ok(());
+        }
+        RunMode::MboOnly => {
+            let (mut ticker, selected) = login_and_select(&credentials, application())?;
+            let probe = test_depth_by_order(&mut ticker, &selected);
+            let close = ticker
+                .close()
+                .map_err(|error| format!("ticker_close_failed={error}"));
+            match (probe, close) {
+                (Ok(()), Ok(())) => {}
+                (Err(probe), Ok(())) => return Err(probe),
+                (Ok(()), Err(close)) => return Err(close),
+                (Err(probe), Err(close)) => return Err(format!("{probe}; {close}")),
+            }
+            println!(
+                "rithmic_mbo_only=passed symbol={} exchange={}",
                 selected.symbol, selected.exchange
             );
             return Ok(());
@@ -142,6 +163,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
             Ok(RunMode::AuthorizedClientLocalSilence)
         }
         [argument] if argument == "--history-only" => Ok(RunMode::HistoryOnly),
+        [argument] if argument == "--mbo-only" => Ok(RunMode::MboOnly),
         [
             flag,
             expected,
@@ -185,7 +207,7 @@ fn parse_run_mode(arguments: impl IntoIterator<Item = String>) -> Result<RunMode
 }
 
 fn usage() -> String {
-    "usage: rithmic_test_smoke [--history-only | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
+    "usage: rithmic_test_smoke [--history-only | --mbo-only | --authorized-silence-recovery | --provider-observed-silence-evidence <heartbeat-silence|message-silence> <30..86400 seconds> <new-output.json> <40-hex-source-revision> <executable-sha256> <cargo-lock-sha256> | --verify-provider-observed-silence-evidence <input.json> <40-hex-source-revision> <cargo-lock-sha256>] (live credentials are loaded only from the native vault)".to_string()
 }
 
 #[derive(Clone)]
@@ -196,7 +218,7 @@ struct SelectedInstrument {
 
 const fn application() -> RithmicApplication<'static> {
     RithmicApplication {
-        name: "Axiusflow",
+        name: RITHMIC_APPLICATION_NAME,
         version: env!("CARGO_PKG_VERSION"),
     }
 }
@@ -422,6 +444,165 @@ fn test_subscription(
     Ok(subscription_rejected)
 }
 
+fn test_depth_by_order(
+    ticker: &mut axiusflow_rithmic_protocol_adapter::RithmicTickerConnection,
+    selected: &SelectedInstrument,
+) -> Result<(), String> {
+    ticker
+        .update_depth_by_order(DepthByOrderSubscription {
+            symbol: &selected.symbol,
+            exchange: &selected.exchange,
+            action: SubscriptionAction::Subscribe,
+        })
+        .map_err(|error| format!("dbo_subscription_send_failed={error}"))?;
+    await_depth_by_order_subscription(ticker)?;
+    println!("rithmic_mbo_subscription=passed");
+
+    ticker
+        .request_depth_by_order_snapshot(DepthByOrderSnapshotRequest {
+            symbol: &selected.symbol,
+            exchange: &selected.exchange,
+        })
+        .map_err(|error| format!("dbo_snapshot_send_failed={error}"))?;
+    let snapshot = collect_depth_by_order_snapshot(ticker, selected)?;
+
+    ticker
+        .update_depth_by_order(DepthByOrderSubscription {
+            symbol: &selected.symbol,
+            exchange: &selected.exchange,
+            action: SubscriptionAction::Unsubscribe,
+        })
+        .map_err(|error| format!("dbo_unsubscribe_send_failed={error}"))?;
+    println!(
+        "rithmic_mbo_snapshot=passed sequence={} levels={} orders={} live_mutations={}",
+        snapshot.sequence.unwrap_or(0),
+        snapshot.levels,
+        snapshot.orders,
+        snapshot.live_mutations
+    );
+    Ok(())
+}
+
+fn await_depth_by_order_subscription(
+    ticker: &mut axiusflow_rithmic_protocol_adapter::RithmicTickerConnection,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let message = match ticker.read_next() {
+            Ok(message) => message,
+            Err(RithmicSessionError::Deadline) if Instant::now() < deadline => continue,
+            Err(error) => return Err(format!("dbo_subscription_read_failed={error}")),
+        };
+        if let RithmicSessionMessage::Control(DecodedControlMessage::DepthByOrderSubscription {
+            accepted,
+        }) = message
+        {
+            return if accepted {
+                Ok(())
+            } else {
+                Err("dbo_subscription_rejected".to_string())
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err("dbo_subscription_timed_out".to_string());
+        }
+    }
+}
+
+#[derive(Default)]
+struct MboSnapshotEvidence {
+    sequence: Option<u64>,
+    levels: usize,
+    orders: usize,
+    live_mutations: usize,
+}
+
+fn collect_depth_by_order_snapshot(
+    ticker: &mut axiusflow_rithmic_protocol_adapter::RithmicTickerConnection,
+    selected: &SelectedInstrument,
+) -> Result<MboSnapshotEvidence, String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut evidence = MboSnapshotEvidence::default();
+    loop {
+        let message = match ticker.read_next() {
+            Ok(message) => message,
+            Err(RithmicSessionError::Deadline) if Instant::now() < deadline => continue,
+            Err(error) => return Err(format!("dbo_snapshot_read_failed={error}")),
+        };
+        match message {
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::Level(level),
+            )) if level.identity.symbol == selected.symbol
+                && level.identity.exchange == selected.exchange =>
+            {
+                if evidence
+                    .sequence
+                    .is_some_and(|sequence| sequence != level.sequence_number)
+                {
+                    return Err("dbo_snapshot_sequence_changed".to_string());
+                }
+                evidence.sequence = Some(level.sequence_number);
+                evidence.levels = evidence.levels.saturating_add(1);
+                if level
+                    .orders
+                    .iter()
+                    .any(|order| order.exchange_order_id.is_empty())
+                {
+                    return Err("dbo_snapshot_missing_exchange_order_id".to_string());
+                }
+                evidence.orders = evidence.orders.saturating_add(level.orders.len());
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrder(update))
+                if update.identity.symbol == selected.symbol
+                    && update.identity.exchange == selected.exchange =>
+            {
+                if update
+                    .mutations
+                    .iter()
+                    .any(|mutation| mutation.exchange_order_id.is_empty())
+                {
+                    return Err("dbo_live_missing_exchange_order_id".to_string());
+                }
+                evidence.live_mutations = evidence
+                    .live_mutations
+                    .saturating_add(update.mutations.len());
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::Complete {
+                    accepted,
+                    identity,
+                    sequence_number,
+                },
+            )) => {
+                if !accepted {
+                    return Err("dbo_snapshot_rejected".to_string());
+                }
+                if identity.as_ref().is_some_and(|identity| {
+                    identity.symbol != selected.symbol || identity.exchange != selected.exchange
+                }) {
+                    return Err("dbo_snapshot_identity_mismatch".to_string());
+                }
+                if evidence
+                    .sequence
+                    .zip(sequence_number)
+                    .is_some_and(|(level, complete)| level != complete)
+                {
+                    return Err("dbo_snapshot_completion_sequence_mismatch".to_string());
+                }
+                evidence.sequence = evidence.sequence.or(sequence_number);
+                return Ok(evidence);
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "dbo_snapshot_timed_out levels={} orders={} live_mutations={}",
+                evidence.levels, evidence.orders, evidence.live_mutations
+            ));
+        }
+    }
+}
+
 fn stream_frame_kind(message: &RithmicSessionMessage) -> &'static str {
     match message {
         RithmicSessionMessage::Control(_) => "control",
@@ -620,7 +801,7 @@ fn collect_provider_observed_silence(
         ..RithmicSessionLimits::default()
     };
     let Ok(config) = RithmicProviderConfig::try_new(
-        "Axiusflow",
+        RITHMIC_APPLICATION_NAME,
         env!("CARGO_PKG_VERSION"),
         limits,
         PROVIDER_OBSERVED_MESSAGE_SILENCE_TIMEOUT,
@@ -864,7 +1045,7 @@ fn run_authorized_silence_recovery_inner(
         ..RithmicSessionLimits::default()
     };
     let config = RithmicProviderConfig::try_new(
-        "Axiusflow",
+        RITHMIC_APPLICATION_NAME,
         env!("CARGO_PKG_VERSION"),
         limits,
         Duration::from_secs(10),
@@ -1088,6 +1269,10 @@ mod tests {
         assert_eq!(
             parse_run_mode(vec!["--history-only".to_string()]),
             Ok(RunMode::HistoryOnly)
+        );
+        assert_eq!(
+            parse_run_mode(vec!["--mbo-only".to_string()]),
+            Ok(RunMode::MboOnly)
         );
         assert_eq!(
             parse_run_mode(vec!["--authorized-silence-recovery".to_string()]),
