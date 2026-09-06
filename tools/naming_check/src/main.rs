@@ -1386,6 +1386,48 @@ mod tests {
     }
 
     #[test]
+    fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
+        for path in [
+            "apps/desktop/src/main.rs",
+            "apps/engine/src/main.rs",
+            "crates/platform_runtime/src/bin/axiusflow_launcher.rs",
+        ] {
+            assert!(
+                manifest(path).contains("windows_subsystem = \"windows\""),
+                "Windows GUI binary {path} lost its GUI subsystem marker"
+            );
+        }
+        assert!(
+            manifest("apps/desktop/src/main.rs")
+                .contains("cx.set_app_identity(\"com.axiusflow.desktop\", \"Axiusflow\")"),
+            "desktop lost its stable Windows taskbar identity"
+        );
+        let setup = manifest("tools/windows/axiusflow_setup.iss");
+        for contract in [
+            "PrivilegesRequired=lowest",
+            "DefaultDirName={localappdata}\\Programs\\Axiusflow",
+            "UninstallFilesDir={localappdata}\\Programs\\Axiusflow-Uninstall",
+            "SetupIconFile={#IconPath}",
+            "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
+            "AppUserModelID: \"com.axiusflow.desktop\"",
+            "--install \"' + Manifest + '\" \"' + Bundle + '\"",
+            "--remove-all-local-data",
+        ] {
+            assert!(
+                setup.contains(contract),
+                "Windows installer lost {contract}"
+            );
+        }
+        let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
+        assert!(
+            publisher.contains("compile_windows_installer")
+                && publisher.contains("tools/windows/axiusflow_setup.iss")
+                && publisher.contains("--iscc"),
+            "release publisher must produce the Windows installer through Inno Setup"
+        );
+    }
+
+    #[test]
     fn platform_filesystem_assumptions_remain_explicitly_guarded() {
         let mut sources = Vec::new();
         for root in [

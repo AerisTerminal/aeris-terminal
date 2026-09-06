@@ -35,6 +35,7 @@ version = "0.1.0"
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 display-info = "=0.5.9"
+embed-resource = "=3.0.11"
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "=0.4.3"
 interprocess = { version = "=2.4.4", default-features = false }

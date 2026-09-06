@@ -45,6 +45,7 @@ struct PublisherConfig {
     output_root: PathBuf,
     r2_bucket: Option<String>,
     wrangler: OsString,
+    iscc: OsString,
 }
 
 impl PublisherConfig {
@@ -58,6 +59,7 @@ impl PublisherConfig {
         let mut output_root = PathBuf::from(DEFAULT_OUTPUT_ROOT);
         let mut r2_bucket = None;
         let mut wrangler = OsString::from("wrangler");
+        let mut iscc = OsString::from("ISCC.exe");
         let mut arguments = arguments;
         while let Some(flag) = arguments.next() {
             let flag = flag
@@ -92,6 +94,9 @@ impl PublisherConfig {
                 "--wrangler" => {
                     wrangler = OsString::from(required_argument(&mut arguments, &flag)?);
                 }
+                "--iscc" => {
+                    iscc = OsString::from(required_argument(&mut arguments, &flag)?);
+                }
                 _ => return Err(usage()),
             }
         }
@@ -105,6 +110,7 @@ impl PublisherConfig {
             output_root,
             r2_bucket,
             wrangler,
+            iscc,
         };
         if !valid_release_identity(&config.release_identity)
             || !valid_identifier(&config.channel, 32)
@@ -117,7 +123,7 @@ impl PublisherConfig {
 }
 
 fn usage() -> String {
-    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> --release-identity <git-head> --generation <n> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>]".to_string()
+    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> --release-identity <git-head> --generation <n> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>]".to_string()
 }
 
 fn required_argument(
@@ -143,7 +149,7 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     let verifying_key = signing_key.verifying_key();
     build_release_binaries(&repository, &config, &verifying_key)?;
     let binaries = release_binary_paths(&repository);
-    let published = package_release(&config, &signing_key, &binaries)?;
+    let published = package_release(&repository, &config, &signing_key, &binaries)?;
     print_release_summary(&published);
     if let Some(bucket) = config.r2_bucket.as_deref() {
         upload_release(&config, bucket, &published, &verifying_key)?;
@@ -412,6 +418,7 @@ struct PublishedRelease {
 
 #[allow(clippy::too_many_lines)]
 fn package_release(
+    repository: &Path,
     config: &PublisherConfig,
     signing_key: &SigningKey,
     binaries: &ReleaseBinaries,
@@ -434,7 +441,6 @@ fn package_release(
     let setup_path = release_directory.join(&setup_name);
     let desktop_path = release_directory.join(&desktop_name);
     let engine_path = release_directory.join(&engine_name);
-    copy_release_binary(&binaries.launcher, &setup_path)?;
     copy_release_binary(&binaries.desktop, &desktop_path)?;
     copy_release_binary(&binaries.engine, &engine_path)?;
 
@@ -473,6 +479,30 @@ fn package_release(
         .map_err(|error| format!("release manifest signing failed: {error}"))?;
     let manifest_path = release_directory.join("manifest.json");
     write_json_new(&manifest_path, &signed)?;
+
+    if cfg!(target_os = "windows") {
+        if cfg!(test) {
+            // Unit packaging tests do not invoke external installer tooling,
+            // but production uses the same path and contract below.
+            let _ = &config.iscc;
+            copy_release_binary(&binaries.launcher, &setup_path)?;
+        } else {
+            compile_windows_installer(
+                repository,
+                config,
+                binaries,
+                &manifest_path,
+                &desktop_path,
+                &engine_path,
+                &setup_path,
+            )?;
+        }
+    } else {
+        // The public native installer is currently a Windows product. Keep
+        // non-Windows publisher tests/builds viable without inventing another
+        // packaging format here.
+        copy_release_binary(&binaries.launcher, &setup_path)?;
+    }
 
     let manifest_url = format!("{}/{release_public_root}/manifest.json", config.base_url);
     let setup_metadata = fs::metadata(&setup_path)
@@ -554,6 +584,62 @@ fn copy_release_binary(source: &Path, destination: &Path) -> Result<(), String> 
         .open(destination)
         .and_then(|file| file.sync_all())
         .map_err(|_| "packaged release binary could not be committed".to_string())?;
+    Ok(())
+}
+
+fn compile_windows_installer(
+    repository: &Path,
+    config: &PublisherConfig,
+    binaries: &ReleaseBinaries,
+    manifest_path: &Path,
+    desktop_path: &Path,
+    engine_path: &Path,
+    setup_path: &Path,
+) -> Result<(), String> {
+    let script = repository.join("tools/windows/axiusflow_setup.iss");
+    let icon = repository.join("apps/desktop/assets/brand_assets/axiusflow.ico");
+    for input in [
+        script.as_path(),
+        icon.as_path(),
+        binaries.launcher.as_path(),
+        manifest_path,
+        desktop_path,
+        engine_path,
+    ] {
+        let metadata = fs::symlink_metadata(input)
+            .map_err(|_| "Windows installer input is unavailable".to_string())?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+            return Err("Windows installer input is invalid".to_string());
+        }
+    }
+    if setup_path.exists() {
+        return Err("immutable Windows installer already exists".to_string());
+    }
+    let output_dir = setup_path
+        .parent()
+        .ok_or_else(|| "Windows installer output path is invalid".to_string())?;
+    let status = Command::new(&config.iscc)
+        .arg("/Qp")
+        .arg(format!("/DAppVersion={}", env!("CARGO_PKG_VERSION")))
+        .arg(format!("/DLauncherPath={}", binaries.launcher.display()))
+        .arg(format!("/DManifestPath={}", manifest_path.display()))
+        .arg(format!("/DDesktopPath={}", desktop_path.display()))
+        .arg(format!("/DEnginePath={}", engine_path.display()))
+        .arg(format!("/DIconPath={}", icon.display()))
+        .arg(format!("/DOutputDir={}", output_dir.display()))
+        .arg(&script)
+        .current_dir(repository)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|_| "Inno Setup compiler could not be started".to_string())?;
+    if !status.success() {
+        return Err("Inno Setup compiler failed".to_string());
+    }
+    let metadata = fs::symlink_metadata(setup_path)
+        .map_err(|_| "Inno Setup did not emit Axiusflow-Setup.exe".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
+        return Err("Inno Setup emitted an invalid installer".to_string());
+    }
     Ok(())
 }
 
@@ -960,9 +1046,10 @@ mod tests {
             output_root: root.join("out"),
             r2_bucket: None,
             wrangler: OsString::from("wrangler"),
+            iscc: OsString::from("ISCC.exe"),
         };
         let key = SigningKey::from_bytes(&[7; 32]);
-        let published = package_release(&config, &key, &binaries).expect("package release");
+        let published = package_release(&root, &config, &key, &binaries).expect("package release");
         let signed: SignedReleaseManifest = serde_json::from_slice(
             &fs::read(&published.manifest_path).expect("signed manifest bytes"),
         )
@@ -1038,5 +1125,27 @@ mod tests {
         assert!(valid_published_at("2024-02-29T23:59:59.123Z"));
         assert!(!valid_published_at("2026-02-30T00:00:00Z"));
         assert!(!valid_published_at("2026-09-07T25:00:00Z"));
+    }
+
+    #[test]
+    fn windows_installer_script_keeps_standard_registration_and_signed_install_boundary() {
+        let script = include_str!("../../../../tools/windows/axiusflow_setup.iss");
+        for required in [
+            "PrivilegesRequired=lowest",
+            "DefaultDirName={localappdata}\\Programs\\Axiusflow",
+            "UninstallFilesDir={localappdata}\\Programs\\Axiusflow-Uninstall",
+            "SetupIconFile={#IconPath}",
+            "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
+            "[Icons]",
+            "[UninstallRun]",
+            "--remove-all-local-data",
+            "--install \"' + Manifest + '\" \"' + Bundle + '\"",
+        ] {
+            assert!(
+                script.contains(required),
+                "installer script lost {required}"
+            );
+        }
+        assert!(!script.contains("Parameters: \"--launch-desktop\""));
     }
 }

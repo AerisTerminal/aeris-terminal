@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! Stable packaging launcher/updater. This binary lives outside version directories.
 
 use std::{
@@ -27,16 +32,46 @@ const RELEASE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const RELEASE_CHANNEL: &str = "stable";
 
 fn main() {
-    #[cfg(target_os = "windows")]
     let no_arguments = std::env::args_os().len() == 1;
     if let Err(error) = run(std::env::args_os().skip(1)) {
         eprintln!("Axiusflow lifecycle: {error}");
-        #[cfg(target_os = "windows")]
         if no_arguments {
-            let _ = Command::new("cmd").args(["/c", "echo. & pause"]).status();
+            show_user_launch_error(&error);
         }
         std::process::exit(1);
     }
+}
+
+#[cfg(target_os = "windows")]
+fn show_user_launch_error(error: &str) {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const SCRIPT: &str = "$shell=New-Object -ComObject WScript.Shell; [void]$shell.Popup($env:AXIUSFLOW_LAUNCH_ERROR,0,'Axiusflow',16)";
+    let message = user_launch_error_message(error);
+    let _ = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            SCRIPT,
+        ])
+        .env("AXIUSFLOW_LAUNCH_ERROR", message)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_user_launch_error(_error: &str) {}
+
+fn user_launch_error_message(error: &str) -> String {
+    let detail: String = error.chars().take(320).collect();
+    format!("Axiusflow could not start.\n\n{detail}")
 }
 
 fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
@@ -74,9 +109,30 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             let bundle_root = required_path(&mut arguments, "release bundle")?;
             require_no_more(arguments)?;
             let signed: SignedReleaseManifest = read_bounded_json(&manifest_path)?;
+            installer.recover(&hooks).map_err(|error| error.to_string())?;
+            if installer
+                .audit_active_release()
+                .map_err(|error| error.to_string())?
+                .is_some_and(|active| {
+                    active.install_generation == signed.manifest.install_generation
+                        && active.release_identity == signed.manifest.release_identity
+                })
+            {
+                // A user may re-run the same standard Windows installer. The
+                // active release audit above already verified the installed
+                // inventory; still authenticate the bundled manifest before
+                // treating this as an idempotent successful install.
+                verify_release_manifest(
+                    &signed,
+                    &verifying_key,
+                    &ReleasePolicy::native(signed.manifest.install_generation),
+                )
+                .map_err(|error| error.to_string())?;
+                return Ok(());
+            }
             installer
-                .recover(&hooks)
-                .and_then(|()| installer.install(&signed, &bundle_root, &hooks).map(|_| ()))
+                .install(&signed, &bundle_root, &hooks)
+                .map(|_| ())
                 .map_err(|error| error.to_string())
         }
         Some("--update") => {
@@ -151,7 +207,6 @@ fn bootstrap_update_and_launch(
             .map_err(|error| error.to_string())?;
         eprintln!("Axiusflow update deferred: {update_error}");
     }
-    ensure_launcher_registration(&stable_launcher)?;
     launch_active(&installer, "axiusflow_desktop")
 }
 
@@ -161,40 +216,6 @@ fn windows_start_menu_shortcut() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .map(|root| root.join("Microsoft/Windows/Start Menu/Programs/Axiusflow/Axiusflow.lnk"))
         .ok_or_else(|| "Windows Start Menu location is unavailable".to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn ensure_launcher_registration(launcher: &Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const SCRIPT: &str = "$shell=New-Object -ComObject WScript.Shell; $link=$shell.CreateShortcut($env:AXIUSFLOW_SHORTCUT); $link.TargetPath=$env:AXIUSFLOW_LAUNCHER; $link.WorkingDirectory=[IO.Path]::GetDirectoryName($env:AXIUSFLOW_LAUNCHER); $link.IconLocation=$env:AXIUSFLOW_LAUNCHER; $link.Save()";
-
-    let shortcut = windows_start_menu_shortcut()?;
-    let parent = shortcut
-        .parent()
-        .ok_or_else(|| "Windows Start Menu shortcut path is invalid".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|_| "Windows Start Menu directory could not be created".to_string())?;
-    let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-        .env("AXIUSFLOW_SHORTCUT", &shortcut)
-        .env("AXIUSFLOW_LAUNCHER", launcher)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "Windows Start Menu shortcut creation could not start".to_string())?;
-    if !status.success() || !shortcut.is_file() {
-        return Err("Windows Start Menu shortcut could not be created".to_string());
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn ensure_launcher_registration(_launcher: &Path) -> Result<(), String> {
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1197,6 +1218,13 @@ mod tests {
         assert!(valid_published_at("2024-02-29T23:59:59.1Z"));
         assert!(!valid_published_at("2026-02-30T00:00:00Z"));
         assert!(!valid_published_at("2026-09-07T24:00:00Z"));
+    }
+
+    #[test]
+    fn user_launch_failure_message_is_bounded() {
+        let message = user_launch_error_message(&"x".repeat(800));
+        assert!(message.starts_with("Axiusflow could not start.\n\n"));
+        assert_eq!(message.chars().count(), 348);
     }
 
     // Note: the relocated-child path (`uninstall_from_root_with_key` with

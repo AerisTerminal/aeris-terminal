@@ -15,6 +15,12 @@ Set-StrictMode -Version Latest
 $repo = Split-Path -Parent $PSScriptRoot
 $websiteRepo = Join-Path (Split-Path -Parent $repo) "axiusflow-website"
 $wrangler = Join-Path $websiteRepo "node_modules\.bin\wrangler.cmd"
+$isccCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+$iscc = if ($null -ne $isccCommand) {
+    $isccCommand.Source
+} else {
+    Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"
+}
 $baseUrl = "https://auth.axiusflow.com/releases"
 $bucket = "axiusflow-releases"
 
@@ -24,6 +30,10 @@ if (-not (Test-Path -LiteralPath $SigningKeyFile -PathType Leaf)) {
 
 if (-not (Test-Path -LiteralPath $wrangler -PathType Leaf)) {
     throw "Wrangler is unavailable at '$wrangler'. Install website dependencies before publishing."
+}
+
+if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+    throw "Inno Setup 6 is unavailable. Install it or add ISCC.exe to PATH before publishing Windows releases."
 }
 
 Push-Location $repo
@@ -67,7 +77,8 @@ try {
         --channel $Channel `
         --output $output `
         --r2-bucket $bucket `
-        --wrangler $wrangler
+        --wrangler $wrangler `
+        --iscc $iscc
     if ($LASTEXITCODE -ne 0) {
         throw "Release publication failed. The stable channel is unchanged unless the publisher completed successfully."
     }

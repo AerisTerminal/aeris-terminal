@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! Axiusflow's native GPUI terminal entry point.
 
 mod assets;
@@ -6252,6 +6257,7 @@ fn run_onboarding() {
         .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
                 .add_fonts(vec![
                     Cow::Borrowed(include_bytes!(
@@ -6289,6 +6295,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
         .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
                 .add_fonts(vec![
                     Cow::Borrowed(include_bytes!(
