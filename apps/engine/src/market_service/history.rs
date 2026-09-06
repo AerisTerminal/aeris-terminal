@@ -1125,14 +1125,16 @@ impl Coordinator<'_> {
             },
         );
         let key = (series.clone(), provider_generation);
+        // The provider fetch and canonical cache are shared by series, but the
+        // viewport intent belongs to each consumer. Plan against their union:
+        // a workspace at the live edge must never replace another workspace's
+        // older range or cancel the page it is already fetching.
+        let range = self
+            .combined_active_viewport_range(&series, provider_generation)
+            .unwrap_or(range);
         let replaced = self.viewport_history_ranges.insert(key.clone(), range);
         if replaced != Some(range) {
             self.viewport_history_retries.remove(&key);
-        }
-        if replaced.is_some_and(|previous| previous != range)
-            && let Some(stop) = self.history_cancellations.get(&key)
-        {
-            stop.store(true, Ordering::Release);
         }
         if self.viewport_history_retries.contains_key(&key) {
             return Ok(());
@@ -1153,6 +1155,23 @@ impl Coordinator<'_> {
         }
         self.schedule_next_coinbase_viewport_page(&series, provider_generation);
         Ok(())
+    }
+
+    fn combined_active_viewport_range(
+        &self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> Option<HistoryRange> {
+        self.active_viewports
+            .values()
+            .filter(|viewport| {
+                viewport.series == *series && viewport.provider_generation == generation
+            })
+            .map(|viewport| viewport.range)
+            .reduce(|left, right| HistoryRange {
+                start_unix_nanos: left.start_unix_nanos.min(right.start_unix_nanos),
+                end_unix_nanos: left.end_unix_nanos.max(right.end_unix_nanos),
+            })
     }
 
     /// Seeds the live aggregator from installed history and drains the buffer.
@@ -2080,6 +2099,24 @@ impl Coordinator<'_> {
                     .and_then(|status| status.generation)
                     == Some(viewport.provider_generation)
         });
+        let pending_viewports = self
+            .viewport_history_ranges
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in pending_viewports {
+            let (series, generation) = &key;
+            if let Some(range) = self.combined_active_viewport_range(series, *generation) {
+                let changed =
+                    self.viewport_history_ranges.insert(key.clone(), range) != Some(range);
+                if changed {
+                    self.viewport_history_retries.remove(&key);
+                }
+            } else {
+                self.viewport_history_ranges.remove(&key);
+                self.viewport_history_retries.remove(&key);
+            }
+        }
         let unused_coverage = self
             .history_coverage
             .keys()

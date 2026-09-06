@@ -2792,6 +2792,110 @@ fn exhausting_the_demanded_repair_range_flushes_one_accumulated_covering_snapsho
 }
 
 #[test]
+fn shared_series_viewports_union_without_cancelling_each_other() {
+    let (history_tx, history_rx) = mpsc::sync_channel(2);
+    let (storage_tx, storage_rx) = mpsc::sync_channel(4);
+    let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
+    let realtime_stop = Arc::new(AtomicBool::new(true));
+    let mut engine = configured_engine().expect("engine configures");
+    let first = ConsumerId(id(1).expect("first consumer"));
+    let second = ConsumerId(id(2).expect("second consumer"));
+    let generation = GenerationId(NonZeroU64::MIN);
+    let series = internal_series(&btc()).expect("series");
+    for consumer_id in [first, second] {
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(NonZeroU64::MIN),
+                    workspace_id: WorkspaceId(consumer_id.0),
+                    consumer_id,
+                },
+                true,
+            )
+            .expect("consumer registers");
+        engine
+            .set_series_demand(consumer_id, generation, &series)
+            .expect("shared demand installs");
+    }
+    let mut coordinator = retained_history_coordinator(
+        engine,
+        &history_tx,
+        &storage_tx,
+        &realtime_tx,
+        &realtime_stop,
+        first,
+        &series,
+    );
+    coordinator.events.insert(second, ConsumerEvents::default());
+    let provider_generation = coordinator
+        .provider_generation_for_series(&series)
+        .expect("provider generation");
+    let interval = 60_000_000_000_i64;
+    let end = align_down(current_unix_nanos().expect("clock"), interval);
+    let first_older =
+        Viewport::try_new(end - 800 * interval, end - 700 * interval).expect("first viewport");
+    coordinator
+        .request_viewport_history(first, generation, first_older)
+        .expect("first viewport queues");
+    let StorageRequest::ReadRange(_, _, first_range) =
+        storage_rx.try_recv().expect("first cache read")
+    else {
+        panic!("viewport uses a range read");
+    };
+    coordinator.viewport_history_local_completed(
+        &series,
+        provider_generation,
+        first_range,
+        Err("fixture cache miss".to_string()),
+    );
+    let _ = history_rx.try_recv().expect("provider page starts");
+    let stop = Arc::clone(
+        coordinator
+            .history_cancellations
+            .get(&(series.clone(), provider_generation))
+            .expect("provider page is cancellable"),
+    );
+
+    let second_latest =
+        Viewport::try_new(end - 100 * interval, end).expect("second latest viewport");
+    coordinator
+        .request_viewport_history(second, generation, second_latest)
+        .expect("second viewport joins");
+    assert_eq!(
+        coordinator
+            .viewport_history_ranges
+            .get(&(series.clone(), provider_generation)),
+        Some(&first_range),
+        "a live-edge workspace cannot erase another workspace's older demand"
+    );
+    assert!(!stop.load(Ordering::Acquire));
+
+    let second_older = Viewport::try_new(end - 1_600 * interval, end - 1_500 * interval)
+        .expect("second older viewport");
+    coordinator
+        .request_viewport_history(second, generation, second_older)
+        .expect("second viewport expands");
+    assert!(
+        coordinator
+            .viewport_history_ranges
+            .get(&(series.clone(), provider_generation))
+            .is_some_and(|range| range.start_unix_nanos < first_range.start_unix_nanos),
+        "the shared target expands to the oldest active workspace"
+    );
+    assert!(!stop.load(Ordering::Acquire));
+
+    assert!(coordinator.engine.remove_consumer(second));
+    coordinator.prune_history_tracking();
+    assert_eq!(
+        coordinator
+            .viewport_history_ranges
+            .get(&(series, provider_generation)),
+        Some(&first_range),
+        "retiring a workspace contracts the shared target to the remaining demand"
+    );
+}
+
+#[test]
 fn newer_viewport_rearms_after_an_older_backfill_fails() {
     let (history_tx, history_rx) = mpsc::sync_channel(1);
     let (storage_tx, storage_rx) = mpsc::sync_channel(1);
