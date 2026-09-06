@@ -28,7 +28,7 @@ use axiusflow_engine_protocol::{
     InstallProviderInstrument, MarketBar, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceState, envelope,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
 const CLIENT_ID: u64 = 1;
@@ -68,6 +68,8 @@ const LIVENESS_DEADLINE: Duration = Duration::from_mins(2);
 /// so the chart is never blank, then repairs it from the provider; this is the
 /// floor the repair has to clear.
 const HISTORY_DEPTH: usize = 200;
+/// Settled one-minute candles required for the independent value comparison.
+const OHLCV_COMPARISON_BARS: usize = 20;
 
 /// Intervals the chart cycles through. All are realtime-capable.
 ///
@@ -477,6 +479,123 @@ fn carries_the_open_candle(fold: &SeriesFold) -> bool {
         .values()
         .next_back()
         .is_some_and(|bar| bar.exchange_timestamp_seconds >= open_bucket)
+}
+
+#[derive(Deserialize)]
+struct IndependentCandles {
+    candles: Vec<IndependentCandle>,
+}
+
+#[derive(Deserialize)]
+struct IndependentCandle {
+    start: String,
+    high: String,
+    low: String,
+    open: String,
+    close: String,
+    volume: String,
+}
+
+/// Parses a provider decimal without sharing the adapter's decoder.
+fn independent_fixed(source: &str, scale: u32) -> Result<i64, String> {
+    let (negative, unsigned) = source
+        .strip_prefix('-')
+        .map_or((false, source), |value| (true, value));
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if source.is_empty()
+        || source.len() > 40
+        || unsigned.matches('.').count() > 1
+        || (integer.is_empty() && fraction.is_empty())
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("independent candle contains an invalid decimal".to_string());
+    }
+    let scale = usize::try_from(scale)
+        .ok()
+        .filter(|scale| *scale <= 18)
+        .ok_or_else(|| "independent candle scale is invalid".to_string())?;
+    let mut magnitude = 0_i128;
+    for byte in integer
+        .bytes()
+        .chain(fraction.bytes().take(scale))
+        .chain(std::iter::repeat_n(
+            b'0',
+            scale.saturating_sub(fraction.len()),
+        ))
+    {
+        magnitude = magnitude
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(i128::from(byte - b'0')))
+            .ok_or_else(|| "independent candle decimal overflowed".to_string())?;
+    }
+    if fraction
+        .as_bytes()
+        .get(scale)
+        .is_some_and(|digit| *digit >= b'5')
+    {
+        magnitude = magnitude
+            .checked_add(1)
+            .ok_or_else(|| "independent candle decimal overflowed".to_string())?;
+    }
+    i64::try_from(if negative { -magnitude } else { magnitude })
+        .map_err(|_| "independent candle decimal overflowed".to_string())
+}
+
+fn independent_coinbase_candles(
+    symbol: &str,
+    start: i64,
+    end: i64,
+    price_scale: u32,
+    quantity_scale: u32,
+) -> Result<BTreeMap<i64, MarketBar>, String> {
+    let url = format!(
+        "https://api.coinbase.com/api/v3/brokerage/market/products/{symbol}/candles?start={start}&end={end}&granularity=ONE_MINUTE&limit=350"
+    );
+    let mut response = ureq::get(&url)
+        .header("Accept", "application/json")
+        .header("Cache-Control", "no-cache")
+        .call()
+        .map_err(|error| format!("independent Coinbase request failed: {error}"))?;
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(512 * 1_024)
+        .read_to_vec()
+        .map_err(|error| format!("independent Coinbase response failed: {error}"))?;
+    let parsed: IndependentCandles = serde_json::from_slice(&body)
+        .map_err(|_| "independent Coinbase response is malformed".to_string())?;
+    if parsed.candles.len() > 350 {
+        return Err("independent Coinbase response exceeds its request bound".to_string());
+    }
+    let mut bars = BTreeMap::new();
+    for candle in parsed.candles {
+        let timestamp = candle
+            .start
+            .parse::<i64>()
+            .ok()
+            .filter(|timestamp| *timestamp >= 0 && *timestamp % 60 == 0)
+            .ok_or_else(|| "independent candle timestamp is invalid".to_string())?;
+        let bar = MarketBar {
+            source_sequence: u64::try_from(timestamp.div_euclid(60))
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| "independent candle sequence overflowed".to_string())?,
+            exchange_timestamp_seconds: timestamp,
+            exchange_timestamp_unix_nanos: timestamp
+                .checked_mul(1_000_000_000)
+                .ok_or_else(|| "independent candle timestamp overflowed".to_string())?,
+            open: independent_fixed(&candle.open, price_scale)?,
+            high: independent_fixed(&candle.high, price_scale)?,
+            low: independent_fixed(&candle.low, price_scale)?,
+            close: independent_fixed(&candle.close, price_scale)?,
+            volume: independent_fixed(&candle.volume, quantity_scale)?,
+        };
+        if bars.insert(timestamp, bar).is_some() {
+            return Err("independent Coinbase response contains a duplicate candle".to_string());
+        }
+    }
+    Ok(bars)
 }
 
 fn open_bucket(interval_seconds: i64) -> Option<i64> {
@@ -960,6 +1079,93 @@ fn live_coinbase_monthly_reaches_a_forming_update() {
         "monthly demand reported neither authoritative live nor explicit provisional readiness"
     );
     assert!(update, "monthly demand never produced a forming update");
+    service
+        .shutdown(Duration::from_secs(10))
+        .expect("engine shuts down");
+}
+
+#[test]
+#[ignore = "compares live engine candles with an independently decoded Coinbase response"]
+fn live_coinbase_closed_ohlcv_matches_independent_response() {
+    let gate = Gate {
+        provider: "coinbase",
+        symbols: &SYMBOLS,
+        timeframes: &TIMEFRAMES,
+    };
+    let service = start_gate_service(&gate);
+    let instrument = install_symbol(&service, "coinbase", "BTC-USD", 1);
+    let mut fold = start_series(&service, "coinbase", &instrument, 60, 1);
+
+    // Give a local-cache bootstrap time to be replaced by the provider page.
+    // Every publication is folded exactly as the desktop folds it.
+    let settle_deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < settle_deadline && fold.snapshots < 2 {
+        if let Some(event) = service
+            .poll_event(CLIENT_ID, CONSUMER_ID)
+            .expect("market poll succeeds")
+        {
+            absorb(&mut fold, event);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let open_minute = open_bucket(60).expect("wall clock is available");
+    let settled_before = open_minute.saturating_sub(60);
+    let mut engine_bars = fold
+        .bars
+        .values()
+        .filter(|bar| bar.exchange_timestamp_seconds < settled_before)
+        .rev()
+        .take(OHLCV_COMPARISON_BARS)
+        .copied()
+        .collect::<Vec<_>>();
+    engine_bars.reverse();
+    assert_eq!(
+        engine_bars.len(),
+        OHLCV_COMPARISON_BARS,
+        "engine did not expose enough settled candles for comparison"
+    );
+    let first = engine_bars
+        .first()
+        .expect("comparison has a first candle")
+        .exchange_timestamp_seconds;
+    let last = engine_bars
+        .last()
+        .expect("comparison has a last candle")
+        .exchange_timestamp_seconds;
+    let oracle = independent_coinbase_candles(
+        &instrument.provider_symbol,
+        first,
+        last,
+        instrument.price_scale,
+        instrument.quantity_scale,
+    )
+    .expect("independent Coinbase candles load");
+
+    for engine in &engine_bars {
+        let independent = oracle
+            .get(&engine.exchange_timestamp_seconds)
+            .unwrap_or_else(|| {
+                panic!(
+                    "independent response omitted settled candle {}",
+                    engine.exchange_timestamp_seconds
+                )
+            });
+        assert_eq!(
+            engine, independent,
+            "OHLCV differs at settled candle {}",
+            engine.exchange_timestamp_seconds
+        );
+    }
+    eprintln!(
+        "independent_ohlcv provider=coinbase instrument={} candles={} first={} last={} price_scale={} quantity_scale={}",
+        instrument.provider_symbol,
+        engine_bars.len(),
+        first,
+        last,
+        instrument.price_scale,
+        instrument.quantity_scale
+    );
     service
         .shutdown(Duration::from_secs(10))
         .expect("engine shuts down");
