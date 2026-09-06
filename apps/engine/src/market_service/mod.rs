@@ -33,6 +33,7 @@ use axiusflow_local_history::{
 use axiusflow_market_data::{
     BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
     OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState as CanonicalOrderBookState,
+    TopOfBookQuote,
 };
 use axiusflow_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, EngineResourceMode,
@@ -79,6 +80,7 @@ const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
+const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
 const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 50;
 const MAXIMUM_TRADED_VOLUME_LEVELS: usize = 4_096;
 
@@ -160,6 +162,27 @@ struct HistoryRequest {
     maximum_bars: usize,
     range: Option<HistoryRange>,
     stop: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeferredHistoryRequest {
+    Full,
+    Range(HistoryRange),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HistoryFetchWindow {
+    pub(crate) maximum_bars: usize,
+    pub(crate) range: Option<HistoryRange>,
+}
+
+impl HistoryRequest {
+    const fn req_window(&self) -> HistoryFetchWindow {
+        HistoryFetchWindow {
+            maximum_bars: self.maximum_bars,
+            range: self.range,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -264,6 +287,7 @@ struct ConsumerEvents {
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
+    top_of_book: Option<TopOfBookQuote>,
     traded_volumes: BTreeMap<i64, i64>,
 }
 
@@ -289,7 +313,6 @@ struct HyperliquidLiveHandoff {
     connected: bool,
     history_ready: bool,
     dirty: bool,
-    published: Option<PublishedTailState>,
 }
 
 struct RithmicLiveHandoff {
@@ -303,7 +326,6 @@ struct RithmicLiveHandoff {
     connected: bool,
     history_ready: bool,
     dirty: bool,
-    published: Option<PublishedTailState>,
     /// The sequence of the period the provider caught open, when it caught one.
     ///
     /// Live trades revise an open period in place; they may never touch a period
@@ -330,22 +352,11 @@ enum RithmicLiveCadence {
     },
 }
 
-/// One live publication for a series.
-///
-/// `Tails` is an append-only run: every bar extends the canonical series by one
-/// sequence, or replaces the forming bar in place. A bucket roll therefore adds
-/// the completed bar and opens the next one without ever replacing the covering
-/// history — which is what used to discard a backfill the moment a bar rolled.
+/// One live publication for a series. Live handoffs publish only incremental
+/// tails; covering history remains owned by `MarketEngine` and is never copied
+/// out of a handoff on the hot path.
 enum LiveSeriesPublication {
     Tails(Vec<MarketBar>),
-    Covering(Vec<MarketBar>),
-}
-
-/// What the canonical series last accepted from one live handoff.
-#[derive(Clone, Copy)]
-enum PublishedTailState {
-    Covering(u64),
-    Forming(u64),
 }
 
 /// A live bar that neither continues the published tail nor revises it in place

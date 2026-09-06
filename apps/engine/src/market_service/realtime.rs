@@ -1,17 +1,51 @@
 use super::{
     BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CanonicalOrderBookState, ConsumerId, Coordinator,
-    DepthSnapshot, FailureStage, FormingBar, HISTORY_BARS_PER_SERIES, HyperliquidCandleDemand,
-    HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
+    DepthSnapshot, FailureStage, FormingBar, HyperliquidCandleDemand, HyperliquidDemand,
+    HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
-    LIVE_BUFFER_CAPACITY, LiveSeriesPublication, MAXIMUM_PUBLISHED_DEPTH_LEVELS,
-    MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
-    OrderBookApplyOutcome, Ordering, PersistenceState, ProviderConnectionState, ProviderGeneration,
-    ProviderHealth, ProviderOrderBook, ProviderRequest, PublishedTailState, ResourceMode,
-    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff,
-    RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection, SeriesLoadState, VecDeque,
-    chart_stream_requirements, hyperliquid_interval_for_period, id, ipc_series, merge_live_candle,
-    order_flow_payload, publish_state, series_state_with_persistence, series_update_message,
+    LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication,
+    MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream,
+    MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering, PersistenceState,
+    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderOrderBook,
+    ProviderRequest, ResourceMode, RithmicCalendarPeriod, RithmicExchangeCalendar,
+    RithmicLiveCadence, RithmicLiveHandoff, RithmicRealtimeControl, RithmicRealtimeEvent,
+    RithmicSelection, SeriesLoadState, TopOfBookQuote, VecDeque, chart_stream_requirements,
+    hyperliquid_interval_for_period, id, ipc_series, merge_live_candle, order_flow_payload,
+    series_state_with_persistence, series_update_message,
 };
+use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
+
+const fn rithmic_invalidation_detail(reason: Option<ProviderInvalidationReason>) -> &'static str {
+    match reason {
+        Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
+        Some(ProviderInvalidationReason::Authentication) => "Rithmic authentication was rejected",
+        Some(ProviderInvalidationReason::AgreementRequired) => {
+            "Rithmic account requires an agreement before market data can stream"
+        }
+        Some(ProviderInvalidationReason::UnsupportedSystem) => {
+            "Rithmic Test system is unavailable for this account"
+        }
+        Some(ProviderInvalidationReason::SchemaMismatch) => {
+            "Rithmic protocol schema does not match the installed provider kit"
+        }
+        Some(ProviderInvalidationReason::HeartbeatSilence) => {
+            "Rithmic heartbeat response timed out"
+        }
+        Some(ProviderInvalidationReason::MessageSilence) => {
+            "Rithmic market-data stream stopped producing messages"
+        }
+        Some(ProviderInvalidationReason::SequenceGap) => {
+            "Rithmic market-data sequence continuity was lost"
+        }
+        Some(ProviderInvalidationReason::QueueOverflow) => {
+            "Rithmic callback queue overflowed before market data could be consumed"
+        }
+        Some(ProviderInvalidationReason::MalformedMessage) => {
+            "Rithmic sent market data that failed protocol validation"
+        }
+        None => "Rithmic live session is recovering",
+    }
+}
 
 impl ProviderOrderBook {
     pub(super) fn new(instrument: InstallProviderInstrument) -> Self {
@@ -20,6 +54,7 @@ impl ProviderOrderBook {
             book: OrderBook::new(
                 NonZeroUsize::new(MAXIMUM_PUBLISHED_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
+            top_of_book: None,
             traded_volumes: BTreeMap::new(),
         }
     }
@@ -44,18 +79,25 @@ impl ProviderOrderBook {
         self.traded_volumes.insert(price, volume);
         true
     }
-}
 
-pub(super) fn requires_covering_publication(
-    published: Option<PublishedTailState>,
-    active_sequence: u64,
-) -> bool {
-    match published {
-        Some(PublishedTailState::Covering(sequence)) => {
-            sequence.checked_add(1) != Some(active_sequence)
+    pub(super) fn install_top_of_book(&mut self, quote: &TopOfBookQuote) -> bool {
+        if quote.metadata.provider_id != self.instrument.provider
+            || quote.metadata.instrument_id != self.instrument.instrument_id
+            || quote.metadata.entitlement_id != self.instrument.entitlement_id
+            || quote.metadata.session_generation < self.instrument.session_generation
+            || quote.validate().is_err()
+        {
+            return false;
         }
-        Some(PublishedTailState::Forming(sequence)) => sequence != active_sequence,
-        None => true,
+        if self.top_of_book.as_ref().is_some_and(|current| {
+            current.metadata.session_generation > quote.metadata.session_generation
+                || (current.metadata.session_generation == quote.metadata.session_generation
+                    && current.metadata.source_sequence >= quote.metadata.source_sequence)
+        }) {
+            return false;
+        }
+        self.top_of_book = Some(quote.clone());
+        true
     }
 }
 
@@ -97,7 +139,6 @@ impl RithmicLiveHandoff {
             connected: false,
             history_ready: false,
             dirty: false,
-            published: None,
             forming_tail_sequence: None,
             live_session_generation: None,
             last_trade_sequence: None,
@@ -112,7 +153,6 @@ impl RithmicLiveHandoff {
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
-        self.published = None;
         self.forming_tail_sequence = None;
         self.live_session_generation = None;
         self.last_trade_sequence = None;
@@ -147,7 +187,8 @@ impl RithmicLiveHandoff {
                     .last()
                     .is_none_or(|last| last.source_sequence < forming.bar.source_sequence)
         });
-        let mut working = bars.to_vec();
+        let start = bars.len().saturating_sub(LIVE_HANDOFF_HISTORY_BARS);
+        let mut working = bars[start..].to_vec();
         if let Some(forming) = &forming {
             working.push(forming.bar);
         }
@@ -157,14 +198,6 @@ impl RithmicLiveHandoff {
             .exchange_timestamp_unix_nanos;
         self.price_scale = price_scale;
         self.quantity_scale = quantity_scale;
-        self.published = if forming.is_some() {
-            bars.last()
-                .map(|bar| PublishedTailState::Covering(bar.source_sequence))
-        } else {
-            working
-                .last()
-                .map(|bar| PublishedTailState::Covering(bar.source_sequence))
-        };
         self.forming_tail_sequence = forming.as_ref().map(|forming| forming.bar.source_sequence);
         self.bars = working;
         self.history_boundary_unix_nanos = handoff_boundary_unix_nanos
@@ -201,13 +234,7 @@ impl RithmicLiveHandoff {
         }
         let active = self.bars.last().copied()?;
         self.dirty = false;
-        let covering = requires_covering_publication(self.published, active.source_sequence);
-        self.published = Some(PublishedTailState::Forming(active.source_sequence));
-        if covering {
-            Some(LiveSeriesPublication::Covering(self.bars.clone()))
-        } else {
-            Some(LiveSeriesPublication::Tails(vec![active]))
-        }
+        Some(LiveSeriesPublication::Tails(vec![active]))
     }
 
     pub(super) fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
@@ -314,8 +341,9 @@ impl RithmicLiveHandoff {
             }
         } else {
             self.bars.push(next);
-            if self.bars.len() > HISTORY_BARS_PER_SERIES + 1 {
-                self.bars.remove(0);
+            if self.bars.len() > LIVE_HANDOFF_HISTORY_BARS {
+                let excess = self.bars.len() - LIVE_HANDOFF_HISTORY_BARS;
+                self.bars.drain(..excess);
             }
         }
         self.live_session_generation = Some(trade.metadata.session_generation);
@@ -379,7 +407,6 @@ impl HyperliquidLiveHandoff {
             connected: false,
             history_ready: false,
             dirty: false,
-            published: None,
         }
     }
 
@@ -391,7 +418,6 @@ impl HyperliquidLiveHandoff {
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
-        self.published = None;
     }
 
     /// Closes the history/live seam with provider candles.
@@ -413,15 +439,13 @@ impl HyperliquidLiveHandoff {
             bars.last()
                 .is_none_or(|last| last.source_sequence < forming.source_sequence)
         });
-        let working = bars.to_vec();
+        let start = bars.len().saturating_sub(LIVE_HANDOFF_HISTORY_BARS);
+        let working = bars[start..].to_vec();
         if working.is_empty() && forming.is_none() {
             return Err("Hyperliquid live handoff requires history".to_string());
         }
         self.price_scale = price_scale;
         self.quantity_scale = quantity_scale;
-        self.published = working
-            .last()
-            .map(|bar| PublishedTailState::Covering(bar.source_sequence));
         self.bars = working;
         self.forming = forming;
         // The open period has to reach the consumer even if no candle arrives
@@ -443,20 +467,7 @@ impl HyperliquidLiveHandoff {
         }
         let active = self.forming.or_else(|| self.bars.last().copied())?;
         self.dirty = false;
-        let covering = requires_covering_publication(self.published, active.source_sequence);
-        self.published = Some(PublishedTailState::Forming(active.source_sequence));
-        if covering {
-            let mut bars = self.bars.clone();
-            if self
-                .forming
-                .is_some_and(|forming| forming.source_sequence == active.source_sequence)
-            {
-                bars.push(active);
-            }
-            Some(LiveSeriesPublication::Covering(bars))
-        } else {
-            Some(LiveSeriesPublication::Tails(vec![active]))
-        }
+        Some(LiveSeriesPublication::Tails(vec![active]))
     }
 
     pub(super) fn accept_candle(&mut self, candle: &HyperliquidLiveCandle) -> Result<(), String> {
@@ -512,6 +523,10 @@ impl HyperliquidLiveHandoff {
         };
         bar.validate().map_err(|error| error.to_string())?;
         merge_live_candle(&mut self.bars, &mut self.forming, bar)?;
+        if self.bars.len() > LIVE_HANDOFF_HISTORY_BARS {
+            let excess = self.bars.len() - LIVE_HANDOFF_HISTORY_BARS;
+            self.bars.drain(..excess);
+        }
         Ok(true)
     }
 }
@@ -626,6 +641,23 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn handle_rithmic_realtime(&mut self, event: RithmicRealtimeEvent) {
+        let event_generation = match &event {
+            RithmicRealtimeEvent::Connecting(generation)
+            | RithmicRealtimeEvent::Connected(generation)
+            | RithmicRealtimeEvent::Heartbeat(generation)
+            | RithmicRealtimeEvent::Trade(generation, _)
+            | RithmicRealtimeEvent::Quote(generation, _)
+            | RithmicRealtimeEvent::Depth(generation, _)
+            | RithmicRealtimeEvent::Recovering(generation, _)
+            | RithmicRealtimeEvent::Disconnected(generation, _) => *generation,
+        };
+        if self
+            .rithmic_stop_pending
+            .is_some_and(|pending| pending.0.get() == event_generation)
+            && !matches!(event, RithmicRealtimeEvent::Disconnected(..))
+        {
+            return;
+        }
         match event {
             RithmicRealtimeEvent::Connecting(generation) => self.rithmic_connecting(generation),
             RithmicRealtimeEvent::Connected(generation)
@@ -633,21 +665,76 @@ impl Coordinator<'_> {
             RithmicRealtimeEvent::Trade(generation, trade) => {
                 self.rithmic_trade(generation, &trade);
             }
+            RithmicRealtimeEvent::Quote(generation, quote) => {
+                self.provider_quote("rithmic", generation, &quote);
+            }
             RithmicRealtimeEvent::Depth(generation, snapshot) => {
                 self.provider_depth("rithmic", generation, &snapshot);
             }
-            RithmicRealtimeEvent::Recovering(generation) => {
-                self.rithmic_recovering(generation, "Rithmic live session is recovering");
+            RithmicRealtimeEvent::Recovering(generation, reason) => {
+                self.rithmic_recovering(generation, rithmic_invalidation_detail(reason));
             }
-            RithmicRealtimeEvent::Disconnected(generation) => {
+            RithmicRealtimeEvent::Disconnected(generation, reason) => {
+                if self
+                    .rithmic_stop_pending
+                    .is_some_and(|pending| pending.0.get() == generation)
+                {
+                    self.rithmic_stop_pending = None;
+                    if !self.rithmic_live.is_empty() {
+                        self.rithmic_selection = None;
+                        self.rithmic_pending_selection = None;
+                        let demanded = self.rithmic_live.keys().cloned().collect::<Vec<_>>();
+                        for series in demanded {
+                            let _ = self.ensure_realtime(&series);
+                        }
+                        self.rithmic_recovering(
+                            generation,
+                            "Rithmic realtime restarted after idle-stop overlap",
+                        );
+                        return;
+                    }
+                    self.rithmic_selection = None;
+                    self.rithmic_pending_selection = None;
+                    if let Ok(generation) = id(generation).map(ProviderGeneration) {
+                        let _ = self.engine.end_provider_session("rithmic", generation);
+                        self.broadcast_provider_for(
+                            "rithmic",
+                            ProviderConnectionState::Disconnected,
+                            generation,
+                            None,
+                        );
+                    }
+                    return;
+                }
                 self.rithmic_selection = None;
                 self.rithmic_pending_selection = None;
-                self.rithmic_recovering(generation, "Rithmic live session is recovering");
+                if let Some(reason) = reason {
+                    self.rithmic_failed(generation, rithmic_invalidation_detail(Some(reason)));
+                } else {
+                    self.rithmic_recovering(generation, "Rithmic live session is recovering");
+                }
             }
         }
     }
 
     pub(super) fn handle_hyperliquid_realtime(&mut self, event: HyperliquidRealtimeEvent) {
+        let event_generation = match &event {
+            HyperliquidRealtimeEvent::Connecting(generation)
+            | HyperliquidRealtimeEvent::Connected(generation)
+            | HyperliquidRealtimeEvent::Heartbeat(generation)
+            | HyperliquidRealtimeEvent::Candle(generation, ..)
+            | HyperliquidRealtimeEvent::Trades(generation, _)
+            | HyperliquidRealtimeEvent::Depth(generation, _)
+            | HyperliquidRealtimeEvent::Recovering(generation)
+            | HyperliquidRealtimeEvent::Disconnected(generation) => *generation,
+        };
+        if self
+            .hyperliquid_stop_pending
+            .is_some_and(|pending| pending.0.get() == event_generation)
+            && !matches!(event, HyperliquidRealtimeEvent::Disconnected(_))
+        {
+            return;
+        }
         match event {
             HyperliquidRealtimeEvent::Connecting(generation) => {
                 self.hyperliquid_connecting(generation);
@@ -671,6 +758,33 @@ impl Coordinator<'_> {
                 self.hyperliquid_recovering(generation, "Hyperliquid live session is recovering");
             }
             HyperliquidRealtimeEvent::Disconnected(generation) => {
+                if self
+                    .hyperliquid_stop_pending
+                    .is_some_and(|pending| pending.0.get() == generation)
+                {
+                    self.hyperliquid_stop_pending = None;
+                    if !self.hyperliquid_live.is_empty() || !self.order_books.is_empty() {
+                        self.hyperliquid_engaged = false;
+                        self.hyperliquid_demand_dirty = true;
+                        self.hyperliquid_recovering(
+                            generation,
+                            "Hyperliquid realtime restarted after idle-stop overlap",
+                        );
+                        return;
+                    }
+                    self.hyperliquid_engaged = false;
+                    self.hyperliquid_demand_dirty = false;
+                    if let Ok(generation) = id(generation).map(ProviderGeneration) {
+                        let _ = self.engine.end_provider_session("hyperliquid", generation);
+                        self.broadcast_provider_for(
+                            "hyperliquid",
+                            ProviderConnectionState::Disconnected,
+                            generation,
+                            None,
+                        );
+                    }
+                    return;
+                }
                 self.hyperliquid_engaged = false;
                 self.hyperliquid_recovering(generation, "Hyperliquid live session is recovering");
             }
@@ -716,9 +830,13 @@ impl Coordinator<'_> {
                 let _ = self.enqueue_local_history(&selected, generation);
             }
         }
-        let _ =
-            self.engine
-                .set_provider_health("hyperliquid", generation, ProviderHealth::Connecting);
+        if self
+            .engine
+            .set_provider_health("hyperliquid", generation, ProviderHealth::Connecting)
+            .is_err()
+        {
+            return;
+        }
         self.broadcast_provider_for(
             "hyperliquid",
             ProviderConnectionState::Connecting,
@@ -739,9 +857,13 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let _ = self
+        if self
             .engine
-            .set_provider_health("hyperliquid", generation, ProviderHealth::Online);
+            .set_provider_health("hyperliquid", generation, ProviderHealth::Online)
+            .is_err()
+        {
+            return;
+        }
         self.broadcast_provider_for(
             "hyperliquid",
             ProviderConnectionState::Online,
@@ -913,9 +1035,13 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let _ =
-            self.engine
-                .set_provider_health("hyperliquid", generation, ProviderHealth::Recovering);
+        if self
+            .engine
+            .set_provider_health("hyperliquid", generation, ProviderHealth::Recovering)
+            .is_err()
+        {
+            return;
+        }
         self.broadcast_provider_for(
             "hyperliquid",
             ProviderConnectionState::Recovering,
@@ -979,9 +1105,13 @@ impl Coordinator<'_> {
                 let _ = self.enqueue_local_history(&selected, generation);
             }
         }
-        let _ = self
+        if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Connecting);
+            .set_provider_health("rithmic", generation, ProviderHealth::Connecting)
+            .is_err()
+        {
+            return;
+        }
         self.broadcast_provider_for(
             "rithmic",
             ProviderConnectionState::Connecting,
@@ -1002,9 +1132,13 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let _ = self
+        if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Online);
+            .set_provider_health("rithmic", generation, ProviderHealth::Online)
+            .is_err()
+        {
+            return;
+        }
         self.broadcast_provider_for("rithmic", ProviderConnectionState::Online, generation, None);
         let missing = self
             .rithmic_live
@@ -1179,6 +1313,35 @@ impl Coordinator<'_> {
         }
     }
 
+    pub(super) fn provider_quote(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        quote: &TopOfBookQuote,
+    ) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            != Some(generation)
+            || quote.metadata.provider_id != provider
+            || quote.metadata.session_generation != generation.0.get()
+        {
+            return;
+        }
+        let instrument_id = quote.metadata.instrument_id.clone();
+        let changed = self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument_id.clone()))
+            .is_some_and(|order_book| order_book.install_top_of_book(quote));
+        if changed {
+            self.broadcast_order_book(provider, &instrument_id);
+        }
+    }
+
     pub(super) fn rithmic_recovering(&mut self, generation: u64, detail: &'static str) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
@@ -1191,12 +1354,59 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let _ = self
+        if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Recovering);
+            .set_provider_health("rithmic", generation, ProviderHealth::Recovering)
+            .is_err()
+        {
+            return;
+        }
         self.broadcast_provider_for(
             "rithmic",
             ProviderConnectionState::Recovering,
+            generation,
+            Some(detail),
+        );
+        for live in self.rithmic_live.values_mut() {
+            live.connected = false;
+        }
+        let stale_books = self
+            .order_books
+            .iter_mut()
+            .filter(|((provider, _), _)| provider == "rithmic")
+            .filter_map(|(identity, order_book)| {
+                order_book.book.mark_stale();
+                matches!(order_book.book.state(), CanonicalOrderBookState::Stale)
+                    .then(|| identity.clone())
+            })
+            .collect::<Vec<_>>();
+        for (provider, instrument_id) in stale_books {
+            self.broadcast_order_book(&provider, &instrument_id);
+        }
+    }
+
+    fn rithmic_failed(&mut self, generation: u64, detail: &'static str) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status("rithmic")
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        if self
+            .engine
+            .set_provider_health("rithmic", generation, ProviderHealth::Failed)
+            .is_err()
+        {
+            return;
+        }
+        self.broadcast_provider_for(
+            "rithmic",
+            ProviderConnectionState::Failed,
             generation,
             Some(detail),
         );
@@ -1249,7 +1459,7 @@ impl Coordinator<'_> {
             })
             .collect::<Vec<_>>();
         for (series, generation, price_scale, quantity_scale, update) in ready {
-            let published = match update {
+            let published: Result<(), axiusflow_market_engine::EngineError> = match update {
                 LiveSeriesPublication::Tails(bars) => bars.into_iter().try_for_each(|bar| {
                     let publications = self.engine.install_realtime_tail(
                         generation,
@@ -1274,22 +1484,6 @@ impl Coordinator<'_> {
                     }
                     Ok(())
                 }),
-                LiveSeriesPublication::Covering(bars) => self
-                    .engine
-                    .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
-                    .map(|publications| {
-                        for publication in publications {
-                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                                publish_state(
-                                    events,
-                                    &publication,
-                                    SeriesLoadState::Live,
-                                    PersistenceState::Durable,
-                                    None,
-                                );
-                            }
-                        }
-                    }),
             };
             if let Err(error) = published {
                 if let Some(live) = self.rithmic_live.get_mut(&series) {
@@ -1334,7 +1528,7 @@ impl Coordinator<'_> {
 
     /// Rebuilds the complete desired Hyperliquid subscription set from live
     /// handoffs and depth demand. Candles follow chart series, trades follow
-    /// live instruments, and books follow DOM demand; nothing else subscribes.
+    /// live instruments, and books follow Order Book demand; nothing else subscribes.
     pub(super) fn hyperliquid_demand(&self) -> HyperliquidDemand {
         let mut candles = BTreeSet::new();
         let mut trades = BTreeSet::new();
@@ -1432,7 +1626,7 @@ impl Coordinator<'_> {
             })
             .collect::<Vec<_>>();
         for (series, generation, price_scale, quantity_scale, update) in ready {
-            let published = match update {
+            let published: Result<(), axiusflow_market_engine::EngineError> = match update {
                 LiveSeriesPublication::Tails(bars) => bars.into_iter().try_for_each(|bar| {
                     let publications = self.engine.install_realtime_tail(
                         generation,
@@ -1457,22 +1651,6 @@ impl Coordinator<'_> {
                     }
                     Ok(())
                 }),
-                LiveSeriesPublication::Covering(bars) => self
-                    .engine
-                    .install_realtime(generation, &series, price_scale, quantity_scale, bars, true)
-                    .map(|publications| {
-                        for publication in publications {
-                            if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                                publish_state(
-                                    events,
-                                    &publication,
-                                    SeriesLoadState::Live,
-                                    PersistenceState::Durable,
-                                    None,
-                                );
-                            }
-                        }
-                    }),
             };
             if let Err(error) = published {
                 if let Some(live) = self.hyperliquid_live.get_mut(&series) {
@@ -1581,28 +1759,40 @@ impl Coordinator<'_> {
         }
     }
     pub(super) fn stop_realtime_if_idle(&mut self) {
-        if self.rithmic_live.is_empty() && self.rithmic_selection.is_some() {
-            self.providers.stop("rithmic");
-            self.rithmic_selection = None;
-            self.rithmic_pending_selection = None;
-            if let Some(generation) = self
+        if self.rithmic_live.is_empty()
+            && self.rithmic_selection.is_some()
+            && self.rithmic_stop_pending.is_none()
+            && let Some(generation) = self
                 .engine
                 .provider_status("rithmic")
                 .and_then(|status| status.generation)
-            {
-                let _ = self.engine.end_provider_session("rithmic", generation);
+        {
+            match self.providers.stop("rithmic") {
+                Ok(true) => self.rithmic_stop_pending = Some(generation),
+                Ok(false) => {}
+                Err(_) => {
+                    self.rithmic_selection = None;
+                    self.rithmic_pending_selection = None;
+                    let _ = self.engine.end_provider_session("rithmic", generation);
+                }
             }
         }
-        if self.hyperliquid_live.is_empty() && self.hyperliquid_engaged {
-            self.providers.stop("hyperliquid");
-            self.hyperliquid_engaged = false;
-            self.hyperliquid_demand_dirty = false;
-            if let Some(generation) = self
+        if self.hyperliquid_live.is_empty()
+            && self.hyperliquid_engaged
+            && self.hyperliquid_stop_pending.is_none()
+            && let Some(generation) = self
                 .engine
                 .provider_status("hyperliquid")
                 .and_then(|status| status.generation)
-            {
-                let _ = self.engine.end_provider_session("hyperliquid", generation);
+        {
+            match self.providers.stop("hyperliquid") {
+                Ok(true) => self.hyperliquid_stop_pending = Some(generation),
+                Ok(false) => {}
+                Err(_) => {
+                    self.hyperliquid_engaged = false;
+                    self.hyperliquid_demand_dirty = false;
+                    let _ = self.engine.end_provider_session("hyperliquid", generation);
+                }
             }
         }
     }

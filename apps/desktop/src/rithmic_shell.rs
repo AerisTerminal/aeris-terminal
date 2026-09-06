@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn search_and_selection_rejections_have_distinct_generation_domains() {
+    fn search_and_selection_rejections_have_distinct_generation_order_bookains() {
         let mut browser = RithmicSymbolBrowser::default();
         let first_search = browser.begin_search("ES").expect("search validates");
         assert!(browser.apply_results(first_search.request_id, vec![result("ESM7")]));

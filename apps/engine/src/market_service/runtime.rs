@@ -39,7 +39,7 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
         &request.series,
         request.provider_generation.0.get(),
         installed,
-        request.maximum_bars,
+        request.req_window(),
         &request.stop,
     )?;
     Ok(HistorySnapshot {
@@ -64,7 +64,7 @@ impl HistorySource for LiveHyperliquidHistory {
             &request.series,
             request.provider_generation.0.get(),
             installed,
-            request.maximum_bars,
+            request.req_window(),
             &request.stop,
         )?;
         Ok(HistorySnapshot {
@@ -538,11 +538,12 @@ impl ProviderDispatch<'_> {
             ProviderRuntimeEvent::RithmicRealtime(event) => {
                 let (generation, reconnecting) = match event {
                     RithmicRealtimeEvent::Connecting(generation)
-                    | RithmicRealtimeEvent::Recovering(generation)
-                    | RithmicRealtimeEvent::Disconnected(generation) => (*generation, true),
+                    | RithmicRealtimeEvent::Recovering(generation, _)
+                    | RithmicRealtimeEvent::Disconnected(generation, _) => (*generation, true),
                     RithmicRealtimeEvent::Connected(generation)
                     | RithmicRealtimeEvent::Heartbeat(generation)
                     | RithmicRealtimeEvent::Trade(generation, _)
+                    | RithmicRealtimeEvent::Quote(generation, _)
                     | RithmicRealtimeEvent::Depth(generation, _) => (*generation, false),
                 };
                 self.observe_generation("rithmic", generation, reconnecting);
@@ -657,18 +658,30 @@ impl ProviderDispatch<'_> {
         }
     }
 
-    pub(super) fn stop(&self, provider_id: &str) {
+    pub(super) fn stop(&self, provider_id: &str) -> Result<bool, String> {
         let Some(record) = self.records.get(provider_id) else {
-            return;
+            return Ok(true);
         };
         match &record.realtime {
             ProviderRealtimeDispatch::Rithmic { controls, .. } => {
-                let _ = controls.try_send(RithmicRealtimeControl::Stop);
+                match controls.try_send(RithmicRealtimeControl::Stop) {
+                    Ok(()) => Ok(true),
+                    Err(TrySendError::Full(_)) => Ok(false),
+                    Err(TrySendError::Disconnected(_)) => {
+                        Err("Rithmic live worker is unavailable".to_string())
+                    }
+                }
             }
             ProviderRealtimeDispatch::Hyperliquid { controls, .. } => {
-                let _ = controls.try_send(HyperliquidRealtimeControl::Stop);
+                match controls.try_send(HyperliquidRealtimeControl::Stop) {
+                    Ok(()) => Ok(true),
+                    Err(TrySendError::Full(_)) => Ok(false),
+                    Err(TrySendError::Disconnected(_)) => {
+                        Err("Hyperliquid live worker is unavailable".to_string())
+                    }
+                }
             }
-            ProviderRealtimeDispatch::Disabled => {}
+            ProviderRealtimeDispatch::Disabled => Ok(true),
         }
     }
 }

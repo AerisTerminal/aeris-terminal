@@ -317,6 +317,70 @@ mod tests {
 
     #[test]
     #[ignore = "drives the live Hyperliquid public info endpoint"]
+    fn live_three_day_candle_snapshot_decodes() {
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_millis();
+        let now_millis = i64::try_from(now_millis).expect("millis fit");
+        let page = fetch_candle_snapshot(&CandleSnapshotRequest {
+            wire_coin: "BTC",
+            period: axiusflow_market_data::BarPeriod::session(3).expect("3d"),
+            start_millis: 0,
+            end_millis: now_millis,
+            now_millis,
+            price_scale: crate::NORMALIZED_PRICE_SCALE,
+            quantity_scale: crate::NORMALIZED_QUANTITY_SCALE,
+            config: HyperliquidHttpConfig::default(),
+        })
+        .expect("live 3D candle page decodes");
+        println!(
+            "hyperliquid_live_3d closed={} forming={} first={} last={}",
+            page.bars.len(),
+            page.forming.is_some(),
+            page.bars
+                .first()
+                .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
+            page.bars
+                .last()
+                .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
+        );
+        assert!(!page.bars.is_empty());
+    }
+    #[test]
+    #[ignore = "drives the live Hyperliquid public info endpoint"]
+    fn live_month_candle_snapshot_decodes() {
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_millis();
+        let now_millis = i64::try_from(now_millis).expect("millis fit");
+        let page = fetch_candle_snapshot(&CandleSnapshotRequest {
+            wire_coin: "BTC",
+            period: axiusflow_market_data::BarPeriod::month(1).expect("month"),
+            start_millis: 0,
+            end_millis: now_millis,
+            now_millis,
+            price_scale: crate::NORMALIZED_PRICE_SCALE,
+            quantity_scale: crate::NORMALIZED_QUANTITY_SCALE,
+            config: HyperliquidHttpConfig::default(),
+        })
+        .expect("live 1M candle page decodes");
+        println!(
+            "hyperliquid_live_month closed={} forming={} first={} last={}",
+            page.bars.len(),
+            page.forming.is_some(),
+            page.bars
+                .first()
+                .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
+            page.bars
+                .last()
+                .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
+        );
+        assert!(!page.bars.is_empty());
+    }
+    #[test]
+    #[ignore = "drives the live Hyperliquid public info endpoint"]
     fn live_catalog_includes_volume_ranked_markets() {
         let catalog = fetch_meta_bundle(HyperliquidHttpConfig::default()).expect("live catalog");
         let popular = catalog.search("", 10);

@@ -448,4 +448,25 @@ mod tests {
             .expect_err("cancelled write reports");
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
     }
+    #[test]
+    #[ignore = "drives the live Hyperliquid public WebSocket"]
+    fn live_public_socket_connects_and_receives_book() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut socket, _) =
+            HyperliquidSocket::connect(crate::HYPERLIQUID_WS_URL, Duration::from_secs(10), &stop)
+                .expect("live Hyperliquid socket connects");
+        socket
+            .send_text(&crate::build_l2_subscription("BTC").expect("subscription encodes"))
+            .expect("book subscription sends");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(Instant::now() < deadline, "live Hyperliquid book timed out");
+            match socket.read_event(Instant::now() + Duration::from_secs(5)) {
+                Ok(SocketEvent::Text(text)) if text.contains("\"channel\":\"l2Book\"") => break,
+                Ok(_) => {}
+                Err(error) if is_read_timeout(&error) => {}
+                Err(error) => panic!("live Hyperliquid socket failed: {error}"),
+            }
+        }
+    }
 }

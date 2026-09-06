@@ -17,7 +17,7 @@ use axiusflow_engine_protocol::{
     SelectProviderInstrument, envelope,
 };
 use axiusflow_market_data::ChartInterval;
-use axiusflow_market_data::DomFrame;
+use axiusflow_market_data::OrderBookFrame;
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
 use std::{
@@ -113,7 +113,10 @@ pub enum ProviderCatalogCommand {
 
 pub enum ProviderCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
-    SelectionInstalled(InstallProviderInstrument),
+    SelectionInstalled {
+        command_generation: u64,
+        instrument: InstallProviderInstrument,
+    },
     CommandRejected {
         rejection: ProviderCatalogRejected,
         command: ProviderCatalogCommand,
@@ -147,13 +150,17 @@ pub fn classify_provider_catalog_event(
                         axiusflow_engine_protocol::ProviderInstrumentSelection {
                             consumer_id: selection.consumer_id,
                             instrument: Some(instrument),
+                            command_generation: selection.command_generation,
                         },
                     )),
                 );
             }
             if selection.consumer_id == consumer_id {
                 (
-                    Some(ProviderCatalogEvent::SelectionInstalled(instrument)),
+                    Some(ProviderCatalogEvent::SelectionInstalled {
+                        command_generation: selection.command_generation,
+                        instrument,
+                    }),
                     None,
                 )
             } else {
@@ -274,7 +281,7 @@ pub enum MarketWorkerMessage {
         series_generation: NonZeroUsize,
         update: ReplayStreamUpdate,
     },
-    RithmicDom(DomFrame),
+    OrderBook(OrderBookFrame),
     EngineSwitchMarker {
         sequence: u64,
     },
@@ -421,8 +428,8 @@ impl MarketWorkerSender {
                 self.send_rithmic_live(queue, message);
                 None
             }
-            message @ MarketWorkerMessage::RithmicDom(_) => {
-                self.send_rithmic_dom(queue, message);
+            message @ MarketWorkerMessage::OrderBook(_) => {
+                self.send_rithmic_order_book(queue, message);
                 None
             }
             message => Some(message),
@@ -557,20 +564,17 @@ impl MarketWorkerSender {
         self.enqueue_control(queue, mailbox_overflow_state());
     }
 
-    fn send_rithmic_dom(
+    fn send_rithmic_order_book(
         &self,
         queue: &mut VecDeque<MarketWorkerMessage>,
         message: MarketWorkerMessage,
     ) {
         if let Some(index) = queue
             .iter()
-            .position(|queued| matches!(queued, MarketWorkerMessage::RithmicDom(_)))
+            .position(|queued| matches!(queued, MarketWorkerMessage::OrderBook(_)))
         {
             let replace = match (&queue[index], &message) {
-                (
-                    MarketWorkerMessage::RithmicDom(current),
-                    MarketWorkerMessage::RithmicDom(next),
-                ) => {
+                (MarketWorkerMessage::OrderBook(current), MarketWorkerMessage::OrderBook(next)) => {
                     (next.selection_generation, next.revision)
                         >= (current.selection_generation, current.revision)
                 }
@@ -806,7 +810,7 @@ fn is_market_publication(message: &MarketWorkerMessage) -> bool {
         message,
         MarketWorkerMessage::Update(_)
             | MarketWorkerMessage::RithmicLive { .. }
-            | MarketWorkerMessage::RithmicDom(_)
+            | MarketWorkerMessage::OrderBook(_)
     )
 }
 
@@ -864,7 +868,7 @@ fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<NonZe
         | MarketWorkerMessage::ProviderCatalog(_)
         | MarketWorkerMessage::RithmicHistory { .. }
         | MarketWorkerMessage::RithmicLive { .. }
-        | MarketWorkerMessage::RithmicDom(_)
+        | MarketWorkerMessage::OrderBook(_)
         | MarketWorkerMessage::EngineSwitchMarker { .. }
         | MarketWorkerMessage::ChartViewport { .. } => None,
     }
@@ -1218,6 +1222,8 @@ fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> NonZeroU64 {
 pub struct MarketDataWorker {
     commands: Option<SyncSender<MarketWorkerCommand>>,
     resource_class: Option<Arc<Mutex<Option<ConsumerResourceClass>>>>,
+    provider_selection: Option<Arc<Mutex<Option<SelectProviderInstrument>>>>,
+    engine_selection: Option<Arc<Mutex<Option<Box<EngineSelectionRequest>>>>>,
     messages: Option<MarketWorkerReceiver>,
     shutdown_complete: Option<Receiver<()>>,
     connected: bool,
@@ -1237,6 +1243,8 @@ impl MarketDataWorker {
         Self {
             commands: Some(commands),
             resource_class: None,
+            provider_selection: None,
+            engine_selection: None,
             messages: Some(messages),
             shutdown_complete: Some(shutdown_complete),
             connected: true,
@@ -1251,6 +1259,23 @@ impl MarketDataWorker {
         resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
     ) -> Self {
         self.resource_class = Some(resource_class);
+        self
+    }
+
+    /// Installs bounded single-item slots for foreground instrument switching.
+    ///
+    /// Symbol selection must not lose to a burst of lower-priority viewport or
+    /// recovery commands. Each slot retains only the newest pending request, so
+    /// foreground intent survives command-mailbox pressure without introducing
+    /// an unbounded queue.
+    #[must_use]
+    pub fn with_foreground_selection_slots(
+        mut self,
+        provider_selection: Arc<Mutex<Option<SelectProviderInstrument>>>,
+        engine_selection: Arc<Mutex<Option<Box<EngineSelectionRequest>>>>,
+    ) -> Self {
+        self.provider_selection = Some(provider_selection);
+        self.engine_selection = Some(engine_selection);
         self
     }
 
@@ -1281,6 +1306,13 @@ impl MarketDataWorker {
             product,
             interval,
         });
+        if let Some(pending) = &self.engine_selection {
+            *pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+            sequence.store(next, Ordering::Release);
+            return Ok(next);
+        }
         commands
             .try_send(MarketWorkerCommand::EngineSelect(request))
             .map_err(|error| {
@@ -1481,6 +1513,12 @@ impl MarketDataWorker {
         let Some(commands) = self.commands.as_ref() else {
             return Err(ProviderCommandUnavailable);
         };
+        if let Some(pending) = &self.provider_selection {
+            *pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
+            return Ok(());
+        }
         commands
             .try_send(MarketWorkerCommand::ProviderSelect(selection))
             .map_err(|_| ProviderCommandUnavailable)
@@ -1705,17 +1743,17 @@ mod tests {
         Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
     };
     use axiusflow_engine_protocol::{
-        ConsumerResourceClass, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-        SearchProviderInstruments, SelectProviderInstrument,
+        ConsumerResourceClass, InstallProviderInstrument, ProviderCatalogRejected,
+        ProviderCatalogRejectionReason, SearchProviderInstruments, SelectProviderInstrument,
     };
-    use axiusflow_market_data::DomFrame;
+    use axiusflow_market_data::OrderBookFrame;
     use axiusflow_market_data::{ChartInterval, OrderBookRecoveryReason, OrderBookState};
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             mpsc,
         },
         thread,
@@ -3071,9 +3109,9 @@ mod tests {
     }
 
     #[test]
-    fn dom_mailbox_retains_latest_complete_frame() {
+    fn order_book_mailbox_retains_latest_complete_frame() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let frame = |revision, state| DomFrame {
+        let frame = |revision, state| OrderBookFrame {
             provider_id: "rithmic".to_string(),
             instrument_id: "rithmic:CME:MNQ".to_string(),
             entitlement_id: "test".to_string(),
@@ -3081,12 +3119,15 @@ mod tests {
             selection_generation: 2,
             revision,
             source_watermark: revision,
+            bbo_source_watermark: revision,
             state,
+            best_bid: None,
+            best_ask: None,
             rows: Vec::new(),
         };
         assert!(
             sender
-                .send(MarketWorkerMessage::RithmicDom(frame(
+                .send(MarketWorkerMessage::OrderBook(frame(
                     3,
                     OrderBookState::Ready,
                 )))
@@ -3094,7 +3135,7 @@ mod tests {
         );
         assert!(
             sender
-                .send(MarketWorkerMessage::RithmicDom(frame(
+                .send(MarketWorkerMessage::OrderBook(frame(
                     2,
                     OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap),
                 )))
@@ -3103,7 +3144,7 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RithmicDom(frame)]
+            [MarketWorkerMessage::OrderBook(frame)]
                 if frame.revision == 3 && frame.state == OrderBookState::Ready
         ));
     }
@@ -3167,5 +3208,74 @@ mod tests {
         });
         drop(worker);
         shutdown.join().expect("shutdown observer exits");
+    }
+
+    #[test]
+    fn foreground_symbol_switch_survives_a_full_command_mailbox() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let provider_selection = Arc::new(Mutex::new(None));
+        let engine_selection = Arc::new(Mutex::new(None));
+        let sequence = Arc::new(AtomicU64::new(7));
+        let worker = MarketDataWorker::from_channels(
+            command_tx,
+            message_rx,
+            shutdown_rx,
+            None,
+            Some(Arc::clone(&sequence)),
+        )
+        .with_foreground_selection_slots(
+            Arc::clone(&provider_selection),
+            Arc::clone(&engine_selection),
+        );
+
+        worker
+            .try_set_chart_viewport(1, 2)
+            .expect("viewport fills the ordinary command mailbox");
+        let selection = SelectProviderInstrument {
+            consumer_id: 0,
+            selection_generation: 3,
+            search_generation: 2,
+            provider: "hyperliquid".to_string(),
+            symbol: "ETH".to_string(),
+            exchange: "Hyperliquid".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+        };
+        worker
+            .try_select_provider(selection.clone())
+            .expect("provider selection uses the foreground slot");
+        let next = worker
+            .try_select_engine(
+                InstallProviderInstrument {
+                    provider: "hyperliquid".to_string(),
+                    provider_symbol: "ETH".to_string(),
+                    display_symbol: "ETH".to_string(),
+                    ..InstallProviderInstrument::default()
+                },
+                ChartInterval::Minute1,
+            )
+            .expect("engine selection uses the foreground slot");
+
+        assert_eq!(next, 8);
+        assert_eq!(sequence.load(Ordering::Acquire), 8);
+        assert_eq!(
+            provider_selection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref(),
+            Some(&selection)
+        );
+        let pending_engine = engine_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("engine selection retained");
+        assert_eq!(pending_engine.sequence, 8);
+        assert_eq!(pending_engine.product.provider_symbol, "ETH");
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::ChartViewport(_))
+        ));
     }
 }

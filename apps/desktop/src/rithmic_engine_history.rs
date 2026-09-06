@@ -16,7 +16,7 @@ use axiusflow_market_data::{
     BarDefinition, ChartAggregation, ChartInterval, DepthLevel, MarketBar, OrderBookPublication,
     OrderBookRecoveryReason, OrderBookState,
 };
-use axiusflow_terminal_ui::{DomFrame, DomSelection, ReadOnlyDom};
+use axiusflow_terminal_ui::{OrderBookFrame, OrderBookSelection, ReadOnlyOrderBook};
 use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -25,7 +25,7 @@ use std::{
 use axiusflow_desktop::market_worker::MarketWorkerBootstrap;
 
 pub(crate) const MAXIMUM_VISIBLE_BARS: usize = 300;
-const MAXIMUM_DOM_LEVELS: usize = 50;
+const MAXIMUM_ORDER_BOOK_LEVELS: usize = 50;
 
 pub(crate) fn validate_engine_instrument(
     instrument: &InstallProviderInstrument,
@@ -280,15 +280,15 @@ pub(crate) fn live_tail(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) struct DomIdentity<'a> {
+pub(crate) struct OrderBookIdentity<'a> {
     pub instrument: &'a InstallProviderInstrument,
     pub series_generation: u64,
 }
 
-pub(crate) fn dom_from_snapshot(
-    identity: &DomIdentity<'_>,
+pub(crate) fn order_book_from_snapshot(
+    identity: &OrderBookIdentity<'_>,
     snapshot: &IpcOrderBookSnapshot,
-) -> Result<DomFrame, String> {
+) -> Result<OrderBookFrame, String> {
     let instrument = identity.instrument;
     if snapshot.consumer_id == 0
         || snapshot.generation != identity.series_generation
@@ -296,8 +296,8 @@ pub(crate) fn dom_from_snapshot(
         || snapshot.instrument_id != instrument.instrument_id
         || snapshot.entitlement_id != instrument.entitlement_id
         || snapshot.provider_generation < instrument.session_generation
-        || snapshot.bids.len() > MAXIMUM_DOM_LEVELS
-        || snapshot.asks.len() > MAXIMUM_DOM_LEVELS
+        || snapshot.bids.len() > MAXIMUM_ORDER_BOOK_LEVELS
+        || snapshot.asks.len() > MAXIMUM_ORDER_BOOK_LEVELS
     {
         return Err("Engine order-book identity is invalid".to_string());
     }
@@ -324,6 +324,22 @@ pub(crate) fn dom_from_snapshot(
     };
     let bids = ipc_depth_levels(&snapshot.bids, true)?;
     let asks = ipc_depth_levels(&snapshot.asks, false)?;
+    let best_bid = snapshot
+        .best_bid
+        .as_ref()
+        .map(ipc_depth_level)
+        .transpose()?;
+    let best_ask = snapshot
+        .best_ask
+        .as_ref()
+        .map(ipc_depth_level)
+        .transpose()?;
+    if best_bid
+        .zip(best_ask)
+        .is_some_and(|(bid, ask)| bid.price >= ask.price)
+    {
+        return Err("Engine BBO is crossed".to_string());
+    }
     let traded_volumes = snapshot
         .bids
         .iter()
@@ -345,12 +361,15 @@ pub(crate) fn dom_from_snapshot(
         session_generation: snapshot.provider_generation,
         revision: snapshot.revision,
         source_watermark: snapshot.source_watermark,
+        best_bid,
+        best_ask,
+        bbo_source_watermark: snapshot.bbo_source_watermark,
         bids,
         asks,
         traded_volumes,
         state,
     };
-    let selection = DomSelection {
+    let selection = OrderBookSelection {
         provider_id: snapshot.provider.clone(),
         instrument_id: snapshot.instrument_id.clone(),
         entitlement_id: snapshot.entitlement_id.clone(),
@@ -368,7 +387,7 @@ pub(crate) fn dom_from_snapshot(
         )
         .map_err(|error| error.to_string())?,
     };
-    ReadOnlyDom::project_publication(&selection, &publication)
+    ReadOnlyOrderBook::project_publication(&selection, &publication)
         .ok_or_else(|| "Engine order-book publication is stale".to_string())
 }
 
@@ -379,9 +398,7 @@ fn ipc_depth_levels(
     let mut previous = None;
     let mut converted = Vec::with_capacity(levels.len());
     for level in levels {
-        if level.price <= 0 || level.quantity <= 0 || level.traded_volume < 0 {
-            return Err("Engine order-book level is invalid".to_string());
-        }
+        let converted_level = ipc_depth_level(level)?;
         if previous.is_some_and(|previous| {
             if bids {
                 level.price >= previous
@@ -392,13 +409,22 @@ fn ipc_depth_levels(
             return Err("Engine order-book levels are unordered".to_string());
         }
         previous = Some(level.price);
-        converted.push(DepthLevel {
-            price: level.price,
-            quantity: level.quantity,
-            order_count: level.order_count,
-        });
+        converted.push(converted_level);
     }
     Ok(converted)
+}
+
+fn ipc_depth_level(
+    level: &axiusflow_engine_protocol::OrderBookLevel,
+) -> Result<DepthLevel, String> {
+    if level.price <= 0 || level.quantity <= 0 || level.traded_volume < 0 {
+        return Err("Engine order-book level is invalid".to_string());
+    }
+    Ok(DepthLevel {
+        price: level.price,
+        quantity: level.quantity,
+        order_count: level.order_count,
+    })
 }
 
 /// Engine-side marker for a provider history demand that completed with no

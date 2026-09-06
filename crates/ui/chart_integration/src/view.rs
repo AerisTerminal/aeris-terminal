@@ -625,6 +625,7 @@ pub struct NucleusChartView {
     chart_type: ChartType,
     product_bars: ProductPriceBars,
     brushable_tooltip: Option<NativePrimitiveId>,
+    brushable_line_width: Option<f64>,
     pending_brush_point: Option<(f64, f64)>,
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
@@ -701,6 +702,7 @@ impl NucleusChartView {
             chart_type: ChartType::Candles,
             product_bars: ProductPriceBars::default(),
             brushable_tooltip: None,
+            brushable_line_width: None,
             pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
@@ -803,6 +805,7 @@ impl NucleusChartView {
             chart_type: ChartType::Candles,
             product_bars,
             brushable_tooltip: None,
+            brushable_line_width: None,
             pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
@@ -2203,6 +2206,13 @@ impl NucleusChartView {
                 .engine
                 .add_delta_tooltip(0, DeltaTooltipOptions::default());
         }
+        if self.brushable_line_width.is_none() {
+            self.brushable_line_width = self
+                .engine
+                .feature_series_options_json(0)
+                .and_then(|options| serde_json::from_str::<serde_json::Value>(&options).ok())
+                .and_then(|options| options["line_width"].as_f64());
+        }
         self.sync_brushable_range();
     }
 
@@ -2211,6 +2221,7 @@ impl NucleusChartView {
             let _ = self.engine.clear_delta_tooltip(id);
             let _ = self.engine.remove_native_primitive(id);
         }
+        self.brushable_line_width = None;
         if matches!(self.drag, Some(ChartDrag::BrushableRange)) {
             self.drag = None;
         }
@@ -2220,20 +2231,26 @@ impl NucleusChartView {
         let Some(id) = self.brushable_tooltip else {
             return;
         };
+        let Some(line_width) = self.brushable_line_width else {
+            return;
+        };
         let (base_style, ranges) = match self.engine.delta_tooltip_active_range(id) {
             Some(range) => (
-                Self::brush_style(BRUSHABLE_LINE, 51, 13, 2.0),
+                Self::brush_style(BRUSHABLE_LINE, 51, 13, line_width),
                 vec![BrushRange {
                     from: f64::from(i32::try_from(range.from).unwrap_or(0)),
                     to: f64::from(i32::try_from(range.to).unwrap_or(0)),
                     style: if range.positive {
-                        Self::brush_style(BRUSHABLE_UP, 255, 102, 3.0)
+                        Self::brush_style(BRUSHABLE_UP, 255, 102, line_width)
                     } else {
-                        Self::brush_style(BRUSHABLE_DOWN, 255, 102, 3.0)
+                        Self::brush_style(BRUSHABLE_DOWN, 255, 102, line_width)
                     },
                 }],
             ),
-            None => (Self::brush_style(BRUSHABLE_LINE, 255, 102, 2.0), Vec::new()),
+            None => (
+                Self::brush_style(BRUSHABLE_LINE, 255, 102, line_width),
+                Vec::new(),
+            ),
         };
         let _ = self.engine.apply_feature_series_options(
             0,
@@ -2241,7 +2258,6 @@ impl NucleusChartView {
                 line_color: Some(base_style.line_color),
                 top_color: Some(base_style.top_color),
                 bottom_color: Some(base_style.bottom_color),
-                line_width: Some(base_style.line_width),
                 brush_ranges: Some(ranges),
                 ..FeatureSeriesOptionsPatch::default()
             },
@@ -3774,6 +3790,15 @@ mod tests {
             chart.engine.feature_series_kind(0),
             Some(nucleuscharts_engine::FeatureSeriesKind::BrushableArea)
         );
+        let nucleus_line_width = serde_json::from_str::<serde_json::Value>(
+            &chart
+                .engine
+                .feature_series_options_json(0)
+                .expect("brushable options"),
+        )
+        .expect("brushable options are JSON")["line_width"]
+            .as_f64()
+            .expect("Nucleus supplies a brushable line width");
         chart
             .engine
             .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
@@ -3788,8 +3813,18 @@ mod tests {
             .engine
             .feature_series_options_json(0)
             .expect("brushable options");
-        assert!(options.contains("brush_ranges"));
-        assert!(options.contains("\"from\""));
+        let options = serde_json::from_str::<serde_json::Value>(&options)
+            .expect("brushable options are JSON");
+        assert_eq!(options["line_width"].as_f64(), Some(nucleus_line_width));
+        let ranges = options["brush_ranges"]
+            .as_array()
+            .expect("brushable ranges are an array");
+        assert!(!ranges.is_empty());
+        assert!(
+            ranges
+                .iter()
+                .all(|range| { range["style"]["line_width"].as_f64() == Some(nucleus_line_width) })
+        );
 
         chart.set_chart_type(ChartType::Candles);
         assert_eq!(

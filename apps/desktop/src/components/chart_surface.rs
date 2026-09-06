@@ -1,10 +1,11 @@
 use super::{
     AxiusflowTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Div,
-    DomColumn, DomColumnVisibility, Entity, FluentBuilder, HugeIcon, InteractiveElement,
-    IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, ParentElement, RadiusToken,
-    ReadOnlyDomView, Role, SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel, StatefulInteractiveElement,
-    Styled, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT, WorkspaceSurface, chart_chrome,
-    chart_surface_notice, chrome_close_button, chrome_tooltip, div, gpui_color, header_icon, px,
+    Entity, FluentBuilder, HugeIcon, InteractiveElement, IntoElement, Loader, MenuRow, MouseButton,
+    NucleusChartView, OrderBookColumn, OrderBookColumnVisibility, ParentElement, RadiusToken,
+    ReadOnlyOrderBookView, Role, SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel,
+    StatefulInteractiveElement, Styled, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
+    WorkspaceSurface, chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div,
+    gpui_color, header_icon, px,
 };
 
 pub(super) struct MarketWorkspaceState<'a> {
@@ -13,16 +14,17 @@ pub(super) struct MarketWorkspaceState<'a> {
     pub(super) chart: Option<&'a Entity<NucleusChartView>>,
     pub(super) chart_has_market_data: bool,
     pub(super) chart_is_superseded: bool,
-    pub(super) dom: Entity<ReadOnlyDomView>,
+    pub(super) order_book: Entity<ReadOnlyOrderBookView>,
     pub(super) side_panel: Option<SidePanel>,
     pub(super) side_panel_width: f32,
-    pub(super) dom_column_menu_open: bool,
-    pub(super) dom_columns: DomColumnVisibility,
+    pub(super) order_book_column_menu_open: bool,
+    pub(super) order_book_columns: OrderBookColumnVisibility,
     pub(super) chart_state: ChartState,
     pub(super) chart_status_detail: String,
     pub(super) theme: &'a AxiusflowTheme,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<> {
     let MarketWorkspaceState {
         app,
@@ -30,11 +32,11 @@ pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElem
         chart,
         chart_has_market_data,
         chart_is_superseded,
-        dom,
+        order_book,
         side_panel,
         side_panel_width,
-        dom_column_menu_open,
-        dom_columns,
+        order_book_column_menu_open,
+        order_book_columns,
         chart_state,
         chart_status_detail,
         theme,
@@ -54,33 +56,39 @@ pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElem
         let resize_app = app.clone();
         let move_app = app.clone();
         let release_app = app.clone();
-        let side_panel_content = div().w(px(side_panel_width)).flex_none().child(
-            div()
-                .size_full()
-                .relative()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .bg(gpui_color(colors.surface))
-                .border_l_1()
-                .border_color(gpui_color(colors.border))
-                .child(side_panel_header(
-                    side_panel,
-                    app.clone(),
-                    dom_column_menu_open,
-                    theme,
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .children((side_panel == SidePanel::Dom).then_some(dom.clone())),
-                )
-                .children(
-                    (side_panel == SidePanel::Dom && dom_column_menu_open)
-                        .then(|| dom_column_menu_layer(app, &dom, dom_columns, theme)),
-                ),
-        );
+        let side_panel_content =
+            div().w(px(side_panel_width)).flex_none().child(
+                div()
+                    .size_full()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .bg(gpui_color(colors.surface))
+                    .border_l_1()
+                    .border_color(gpui_color(colors.border))
+                    .child(side_panel_header(
+                        side_panel,
+                        app.clone(),
+                        order_book_column_menu_open,
+                        theme,
+                    ))
+                    .child(div().flex_1().overflow_hidden().children(
+                        (side_panel == SidePanel::OrderBook).then_some(order_book.clone()),
+                    ))
+                    .children(
+                        (side_panel == SidePanel::OrderBook && order_book_column_menu_open).then(
+                            || {
+                                order_book_column_menu_layer(
+                                    app,
+                                    &order_book,
+                                    order_book_columns,
+                                    theme,
+                                )
+                            },
+                        ),
+                    ),
+            );
         div()
             .id(("market_workspace", pane_id))
             .size_full()
@@ -139,7 +147,7 @@ pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
 pub(super) fn side_panel_header(
     panel: SidePanel,
     app: Entity<WorkspaceSurface>,
-    dom_column_menu_open: bool,
+    order_book_column_menu_open: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -157,10 +165,10 @@ pub(super) fn side_panel_header(
         .text_color(gpui_color(colors.text_secondary))
         .child(div().flex_1().child(panel.title().to_uppercase()))
         .child(chrome_tooltip(
-            "dom_column_settings",
+            "order_book_column_settings",
             "Choose order-book columns",
             div()
-                .id("dom_column_settings")
+                .id("order_book_column_settings")
                 .occlude()
                 .size(px(WORKSPACE_TAB_ICON_HIT))
                 .flex_none()
@@ -168,7 +176,7 @@ pub(super) fn side_panel_header(
                 .items_center()
                 .justify_center()
                 .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-                .text_color(gpui_color(if dom_column_menu_open {
+                .text_color(gpui_color(if order_book_column_menu_open {
                     colors.icon_active
                 } else {
                     colors.icon
@@ -176,12 +184,12 @@ pub(super) fn side_panel_header(
                 .cursor_pointer()
                 .role(Role::Button)
                 .aria_label("Choose order-book columns")
-                .when(dom_column_menu_open, |button| {
+                .when(order_book_column_menu_open, |button| {
                     button.bg(gpui_color(colors.active_bg.over(colors.surface)))
                 })
                 .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    settings_app.update(cx, WorkspaceSurface::toggle_dom_column_menu);
+                    settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
                     cx.stop_propagation();
                 })
                 .child(header_icon(HugeIcon::Settings01).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
@@ -197,16 +205,16 @@ pub(super) fn side_panel_header(
         ))
 }
 
-pub(super) fn dom_column_menu_layer(
+pub(super) fn order_book_column_menu_layer(
     app: Entity<WorkspaceSurface>,
-    dom: &Entity<ReadOnlyDomView>,
-    columns: DomColumnVisibility,
+    order_book: &Entity<ReadOnlyOrderBookView>,
+    columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let dismiss_app = app;
     let mut panel = div()
-        .id("dom_column_menu")
+        .id("order_book_column_menu")
         .absolute()
         .top(px(28.0))
         .right(px(30.0))
@@ -218,10 +226,10 @@ pub(super) fn dom_column_menu_layer(
         .bg(gpui_color(colors.surface_secondary))
         .text_color(gpui_color(colors.text_primary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
-    let last = DomColumn::ALL.len().saturating_sub(1);
-    for (index, column) in DomColumn::ALL.into_iter().enumerate() {
-        panel = panel.child(dom_column_menu_item(
-            dom.clone(),
+    let last = OrderBookColumn::ALL.len().saturating_sub(1);
+    for (index, column) in OrderBookColumn::ALL.into_iter().enumerate() {
+        panel = panel.child(order_book_column_menu_item(
+            order_book.clone(),
             column,
             columns.is_visible(column),
             index == 0,
@@ -230,7 +238,7 @@ pub(super) fn dom_column_menu_layer(
         ));
     }
     div()
-        .id("dom_column_menu_layer")
+        .id("order_book_column_menu_layer")
         .absolute()
         .inset_0()
         .child(
@@ -238,16 +246,16 @@ pub(super) fn dom_column_menu_layer(
                 .absolute()
                 .inset_0()
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    dismiss_app.update(cx, WorkspaceSurface::close_dom_column_menu);
+                    dismiss_app.update(cx, WorkspaceSurface::close_order_book_column_menu);
                     cx.stop_propagation();
                 }),
         )
         .child(panel)
 }
 
-pub(super) fn dom_column_menu_item(
-    dom: Entity<ReadOnlyDomView>,
-    column: DomColumn,
+pub(super) fn order_book_column_menu_item(
+    order_book: Entity<ReadOnlyOrderBookView>,
+    column: OrderBookColumn,
     checked: bool,
     first: bool,
     last: bool,
@@ -260,19 +268,21 @@ pub(super) fn dom_column_menu_item(
         "P/L · routing unavailable".to_string()
     };
     let id = match column {
-        DomColumn::ProfitLoss => "dom_column_profit_loss",
-        DomColumn::Bid => "dom_column_bid",
-        DomColumn::Price => "dom_column_price",
-        DomColumn::Ask => "dom_column_ask",
-        DomColumn::Orders => "dom_column_orders",
-        DomColumn::Volume => "dom_column_volume",
+        OrderBookColumn::ProfitLoss => "order_book_column_profit_loss",
+        OrderBookColumn::Bid => "order_book_column_bid",
+        OrderBookColumn::Price => "order_book_column_price",
+        OrderBookColumn::Ask => "order_book_column_ask",
+        OrderBookColumn::Orders => "order_book_column_orders",
+        OrderBookColumn::Volume => "order_book_column_volume",
     };
-    let item_dom = dom;
+    let item_order_book = order_book;
     let mut item = MenuRow::compact(id, label, theme)
         .disabled(!available)
         .flush_in_panel(first, last)
         .on_click(move |_, _, cx| {
-            item_dom.update(cx, |dom, dom_cx| dom.toggle_column(column, dom_cx));
+            item_order_book.update(cx, |order_book, order_book_cx| {
+                order_book.toggle_column(column, order_book_cx);
+            });
         });
     if checked {
         item = item.trailing(

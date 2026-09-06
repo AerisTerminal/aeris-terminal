@@ -53,7 +53,7 @@ pub enum WorkspaceSplitAxis {
 #[repr(i32)]
 pub enum WorkspacePaneKind {
     Chart = 0,
-    Dom = 1,
+    OrderBook = 1,
     Watchlist = 2,
     OrderEntry = 3,
 }
@@ -571,7 +571,7 @@ pub struct RegisterConsumer {
     /// Owning workspace tab.
     #[prost(uint64, tag = "2")]
     pub workspace_id: u64,
-    /// Stable chart or DOM consumer identity.
+    /// Stable chart or Order Book consumer identity.
     #[prost(uint64, tag = "3")]
     pub consumer_id: u64,
 }
@@ -791,6 +791,11 @@ pub struct ProviderInstrumentSelection {
     pub consumer_id: u64,
     #[prost(message, optional, tag = "2")]
     pub instrument: Option<InstallProviderInstrument>,
+    /// Selection-command generation echoed for consumer-side correlation.
+    /// This is distinct from the installed instrument's provider-wide
+    /// `selection_generation`, which fences provider/session state.
+    #[prost(uint64, tag = "3")]
+    pub command_generation: u64,
 }
 
 /// Requests complete resident-engine shutdown.
@@ -1040,6 +1045,15 @@ pub struct OrderBookSnapshot {
     pub bids: Vec<OrderBookLevel>,
     #[prost(message, repeated, tag = "12")]
     pub asks: Vec<OrderBookLevel>,
+    /// Independently observed best bid from the provider BBO stream.
+    #[prost(message, optional, tag = "13")]
+    pub best_bid: Option<OrderBookLevel>,
+    /// Independently observed best ask from the provider BBO stream.
+    #[prost(message, optional, tag = "14")]
+    pub best_ask: Option<OrderBookLevel>,
+    /// Source sequence of the latest BBO observation.
+    #[prost(uint64, tag = "15")]
+    pub bbo_source_watermark: u64,
 }
 
 /// Stage-specific terminal or degraded result for one demand.

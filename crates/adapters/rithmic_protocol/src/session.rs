@@ -1,9 +1,9 @@
 use crate::{
     DecodedCatalogMessage, DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage,
-    InstrumentReferenceRequest, LoginRequest, MarketDataSubscription, OutboundRequest,
-    ProtocolError, ReadOnlyPlant, ReplayKind, RithmicProtocolBackend, RithmicProtocolCodec,
-    RithmicSessionError, RithmicSessionLimits, SymbolSearchRequest, TickBarReplayRequest,
-    TimeBarReplayRequest,
+    DepthByOrderSnapshotRequest, DepthByOrderSubscription, InstrumentReferenceRequest,
+    LoginRequest, MarketDataSubscription, OutboundRequest, ProtocolError, ReadOnlyPlant,
+    ReplayKind, RithmicProtocolBackend, RithmicProtocolCodec, RithmicSessionError,
+    RithmicSessionLimits, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
     endpoint::RithmicEndpoint,
     network::{
         ConnectionAbort, RithmicWebSocket, begin_shutdown, connect_websocket, default_tls_config,
@@ -406,6 +406,30 @@ impl RithmicTickerConnection {
         request: MarketDataSubscription<'_>,
     ) -> Result<(), RithmicSessionError> {
         self.send(OutboundRequest::MarketData(request))
+    }
+
+    /// Updates one read-only depth-by-order subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn update_depth_by_order(
+        &mut self,
+        request: DepthByOrderSubscription<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.send(OutboundRequest::DepthByOrder(request))
+    }
+
+    /// Requests one covering read-only depth-by-order image.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted protocol or transport failure.
+    pub fn request_depth_by_order_snapshot(
+        &mut self,
+        request: DepthByOrderSnapshotRequest<'_>,
+    ) -> Result<(), RithmicSessionError> {
+        self.send(OutboundRequest::DepthByOrderSnapshot(request))
     }
 
     /// Reads and decodes one bounded provider message.

@@ -53,7 +53,12 @@ pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 /// `AccountView`, and `SignOut`. The engine owns the PKCE transaction and
 /// vault material; the desktop receives only the browser URL and the
 /// sanitized view.
-pub const PROTOCOL_VERSION: u32 = 18;
+///
+/// Revision 19 adds the selection-command generation to
+/// `ProviderInstrumentSelection`. Provider-wide instrument generations remain
+/// independent fencing identities, while the echoed command generation lets a
+/// desktop correlate a completion to the exact symbol-picker request.
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// Maximum prost payload accepted in one frame (3 MiB).
 pub const MAX_FRAME_BYTES: usize = 3 * 1_048_576;

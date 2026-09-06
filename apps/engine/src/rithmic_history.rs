@@ -17,7 +17,7 @@ use axiusflow_market_data::{
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use axiusflow_provider_history::HistoryRange;
 
-use crate::market_service::FormingBar;
+use crate::market_service::{FormingBar, HistoryFetchWindow};
 use axiusflow_rithmic_protocol_adapter::{
     InstrumentDescriptor, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication,
     RithmicCredentialBytes, RithmicHistorySessionTransport, RithmicProviderInstrument,
@@ -61,7 +61,7 @@ pub(super) fn fetch(
     series: &BarSeriesKey,
     provider_generation: u64,
     installed: &InstallProviderInstrument,
-    maximum_visible_bars: usize,
+    window: HistoryFetchWindow,
     stop: &Arc<AtomicBool>,
 ) -> Result<Snapshot, String> {
     if stop.load(Ordering::Acquire) {
@@ -76,8 +76,11 @@ pub(super) fn fetch(
         return Err("Rithmic history identity is inconsistent".to_string());
     }
     let interval = chart_interval(series.period)?;
-    let maximum_visible_bars = maximum_visible_bars.clamp(1, MAXIMUM_VISIBLE_BARS);
-    let replay = replay_envelope(interval, maximum_visible_bars, SystemTime::now())?;
+    let maximum_visible_bars = window.maximum_bars.clamp(1, MAXIMUM_VISIBLE_BARS);
+    let replay = match window.range {
+        Some(range) => explicit_replay_envelope(maximum_visible_bars, range)?,
+        None => replay_envelope(interval, maximum_visible_bars, SystemTime::now())?,
+    };
     let connection = connect(Arc::clone(stop))?;
     let mut transport = RithmicHistorySessionTransport::try_new(
         connection,
@@ -405,6 +408,24 @@ fn replay_envelope(
         range: history_range(start_seconds, end_seconds)?,
         maximum_bars: NonZeroUsize::new(theoretical_bars).unwrap_or(NonZeroUsize::MIN),
         forming,
+    })
+}
+
+fn explicit_replay_envelope(
+    maximum_visible_bars: usize,
+    range: HistoryRange,
+) -> Result<ReplayEnvelope, String> {
+    if range.start_unix_nanos >= range.end_unix_nanos {
+        return Err("Rithmic visible history range is empty".to_string());
+    }
+    Ok(ReplayEnvelope {
+        range,
+        maximum_bars: NonZeroUsize::new(maximum_visible_bars.clamp(1, MAXIMUM_REPLAY_BARS))
+            .unwrap_or(NonZeroUsize::MIN),
+        // Viewport repairs are behind the installed live edge, so they never
+        // invent an open bucket. The existing realtime handoff remains owner
+        // of the forming candle while the repair replaces completed history.
+        forming: FormingPlan::Closed,
     })
 }
 

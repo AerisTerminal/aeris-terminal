@@ -98,6 +98,7 @@ pub(crate) enum HyperliquidCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
     SelectionResolved {
         consumer_id: u64,
+        command_generation: u64,
         instrument: InstallProviderInstrument,
     },
     Rejected {
@@ -357,6 +358,7 @@ fn handle_catalog_select(
     stop: &Arc<AtomicBool>,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
+    let command_generation = selection.selection_generation;
     // Resolve-on-demand when the catalog is missing entirely so a cold
     // start without a background refresh still answers.
     if catalog.present().is_none() {
@@ -416,6 +418,7 @@ fn handle_catalog_select(
         events,
         HyperliquidCatalogEvent::SelectionResolved {
             consumer_id: selection.consumer_id,
+            command_generation,
             instrument: InstallProviderInstrument {
                 provider: "hyperliquid".to_string(),
                 session_generation: ws_generation.load(Ordering::Acquire).max(1),

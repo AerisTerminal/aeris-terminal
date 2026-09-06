@@ -44,6 +44,7 @@ pub struct ProviderStatus {
 struct ProviderRecord {
     config: ProviderConfig,
     status: ProviderStatus,
+    active: bool,
 }
 
 pub(crate) struct ProviderManager {
@@ -78,6 +79,7 @@ impl ProviderManager {
                     health: ProviderHealth::Disconnected,
                     capabilities: config.capabilities,
                 },
+                active: false,
                 config,
             },
         );
@@ -105,6 +107,7 @@ impl ProviderManager {
         }
         record.status.generation = Some(generation);
         record.status.health = ProviderHealth::Connecting;
+        record.active = true;
         Ok(())
     }
 
@@ -118,6 +121,7 @@ impl ProviderManager {
             .providers
             .get_mut(provider)
             .ok_or_else(|| EngineError::UnknownProvider(provider.to_string()))?;
+        record.active = false;
         record.status.health = ProviderHealth::Disconnected;
         Ok(())
     }
@@ -133,6 +137,11 @@ impl ProviderManager {
             .providers
             .get_mut(provider)
             .ok_or_else(|| EngineError::UnknownProvider(provider.to_string()))?;
+        if !record.active {
+            return Err(EngineError::ProviderSessionUnavailable(
+                provider.to_string(),
+            ));
+        }
         record.status.health = health;
         Ok(())
     }
@@ -164,7 +173,7 @@ impl ProviderManager {
             .providers
             .get(provider)
             .ok_or_else(|| EngineError::UnknownProvider(provider.to_string()))?;
-        if record.status.generation.is_none() {
+        if !record.active || record.status.generation.is_none() {
             return Err(EngineError::ProviderSessionUnavailable(
                 provider.to_string(),
             ));

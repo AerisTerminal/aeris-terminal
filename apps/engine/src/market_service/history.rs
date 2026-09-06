@@ -1,16 +1,17 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarPeriod, BarSeriesKey, Command, ConsumerId,
-    Coordinator, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, FailureStage, FormingBar, GenerationId,
-    HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED, HISTORY_RETRY_DELAY, HistoryRange,
-    HistoryRequest, HistorySnapshot, HistorySource, HotSeries, HotSetManager, HotSetTier,
-    HyperliquidHandoffSeed, InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES,
-    MAXIMUM_SERIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering, PersistenceState,
-    ProviderCatalogCommand, ProviderConnectionState, ProviderGeneration, ProviderRequest,
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RithmicHandoffSeed, SearchProviderInstruments,
-    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, StorageRequest, SyncSender,
-    TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId, WorkspaceState,
-    engine_install_failure_stage, fail_waiters, hyperliquid_interval_for_period, ipc_series,
-    publish_state, series_state, thread, try_enqueue_history,
+    Coordinator, DeferredHistoryRequest, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, FailureStage,
+    FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED,
+    HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest, HistorySnapshot, HistorySource, HotSeries,
+    HotSetManager, HotSetTier, HyperliquidHandoffSeed, InstallProviderInstrument, Instant,
+    MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering,
+    PersistenceState, ProviderCatalogCommand, ProviderConnectionState, ProviderGeneration,
+    ProviderRequest, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RithmicHandoffSeed,
+    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    StorageRequest, SyncSender, TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries,
+    WorkspaceId, WorkspaceState, engine_install_failure_stage, fail_waiters,
+    hyperliquid_interval_for_period, ipc_series, publish_state, series_state, thread,
+    try_enqueue_history,
 };
 use crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID;
 
@@ -23,7 +24,15 @@ pub(super) fn reconcile_history_repair(
         return Err("covering history repair is empty".to_string());
     }
     let mut by_timestamp = std::collections::BTreeMap::new();
-    for bar in current.bars.iter().copied() {
+    let current_completed = if current.forming {
+        current
+            .bars
+            .get(..current.bars.len().saturating_sub(1))
+            .unwrap_or(&[])
+    } else {
+        current.bars.as_ref()
+    };
+    for bar in current_completed.iter().copied() {
         by_timestamp.insert(bar.exchange_timestamp_unix_nanos, bar);
     }
     // Provider repair is authoritative for overlapping buckets and may extend
@@ -241,7 +250,7 @@ impl Coordinator<'_> {
             Err(HISTORY_CAPACITY_EXHAUSTED) => {
                 self.history_retries
                     .entry((series.clone(), generation))
-                    .or_insert((Instant::now() + HISTORY_RETRY_DELAY, 0));
+                    .or_insert((Instant::now() + HISTORY_RETRY_DELAY, 0, None));
                 Ok(())
             }
             result => result,
@@ -381,7 +390,7 @@ impl Coordinator<'_> {
         {
             Ok(())
         } else {
-            self.enqueue_history(series, provider_generation)
+            self.enqueue_history_recovery(series, provider_generation)
         };
         if let Err(detail) = history
             && let Some(waiters) = self.pending.remove(series)
@@ -438,13 +447,14 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
+        range: Option<HistoryRange>,
         error: &str,
     ) -> bool {
         let key = (series.clone(), generation);
         let attempts = self
             .history_retries
             .get(&key)
-            .map_or(1, |(_, attempts)| attempts.saturating_add(1));
+            .map_or(1, |(_, attempts, _)| attempts.saturating_add(1));
         eprintln!(
             "Axiusflow engine {} history attempt {attempts} failed for {}: {error}",
             series.provider_id, series.instrument_id
@@ -454,7 +464,7 @@ impl Coordinator<'_> {
             return false;
         }
         self.history_retries
-            .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts));
+            .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts, range));
         self.broadcast_provider_for(
             &series.provider_id,
             ProviderConnectionState::Recovering,
@@ -473,13 +483,14 @@ impl Coordinator<'_> {
         let Some(key) = self
             .history_retries
             .iter()
-            .find(|(key, (retry_at, _))| {
+            .find(|(key, (retry_at, _, _))| {
                 now >= *retry_at && !self.history_inflight.contains_key(*key)
             })
-            .map(|(key, _)| key.clone())
+            .map(|(key, (_, _, range))| (key.clone(), *range))
         else {
             return;
         };
+        let (key, range) = key;
         let (series, generation) = &key;
         let current_generation = self
             .engine
@@ -489,8 +500,8 @@ impl Coordinator<'_> {
             self.history_retries.remove(&key);
             return;
         }
-        let _ = self.enqueue_history(series, *generation);
-        if let Some((retry_at, _)) = self.history_retries.get_mut(&key) {
+        let _ = self.enqueue_history_request(series, *generation, range);
+        if let Some((retry_at, _, _)) = self.history_retries.get_mut(&key) {
             *retry_at = now + HISTORY_RETRY_DELAY;
         }
     }
@@ -622,13 +633,54 @@ impl Coordinator<'_> {
         &mut self,
         consumer_id: ConsumerId,
         generation: GenerationId,
-        _viewport: Viewport,
+        viewport: Viewport,
     ) -> Result<(), String> {
         let Some(demand) = self.engine.current_demand(consumer_id) else {
             return Err("market consumer is unavailable".to_string());
         };
-        let _ = (demand, generation);
-        Ok(())
+        if demand.generation != Some(generation) {
+            return Ok(());
+        }
+        let Some(series) = demand.series.clone() else {
+            return Ok(());
+        };
+        let Some(snapshot) = self.engine.series_snapshot(&series) else {
+            // Initial history already owns the unresolved series. Once the
+            // first covering snapshot lands, later viewport movement can ask
+            // for older coverage without duplicating startup work.
+            return Ok(());
+        };
+        let Some(first) = snapshot.bars.first() else {
+            return Ok(());
+        };
+        if viewport.start_unix_nanos >= first.exchange_timestamp_unix_nanos {
+            return Ok(());
+        }
+        let mut start_unix_nanos = viewport.start_unix_nanos;
+        let end_unix_nanos = first.exchange_timestamp_unix_nanos;
+        if let Some(duration) = series.period.duration_nanos() {
+            let maximum = HISTORY_BARS_PER_SERIES
+                .saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE)
+                .max(1);
+            if let Ok(maximum) = i64::try_from(maximum)
+                && let Some(span) = duration.checked_mul(maximum)
+            {
+                start_unix_nanos = start_unix_nanos.max(end_unix_nanos.saturating_sub(span));
+            }
+        }
+        if start_unix_nanos >= end_unix_nanos {
+            return Ok(());
+        }
+        let provider_generation = self.provider_generation_for_series(&series)?;
+        self.enqueue_history_request(
+            &series,
+            provider_generation,
+            Some(HistoryRange {
+                start_unix_nanos,
+                end_unix_nanos,
+            }),
+        )
+        .map_err(str::to_string)
     }
 
     /// Seeds the live aggregator from installed history and drains the buffer.
@@ -667,6 +719,21 @@ impl Coordinator<'_> {
         }
         let key = (series.clone(), generation);
         if self.history_inflight.contains_key(&key) {
+            self.history_deferred
+                .entry(key)
+                .and_modify(|deferred| match (deferred, range) {
+                    (DeferredHistoryRequest::Full, _) => {}
+                    (slot, None) => *slot = DeferredHistoryRequest::Full,
+                    (DeferredHistoryRequest::Range(existing), Some(range)) => {
+                        existing.start_unix_nanos =
+                            existing.start_unix_nanos.min(range.start_unix_nanos);
+                        existing.end_unix_nanos = existing.end_unix_nanos.max(range.end_unix_nanos);
+                    }
+                })
+                .or_insert_with(|| match range {
+                    Some(range) => DeferredHistoryRequest::Range(range),
+                    None => DeferredHistoryRequest::Full,
+                });
             return Ok(());
         }
         let instrument = if series.provider_id == "rithmic" || series.provider_id == "hyperliquid" {
@@ -745,7 +812,7 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        _range: Option<HistoryRange>,
+        range: Option<HistoryRange>,
         result: Result<HistorySnapshot, String>,
     ) -> Option<HistorySnapshot> {
         let key = (series.clone(), generation);
@@ -777,8 +844,18 @@ impl Coordinator<'_> {
                 None
             }
             Err(error) => {
-                if !self.schedule_history_retry(series, generation, &error) {
-                    self.history_failed(series, generation);
+                if !self.schedule_history_retry(series, generation, range, &error) {
+                    if range.is_none() {
+                        self.history_failed(series, generation);
+                    } else {
+                        self.history_deferred.remove(&(series.clone(), generation));
+                        self.broadcast_series_resolution_for(
+                            series,
+                            SeriesLoadState::Partial,
+                            PersistenceState::Durable,
+                            Some("Visible history backfill is temporarily unavailable"),
+                        );
+                    }
                 }
                 None
             }
@@ -796,22 +873,69 @@ impl Coordinator<'_> {
             return;
         };
         if snapshot.bars.is_empty() {
-            self.history_failed(series, generation);
+            if range.is_some() {
+                self.history_deferred.remove(&(series.clone(), generation));
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    PersistenceState::Durable,
+                    Some("No additional provider history is available for this viewport"),
+                );
+            } else {
+                self.history_failed(series, generation);
+            }
             return;
         }
+        let replacing_existing = self.engine.series_snapshot(series).is_some();
         let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot) else {
             self.history_failed(series, generation);
             return;
         };
-        let persisted_bars = snapshot.bars.clone();
         if self
-            .install_completed_history(series, generation, snapshot, false, persisted_bars, true)
+            .install_completed_history(
+                series,
+                generation,
+                snapshot,
+                replacing_existing,
+                true,
+                range.is_none(),
+            )
             .is_none()
         {
             return;
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
+        if range.is_none() {
+            let viewport_demands = self
+                .events
+                .keys()
+                .filter_map(|consumer_id| {
+                    let demand = self.engine.current_demand(*consumer_id)?;
+                    (demand.series.as_ref() == Some(series)).then_some((
+                        *consumer_id,
+                        demand.generation?,
+                        demand.viewport?,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (consumer_id, consumer_generation, viewport) in viewport_demands {
+                let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
+            }
+        }
+        self.dispatch_deferred_history(series, generation);
+    }
+
+    fn dispatch_deferred_history(&mut self, series: &BarSeriesKey, generation: ProviderGeneration) {
+        let key = (series.clone(), generation);
+        let Some(deferred) = self.history_deferred.remove(&key) else {
+            return;
+        };
+        let range = match deferred {
+            DeferredHistoryRequest::Full => None,
+            DeferredHistoryRequest::Range(range) => Some(range),
+        };
+        let _ = self.enqueue_history_request(series, generation, range);
     }
     pub(super) fn install_completed_history(
         &mut self,
@@ -819,12 +943,13 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         snapshot: HistorySnapshot,
         replace_covering: bool,
-        persisted_bars: Vec<MarketBar>,
         publish: bool,
+        reseed_live: bool,
     ) -> Option<(Vec<MarketBar>, Option<FormingBar>)> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
+        let persisted_bars = snapshot.bars.clone();
         let mut forming = snapshot.forming;
         let provider_forming =
             if series.provider_id == "hyperliquid" || series.provider_id == "rithmic" {
@@ -874,6 +999,9 @@ impl Coordinator<'_> {
             false,
             "Local history persistence is unavailable",
         );
+        if !reseed_live {
+            return Some((bars, forming));
+        }
         if series.provider_id == "hyperliquid" {
             if let Err(error) = self.finish_hyperliquid_history_handoff(
                 series,
@@ -885,15 +1013,7 @@ impl Coordinator<'_> {
                     forming: provider_forming,
                 },
             ) {
-                if let Some(waiters) = self.pending.remove(series) {
-                    fail_waiters(
-                        &mut self.events,
-                        waiters,
-                        series,
-                        FailureStage::Handoff,
-                        &error,
-                    );
-                }
+                self.fail_history_handoff(series, &error);
                 return None;
             }
         } else if let Err(error) = self.finish_rithmic_history_handoff(
@@ -907,18 +1027,22 @@ impl Coordinator<'_> {
                 handoff_boundary_unix_nanos,
             },
         ) {
-            if let Some(waiters) = self.pending.remove(series) {
-                fail_waiters(
-                    &mut self.events,
-                    waiters,
-                    series,
-                    FailureStage::Handoff,
-                    &error,
-                );
-            }
+            self.fail_history_handoff(series, &error);
             return None;
         }
         Some((bars, forming))
+    }
+
+    fn fail_history_handoff(&mut self, series: &BarSeriesKey, error: &str) {
+        if let Some(waiters) = self.pending.remove(series) {
+            fail_waiters(
+                &mut self.events,
+                waiters,
+                series,
+                FailureStage::Handoff,
+                error,
+            );
+        }
     }
 
     /// Publishes one installed covering snapshot to every matching consumer
@@ -946,12 +1070,9 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         mut snapshot: HistorySnapshot,
     ) -> Option<HistorySnapshot> {
-        if !self.local_loaded.contains(&(series.clone(), generation)) {
-            return Some(snapshot);
-        }
+        let had_local_history = self.local_loaded.contains(&(series.clone(), generation));
         let Some(current) = self.engine.series_snapshot(series) else {
-            self.history_failed(series, generation);
-            return None;
+            return Some(snapshot);
         };
         let merged = reconcile_history_repair(&current, snapshot.bars, HISTORY_BARS_PER_SERIES);
         let Ok(bars) = merged else {
@@ -959,8 +1080,16 @@ impl Coordinator<'_> {
             return None;
         };
         snapshot.bars = bars;
-        self.local_loaded.remove(&(series.clone(), generation));
-        self.engine.invalidate_series(series);
+        if let Some(forming) = snapshot.forming.as_mut() {
+            let next_sequence = snapshot
+                .bars
+                .last()
+                .map_or(1, |bar| bar.source_sequence.saturating_add(1));
+            forming.bar.source_sequence = next_sequence;
+        }
+        if had_local_history {
+            self.local_loaded.remove(&(series.clone(), generation));
+        }
         Some(snapshot)
     }
 
@@ -1139,6 +1268,16 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn prune_history_tracking(&mut self) {
+        // Timeframe/symbol changes supersede the old series immediately. Cancel
+        // its queued/in-flight provider work so one user rapidly changing the
+        // chart cannot occupy the bounded history queue with obsolete fetches.
+        for ((series, _), stop) in &self.history_cancellations {
+            if !self.engine.has_subscription(series) {
+                stop.store(true, Ordering::Release);
+            }
+        }
+        self.history_deferred
+            .retain(|(series, _), _| self.engine.has_subscription(series));
         self.history_retries.retain(|(series, generation), _| {
             self.engine.has_subscription(series)
                 && self

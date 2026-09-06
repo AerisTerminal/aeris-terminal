@@ -19,8 +19,9 @@ use axiusflow_hyperliquid_market_adapter::{
     NORMALIZED_QUANTITY_SCALE, fetch_candle_snapshot, hyperliquid_interval_for_period,
 };
 use axiusflow_market_data::{BarPeriod, BarSeriesKey};
+use axiusflow_provider_history::HistoryRange;
 
-use crate::market_service::FormingBar;
+use crate::market_service::{FormingBar, HistoryFetchWindow};
 
 const NANOS_PER_MILLI: i64 = 1_000_000;
 
@@ -49,7 +50,7 @@ pub(super) fn fetch(
     series: &BarSeriesKey,
     _provider_generation: u64,
     installed: &InstallProviderInstrument,
-    maximum_bars: usize,
+    window: HistoryFetchWindow,
     stop: &Arc<AtomicBool>,
 ) -> Result<Snapshot, String> {
     if stop.load(Ordering::Acquire) {
@@ -69,7 +70,7 @@ pub(super) fn fetch(
     // Fails explicitly for intervals with no native Hyperliquid candle
     // (notably tick periods) instead of reinterpreting the demand.
     hyperliquid_interval_for_period(series.period)?;
-    let maximum_bars = maximum_bars.clamp(
+    let maximum_bars = window.maximum_bars.clamp(
         1,
         axiusflow_hyperliquid_market_adapter::MAXIMUM_HYPERLIQUID_CANDLES,
     );
@@ -79,7 +80,10 @@ pub(super) fn fetch(
         .as_millis();
     let now_millis =
         i64::try_from(now_millis).map_err(|_| "system clock is invalid".to_string())?;
-    let (start_millis, end_millis) = history_window(series.period, maximum_bars, now_millis)?;
+    let (start_millis, end_millis) = match window.range {
+        Some(range) => history_window_for_range(series.period, maximum_bars, range, now_millis)?,
+        None => history_window(series.period, maximum_bars, now_millis)?,
+    };
     let page = fetch_candle_snapshot(&CandleSnapshotRequest {
         wire_coin: &installed.provider_symbol,
         period: series.period,
@@ -109,6 +113,27 @@ pub(super) fn fetch(
         forming: page.forming.map(|bar| FormingBar { bar, trades: None }),
         handoff_boundary_unix_nanos,
     })
+}
+
+fn history_window_for_range(
+    period: BarPeriod,
+    maximum_bars: usize,
+    range: HistoryRange,
+    now_millis: i64,
+) -> Result<(i64, i64), String> {
+    if range.start_unix_nanos >= range.end_unix_nanos {
+        return Err("Hyperliquid history range is empty".to_string());
+    }
+    let requested_start = range.start_unix_nanos.div_euclid(NANOS_PER_MILLI).max(0);
+    let requested_end = range
+        .end_unix_nanos
+        .div_euclid(NANOS_PER_MILLI)
+        .min(now_millis);
+    if requested_start >= requested_end {
+        return Err("Hyperliquid history range is outside available time".to_string());
+    }
+    let (minimum_start, _) = history_window(period, maximum_bars, requested_end)?;
+    Ok((requested_start.max(minimum_start), requested_end))
 }
 
 /// Sizes one bounded history window ending now.

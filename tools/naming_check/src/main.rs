@@ -378,7 +378,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "a21796ffef2c9c3831242e8c355ad4259e10d34c";
+        let expected_revision = "5bfddf5a9e1ef7e5803ac00e88bfdbaae148fbc6";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_render",
@@ -1260,12 +1260,12 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 18"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 19"),
             "incompatible IPC revisions require a deliberate protocol-version change"
         );
         assert!(
-            protocol.contains("Revision 18 adds the phase 5 account boundary"),
-            "protocol version 18 must document the account boundary"
+            protocol.contains("Revision 19 adds the selection-command generation"),
+            "protocol version 19 must document symbol-selection correlation"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");
         assert!(

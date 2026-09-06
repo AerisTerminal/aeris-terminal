@@ -298,8 +298,9 @@ impl Coordinator<'_> {
             RithmicCatalogEvent::SearchCompleted(result) => self.handle_catalog_search(result),
             RithmicCatalogEvent::SelectionResolved {
                 consumer_id,
+                command_generation,
                 instrument,
-            } => self.handle_catalog_selection(consumer_id, instrument),
+            } => self.handle_catalog_selection(consumer_id, command_generation, instrument),
             RithmicCatalogEvent::Rejected {
                 rejection,
                 selection,
@@ -315,10 +316,11 @@ impl Coordinator<'_> {
             }
             HyperliquidCatalogEvent::SelectionResolved {
                 consumer_id,
+                command_generation,
                 instrument,
             } => {
                 self.restore_hyperliquid_catalog_health(&instrument.provider);
-                self.handle_catalog_selection(consumer_id, instrument);
+                self.handle_catalog_selection(consumer_id, command_generation, instrument);
             }
             HyperliquidCatalogEvent::Rejected {
                 rejection,
@@ -480,6 +482,7 @@ impl Coordinator<'_> {
     pub(super) fn handle_catalog_selection(
         &mut self,
         consumer_id: u64,
+        command_generation: u64,
         instrument: InstallProviderInstrument,
     ) {
         if consumer_id == 0 {
@@ -519,12 +522,12 @@ impl Coordinator<'_> {
         let Ok(id) = id(consumer_id).map(ConsumerId) else {
             return;
         };
-        let command_generation = instrument.selection_generation;
         let provider = instrument.provider.clone();
         let publication = match self.install_provider_instrument(&instrument) {
             Ok(()) => envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
                 consumer_id,
                 instrument: Some(instrument),
+                command_generation,
             }),
             Err(_) => envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
                 consumer_id,

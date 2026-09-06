@@ -429,6 +429,11 @@ fn stream_frame_kind(message: &RithmicSessionMessage) -> &'static str {
         RithmicSessionMessage::Market(DecodedMarketMessage::Trade(_)) => "market-trade",
         RithmicSessionMessage::Market(DecodedMarketMessage::Quote(_)) => "market-quote",
         RithmicSessionMessage::Market(DecodedMarketMessage::OrderBook(_)) => "market-book",
+        RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(_)) => {
+            "market-dbo-snapshot"
+        }
+        RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrder(_)) => "market-dbo",
+        RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderEnd(_)) => "market-dbo-end",
         RithmicSessionMessage::History(_) => "history",
     }
 }

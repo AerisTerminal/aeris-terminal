@@ -2,12 +2,15 @@ use crate::network::ConnectionAbort;
 use crate::{
     AggregateBookAssembler, AggregateBookLimits, AggregateBookOutcome, CollectedSymbols,
     CollectionProgress, CollectorError, DecodedCatalogMessage, DecodedControlMessage,
-    DecodedMarketMessage, InstrumentReference, InstrumentReferenceRequest, InstrumentType,
-    MarketDataSubscription, MarketIdentity, OrderBookLevel, ProviderTimestamp, QuoteLevel,
-    QuoteSideUpdate, RetryDisposition, RithmicApplication, RithmicCredentialBytes,
-    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession,
-    SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
-    SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
+    DecodedMarketMessage, DepthByOrderEndEvent as DecodedDepthByOrderEndEvent,
+    DepthByOrderMutation, DepthByOrderMutationKind, DepthByOrderSide, DepthByOrderSnapshotLevel,
+    DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
+    InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
+    MarketIdentity, OrderBookLevel, ProviderTimestamp, QuoteLevel, QuoteSideUpdate,
+    RetryDisposition, RithmicApplication, RithmicCredentialBytes, RithmicSessionError,
+    RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession, SearchPattern,
+    SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
+    SymbolSearchResult, TradeAggressor,
 };
 use crate::{
     AuthenticationState, ConnectTrigger, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
@@ -16,7 +19,7 @@ use crate::{
     SessionGeneration,
 };
 use axiusflow_market_data::{
-    AggressorSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
+    AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
     QualifiedTimestamp, TopOfBookQuote,
 };
 use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
@@ -48,6 +51,7 @@ const SESSION_COMMAND_CAPACITY: usize = 8;
 const SESSION_COMMAND_BATCH: usize = 4;
 const SESSION_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES: usize = 256;
+const MAXIMUM_INITIAL_DBO_SNAPSHOT_MESSAGES: usize = 8_192;
 const MAXIMUM_CALLBACK_EVENTS: usize = 4_096;
 const MAXIMUM_CALLBACK_BYTES: usize = 256 * 1024 * 1024;
 const MAXIMUM_SILENCE_TIMEOUT: Duration = Duration::from_mins(5);
@@ -522,6 +526,21 @@ impl RithmicProviderInstrument {
     fn identity_matches(&self, identity: &MarketIdentity) -> bool {
         self.descriptor.provider_symbol == identity.symbol
             && self.descriptor.venue_id == identity.exchange
+    }
+
+    fn depth_request(&self, action: SubscriptionAction) -> DepthByOrderSubscription<'_> {
+        DepthByOrderSubscription {
+            symbol: &self.descriptor.provider_symbol,
+            exchange: &self.descriptor.venue_id,
+            action,
+        }
+    }
+
+    fn depth_snapshot_request(&self) -> DepthByOrderSnapshotRequest<'_> {
+        DepthByOrderSnapshotRequest {
+            symbol: &self.descriptor.provider_symbol,
+            exchange: &self.descriptor.venue_id,
+        }
     }
 }
 
@@ -1816,33 +1835,128 @@ fn install_subscriptions(
         if stop.load(Ordering::Acquire) {
             return Err(RithmicSessionError::Cancelled);
         }
-        let deadline = Instant::now() + config.session_limits.response_timeout;
-        let mut accepted = false;
-        while messages_read < MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES {
-            match connection.read_next_until(deadline)? {
-                RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
-                    accepted: true,
-                }) => {
-                    messages_read += 1;
-                    accepted = true;
-                    break;
-                }
-                RithmicSessionMessage::Control(
-                    DecodedControlMessage::MarketDataSubscription { accepted: false }
-                    | DecodedControlMessage::Reject
-                    | DecodedControlMessage::ForcedLogout,
-                ) => return Err(RithmicSessionError::Protocol),
-                message => {
-                    messages_read += 1;
-                    initial_messages.push_back(message);
-                }
-            }
-        }
-        if !accepted {
-            return Err(RithmicSessionError::Deadline);
+        await_initial_subscription_ack(
+            connection,
+            config.session_limits.response_timeout,
+            InitialSubscriptionAck::MarketData,
+            &mut messages_read,
+            &mut initial_messages,
+        )?;
+        if instrument.order_book {
+            connection
+                .update_depth_by_order(instrument.depth_request(SubscriptionAction::Subscribe))?;
+            await_initial_subscription_ack(
+                connection,
+                config.session_limits.response_timeout,
+                InitialSubscriptionAck::DepthByOrder,
+                &mut messages_read,
+                &mut initial_messages,
+            )?;
+            connection.request_depth_by_order_snapshot(instrument.depth_snapshot_request())?;
+            await_initial_depth_snapshot(
+                connection,
+                config.session_limits.response_timeout,
+                instrument,
+                &mut initial_messages,
+            )?;
         }
     }
     Ok(initial_messages)
+}
+
+fn await_initial_depth_snapshot(
+    connection: &mut crate::RithmicTickerConnection,
+    response_timeout: Duration,
+    instrument: &RithmicProviderInstrument,
+    initial_messages: &mut VecDeque<RithmicSessionMessage>,
+) -> Result<(), RithmicSessionError> {
+    let deadline = Instant::now() + response_timeout;
+    let mut messages_read = 0_usize;
+    let mut retained_orders = 0_usize;
+    loop {
+        if messages_read >= MAXIMUM_INITIAL_DBO_SNAPSHOT_MESSAGES {
+            return Err(RithmicSessionError::Protocol);
+        }
+        let mut message = connection.read_next_until(deadline)?;
+        messages_read = messages_read.saturating_add(1);
+        match &mut message {
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::Level(level),
+            )) => {
+                if !instrument.identity_matches(&level.identity) {
+                    return Err(RithmicSessionError::Protocol);
+                }
+                retained_orders = retained_orders
+                    .checked_add(level.orders.len())
+                    .filter(|orders| *orders <= MAXIMUM_MBO_ORDERS)
+                    .ok_or(RithmicSessionError::Protocol)?;
+                initial_messages.push_back(message);
+            }
+            RithmicSessionMessage::Market(DecodedMarketMessage::DepthByOrderSnapshot(
+                DepthByOrderSnapshotMessage::Complete {
+                    accepted, identity, ..
+                },
+            )) => {
+                if !*accepted {
+                    return Err(RithmicSessionError::Protocol);
+                }
+                if identity.is_none() {
+                    *identity = Some(MarketIdentity {
+                        symbol: instrument.descriptor.provider_symbol.clone(),
+                        exchange: instrument.descriptor.venue_id.clone(),
+                    });
+                } else if identity
+                    .as_ref()
+                    .is_some_and(|identity| !instrument.identity_matches(identity))
+                {
+                    return Err(RithmicSessionError::Protocol);
+                }
+                initial_messages.push_back(message);
+                return Ok(());
+            }
+            RithmicSessionMessage::Control(
+                DecodedControlMessage::Reject | DecodedControlMessage::ForcedLogout,
+            ) => return Err(RithmicSessionError::Protocol),
+            _ => initial_messages.push_back(message),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InitialSubscriptionAck {
+    MarketData,
+    DepthByOrder,
+}
+
+fn await_initial_subscription_ack(
+    connection: &mut crate::RithmicTickerConnection,
+    response_timeout: Duration,
+    expected: InitialSubscriptionAck,
+    messages_read: &mut usize,
+    initial_messages: &mut VecDeque<RithmicSessionMessage>,
+) -> Result<(), RithmicSessionError> {
+    let deadline = Instant::now() + response_timeout;
+    while *messages_read < MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES {
+        let message = connection.read_next_until(deadline)?;
+        *messages_read = messages_read.saturating_add(1);
+        let matching = match &message {
+            RithmicSessionMessage::Control(DecodedControlMessage::MarketDataSubscription {
+                accepted,
+            }) if expected == InitialSubscriptionAck::MarketData => Some(*accepted),
+            RithmicSessionMessage::Control(DecodedControlMessage::DepthByOrderSubscription {
+                accepted,
+            }) if expected == InitialSubscriptionAck::DepthByOrder => Some(*accepted),
+            RithmicSessionMessage::Control(
+                DecodedControlMessage::Reject | DecodedControlMessage::ForcedLogout,
+            ) => return Err(RithmicSessionError::Protocol),
+            _ => None,
+        };
+        if let Some(accepted) = matching {
+            return accepted.then_some(()).ok_or(RithmicSessionError::Protocol);
+        }
+        initial_messages.push_back(message);
+    }
+    Err(RithmicSessionError::Deadline)
 }
 
 enum PendingCatalogCommand {
@@ -1857,9 +1971,13 @@ enum PendingCatalogCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SubscriptionPhase {
-    Unsubscribe(usize),
-    Subscribe,
+    UnsubscribeMarket(usize),
+    UnsubscribeDepth(usize),
+    SubscribeMarket,
+    SubscribeDepth,
+    SubscribeDepthSnapshot,
 }
 
 struct PendingSubscription {
@@ -2053,6 +2171,7 @@ fn silence_invalidation(
         })
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_session_message(
     connection: &mut crate::RithmicTickerConnection,
     message: RithmicSessionMessage,
@@ -2082,13 +2201,58 @@ fn handle_session_message(
                 connection,
                 generation,
                 emitter,
-                accepted,
+                SubscriptionAcknowledgement::MarketData(accepted),
+                &mut state.catalog.pending_subscription,
+                canonical,
+                response_timeout,
+            )?;
+        }
+        RithmicSessionMessage::Control(DecodedControlMessage::DepthByOrderSubscription {
+            accepted,
+        }) if state.catalog.pending_subscription.is_some() => {
+            advance_subscription(
+                connection,
+                generation,
+                emitter,
+                SubscriptionAcknowledgement::DepthByOrder(accepted),
                 &mut state.catalog.pending_subscription,
                 canonical,
                 response_timeout,
             )?;
         }
         RithmicSessionMessage::Market(message) => {
+            let snapshot_completion = match &message {
+                DecodedMarketMessage::DepthByOrderSnapshot(
+                    DepthByOrderSnapshotMessage::Complete {
+                        accepted, identity, ..
+                    },
+                ) => {
+                    if let Some(plan) = state.catalog.pending_subscription.as_ref()
+                        && plan.phase == SubscriptionPhase::SubscribeDepthSnapshot
+                    {
+                        if identity
+                            .as_ref()
+                            .is_some_and(|identity| !plan.instrument.identity_matches(identity))
+                        {
+                            return Err(malformed());
+                        }
+                        if !*accepted {
+                            send_rejection(
+                                emitter,
+                                generation,
+                                plan.selection.selection_generation,
+                                RithmicCatalogRejection::SubscriptionRejected,
+                            );
+                            return Err((
+                                ProviderInvalidationReason::Transport,
+                                RetryDisposition::Transient,
+                            ));
+                        }
+                    }
+                    Some(*accepted)
+                }
+                _ => None,
+            };
             let received_unix_nanos = unix_nanos_now()?;
             if let Some(event) =
                 canonical.convert(message, state.source_ordinal, received_unix_nanos)?
@@ -2096,6 +2260,15 @@ fn handle_session_message(
             {
                 stop.store(true, Ordering::Release);
                 return Ok(false);
+            }
+            if snapshot_completion.is_some_and(|accepted| accepted)
+                && state
+                    .catalog
+                    .pending_subscription
+                    .as_ref()
+                    .is_some_and(|plan| plan.phase == SubscriptionPhase::SubscribeDepthSnapshot)
+            {
+                finish_subscription(&mut state.catalog.pending_subscription, generation, emitter)?;
             }
         }
         RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
@@ -2290,7 +2463,7 @@ fn handle_catalog_message(
             let previous = canonical.instruments.clone();
             let phase = if previous.is_empty() {
                 begin_subscription(connection, &instrument, canonical)?;
-                SubscriptionPhase::Subscribe
+                SubscriptionPhase::SubscribeMarket
             } else {
                 connection
                     .update_market_data(subscription_request(
@@ -2298,7 +2471,7 @@ fn handle_catalog_message(
                         SubscriptionAction::Unsubscribe,
                     ))
                     .map_err(session_failure)?;
-                SubscriptionPhase::Unsubscribe(0)
+                SubscriptionPhase::UnsubscribeMarket(0)
             };
             state.pending_subscription = Some(PendingSubscription {
                 selection,
@@ -2330,7 +2503,7 @@ fn advance_subscription(
     connection: &mut crate::RithmicTickerConnection,
     session_generation: SessionGeneration,
     emitter: &SessionEmitter,
-    accepted: bool,
+    acknowledgement: SubscriptionAcknowledgement,
     pending: &mut Option<PendingSubscription>,
     canonical: &mut CanonicalSessionState,
     response_timeout: Duration,
@@ -2338,7 +2511,7 @@ fn advance_subscription(
     let Some(plan) = pending.as_mut() else {
         return Err(malformed());
     };
-    if !accepted {
+    if !acknowledgement.accepted() {
         send_rejection(
             emitter,
             session_generation,
@@ -2350,41 +2523,110 @@ fn advance_subscription(
             RetryDisposition::Transient,
         ));
     }
-    match plan.phase {
-        SubscriptionPhase::Unsubscribe(index) => {
-            let next = index + 1;
-            if let Some(instrument) = plan.previous.get(next) {
+    match (plan.phase, acknowledgement) {
+        (
+            SubscriptionPhase::UnsubscribeMarket(index),
+            SubscriptionAcknowledgement::MarketData(_),
+        ) => {
+            if plan.previous[index].order_book {
                 connection
-                    .update_market_data(subscription_request(
-                        instrument,
-                        SubscriptionAction::Unsubscribe,
-                    ))
+                    .update_depth_by_order(
+                        plan.previous[index].depth_request(SubscriptionAction::Unsubscribe),
+                    )
                     .map_err(session_failure)?;
-                plan.phase = SubscriptionPhase::Unsubscribe(next);
+                plan.phase = SubscriptionPhase::UnsubscribeDepth(index);
                 plan.deadline = Instant::now() + response_timeout;
+                Ok(())
             } else {
-                begin_subscription(connection, &plan.instrument, canonical)?;
-                plan.phase = SubscriptionPhase::Subscribe;
-                plan.deadline = Instant::now() + response_timeout;
+                advance_previous_unsubscribe(connection, plan, index, canonical, response_timeout)
             }
+        }
+        (
+            SubscriptionPhase::UnsubscribeDepth(index),
+            SubscriptionAcknowledgement::DepthByOrder(_),
+        ) => advance_previous_unsubscribe(connection, plan, index, canonical, response_timeout),
+        (SubscriptionPhase::SubscribeMarket, SubscriptionAcknowledgement::MarketData(_)) => {
+            if plan.instrument.order_book {
+                connection
+                    .update_depth_by_order(
+                        plan.instrument.depth_request(SubscriptionAction::Subscribe),
+                    )
+                    .map_err(session_failure)?;
+                plan.phase = SubscriptionPhase::SubscribeDepth;
+                plan.deadline = Instant::now() + response_timeout;
+                Ok(())
+            } else {
+                finish_subscription(pending, session_generation, emitter)
+            }
+        }
+        (SubscriptionPhase::SubscribeDepth, SubscriptionAcknowledgement::DepthByOrder(_)) => {
+            connection
+                .request_depth_by_order_snapshot(plan.instrument.depth_snapshot_request())
+                .map_err(session_failure)?;
+            plan.phase = SubscriptionPhase::SubscribeDepthSnapshot;
+            plan.deadline = Instant::now() + response_timeout;
             Ok(())
         }
-        SubscriptionPhase::Subscribe => {
-            let plan = pending.take().ok_or_else(malformed)?;
-            if !emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
-                session_generation,
-                selection_generation: plan.selection.selection_generation,
-                instrument: plan.instrument.descriptor,
-                entitlement_id: plan.instrument.entitlement_id,
-            }) {
-                return Err((
-                    ProviderInvalidationReason::QueueOverflow,
-                    RetryDisposition::Transient,
-                ));
-            }
-            Ok(())
+        _ => Err(malformed()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubscriptionAcknowledgement {
+    MarketData(bool),
+    DepthByOrder(bool),
+}
+
+impl SubscriptionAcknowledgement {
+    const fn accepted(self) -> bool {
+        match self {
+            Self::MarketData(accepted) | Self::DepthByOrder(accepted) => accepted,
         }
     }
+}
+
+fn advance_previous_unsubscribe(
+    connection: &mut crate::RithmicTickerConnection,
+    plan: &mut PendingSubscription,
+    index: usize,
+    canonical: &mut CanonicalSessionState,
+    response_timeout: Duration,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let next = index + 1;
+    if let Some(instrument) = plan.previous.get(next) {
+        connection
+            .update_market_data(subscription_request(
+                instrument,
+                SubscriptionAction::Unsubscribe,
+            ))
+            .map_err(session_failure)?;
+        plan.phase = SubscriptionPhase::UnsubscribeMarket(next);
+    } else {
+        begin_subscription(connection, &plan.instrument, canonical)?;
+        plan.phase = SubscriptionPhase::SubscribeMarket;
+    }
+    plan.deadline = Instant::now() + response_timeout;
+    Ok(())
+}
+
+fn finish_subscription(
+    pending: &mut Option<PendingSubscription>,
+    session_generation: SessionGeneration,
+    emitter: &SessionEmitter,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let plan = pending.take().ok_or_else(malformed)?;
+    if !emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
+        session_generation,
+        selection_generation: plan.selection.selection_generation,
+        instrument: plan.instrument.descriptor,
+        entitlement_id: plan.instrument.entitlement_id,
+    }) {
+        return Err((
+            ProviderInvalidationReason::QueueOverflow,
+            RetryDisposition::Transient,
+        ));
+    }
+    Ok(())
 }
 
 fn selected_instrument(
@@ -2455,6 +2697,7 @@ struct CanonicalSessionState {
     generation: SessionGeneration,
     quotes: BTreeMap<String, QuoteState>,
     books: BTreeMap<String, AggregateBookAssembler>,
+    mbo_books: BTreeMap<String, MboBookAssembler>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2463,12 +2706,444 @@ struct QuoteState {
     ask: Option<QuoteLevel>,
 }
 
+const MAXIMUM_MBO_ORDERS: usize = 131_072;
+const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
+const MAXIMUM_PENDING_MBO_MUTATIONS: usize = 131_072;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MboOrder {
+    side: BookSide,
+    price: i64,
+    quantity: i64,
+    priority: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MboAggregateLevel {
+    quantity: i64,
+    order_count: u32,
+}
+
+struct MboBookAssembler {
+    identity: MarketIdentity,
+    orders: BTreeMap<String, MboOrder>,
+    bids: BTreeMap<i64, MboAggregateLevel>,
+    asks: BTreeMap<i64, MboAggregateLevel>,
+    last_provider_sequence: Option<u64>,
+    snapshot_orders: BTreeMap<String, MboOrder>,
+    snapshot_bids: BTreeMap<i64, MboAggregateLevel>,
+    snapshot_asks: BTreeMap<i64, MboAggregateLevel>,
+    snapshot_sequence: Option<u64>,
+    pending_updates: VecDeque<crate::DepthByOrderUpdate>,
+    pending_mutations: usize,
+    ready: bool,
+}
+
+enum MboBookOutcome {
+    Pending,
+    IgnoredStale,
+    Snapshot {
+        timestamp: Option<ProviderTimestamp>,
+        bids: Vec<DepthLevel>,
+        asks: Vec<DepthLevel>,
+    },
+}
+
+impl MboBookAssembler {
+    fn new(identity: MarketIdentity) -> Self {
+        Self {
+            identity,
+            orders: BTreeMap::new(),
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            last_provider_sequence: None,
+            snapshot_orders: BTreeMap::new(),
+            snapshot_bids: BTreeMap::new(),
+            snapshot_asks: BTreeMap::new(),
+            snapshot_sequence: None,
+            pending_updates: VecDeque::new(),
+            pending_mutations: 0,
+            ready: false,
+        }
+    }
+
+    const fn ready(&self) -> bool {
+        self.ready
+    }
+
+    fn accept_update(
+        &mut self,
+        update: crate::DepthByOrderUpdate,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
+        if update.identity != self.identity {
+            return Err(malformed());
+        }
+        if !self.ready {
+            if self
+                .snapshot_sequence
+                .is_some_and(|snapshot| update.sequence_number <= snapshot)
+            {
+                return Ok(MboBookOutcome::IgnoredStale);
+            }
+            self.pending_mutations = self
+                .pending_mutations
+                .checked_add(update.mutations.len())
+                .filter(|count| *count <= MAXIMUM_PENDING_MBO_MUTATIONS)
+                .ok_or((
+                    ProviderInvalidationReason::QueueOverflow,
+                    RetryDisposition::Transient,
+                ))?;
+            self.pending_updates.push_back(update);
+            return Ok(MboBookOutcome::Pending);
+        }
+        if self
+            .last_provider_sequence
+            .is_some_and(|last| update.sequence_number <= last)
+        {
+            return Ok(MboBookOutcome::IgnoredStale);
+        }
+        if self.ready
+            && self
+                .last_provider_sequence
+                .is_some_and(|last| update.sequence_number != last.saturating_add(1))
+        {
+            return Err((
+                ProviderInvalidationReason::SequenceGap,
+                RetryDisposition::Transient,
+            ));
+        }
+        for mutation in update.mutations {
+            self.apply_mutation(mutation, price_scale, quantity_scale)?;
+        }
+        self.last_provider_sequence = Some(update.sequence_number);
+        if self.ready {
+            Ok(self.snapshot(update.timestamp))
+        } else {
+            Ok(MboBookOutcome::Pending)
+        }
+    }
+
+    fn accept_snapshot_level(
+        &mut self,
+        level: DepthByOrderSnapshotLevel,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
+        if level.identity != self.identity {
+            return Err(malformed());
+        }
+        if self.ready {
+            return if self
+                .last_provider_sequence
+                .is_some_and(|last| level.sequence_number <= last)
+            {
+                Ok(MboBookOutcome::IgnoredStale)
+            } else {
+                Err((
+                    ProviderInvalidationReason::SequenceGap,
+                    RetryDisposition::Transient,
+                ))
+            };
+        }
+        if self
+            .snapshot_sequence
+            .is_some_and(|sequence| sequence != level.sequence_number)
+        {
+            return Err((
+                ProviderInvalidationReason::SequenceGap,
+                RetryDisposition::Transient,
+            ));
+        }
+        self.snapshot_sequence = Some(level.sequence_number);
+        let side = match level.side {
+            DepthByOrderSide::Bid => BookSide::Bid,
+            DepthByOrderSide::Ask => BookSide::Ask,
+        };
+        let price = fixed_price(level.price, price_scale)?;
+        for snapshot_order in level.orders {
+            if self
+                .snapshot_orders
+                .contains_key(&snapshot_order.exchange_order_id)
+                || self.snapshot_orders.len() >= MAXIMUM_MBO_ORDERS
+            {
+                return Err((
+                    ProviderInvalidationReason::QueueOverflow,
+                    RetryDisposition::Transient,
+                ));
+            }
+            let exchange_order_id = snapshot_order.exchange_order_id;
+            let order = MboOrder {
+                side,
+                price,
+                quantity: fixed_quantity(snapshot_order.size, quantity_scale)?,
+                priority: snapshot_order.priority,
+            };
+            add_mbo_aggregate(&mut self.snapshot_bids, &mut self.snapshot_asks, order)?;
+            self.snapshot_orders.insert(exchange_order_id, order);
+        }
+        Ok(MboBookOutcome::Pending)
+    }
+
+    fn finish_snapshot(
+        &mut self,
+        completion_sequence: Option<u64>,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
+        if self.ready {
+            return Ok(MboBookOutcome::IgnoredStale);
+        }
+        let baseline = match (self.snapshot_sequence, completion_sequence) {
+            (Some(snapshot), Some(completion)) if snapshot != completion => {
+                return Err((
+                    ProviderInvalidationReason::SequenceGap,
+                    RetryDisposition::Transient,
+                ));
+            }
+            (Some(snapshot), _) => snapshot,
+            (None, Some(completion)) => completion,
+            (None, None) => return Err(malformed()),
+        };
+        self.orders = std::mem::take(&mut self.snapshot_orders);
+        self.bids = std::mem::take(&mut self.snapshot_bids);
+        self.asks = std::mem::take(&mut self.snapshot_asks);
+        self.last_provider_sequence = Some(baseline);
+        self.snapshot_sequence = None;
+        self.ready = true;
+        let mut timestamp = None;
+        while let Some(update) = self.pending_updates.pop_front() {
+            if update.identity != self.identity {
+                return Err(malformed());
+            }
+            if update.sequence_number <= self.last_provider_sequence.unwrap_or(0) {
+                continue;
+            }
+            let expected = self.last_provider_sequence.unwrap_or(0).saturating_add(1);
+            if update.sequence_number != expected {
+                return Err((
+                    ProviderInvalidationReason::SequenceGap,
+                    RetryDisposition::Transient,
+                ));
+            }
+            for mutation in update.mutations {
+                self.apply_mutation(mutation, price_scale, quantity_scale)?;
+            }
+            self.last_provider_sequence = Some(update.sequence_number);
+            timestamp = update.timestamp.or(timestamp);
+        }
+        self.pending_mutations = 0;
+        Ok(self.snapshot(timestamp))
+    }
+
+    fn finish_initial_image(
+        &mut self,
+        event: &DecodedDepthByOrderEndEvent,
+    ) -> Result<MboBookOutcome, (ProviderInvalidationReason, RetryDisposition)> {
+        if !event
+            .identities
+            .iter()
+            .any(|identity| identity == &self.identity)
+        {
+            return Ok(MboBookOutcome::Pending);
+        }
+        if self.ready {
+            return if self
+                .last_provider_sequence
+                .is_some_and(|last| event.sequence_number <= last)
+            {
+                Ok(MboBookOutcome::IgnoredStale)
+            } else {
+                Err((
+                    ProviderInvalidationReason::SequenceGap,
+                    RetryDisposition::Transient,
+                ))
+            };
+        }
+        // The explicit 115/116 snapshot owns readiness. Template 161 may
+        // interleave while that snapshot is in flight, but it cannot make a
+        // partially observed live stream authoritative.
+        Ok(MboBookOutcome::Pending)
+    }
+
+    fn apply_mutation(
+        &mut self,
+        mutation: DepthByOrderMutation,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+        let side = match mutation.side {
+            DepthByOrderSide::Bid => BookSide::Bid,
+            DepthByOrderSide::Ask => BookSide::Ask,
+        };
+        let price = fixed_price(mutation.price, price_scale)?;
+        match mutation.kind {
+            DepthByOrderMutationKind::New => {
+                if self.orders.contains_key(&mutation.exchange_order_id)
+                    || self.orders.len() >= MAXIMUM_MBO_ORDERS
+                {
+                    return Err((
+                        ProviderInvalidationReason::QueueOverflow,
+                        RetryDisposition::Transient,
+                    ));
+                }
+                let quantity = fixed_quantity(mutation.size, quantity_scale)?;
+                let order = MboOrder {
+                    side,
+                    price,
+                    quantity,
+                    priority: mutation.priority,
+                };
+                self.add_aggregate(order)?;
+                self.orders.insert(mutation.exchange_order_id, order);
+            }
+            DepthByOrderMutationKind::Change => {
+                let Some(previous) = self.orders.remove(&mutation.exchange_order_id) else {
+                    return Err((
+                        ProviderInvalidationReason::SequenceGap,
+                        RetryDisposition::Transient,
+                    ));
+                };
+                if let Some(previous_price) = mutation.previous_price {
+                    let expected = fixed_price(previous_price, price_scale)?;
+                    if expected != previous.price {
+                        return Err((
+                            ProviderInvalidationReason::SequenceGap,
+                            RetryDisposition::Transient,
+                        ));
+                    }
+                }
+                self.remove_aggregate(previous)?;
+                let quantity = fixed_quantity(mutation.size, quantity_scale)?;
+                let updated = MboOrder {
+                    side,
+                    price,
+                    quantity,
+                    priority: mutation.priority,
+                };
+                self.add_aggregate(updated)?;
+                self.orders.insert(mutation.exchange_order_id, updated);
+            }
+            DepthByOrderMutationKind::Delete => {
+                let Some(previous) = self.orders.remove(&mutation.exchange_order_id) else {
+                    return Err((
+                        ProviderInvalidationReason::SequenceGap,
+                        RetryDisposition::Transient,
+                    ));
+                };
+                if let Some(previous_price) = mutation.previous_price {
+                    let expected = fixed_price(previous_price, price_scale)?;
+                    if expected != previous.price {
+                        return Err((
+                            ProviderInvalidationReason::SequenceGap,
+                            RetryDisposition::Transient,
+                        ));
+                    }
+                }
+                self.remove_aggregate(previous)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn add_aggregate(
+        &mut self,
+        order: MboOrder,
+    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+        add_mbo_aggregate(&mut self.bids, &mut self.asks, order)
+    }
+
+    fn remove_aggregate(
+        &mut self,
+        order: MboOrder,
+    ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+        remove_mbo_aggregate(&mut self.bids, &mut self.asks, order)
+    }
+
+    fn snapshot(&self, timestamp: Option<ProviderTimestamp>) -> MboBookOutcome {
+        let bids = self
+            .bids
+            .iter()
+            .rev()
+            .take(MAXIMUM_CANONICAL_DEPTH_LEVELS)
+            .map(|(price, level)| DepthLevel {
+                price: *price,
+                quantity: level.quantity,
+                order_count: Some(level.order_count),
+            })
+            .collect();
+        let asks = self
+            .asks
+            .iter()
+            .take(MAXIMUM_CANONICAL_DEPTH_LEVELS)
+            .map(|(price, level)| DepthLevel {
+                price: *price,
+                quantity: level.quantity,
+                order_count: Some(level.order_count),
+            })
+            .collect();
+        MboBookOutcome::Snapshot {
+            timestamp,
+            bids,
+            asks,
+        }
+    }
+}
+
+fn add_mbo_aggregate(
+    bids: &mut BTreeMap<i64, MboAggregateLevel>,
+    asks: &mut BTreeMap<i64, MboAggregateLevel>,
+    order: MboOrder,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let levels = match order.side {
+        BookSide::Bid => bids,
+        BookSide::Ask => asks,
+    };
+    let level = levels.entry(order.price).or_insert(MboAggregateLevel {
+        quantity: 0,
+        order_count: 0,
+    });
+    level.quantity = level
+        .quantity
+        .checked_add(order.quantity)
+        .ok_or_else(malformed)?;
+    level.order_count = level.order_count.checked_add(1).ok_or_else(malformed)?;
+    Ok(())
+}
+
+fn remove_mbo_aggregate(
+    bids: &mut BTreeMap<i64, MboAggregateLevel>,
+    asks: &mut BTreeMap<i64, MboAggregateLevel>,
+    order: MboOrder,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let levels = match order.side {
+        BookSide::Bid => bids,
+        BookSide::Ask => asks,
+    };
+    let Some(level) = levels.get_mut(&order.price) else {
+        return Err(malformed());
+    };
+    level.quantity = level
+        .quantity
+        .checked_sub(order.quantity)
+        .ok_or_else(malformed)?;
+    level.order_count = level.order_count.checked_sub(1).ok_or_else(malformed)?;
+    if level.quantity == 0 && level.order_count == 0 {
+        levels.remove(&order.price);
+    } else if level.quantity <= 0 || level.order_count == 0 {
+        return Err(malformed());
+    }
+    Ok(())
+}
+
 impl CanonicalSessionState {
     fn try_new(
         config: &RithmicProviderConfig,
         generation: SessionGeneration,
     ) -> Result<Self, (ProviderInvalidationReason, RetryDisposition)> {
         let mut books = BTreeMap::new();
+        let mut mbo_books = BTreeMap::new();
         for instrument in &config.instruments {
             if instrument.order_book {
                 let limits = AggregateBookLimits::try_new(
@@ -2486,6 +3161,13 @@ impl CanonicalSessionState {
                         limits,
                     ),
                 );
+                mbo_books.insert(
+                    instrument.descriptor.instrument_id.clone(),
+                    MboBookAssembler::new(MarketIdentity {
+                        symbol: instrument.descriptor.provider_symbol.clone(),
+                        exchange: instrument.descriptor.venue_id.clone(),
+                    }),
+                );
             }
         }
         Ok(Self {
@@ -2493,9 +3175,11 @@ impl CanonicalSessionState {
             generation,
             quotes: BTreeMap::new(),
             books,
+            mbo_books,
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn convert(
         &mut self,
         message: DecodedMarketMessage,
@@ -2535,9 +3219,6 @@ impl CanonicalSessionState {
                 }
                 apply_quote_side(&mut state.bid, quote.bid);
                 apply_quote_side(&mut state.ask, quote.ask);
-                let Some((bid, ask)) = state.bid.zip(state.ask) else {
-                    return Ok(None);
-                };
                 let event = MarketEvent::Quote(TopOfBookQuote {
                     metadata: metadata(
                         &instrument,
@@ -2546,15 +3227,26 @@ impl CanonicalSessionState {
                         Some(quote.timestamp),
                         received_unix_nanos,
                     )?,
-                    bid_price: fixed_price(bid.price, instrument.descriptor.price_scale)?,
-                    bid_quantity: fixed_quantity(bid.size, instrument.descriptor.quantity_scale)?,
-                    ask_price: fixed_price(ask.price, instrument.descriptor.price_scale)?,
-                    ask_quantity: fixed_quantity(ask.size, instrument.descriptor.quantity_scale)?,
+                    bid: state
+                        .bid
+                        .map(|level| canonical_quote_level(level, &instrument))
+                        .transpose()?,
+                    ask: state
+                        .ask
+                        .map(|level| canonical_quote_level(level, &instrument))
+                        .transpose()?,
                 });
                 validate_market(event).map(Some)
             }
             DecodedMarketMessage::OrderBook(update) => {
                 let instrument = self.instrument(&update.identity)?.clone();
+                if self
+                    .mbo_books
+                    .get(&instrument.descriptor.instrument_id)
+                    .is_some_and(MboBookAssembler::ready)
+                {
+                    return Ok(None);
+                }
                 let assembler = self
                     .books
                     .get_mut(&instrument.descriptor.instrument_id)
@@ -2592,6 +3284,151 @@ impl CanonicalSessionState {
                     )),
                 }
             }
+            DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Level(
+                level,
+            )) => {
+                let instrument = self.instrument(&level.identity)?.clone();
+                let assembler = self
+                    .mbo_books
+                    .get_mut(&instrument.descriptor.instrument_id)
+                    .ok_or_else(malformed)?;
+                match assembler.accept_snapshot_level(
+                    level,
+                    instrument.descriptor.price_scale,
+                    instrument.descriptor.quantity_scale,
+                )? {
+                    MboBookOutcome::Pending | MboBookOutcome::IgnoredStale => Ok(None),
+                    MboBookOutcome::Snapshot { .. } => Err(malformed()),
+                }
+            }
+            DecodedMarketMessage::DepthByOrderSnapshot(DepthByOrderSnapshotMessage::Complete {
+                accepted,
+                identity,
+                sequence_number,
+            }) => {
+                if !accepted {
+                    return Err((
+                        ProviderInvalidationReason::Transport,
+                        RetryDisposition::Transient,
+                    ));
+                }
+                let instrument = if let Some(identity) = identity.as_ref() {
+                    self.instrument(identity)?.clone()
+                } else {
+                    let mut matching = self
+                        .instruments
+                        .iter()
+                        .filter(|instrument| instrument.order_book);
+                    let instrument = matching.next().cloned().ok_or_else(malformed)?;
+                    if matching.next().is_some() {
+                        return Err(malformed());
+                    }
+                    instrument
+                };
+                let assembler = self
+                    .mbo_books
+                    .get_mut(&instrument.descriptor.instrument_id)
+                    .ok_or_else(malformed)?;
+                match assembler.finish_snapshot(
+                    sequence_number,
+                    instrument.descriptor.price_scale,
+                    instrument.descriptor.quantity_scale,
+                )? {
+                    MboBookOutcome::Pending | MboBookOutcome::IgnoredStale => Ok(None),
+                    MboBookOutcome::Snapshot {
+                        timestamp,
+                        bids,
+                        asks,
+                    } => {
+                        let event = MarketEvent::DepthSnapshot(DepthSnapshot {
+                            metadata: metadata(
+                                &instrument,
+                                self.generation,
+                                source_ordinal,
+                                timestamp,
+                                received_unix_nanos,
+                            )?,
+                            bids,
+                            asks,
+                        });
+                        validate_market(event).map(Some)
+                    }
+                }
+            }
+            DecodedMarketMessage::DepthByOrder(update) => {
+                let instrument = self.instrument(&update.identity)?.clone();
+                let assembler = self
+                    .mbo_books
+                    .get_mut(&instrument.descriptor.instrument_id)
+                    .ok_or_else(malformed)?;
+                match assembler.accept_update(
+                    update,
+                    instrument.descriptor.price_scale,
+                    instrument.descriptor.quantity_scale,
+                )? {
+                    MboBookOutcome::Pending | MboBookOutcome::IgnoredStale => Ok(None),
+                    MboBookOutcome::Snapshot {
+                        timestamp,
+                        bids,
+                        asks,
+                    } => {
+                        let event = MarketEvent::DepthSnapshot(DepthSnapshot {
+                            metadata: metadata(
+                                &instrument,
+                                self.generation,
+                                source_ordinal,
+                                timestamp,
+                                received_unix_nanos,
+                            )?,
+                            bids,
+                            asks,
+                        });
+                        validate_market(event).map(Some)
+                    }
+                }
+            }
+            DecodedMarketMessage::DepthByOrderEnd(event) => {
+                let matching = self
+                    .instruments
+                    .iter()
+                    .filter(|instrument| {
+                        event
+                            .identities
+                            .iter()
+                            .any(|identity| instrument.identity_matches(identity))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matching.len() != 1 {
+                    return Err(malformed());
+                }
+                let instrument = &matching[0];
+                let assembler = self
+                    .mbo_books
+                    .get_mut(&instrument.descriptor.instrument_id)
+                    .ok_or_else(malformed)?;
+                match assembler.finish_initial_image(&event)? {
+                    MboBookOutcome::Pending | MboBookOutcome::IgnoredStale => Ok(None),
+                    MboBookOutcome::Snapshot {
+                        timestamp,
+                        bids,
+                        asks,
+                    } => {
+                        let event = MarketEvent::DepthSnapshot(DepthSnapshot {
+                            metadata: metadata(
+                                instrument,
+                                self.generation,
+                                source_ordinal,
+                                timestamp,
+                                received_unix_nanos,
+                            )?,
+                            bids,
+                            asks,
+                        });
+                        validate_market(event).map(Some)
+                    }
+                }
+            }
         }
     }
 
@@ -2613,6 +3450,7 @@ impl CanonicalSessionState {
         self.instruments.push(instrument);
         self.quotes.clear();
         self.books.clear();
+        self.mbo_books.clear();
         let instrument = &self.instruments[0];
         if instrument.order_book {
             let limits = AggregateBookLimits::try_new(
@@ -2629,6 +3467,13 @@ impl CanonicalSessionState {
                     },
                     limits,
                 ),
+            );
+            self.mbo_books.insert(
+                instrument.descriptor.instrument_id.clone(),
+                MboBookAssembler::new(MarketIdentity {
+                    symbol: instrument.descriptor.provider_symbol.clone(),
+                    exchange: instrument.descriptor.venue_id.clone(),
+                }),
             );
         }
         Ok(())
@@ -2679,6 +3524,17 @@ fn canonical_levels(
             })
         })
         .collect()
+}
+
+fn canonical_quote_level(
+    level: QuoteLevel,
+    instrument: &RithmicProviderInstrument,
+) -> Result<DepthLevel, (ProviderInvalidationReason, RetryDisposition)> {
+    Ok(DepthLevel {
+        price: fixed_price(level.price, instrument.descriptor.price_scale)?,
+        quantity: fixed_quantity(level.size, instrument.descriptor.quantity_scale)?,
+        order_count: level.orders,
+    })
 }
 
 fn fixed_price(
@@ -3301,10 +4157,16 @@ mod tests {
                 }),
                 MarketEvent::Quote(TopOfBookQuote {
                     metadata: metadata(2),
-                    bid_price: 510_000,
-                    bid_quantity: 2,
-                    ask_price: 510_025,
-                    ask_quantity: 3,
+                    bid: Some(DepthLevel {
+                        price: 510_000,
+                        quantity: 2,
+                        order_count: Some(1),
+                    }),
+                    ask: Some(DepthLevel {
+                        price: 510_025,
+                        quantity: 3,
+                        order_count: Some(1),
+                    }),
                 }),
                 MarketEvent::DepthSnapshot(DepthSnapshot {
                     metadata: metadata(3),
@@ -3550,8 +4412,8 @@ mod tests {
             size: 4,
             orders: Some(2),
         };
-        assert_eq!(
-            canonical.convert(
+        let partial = canonical
+            .convert(
                 DecodedMarketMessage::Quote(QuoteUpdate {
                     identity: identity(),
                     bid: QuoteSideUpdate::Value(bid),
@@ -3561,9 +4423,17 @@ mod tests {
                 }),
                 1,
                 1,
-            ),
-            Ok(None)
-        );
+            )
+            .expect("partial quote converts")
+            .expect("partial quote publishes replacement BBO state");
+        assert!(matches!(
+            partial,
+            MarketEvent::Quote(TopOfBookQuote {
+                bid: Some(_),
+                ask: None,
+                ..
+            })
+        ));
         let quote = canonical
             .convert(
                 DecodedMarketMessage::Quote(QuoteUpdate {
@@ -3581,15 +4451,21 @@ mod tests {
         assert!(matches!(
             quote,
             MarketEvent::Quote(TopOfBookQuote {
-                bid_price: 510_025,
-                bid_quantity: 200,
-                ask_price: 510_050,
-                ask_quantity: 400,
+                bid: Some(DepthLevel {
+                    price: 510_025,
+                    quantity: 200,
+                    order_count: Some(1),
+                }),
+                ask: Some(DepthLevel {
+                    price: 510_050,
+                    quantity: 400,
+                    order_count: Some(2),
+                }),
                 ..
             })
         ));
-        assert_eq!(
-            canonical.convert(
+        let cleared = canonical
+            .convert(
                 DecodedMarketMessage::Quote(QuoteUpdate {
                     identity: identity(),
                     bid: QuoteSideUpdate::Unchanged,
@@ -3599,9 +4475,17 @@ mod tests {
                 }),
                 3,
                 3,
-            ),
-            Ok(None)
-        );
+            )
+            .expect("clear converts")
+            .expect("clear publishes replacement BBO state");
+        assert!(matches!(
+            cleared,
+            MarketEvent::Quote(TopOfBookQuote {
+                bid: Some(_),
+                ask: None,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3688,6 +4572,146 @@ mod tests {
                 RetryDisposition::Transient,
             ))
         );
+    }
+
+    #[test]
+    fn mbo_snapshot_atomically_replays_interleaved_live_updates() {
+        let mut assembler = MboBookAssembler::new(identity());
+        let live = crate::DepthByOrderUpdate {
+            identity: identity(),
+            sequence_number: 41,
+            mutations: vec![DepthByOrderMutation {
+                kind: DepthByOrderMutationKind::Change,
+                side: DepthByOrderSide::Bid,
+                price: 5_100.0,
+                previous_price: Some(5_100.0),
+                size: 5,
+                priority: 13,
+                exchange_order_id: "bid-1".to_string(),
+            }],
+            timestamp: Some(timestamp()),
+        };
+        assert!(matches!(
+            assembler
+                .accept_update(live, 2, 2)
+                .expect("pre-snapshot live update buffers"),
+            MboBookOutcome::Pending
+        ));
+        assert!(!assembler.ready());
+
+        for level in [
+            DepthByOrderSnapshotLevel {
+                identity: identity(),
+                sequence_number: 40,
+                side: DepthByOrderSide::Bid,
+                price: 5_100.0,
+                orders: vec![
+                    crate::DepthByOrderSnapshotOrder {
+                        size: 2,
+                        priority: 11,
+                        exchange_order_id: "bid-1".to_string(),
+                    },
+                    crate::DepthByOrderSnapshotOrder {
+                        size: 3,
+                        priority: 12,
+                        exchange_order_id: "bid-2".to_string(),
+                    },
+                ],
+            },
+            DepthByOrderSnapshotLevel {
+                identity: identity(),
+                sequence_number: 40,
+                side: DepthByOrderSide::Ask,
+                price: 5_100.25,
+                orders: vec![crate::DepthByOrderSnapshotOrder {
+                    size: 4,
+                    priority: 21,
+                    exchange_order_id: "ask-1".to_string(),
+                }],
+            },
+        ] {
+            assert!(matches!(
+                assembler
+                    .accept_snapshot_level(level, 2, 2)
+                    .expect("snapshot level installs into candidate state"),
+                MboBookOutcome::Pending
+            ));
+        }
+
+        let MboBookOutcome::Snapshot { bids, asks, .. } = assembler
+            .finish_snapshot(Some(40), 2, 2)
+            .expect("covering snapshot completes and live delta replays")
+        else {
+            panic!("covering snapshot must publish");
+        };
+        assert!(assembler.ready());
+        assert_eq!(bids.len(), 1);
+        assert_eq!(bids[0].price, 510_000);
+        assert_eq!(bids[0].quantity, 800);
+        assert_eq!(bids[0].order_count, Some(2));
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].price, 510_025);
+        assert_eq!(asks[0].quantity, 400);
+        assert_eq!(asks[0].order_count, Some(1));
+
+        let delete = crate::DepthByOrderUpdate {
+            identity: identity(),
+            sequence_number: 42,
+            mutations: vec![DepthByOrderMutation {
+                kind: DepthByOrderMutationKind::Delete,
+                side: DepthByOrderSide::Bid,
+                price: 5_100.0,
+                previous_price: Some(5_100.0),
+                size: 0,
+                priority: 12,
+                exchange_order_id: "bid-2".to_string(),
+            }],
+            timestamp: Some(timestamp()),
+        };
+        let MboBookOutcome::Snapshot { bids, .. } = assembler
+            .accept_update(delete, 2, 2)
+            .expect("next live update applies")
+        else {
+            panic!("ready MBO update must publish");
+        };
+        assert_eq!(bids[0].quantity, 500);
+        assert_eq!(bids[0].order_count, Some(1));
+    }
+
+    #[test]
+    fn dbo_end_marker_cannot_make_partial_live_state_authoritative() {
+        let mut assembler = MboBookAssembler::new(identity());
+        assembler
+            .accept_update(
+                crate::DepthByOrderUpdate {
+                    identity: identity(),
+                    sequence_number: 41,
+                    mutations: vec![DepthByOrderMutation {
+                        kind: DepthByOrderMutationKind::New,
+                        side: DepthByOrderSide::Bid,
+                        price: 5_100.0,
+                        previous_price: None,
+                        size: 2,
+                        priority: 11,
+                        exchange_order_id: "bid-1".to_string(),
+                    }],
+                    timestamp: Some(timestamp()),
+                },
+                2,
+                2,
+            )
+            .expect("live update buffers");
+        assert!(matches!(
+            assembler
+                .finish_initial_image(&DecodedDepthByOrderEndEvent {
+                    identities: vec![identity()],
+                    sequence_number: 41,
+                    timestamp: Some(timestamp()),
+                })
+                .expect("end marker is non-authoritative while snapshot is pending"),
+            MboBookOutcome::Pending
+        ));
+        assert!(!assembler.ready());
     }
 
     #[test]

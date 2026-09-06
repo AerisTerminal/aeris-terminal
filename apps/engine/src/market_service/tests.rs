@@ -132,6 +132,63 @@ fn provider_validation_accepts_rithmic_and_hyperliquid() {
 }
 
 #[test]
+fn rithmic_bbo_clear_replaces_the_retained_side_instead_of_freezing_it() {
+    let instrument = InstallProviderInstrument {
+        provider: "rithmic".to_string(),
+        session_generation: 7,
+        selection_generation: 2,
+        instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+        provider_symbol: "MNQU6".to_string(),
+        display_symbol: "MNQ Sep 2026".to_string(),
+        venue_id: "CME".to_string(),
+        price_scale: 2,
+        quantity_scale: 0,
+        entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+    };
+    let instrument_id = instrument.instrument_id.clone();
+    let entitlement_id = instrument.entitlement_id.clone();
+    let metadata = |source_sequence| axiusflow_market_data::EventMetadata {
+        provider_id: "rithmic".to_string(),
+        instrument_id: instrument_id.clone(),
+        entitlement_id: entitlement_id.clone(),
+        source_sequence,
+        session_generation: 7,
+        timestamps: axiusflow_market_data::QualifiedTimestamp {
+            exchange_unix_nanos: Some(1_800_000_000_000_000_000),
+            provider_unix_nanos: None,
+            received_unix_nanos: 1_800_000_000_000_000_001,
+        },
+    };
+    let mut book = ProviderOrderBook::new(instrument);
+    assert!(book.install_top_of_book(&TopOfBookQuote {
+        metadata: metadata(1),
+        bid: Some(DepthLevel {
+            price: 510_000,
+            quantity: 10,
+            order_count: Some(2),
+        }),
+        ask: Some(DepthLevel {
+            price: 510_025,
+            quantity: 12,
+            order_count: Some(3),
+        }),
+    }));
+    assert!(book.install_top_of_book(&TopOfBookQuote {
+        metadata: metadata(2),
+        bid: Some(DepthLevel {
+            price: 510_000,
+            quantity: 11,
+            order_count: Some(2),
+        }),
+        ask: None,
+    }));
+    let retained = book.top_of_book.expect("latest BBO is retained");
+    assert_eq!(retained.metadata.source_sequence, 2);
+    assert_eq!(retained.bid.map(|level| level.quantity), Some(11));
+    assert!(retained.ask.is_none());
+}
+
+#[test]
 fn restored_hot_series_requires_the_rithmic_scope() {
     let hot = HotSeries {
         provider: "rithmic".to_string(),
@@ -233,7 +290,6 @@ fn hyperliquid_handoff_seeds_forming_and_revises_it_in_place() {
             assert_eq!(bars[0].source_sequence, 11);
             assert_eq!(bars[0].close, 10_150);
         }
-        LiveSeriesPublication::Covering(_) => panic!("seed must not re-cover installed history"),
     }
 
     // A same-period replacement revises the forming bar in place: the
@@ -251,7 +307,6 @@ fn hyperliquid_handoff_seeds_forming_and_revises_it_in_place() {
             assert_eq!(bars[0].close, 10_200);
             assert_eq!(bars[0].volume, 7);
         }
-        LiveSeriesPublication::Covering(_) => panic!("in-place revise must not re-cover"),
     }
     assert!(handoff.take_publication().is_none());
 }
@@ -274,19 +329,16 @@ fn hyperliquid_handoff_rolls_the_forming_bar_exactly_once() {
     assert!(handoff.take_publication().is_some());
 
     // A newer period completes the forming bar and opens the next one. The
-    // completed bar republishes with history so the roll can never discard
-    // the backfill it just closed.
+    // engine accepts the new period as one incremental append; covering
+    // history stays shared and is never rebuilt by the handoff.
     let update = live_candle(180_000_000_000, 10_300, 10_250, 2);
     handoff.accept_candle(&update).expect("accept");
     match handoff.take_publication().expect("roll") {
-        LiveSeriesPublication::Covering(bars) => {
-            assert_eq!(bars.len(), 3);
-            assert_eq!(bars[1].source_sequence, 11);
-            assert_eq!(bars[1].exchange_timestamp_unix_nanos, 120_000_000_000);
-            assert_eq!(bars[2].source_sequence, 12);
-            assert_eq!(bars[2].exchange_timestamp_unix_nanos, 180_000_000_000);
+        LiveSeriesPublication::Tails(bars) => {
+            assert_eq!(bars.len(), 1);
+            assert_eq!(bars[0].source_sequence, 12);
+            assert_eq!(bars[0].exchange_timestamp_unix_nanos, 180_000_000_000);
         }
-        LiveSeriesPublication::Tails(_) => panic!("roll must republish the completed bar"),
     }
 
     // Redelivery of the same update resolves to the identical bar: the
@@ -298,7 +350,6 @@ fn hyperliquid_handoff_rolls_the_forming_bar_exactly_once() {
             assert_eq!(bars[0].source_sequence, 12);
             assert_eq!(bars[0].exchange_timestamp_unix_nanos, 180_000_000_000);
         }
-        LiveSeriesPublication::Covering(_) => panic!("redelivery must not re-cover"),
     }
 }
 
@@ -340,7 +391,6 @@ fn hyperliquid_handoff_bounds_pre_history_candles_and_resets_on_reconnect() {
             assert_eq!(bars[0].source_sequence, 11);
             assert_eq!(bars[0].close, 10_200);
         }
-        LiveSeriesPublication::Covering(_) => panic!("replay must extend the seeded seam"),
     }
 
     // The buffer is a bound, not a queue that grows with the outage: past

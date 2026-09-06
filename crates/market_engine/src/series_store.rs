@@ -32,6 +32,7 @@ pub struct SeriesTail {
 
 struct StoredSeries {
     covering: Arc<SeriesSnapshot>,
+    completed_tail: Vec<MarketBar>,
     tail: Option<SeriesTail>,
 }
 
@@ -149,11 +150,28 @@ impl SeriesStore {
                 maximum: self.maximum_series,
             });
         }
+        let retained_tail = repair
+            .then(|| current.and_then(|current| current.tail))
+            .flatten()
+            .filter(|tail| {
+                bars.last().is_some_and(|bar| {
+                    bar.exchange_timestamp_unix_nanos <= tail.bar.exchange_timestamp_unix_nanos
+                })
+            });
+        let tail_overlaps_last = retained_tail.is_some_and(|tail| {
+            bars.last().is_some_and(|bar| {
+                bar.exchange_timestamp_unix_nanos == tail.bar.exchange_timestamp_unix_nanos
+            })
+        });
         let retained = current.map_or(0, StoredSeries::bar_count);
+        let replacement_bars = bars
+            .len()
+            .checked_add(usize::from(retained_tail.is_some() && !tail_overlaps_last))
+            .ok_or(EngineError::CapacityOverflow)?;
         let projected = self
             .total_bars
             .checked_sub(retained)
-            .and_then(|count| count.checked_add(bars.len()))
+            .and_then(|count| count.checked_add(replacement_bars))
             .ok_or(EngineError::CapacityOverflow)?;
         if projected > self.maximum_bars.get() {
             return Err(EngineError::BarLimitExceeded {
@@ -163,23 +181,12 @@ impl SeriesStore {
         }
         let publication_generation = match current {
             Some(snapshot) => snapshot
-                .covering
-                .publication_generation
+                .latest_publication_generation()
                 .checked_add(1)
                 .ok_or(EngineError::CapacityOverflow)?,
             None => 1,
         };
-        let retained_tail = repair
-            .then(|| current.and_then(|current| current.tail))
-            .flatten()
-            .filter(|tail| {
-                bars.len() > 1
-                    && bars.last().is_some_and(|bar| {
-                        bar.exchange_timestamp_unix_nanos == tail.bar.exchange_timestamp_unix_nanos
-                    })
-            });
-        let has_retained_tail = retained_tail.is_some();
-        let covering_bars = if has_retained_tail {
+        let covering_bars = if tail_overlaps_last {
             &bars[..bars.len() - 1]
         } else {
             bars
@@ -197,6 +204,7 @@ impl SeriesStore {
         let stored = if let Some(tail) = retained_tail {
             StoredSeries {
                 covering,
+                completed_tail: Vec::new(),
                 tail: Some(SeriesTail {
                     provider_generation,
                     publication_generation,
@@ -285,10 +293,17 @@ impl SeriesStore {
         }
 
         let previous = current.tail.map_or_else(
-            || current.covering.bars.last().copied(),
+            || {
+                current
+                    .completed_tail
+                    .last()
+                    .copied()
+                    .or_else(|| current.covering.bars.last().copied())
+            },
             |tail| Some(tail.bar),
         );
         let previous = previous.ok_or(EngineError::EmptySeries)?;
+        let previous_publication_generation = current.latest_publication_generation();
         let operation = if bar.source_sequence == previous.source_sequence {
             if current.tail.is_none()
                 || bar.exchange_timestamp_unix_nanos != previous.exchange_timestamp_unix_nanos
@@ -321,26 +336,12 @@ impl SeriesStore {
                 });
             }
             if let Some(tail) = current.tail.take() {
-                let mut completed = current.covering.bars.to_vec();
-                completed.push(tail.bar);
-                current.covering = Arc::new(SeriesSnapshot {
-                    series: current.covering.series.clone(),
-                    provider_generation,
-                    publication_generation: tail.publication_generation,
-                    price_scale,
-                    quantity_scale,
-                    forming: false,
-                    bars: completed.into(),
-                });
+                current.completed_tail.push(tail.bar);
             }
             self.total_bars = projected;
             SeriesTailOperation::Append
         };
-        let publication_generation = current
-            .tail
-            .map_or(current.covering.publication_generation, |tail| {
-                tail.publication_generation
-            })
+        let publication_generation = previous_publication_generation
             .checked_add(1)
             .ok_or(EngineError::CapacityOverflow)?;
         let tail = SeriesTail {
@@ -451,30 +452,76 @@ impl SeriesStore {
 
     #[cfg(test)]
     pub(crate) fn completed_bars(&self, series: &BarSeriesKey) -> Option<Arc<[MarketBar]>> {
-        self.series
-            .get(series)
-            .map(|stored| Arc::clone(&stored.covering.bars))
+        self.series.get(series).map(|stored| {
+            if stored.completed_tail.is_empty() {
+                return Arc::clone(&stored.covering.bars);
+            }
+            let mut bars = Vec::with_capacity(
+                stored
+                    .covering
+                    .bars
+                    .len()
+                    .saturating_add(stored.completed_tail.len()),
+            );
+            bars.extend_from_slice(&stored.covering.bars);
+            bars.extend_from_slice(&stored.completed_tail);
+            bars.into()
+        })
     }
 }
 
 impl StoredSeries {
+    fn latest_publication_generation(&self) -> u64 {
+        self.tail
+            .map_or(self.covering.publication_generation, |tail| {
+                tail.publication_generation
+            })
+    }
+
     fn bar_count(&self) -> usize {
-        self.covering.bars.len() + usize::from(self.tail.is_some())
+        self.covering
+            .bars
+            .len()
+            .saturating_add(self.completed_tail.len())
+            .saturating_add(usize::from(self.tail.is_some()))
     }
 
     fn snapshot(&self) -> Arc<SeriesSnapshot> {
-        let Some(tail) = self.tail else {
+        if self.completed_tail.is_empty() && self.tail.is_none() {
             return Arc::clone(&self.covering);
-        };
-        let mut bars = self.covering.bars.to_vec();
-        bars.push(tail.bar);
+        }
+        let mut bars = Vec::with_capacity(self.bar_count());
+        bars.extend_from_slice(&self.covering.bars);
+        bars.extend_from_slice(&self.completed_tail);
+        if let Some(tail) = self.tail {
+            bars.push(tail.bar);
+        }
+        let (provider_generation, publication_generation, price_scale, quantity_scale, forming) =
+            self.tail.map_or(
+                (
+                    self.covering.provider_generation,
+                    self.covering.publication_generation,
+                    self.covering.price_scale,
+                    self.covering.quantity_scale,
+                    false,
+                ),
+                |tail| {
+                    (
+                        tail.provider_generation,
+                        tail.publication_generation,
+                        tail.price_scale,
+                        tail.quantity_scale,
+                        tail.forming,
+                    )
+                },
+            );
         Arc::new(SeriesSnapshot {
             series: self.covering.series.clone(),
-            provider_generation: tail.provider_generation,
-            publication_generation: tail.publication_generation,
-            price_scale: tail.price_scale,
-            quantity_scale: tail.quantity_scale,
-            forming: tail.forming,
+            provider_generation,
+            publication_generation,
+            price_scale,
+            quantity_scale,
+            forming,
             bars: bars.into(),
         })
     }
@@ -487,6 +534,7 @@ fn stored_series(
     if !realtime || !snapshot.forming {
         return Ok(StoredSeries {
             covering: Arc::clone(snapshot),
+            completed_tail: Vec::new(),
             tail: None,
         });
     }
@@ -501,6 +549,7 @@ fn stored_series(
             forming: false,
             bars: completed.into(),
         }),
+        completed_tail: Vec::new(),
         tail: Some(SeriesTail {
             provider_generation: snapshot.provider_generation,
             publication_generation: snapshot.publication_generation,

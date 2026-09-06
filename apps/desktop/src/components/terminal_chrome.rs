@@ -518,12 +518,12 @@ pub(super) fn header_controls(
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
 ) -> impl IntoElement {
-    let dom_toggle = side_panel_toggle(
+    let order_book_toggle = side_panel_toggle(
         app.clone(),
         &state.theme,
-        SidePanel::Dom,
-        state.controls.enabled(HeaderControls::DOM),
-        state.dom_visible,
+        SidePanel::OrderBook,
+        state.controls.enabled(HeaderControls::ORDER_BOOK),
+        state.order_book_visible,
     );
     let (connection_label, connection_color) = connection_presentation(
         state.provider,
@@ -602,7 +602,7 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(dom_toggle)
+        .child(order_book_toggle)
         .child(theme_toggle(terminal.clone(), &state.theme))
 }
 
@@ -614,10 +614,10 @@ pub(super) fn side_panel_toggle(
     selected: bool,
 ) -> AnyElement {
     let (id, icon, toggle) = match panel {
-        SidePanel::Dom => (
-            "dom_toggle",
+        SidePanel::OrderBook => (
+            "order_book_toggle",
             HugeIcon::SidebarRightIcon01,
-            WorkspaceSurface::toggle_dom
+            WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         ),
     };

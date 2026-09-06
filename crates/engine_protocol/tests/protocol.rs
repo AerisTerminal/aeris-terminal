@@ -35,7 +35,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 18);
+    assert_eq!(PROTOCOL_VERSION, 19);
 }
 
 fn account_payloads() -> Vec<envelope::Payload> {
@@ -479,6 +479,7 @@ fn catalog_payloads() -> Vec<envelope::Payload> {
         envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
             consumer_id: 13,
             instrument: Some(instrument),
+            command_generation: 22,
         }),
     ]
 }
@@ -507,6 +508,19 @@ fn order_book_payload() -> envelope::Payload {
             order_count: None,
             traded_volume: 9,
         }],
+        best_bid: Some(OrderBookLevel {
+            price: 20_000,
+            quantity: 7,
+            order_count: Some(3),
+            traded_volume: 11,
+        }),
+        best_ask: Some(OrderBookLevel {
+            price: 20_025,
+            quantity: 4,
+            order_count: None,
+            traded_volume: 9,
+        }),
+        bbo_source_watermark: 5,
     })
 }
 

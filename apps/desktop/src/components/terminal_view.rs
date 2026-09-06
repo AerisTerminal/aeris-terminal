@@ -33,7 +33,7 @@ fn active_header_state(
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
-        dom_visible: workspace.side_panel == Some(SidePanel::Dom),
+        order_book_visible: workspace.side_panel == Some(SidePanel::OrderBook),
         connection_state: workspace
             .connection_state
             .unwrap_or(FeedConnectionState::Disconnected),

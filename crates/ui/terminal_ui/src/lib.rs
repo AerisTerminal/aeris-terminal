@@ -6,14 +6,16 @@
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 
-mod dom;
+mod order_book;
 #[cfg(feature = "gpui")]
-mod dom_view;
+mod order_book_view;
 
-pub use axiusflow_market_data::{DomColumnLevel, DomFrame, DomRow};
-pub use dom::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
+pub use axiusflow_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
+pub use order_book::{OrderBookSelection, OrderBookUpdateOutcome, ReadOnlyOrderBook};
 #[cfg(feature = "gpui")]
-pub use dom_view::{DomColumn, DomColumnVisibility, DomConnectionState, ReadOnlyDomView};
+pub use order_book_view::{
+    OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, ReadOnlyOrderBookView,
+};
 
 /// A bounded queue that prevents background producers from growing UI work.
 #[derive(Debug)]

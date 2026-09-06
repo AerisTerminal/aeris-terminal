@@ -3,7 +3,7 @@
 //! Three strings describe every market and must never be conflated:
 //! - stable `instrument_id`: engine-level identity (`hyperliquid:...`);
 //! - wire `coin`: the exact `coin` value sent to the info/WebSocket API;
-//! - display label: the human label shown in search, charts, and the DOM.
+//! - display label: the human label shown in search, charts, and the Order Book.
 //!
 //! Spot markets additionally preserve pair and token indexes; builder
 //! (HIP-3) perpetuals preserve their DEX namespace. Identical display names

@@ -8,7 +8,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axiusflow_application::{
@@ -17,9 +17,9 @@ use axiusflow_application::{
 };
 use axiusflow_engine_protocol::{
     ConsumerResourceClass, DemandError, EngineFaultCode, FailureStage, InstallProviderInstrument,
-    ProviderConnectionState, ProviderState, SearchProviderInstruments, SeriesCadence, SeriesKey,
-    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SeriesUpdateOperation,
-    WorkspacePaneKind, WorkspaceState, envelope,
+    ProviderConnectionState, ProviderInstrumentSummary, ProviderState, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    SeriesState, SeriesUpdate, SeriesUpdateOperation, WorkspacePaneKind, WorkspaceState, envelope,
 };
 #[cfg(test)]
 use axiusflow_engine_protocol::{WorkspacePaneState, WorkspaceTabState};
@@ -30,7 +30,7 @@ use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 
 use crate::engine_supervisor::EngineSupervisor;
-use crate::rithmic_engine_history::{DomIdentity, dom_from_snapshot};
+use crate::rithmic_engine_history::{OrderBookIdentity, order_book_from_snapshot};
 #[cfg(test)]
 use axiusflow_desktop::market_worker::ProviderCatalogEvent;
 use axiusflow_desktop::market_worker::{
@@ -44,6 +44,9 @@ const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
 const MAXIMUM_STARTUP_ATTEMPTS: u8 = 4;
 const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
+const SNAPSHOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const STARTUP_CATALOG_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(12);
+const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
 const RETAINED_BAR_CAPACITY: usize = 32_768;
@@ -183,7 +186,7 @@ pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketData
 pub(super) fn start_workspace_tabs(
     workspace: &WorkspaceState,
 ) -> Result<WorkspaceMarketGroup, String> {
-    let client_id = random_identity()?;
+    let client_id = ranorder_book_identity()?;
     let mut initial = Vec::new();
     let mut endpoints = Vec::new();
     let (maximum_workspace_id, maximum_pane_id, maximum_consumer_id) =
@@ -278,6 +281,10 @@ struct WorkerEndpoint {
     messages: MarketWorkerSender,
     commands: mpsc::Receiver<MarketWorkerCommand>,
     pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
+    pending_provider_selection:
+        Arc<Mutex<Option<axiusflow_engine_protocol::SelectProviderInstrument>>>,
+    pending_engine_selection:
+        Arc<Mutex<Option<Box<axiusflow_desktop::market_worker::EngineSelectionRequest>>>>,
     shutdown: mpsc::SyncSender<()>,
     publication: Option<MarketPublicationGeneration>,
     /// Set once the engine has reported this demand generation live. After that
@@ -298,15 +305,15 @@ fn start_group(
     ),
     String,
 > {
-    let client_id = random_identity()?;
+    let client_id = ranorder_book_identity()?;
     let mut workers = Vec::with_capacity(configurations.len());
     let mut endpoints = Vec::with_capacity(configurations.len());
     let mut maximum_workspace_id = 0;
     let mut maximum_pane_id = 1;
     let mut maximum_consumer_id = 0;
     for (workspace_id, product) in configurations {
-        let consumer_id = random_identity()?;
-        let pane_id = random_identity()?;
+        let consumer_id = ranorder_book_identity()?;
+        let pane_id = ranorder_book_identity()?;
         maximum_workspace_id = maximum_workspace_id.max(workspace_id);
         maximum_pane_id = maximum_pane_id.max(pane_id);
         maximum_consumer_id = maximum_consumer_id.max(consumer_id);
@@ -367,6 +374,8 @@ fn worker_endpoint(
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let selection_sequence = Arc::new(AtomicU64::new(initial_generation));
     let pending_resource_class = Arc::new(Mutex::new(None));
+    let pending_provider_selection = Arc::new(Mutex::new(None));
+    let pending_engine_selection = Arc::new(Mutex::new(None));
     let worker = WorkspaceMarketPane {
         workspace_id,
         pane_id,
@@ -379,7 +388,11 @@ fn worker_endpoint(
             None,
             Some(Arc::clone(&selection_sequence)),
         )
-        .with_resource_class_slot(Arc::clone(&pending_resource_class)),
+        .with_resource_class_slot(Arc::clone(&pending_resource_class))
+        .with_foreground_selection_slots(
+            Arc::clone(&pending_provider_selection),
+            Arc::clone(&pending_engine_selection),
+        ),
     };
     let endpoint = EndpointRecord {
         workspace_id,
@@ -390,6 +403,8 @@ fn worker_endpoint(
             messages: message_tx,
             commands: command_rx,
             pending_resource_class,
+            pending_provider_selection,
+            pending_engine_selection,
             shutdown: shutdown_tx,
             publication: None,
             live: false,
@@ -463,7 +478,7 @@ fn run_attached_workers(
         initialize_endpoint(
             client,
             record.workspace_id,
-            &record.product,
+            &mut record.product,
             record.interval,
             &mut record.endpoint,
         )?;
@@ -478,7 +493,7 @@ fn run_attached_workers(
                         match initialize_endpoint(
                             client,
                             record.workspace_id,
-                            &record.product,
+                            &mut record.product,
                             record.interval,
                             &mut record.endpoint,
                         ) {
@@ -501,6 +516,7 @@ fn run_attached_workers(
             }
         }
         for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
+            process_pending_foreground_selection(client, record);
             process_pending_resource_class(client, &mut record.endpoint);
             match record.endpoint.commands.try_recv() {
                 Ok(command) => {
@@ -546,6 +562,46 @@ fn run_attached_workers(
         }
     }
     Ok(())
+}
+
+fn process_pending_foreground_selection(
+    client: &mut EngineSupervisor,
+    record: &mut EndpointRecord,
+) {
+    let provider_selection = record
+        .endpoint
+        .pending_provider_selection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(selection) = provider_selection
+        && let Err(error) = process_command(
+            client,
+            record,
+            MarketWorkerCommand::ProviderSelect(selection),
+        )
+    {
+        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: error,
+        });
+    }
+
+    let engine_selection = record
+        .endpoint
+        .pending_engine_selection
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(selection) = engine_selection
+        && let Err(error) =
+            process_command(client, record, MarketWorkerCommand::EngineSelect(selection))
+    {
+        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: error,
+        });
+    }
 }
 
 /// Reports a failed engine restore as recovering on every active endpoint
@@ -673,7 +729,7 @@ fn process_pending_resource_class(client: &mut EngineSupervisor, endpoint: &mut 
 fn initialize_endpoint(
     client: &mut EngineSupervisor,
     workspace_id: u64,
-    product: &InstallProviderInstrument,
+    product: &mut InstallProviderInstrument,
     interval: ChartInterval,
     endpoint: &mut WorkerEndpoint,
 ) -> Result<(), String> {
@@ -682,7 +738,8 @@ fn initialize_endpoint(
         message: "Connecting to the resident market engine".to_string(),
     });
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
-    client.install_provider_instrument(product.clone())?;
+    let canonical = install_or_resolve_startup_instrument(client, endpoint.consumer_id, product)?;
+    product.clone_from(&canonical);
     let provider_name = provider_display_name(product.provider.as_str());
     let series = series_key(product, interval)?;
     let mut attempt = 1_u8;
@@ -692,6 +749,7 @@ fn initialize_endpoint(
             endpoint.consumer_id,
             endpoint.active_generation,
             series.clone(),
+            product.session_generation,
             &endpoint.messages,
         ) {
             Ok(snapshot) => break Ok(snapshot),
@@ -739,6 +797,181 @@ fn initialize_endpoint(
             .unwrap_or(u32::MAX),
     })?;
     Ok(())
+}
+
+fn install_or_resolve_startup_instrument(
+    client: &mut EngineSupervisor,
+    consumer_id: u64,
+    requested: &InstallProviderInstrument,
+) -> Result<InstallProviderInstrument, String> {
+    match client.install_provider_instrument(requested.clone()) {
+        Ok(()) => return Ok(requested.clone()),
+        Err(error)
+            if requested.provider == "hyperliquid"
+                && matches!(
+                    error.as_str(),
+                    "provider instrument session is stale"
+                        | "provider instrument selection is stale"
+                        | "provider instrument selection conflicts"
+                ) => {}
+        Err(error) => return Err(error),
+    }
+
+    resolve_hyperliquid_startup_instrument(client, consumer_id, requested)
+}
+
+fn resolve_hyperliquid_startup_instrument(
+    client: &mut EngineSupervisor,
+    consumer_id: u64,
+    requested: &InstallProviderInstrument,
+) -> Result<InstallProviderInstrument, String> {
+    let command_generation = STARTUP_CATALOG_COMMAND_GENERATION;
+    let deadline = Instant::now()
+        .checked_add(STARTUP_CATALOG_RESOLUTION_TIMEOUT)
+        .ok_or_else(|| "Hyperliquid startup catalog deadline overflowed".to_string())?;
+    let summary = search_hyperliquid_startup_instrument(
+        client,
+        consumer_id,
+        requested,
+        command_generation,
+        deadline,
+    )?;
+    select_hyperliquid_startup_instrument(
+        client,
+        consumer_id,
+        requested,
+        summary,
+        command_generation,
+        deadline,
+    )
+}
+
+fn search_hyperliquid_startup_instrument(
+    client: &mut EngineSupervisor,
+    consumer_id: u64,
+    requested: &InstallProviderInstrument,
+    command_generation: u64,
+    deadline: Instant,
+) -> Result<ProviderInstrumentSummary, String> {
+    client.search_provider_instruments(SearchProviderInstruments {
+        consumer_id,
+        search_generation: command_generation,
+        provider: requested.provider.clone(),
+        query: requested.provider_symbol.clone(),
+        maximum_results: 32,
+    })?;
+    loop {
+        let event = client.receive_market_event_for_until(consumer_id, deadline)?;
+        if event.reconnected {
+            return Err(
+                "resident engine restarted during Hyperliquid startup catalog search".to_string(),
+            );
+        }
+        let Some(event) = event.event else {
+            if Instant::now() >= deadline {
+                return Err("Hyperliquid startup catalog search timed out".to_string());
+            }
+            continue;
+        };
+        match event {
+            envelope::Payload::ProviderInstrumentSearchResult(result)
+                if result.consumer_id == consumer_id
+                    && result.search_generation == command_generation =>
+            {
+                let index = result
+                    .instruments
+                    .iter()
+                    .position(|candidate| {
+                        candidate.symbol == requested.provider_symbol
+                            && candidate.exchange == requested.venue_id
+                    })
+                    .or_else(|| {
+                        result
+                            .instruments
+                            .iter()
+                            .position(|candidate| candidate.symbol == requested.provider_symbol)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "Hyperliquid catalog no longer contains {}",
+                            requested.display_symbol
+                        )
+                    })?;
+                return result
+                    .instruments
+                    .into_iter()
+                    .nth(index)
+                    .ok_or_else(|| "Hyperliquid startup catalog result vanished".to_string());
+            }
+            envelope::Payload::ProviderCatalogRejected(rejection)
+                if rejection.consumer_id == consumer_id
+                    && rejection.command_generation == command_generation =>
+            {
+                return Err("Hyperliquid startup catalog search was rejected".to_string());
+            }
+            envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
+            _ => {}
+        }
+    }
+}
+
+fn select_hyperliquid_startup_instrument(
+    client: &mut EngineSupervisor,
+    consumer_id: u64,
+    requested: &InstallProviderInstrument,
+    summary: ProviderInstrumentSummary,
+    command_generation: u64,
+    deadline: Instant,
+) -> Result<InstallProviderInstrument, String> {
+    client.select_provider_instrument(SelectProviderInstrument {
+        consumer_id,
+        selection_generation: command_generation,
+        search_generation: command_generation,
+        provider: requested.provider.clone(),
+        symbol: summary.symbol,
+        exchange: summary.exchange,
+        entitlement_id: requested.entitlement_id.clone(),
+    })?;
+
+    loop {
+        let event = client.receive_market_event_for_until(consumer_id, deadline)?;
+        if event.reconnected {
+            return Err(
+                "resident engine restarted during Hyperliquid startup selection".to_string(),
+            );
+        }
+        let Some(event) = event.event else {
+            if Instant::now() >= deadline {
+                return Err("Hyperliquid startup selection timed out".to_string());
+            }
+            continue;
+        };
+        match event {
+            envelope::Payload::ProviderInstrumentSelection(selection)
+                if selection.consumer_id == consumer_id
+                    && selection.command_generation == command_generation =>
+            {
+                let instrument = selection.instrument.ok_or_else(|| {
+                    "Hyperliquid startup selection omitted canonical identity".to_string()
+                })?;
+                if instrument.provider != requested.provider
+                    || instrument.provider_symbol != requested.provider_symbol
+                    || instrument.entitlement_id != requested.entitlement_id
+                {
+                    return Err("Hyperliquid startup selection identity mismatched".to_string());
+                }
+                return Ok(instrument);
+            }
+            envelope::Payload::ProviderCatalogRejected(rejection)
+                if rejection.consumer_id == consumer_id
+                    && rejection.command_generation == command_generation =>
+            {
+                return Err("Hyperliquid startup selection was rejected".to_string());
+            }
+            envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
+            _ => {}
+        }
+    }
 }
 
 fn process_command(
@@ -946,49 +1179,39 @@ fn apply_pushed_event(
         instrument,
     } = context;
     match event {
-        envelope::Payload::SeriesSnapshot(snapshot) => {
-            if snapshot.consumer_id != consumer_id || snapshot.generation != active_generation {
-                return Err("engine realtime snapshot identity mismatched".to_string());
-            }
-            let replay = replay_snapshot(&snapshot)?;
-            let generation = generation_from_snapshot(&snapshot, &replay)?;
-            let status = MarketPublicationGeneration::from_generation(&generation);
-            *publication = Some(status);
-            send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)?;
-            Ok(())
-        }
-        envelope::Payload::SeriesUpdate(update) => {
-            if update.consumer_id != consumer_id || update.generation != active_generation {
-                return Err("engine realtime update identity mismatched".to_string());
-            }
-            let tail = replay_tail_update(&update)?;
-            let status = tail_publication(
-                publication.ok_or_else(|| {
-                    "engine sent a Rithmic update before a covering snapshot".to_string()
-                })?,
-                &tail,
-            );
-            *publication = Some(status);
-            send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
-        }
+        envelope::Payload::SeriesSnapshot(snapshot) => apply_realtime_snapshot(
+            &snapshot,
+            consumer_id,
+            active_generation,
+            instrument.session_generation,
+            publication,
+            messages,
+        ),
+        envelope::Payload::SeriesUpdate(update) => apply_realtime_update(
+            &update,
+            consumer_id,
+            active_generation,
+            instrument.session_generation,
+            publication,
+            messages,
+        ),
         envelope::Payload::ProviderState(state) => {
+            if stale_generation(
+                state.generation,
+                instrument.session_generation,
+                "engine provider state generation advanced unexpectedly",
+            )? {
+                return Ok(());
+            }
             apply_provider_state(&state, instrument.provider.as_str(), realtime, messages)?;
             Ok(())
         }
         envelope::Payload::SeriesState(state) => {
-            if state.consumer_id != consumer_id || state.generation != active_generation {
-                return Err("engine realtime state identity mismatched".to_string());
-            }
-            apply_series_state(
-                state,
-                instrument.provider.as_str(),
-                realtime,
-                publication.is_some(),
-                live,
-                messages,
-            )
+            apply_realtime_series_state(&state, context, publication.is_some(), live, messages)
         }
-        envelope::Payload::DemandError(error) => Err(demand_error(&error)),
+        envelope::Payload::DemandError(error) => {
+            apply_realtime_demand_error(&error, consumer_id, active_generation)
+        }
         envelope::Payload::OrderBookSnapshot(snapshot) => {
             if snapshot.consumer_id != consumer_id {
                 return Err("engine order-book consumer mismatched".to_string());
@@ -996,8 +1219,8 @@ fn apply_pushed_event(
             if snapshot.provider_generation < instrument.session_generation {
                 return Ok(());
             }
-            let Ok(frame) = dom_from_snapshot(
-                &DomIdentity {
+            let Ok(frame) = order_book_from_snapshot(
+                &OrderBookIdentity {
                     instrument,
                     series_generation: active_generation,
                 },
@@ -1005,12 +1228,12 @@ fn apply_pushed_event(
             ) else {
                 // Depth is an ancillary stream. A stale or malformed book
                 // image must never transition the price chart into a fatal
-                // state; retain the last valid DOM frame and wait for the next
+                // state; retain the last valid Order Book frame and wait for the next
                 // canonical snapshot.
                 return Ok(());
             };
             messages
-                .send(MarketWorkerMessage::RithmicDom(frame))
+                .send(MarketWorkerMessage::OrderBook(frame))
                 .map_err(|error| error.to_string())?;
             Ok(())
         }
@@ -1018,6 +1241,118 @@ fn apply_pushed_event(
         envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
         _ => Err("engine returned an unexpected pushed market event".to_string()),
     }
+}
+
+fn apply_realtime_snapshot(
+    snapshot: &SeriesSnapshot,
+    consumer_id: u64,
+    active_generation: u64,
+    minimum_provider_generation: u64,
+    publication: &mut Option<MarketPublicationGeneration>,
+    messages: &MarketWorkerSender,
+) -> Result<(), String> {
+    if snapshot.consumer_id != consumer_id {
+        return Err("engine realtime snapshot identity mismatched".to_string());
+    }
+    if stale_generation(
+        snapshot.generation,
+        active_generation,
+        "engine realtime snapshot generation advanced unexpectedly",
+    )? || snapshot.provider_generation < minimum_provider_generation
+    {
+        return Ok(());
+    }
+    let replay = replay_snapshot(snapshot)?;
+    let generation = generation_from_snapshot(snapshot, &replay)?;
+    let status = MarketPublicationGeneration::from_generation(&generation);
+    *publication = Some(status);
+    send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)
+}
+
+fn apply_realtime_update(
+    update: &SeriesUpdate,
+    consumer_id: u64,
+    active_generation: u64,
+    minimum_provider_generation: u64,
+    publication: &mut Option<MarketPublicationGeneration>,
+    messages: &MarketWorkerSender,
+) -> Result<(), String> {
+    if update.consumer_id != consumer_id {
+        return Err("engine realtime update identity mismatched".to_string());
+    }
+    if stale_generation(
+        update.generation,
+        active_generation,
+        "engine realtime update generation advanced unexpectedly",
+    )? || update.provider_generation < minimum_provider_generation
+    {
+        return Ok(());
+    }
+    let tail = replay_tail_update(update)?;
+    let status = tail_publication(
+        publication
+            .ok_or_else(|| "engine sent a Rithmic update before a covering snapshot".to_string())?,
+        &tail,
+    );
+    *publication = Some(status);
+    send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
+}
+
+fn apply_realtime_series_state(
+    state: &SeriesState,
+    context: &PushedEventContext<'_>,
+    has_publication: bool,
+    live: &mut bool,
+    messages: &MarketWorkerSender,
+) -> Result<(), String> {
+    let consumer_id = context.consumer_id;
+    let active_generation = context.active_generation;
+    if state.consumer_id != consumer_id {
+        return Err("engine realtime state identity mismatched".to_string());
+    }
+    if stale_generation(
+        state.generation,
+        active_generation,
+        "engine realtime state generation advanced unexpectedly",
+    )? {
+        return Ok(());
+    }
+    apply_series_state(
+        state.clone(),
+        context.instrument.provider.as_str(),
+        context.realtime,
+        has_publication,
+        live,
+        messages,
+    )
+}
+
+fn apply_realtime_demand_error(
+    error: &DemandError,
+    consumer_id: u64,
+    active_generation: u64,
+) -> Result<(), String> {
+    if error.consumer_id != consumer_id {
+        return Err("engine demand-error consumer mismatched".to_string());
+    }
+    if stale_generation(
+        error.generation,
+        active_generation,
+        "engine demand-error generation advanced unexpectedly",
+    )? {
+        return Ok(());
+    }
+    Err(demand_error(error))
+}
+
+fn stale_generation(received: u64, current: u64, future_error: &str) -> Result<bool, String> {
+    if received < current {
+        return Ok(true);
+    }
+    if received > current {
+        return Err(future_error.to_string());
+    }
+    Ok(false)
 }
 
 fn apply_provider_state(
@@ -1070,13 +1405,24 @@ fn request_snapshot(
     consumer_id: u64,
     generation: u64,
     series: SeriesKey,
+    minimum_provider_generation: u64,
     messages: &MarketWorkerSender,
 ) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
     let realtime = series_supports_realtime(&series);
     let provider = series.provider.clone();
-    client.set_series_demand(consumer_id, generation, series)?;
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_REQUEST_TIMEOUT)
+        .ok_or_else(|| "resident engine snapshot deadline overflowed".to_string())?;
+    client.set_series_demand_until(consumer_id, generation, series, deadline)?;
     loop {
-        let poll = client.receive_market_event_for(consumer_id, Duration::from_millis(250))?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "resident engine timed out while resolving {} market history",
+                provider_display_name(provider.as_str())
+            ));
+        }
+        let poll = client.receive_market_event_for_until(consumer_id, deadline)?;
         if poll.reconnected {
             let _ = messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
@@ -1095,62 +1441,109 @@ fn request_snapshot(
             continue;
         }
         let Some(event) = event else { continue };
-        let provider_name = provider_display_name(provider.as_str());
-        match event {
-            envelope::Payload::SeriesState(state) => {
-                let load_state = SeriesLoadState::try_from(state.state)
-                    .map_err(|_| "engine returned an invalid series state".to_string())?;
-                match load_state {
-                    SeriesLoadState::Resolving => {
-                        let _ = messages.send(MarketWorkerMessage::State {
-                            state: ChartState::Loading,
-                            message: format!(
-                                "Resident engine is resolving {provider_name} history"
-                            ),
-                        });
-                    }
-                    SeriesLoadState::Ready | SeriesLoadState::Live => {
-                        return Err(
-                            "engine marked history ready without a covering snapshot".to_string()
-                        );
-                    }
-                    SeriesLoadState::Failed => {
-                        return Err(state.detail.unwrap_or_else(|| {
-                            format!("resident engine could not resolve {provider_name} history")
-                        }));
-                    }
-                    SeriesLoadState::Superseded => {
-                        return Err(format!("{provider_name} history demand was superseded"));
-                    }
-                    SeriesLoadState::Empty | SeriesLoadState::Partial => {}
-                }
-            }
-            envelope::Payload::ProviderState(state) => {
-                apply_provider_state(&state, provider.as_str(), realtime, messages)?;
-            }
-            envelope::Payload::SeriesSnapshot(snapshot) => {
-                if snapshot.consumer_id != consumer_id || snapshot.generation != generation {
-                    continue;
-                }
-                let replay = replay_snapshot(&snapshot)?;
-                let publication = generation_from_snapshot(&snapshot, &replay)?;
-                return Ok((replay, publication));
-            }
-            envelope::Payload::DemandError(error) => return Err(demand_error(&error)),
-            envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
-            // Order book and order flow are latest-value on the engine side and
-            // are republished on the next depth or trade event, so skipping one
-            // here costs nothing. Failing on them instead is what made every
-            // resnapshot during live streaming kill the chart: the book is
-            // refilled on every level-2 update, so one was almost always
-            // waiting when a snapshot was requested.
-            envelope::Payload::OrderBookSnapshot(_)
-            | envelope::Payload::OrderFlowSnapshot(_)
-            | envelope::Payload::OrderFlowUpdate(_)
-            | envelope::Payload::SeriesUpdate(_) => {}
-            _ => return Err("engine returned an unexpected market response".to_string()),
+        if let Some(snapshot) = handle_snapshot_event(
+            event,
+            consumer_id,
+            generation,
+            minimum_provider_generation,
+            realtime,
+            provider.as_str(),
+            messages,
+        )? {
+            return Ok(snapshot);
         }
     }
+}
+
+fn handle_snapshot_event(
+    event: envelope::Payload,
+    consumer_id: u64,
+    generation: u64,
+    minimum_provider_generation: u64,
+    realtime: bool,
+    provider: &str,
+    messages: &MarketWorkerSender,
+) -> Result<Option<(ReplaySnapshot, DesktopMarketGeneration)>, String> {
+    let provider_name = provider_display_name(provider);
+    match event {
+        envelope::Payload::SeriesState(state) => {
+            if state.consumer_id != consumer_id {
+                return Err("engine snapshot state consumer mismatched".to_string());
+            }
+            if stale_generation(
+                state.generation,
+                generation,
+                "engine snapshot state generation advanced unexpectedly",
+            )? {
+                return Ok(None);
+            }
+            match SeriesLoadState::try_from(state.state)
+                .map_err(|_| "engine returned an invalid series state".to_string())?
+            {
+                SeriesLoadState::Resolving => {
+                    let _ = messages.send(MarketWorkerMessage::State {
+                        state: ChartState::Loading,
+                        message: format!("Resident engine is resolving {provider_name} history"),
+                    });
+                }
+                SeriesLoadState::Ready | SeriesLoadState::Live => {
+                    return Err(
+                        "engine marked history ready without a covering snapshot".to_string()
+                    );
+                }
+                SeriesLoadState::Failed => {
+                    return Err(state.detail.unwrap_or_else(|| {
+                        format!("resident engine could not resolve {provider_name} history")
+                    }));
+                }
+                SeriesLoadState::Superseded => {
+                    return Err(format!("{provider_name} history demand was superseded"));
+                }
+                SeriesLoadState::Empty | SeriesLoadState::Partial => {}
+            }
+        }
+        envelope::Payload::ProviderState(state) => {
+            if stale_generation(
+                state.generation,
+                minimum_provider_generation,
+                "engine snapshot provider generation advanced unexpectedly",
+            )? {
+                return Ok(None);
+            }
+            apply_provider_state(&state, provider, realtime, messages)?;
+        }
+        envelope::Payload::SeriesSnapshot(snapshot) => {
+            if snapshot.consumer_id != consumer_id
+                || snapshot.generation != generation
+                || snapshot.provider_generation < minimum_provider_generation
+            {
+                return Ok(None);
+            }
+            let replay = replay_snapshot(&snapshot)?;
+            let publication = generation_from_snapshot(&snapshot, &replay)?;
+            return Ok(Some((replay, publication)));
+        }
+        envelope::Payload::DemandError(error) => {
+            if error.consumer_id != consumer_id {
+                return Err("engine snapshot demand-error consumer mismatched".to_string());
+            }
+            if stale_generation(
+                error.generation,
+                generation,
+                "engine snapshot demand-error generation advanced unexpectedly",
+            )? {
+                return Ok(None);
+            }
+            return Err(demand_error(&error));
+        }
+        envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
+        envelope::Payload::OrderBookSnapshot(_)
+        | envelope::Payload::OrderFlowSnapshot(_)
+        | envelope::Payload::OrderFlowUpdate(_)
+        | envelope::Payload::SeriesUpdate(_) => {}
+        _ => return Err("engine returned an unexpected market response".to_string()),
+    }
+    Ok(None)
 }
 
 fn send_recovery(
@@ -1165,6 +1558,7 @@ fn send_recovery(
         endpoint.consumer_id,
         endpoint.active_generation,
         series_key(product, interval)?,
+        product.session_generation,
         &endpoint.messages,
     )
     .map(|(snapshot, generation)| {
@@ -1680,7 +2074,7 @@ fn now_unix_nanos() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn random_identity() -> Result<u64, String> {
+fn ranorder_book_identity() -> Result<u64, String> {
     let mut bytes = [0_u8; 8];
     getrandom::fill(&mut bytes).map_err(|_| "system CSPRNG is unavailable".to_string())?;
     Ok(NonZeroU64::new(u64::from_le_bytes(bytes))
@@ -1696,6 +2090,7 @@ mod tests {
         MarketBar as IpcMarketBar, OrderBookLevel as IpcOrderBookLevel,
         OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState,
         ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
+        SelectProviderInstrument,
     };
 
     fn handle_rithmic_catalog_event(
@@ -1733,6 +2128,87 @@ mod tests {
         assert_eq!(record.endpoint.consumer_id, 41);
         assert_eq!(record.product.instrument_id, product.instrument_id);
         assert_eq!(record.interval, ChartInterval::Minute5);
+    }
+
+    #[test]
+    fn workspace_endpoint_wires_foreground_selection_slots() {
+        let product = default_hyperliquid_product();
+        let (pane, record) =
+            worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute1, None, 7);
+        let provider_selection = SelectProviderInstrument {
+            consumer_id: 0,
+            selection_generation: 3,
+            search_generation: 2,
+            provider: "hyperliquid".to_string(),
+            symbol: "ETH".to_string(),
+            exchange: "Hyperliquid".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+        };
+        pane.worker
+            .try_select_provider(provider_selection.clone())
+            .expect("provider selection enters foreground slot");
+        assert_eq!(
+            record
+                .endpoint
+                .pending_provider_selection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref(),
+            Some(&provider_selection)
+        );
+
+        assert_eq!(
+            pane.worker
+                .try_select_engine(product, ChartInterval::Minute5)
+                .expect("engine selection enters foreground slot"),
+            8
+        );
+        let pending_engine = record
+            .endpoint
+            .pending_engine_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("engine selection is retained");
+        assert_eq!(pending_engine.sequence, 8);
+        assert_eq!(pending_engine.interval, ChartInterval::Minute5);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine and live Hyperliquid public access"]
+    fn native_resident_hyperliquid_startup_resolves_stale_default_generation() {
+        let (_startup, mut worker, factory) = start().expect("start resident Hyperliquid worker");
+        drop(factory);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (messages, disconnected) = worker.drain_messages();
+            for message in messages {
+                match message {
+                    MarketWorkerMessage::Update(MarketWorkerPublication {
+                        update: ReplayStreamUpdate::Snapshot(snapshot),
+                        ..
+                    }) => {
+                        assert!(!snapshot.bars().is_empty());
+                        return;
+                    }
+                    MarketWorkerMessage::State {
+                        state: ChartState::Error,
+                        message,
+                    } => panic!("resident Hyperliquid startup failed: {message}"),
+                    _ => {}
+                }
+            }
+            assert!(
+                !disconnected,
+                "resident Hyperliquid startup worker disconnected"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "resident Hyperliquid startup did not publish a covering snapshot"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -1780,6 +2256,7 @@ mod tests {
                 envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
                     consumer_id: 41,
                     instrument: Some(selected),
+                    command_generation: 4,
                 }),
             )
             .is_none()
@@ -1789,7 +2266,10 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::ProviderCatalog(
-                ProviderCatalogEvent::SelectionInstalled(instrument)
+                ProviderCatalogEvent::SelectionInstalled {
+                    command_generation: 4,
+                    instrument,
+                }
             )] if instrument.selection_generation == 5
         ));
 
@@ -2639,11 +3119,12 @@ mod tests {
         );
     }
 
-    /// The Rithmic DOM panel stayed empty because the engine's order-book
-    /// snapshot had no arm here: `RithmicDom` was declared, coalesced, and
+    /// The Rithmic Order Book panel stayed empty because the engine's order-book
+    /// snapshot had no arm here: `OrderBook` was declared, coalesced, and
     /// rendered, but never constructed. Levels are a real MNQ top-of-book fixture
     /// with accurate Rithmic integer-contract volumes.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn rithmic_order_book_snapshot_uses_the_consumers_selection_identity() {
         let product = default_product("MNQ");
         let (sender, receiver) =
@@ -2693,6 +3174,19 @@ mod tests {
                         traded_volume: 0,
                     },
                 ],
+                best_bid: Some(IpcOrderBookLevel {
+                    price: 7_798_670,
+                    quantity: 653_408,
+                    order_count: Some(3),
+                    traded_volume: 125,
+                }),
+                best_ask: Some(IpcOrderBookLevel {
+                    price: 7_798_671,
+                    quantity: 22_517_771,
+                    order_count: Some(4),
+                    traded_volume: 75,
+                }),
+                bbo_source_watermark: 2,
             }),
             &PushedEventContext {
                 consumer_id: 1,
@@ -2710,15 +3204,23 @@ mod tests {
         let frame = messages
             .into_iter()
             .find_map(|message| match message {
-                MarketWorkerMessage::RithmicDom(frame) => Some(frame),
+                MarketWorkerMessage::OrderBook(frame) => Some(frame),
                 _ => None,
             })
-            .expect("Rithmic depth must reach the DOM panel");
+            .expect("Rithmic depth must reach the Order Book panel");
         assert!(
             !frame.rows.is_empty(),
-            "a projected Rithmic DOM frame must carry price rows"
+            "a projected Rithmic Order Book frame must carry price rows"
         );
         assert_eq!(frame.selection_generation, product.selection_generation);
+        assert_eq!(
+            frame.best_bid.as_ref().map(|level| level.price),
+            Some(7_798_670)
+        );
+        assert_eq!(
+            frame.best_ask.as_ref().map(|level| level.price),
+            Some(7_798_671)
+        );
         assert_eq!(
             frame.rows[0]
                 .bid

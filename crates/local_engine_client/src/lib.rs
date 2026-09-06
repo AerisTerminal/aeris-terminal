@@ -46,9 +46,17 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum time allowed for one session frame write. Frames are small and a
 /// live resident always drains its command stream; expiry means it is wedged.
 const SESSION_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time allowed for one post-handshake request/reply round trip.
+const SESSION_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 const ENGINE_VAULT_SERVICE: &str = "com.axiusflow.engine";
 const IPC_INBOX_CAPACITY: usize = 256;
+
+fn session_send_deadline() -> Result<Instant, String> {
+    Instant::now()
+        .checked_add(SESSION_SEND_TIMEOUT)
+        .ok_or_else(|| "ipc_send failed: local transport deadline overflowed".to_string())
+}
 const MAX_PENDING_MARKET_RESPONSES: usize = IPC_INBOX_CAPACITY;
 const ENGINE_TOKEN_KEY: &str = "local-ipc-token-v1";
 
@@ -119,13 +127,23 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when connection, framing, authentication, or negotiation fails.
     pub fn connect(name: &str, installation_token: &[u8]) -> Result<Self, String> {
-        Self::connect_with_reachability(name, installation_token).map_err(|failure| failure.detail)
+        let deadline = Instant::now()
+            .checked_add(HANDSHAKE_TIMEOUT)
+            .ok_or_else(|| "handshake deadline overflowed".to_string())?;
+        Self::connect_with_reachability_until(name, installation_token, deadline)
+            .map_err(|failure| failure.detail)
     }
 
-    fn connect_with_reachability(
+    fn connect_with_reachability_until(
         name: &str,
         installation_token: &[u8],
+        deadline: Instant,
     ) -> Result<Self, EngineConnectionFailure> {
+        if Instant::now() >= deadline {
+            return Err(unreached_failure(
+                "resident engine connection deadline expired".to_string(),
+            ));
+        }
         let ns_name =
             name.to_ns_name::<GenericNamespaced>()
                 .map_err(|error| EngineConnectionFailure {
@@ -144,6 +162,7 @@ impl EngineClient {
             session_nonce,
             StreamRole::Command,
             false,
+            bounded_deadline(deadline, HANDSHAKE_TIMEOUT)?,
         )?
         .expect("command stream is required");
         // The event stream is optional at this point: a legacy single-stream
@@ -152,33 +171,29 @@ impl EngineClient {
         // instance exhaustion; a persistent refusal means a legacy resident.
         let mut event = None;
         for _ in 0..3 {
-            match open_session_stream(
+            if let Some(stream) = open_session_stream(
                 ns_name.clone(),
                 installation_token,
                 &release,
                 session_nonce,
                 StreamRole::Event,
                 true,
+                bounded_deadline(deadline, HANDSHAKE_TIMEOUT)?,
             )? {
-                Some(stream) => {
-                    event = Some(stream);
-                    break;
-                }
-                None => thread::sleep(Duration::from_millis(20)),
+                event = Some(stream);
+                break;
             }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(remaining.min(Duration::from_millis(20)));
         }
         // Readiness always arrives on the command stream, for both paired and
         // legacy sessions. Handshake I/O polls the nonblocking command stream
         // with a deadline so a wedged endpoint fails bounded; no reader thread
         // exists yet, so no transport handle is ever shared.
-        let handshake_deadline =
-            Instant::now()
-                .checked_add(HANDSHAKE_TIMEOUT)
-                .ok_or_else(|| EngineConnectionFailure {
-                    detail: "handshake deadline overflowed".to_string(),
-                    endpoint_reached: true,
-                    legacy_stopped: false,
-                })?;
+        let handshake_deadline = bounded_deadline(deadline, HANDSHAKE_TIMEOUT)?;
         let mut handshake_decoder =
             EnvelopeDecoder::try_new().map_err(|error| EngineConnectionFailure {
                 detail: error.to_string(),
@@ -242,10 +257,11 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the connection fails or the reply is unexpected.
     pub fn restore_workspace(&mut self) -> Result<WorkspaceState, String> {
-        self.connection.send(envelope::Payload::RestoreWorkspace(
-            RestoreWorkspace::default(),
-        ))?;
-        match self.receive_reply()? {
+        let deadline = session_reply_deadline()?;
+        match self.send_request_until(
+            envelope::Payload::RestoreWorkspace(RestoreWorkspace::default()),
+            deadline,
+        )? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected workspace reply".to_string()),
@@ -260,13 +276,13 @@ impl EngineClient {
         &mut self,
         mode: ResourceMode,
     ) -> Result<WorkspaceState, String> {
-        self.connection
-            .send(envelope::Payload::SetEngineResourceMode(
-                SetEngineResourceMode {
-                    resource_mode: mode as i32,
-                },
-            ))?;
-        self.receive_workspace()
+        let deadline = session_reply_deadline()?;
+        self.send_workspace_request_until(
+            envelope::Payload::SetEngineResourceMode(SetEngineResourceMode {
+                resource_mode: mode as i32,
+            }),
+            deadline,
+        )
     }
 
     /// Persists revision-fenced engine lifetime, autostart, and markets-live permission settings.
@@ -280,14 +296,16 @@ impl EngineClient {
         autostart_enabled: bool,
         markets_live_permitted: bool,
     ) -> Result<WorkspaceState, String> {
-        self.connection
-            .send(envelope::Payload::SetEngineLifecycle(SetEngineLifecycle {
+        let deadline = session_reply_deadline()?;
+        self.send_workspace_request_until(
+            envelope::Payload::SetEngineLifecycle(SetEngineLifecycle {
                 workspace_revision,
                 lifetime_mode: lifetime_mode as i32,
                 autostart_enabled,
                 markets_live_permitted,
-            }))?;
-        self.receive_workspace()
+            }),
+            deadline,
+        )
     }
 
     /// Returns one bounded engine lifecycle and resource status snapshot.
@@ -295,9 +313,11 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the authenticated request fails or the reply is invalid.
     pub fn engine_status(&mut self) -> Result<EngineStatus, String> {
-        self.connection
-            .send(envelope::Payload::GetEngineStatus(GetEngineStatus {}))?;
-        match self.receive_reply()? {
+        let deadline = session_reply_deadline()?;
+        match self.send_request_until(
+            envelope::Payload::GetEngineStatus(GetEngineStatus {}),
+            deadline,
+        )? {
             envelope::Payload::EngineStatus(status) => Ok(status),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected status reply".to_string()),
@@ -309,9 +329,11 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the authenticated command fails or is not acknowledged.
     pub fn shutdown_engine(mut self) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::ShutdownEngine(ShutdownEngine {}))?;
-        match self.receive_reply()? {
+        let deadline = session_reply_deadline()?;
+        match self.send_request_until(
+            envelope::Payload::ShutdownEngine(ShutdownEngine {}),
+            deadline,
+        )? {
             envelope::Payload::Goodbye(_) => Ok(()),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected shutdown reply".to_string()),
@@ -350,15 +372,17 @@ impl EngineClient {
         workspace_revision: u64,
         selection_generation: u64,
     ) -> Result<WorkspaceState, String> {
-        self.connection
-            .send(envelope::Payload::SetSelection(SetSelection {
+        let deadline = session_reply_deadline()?;
+        self.send_workspace_request_until(
+            envelope::Payload::SetSelection(SetSelection {
                 market,
                 interval_seconds,
                 workspace_revision,
                 selection_generation,
                 provider,
-            }))?;
-        self.receive_workspace()
+            }),
+            deadline,
+        )
     }
 
     /// Persists the stable viewport for the active selection without changing its revision.
@@ -371,13 +395,15 @@ impl EngineClient {
         end_unix_nanos: i64,
         selection_generation: u64,
     ) -> Result<WorkspaceState, String> {
-        self.connection
-            .send(envelope::Payload::SetViewport(SetViewport {
+        let deadline = session_reply_deadline()?;
+        self.send_workspace_request_until(
+            envelope::Payload::SetViewport(SetViewport {
                 start_unix_nanos,
                 end_unix_nanos,
                 selection_generation,
-            }))?;
-        self.receive_workspace()
+            }),
+            deadline,
+        )
     }
 
     /// Persists the complete bounded workspace/tab/pane composition.
@@ -391,22 +417,37 @@ impl EngineClient {
         active_workspace_id: u64,
         workspace_tabs: Vec<WorkspaceTabState>,
     ) -> Result<WorkspaceState, String> {
-        self.connection
-            .send(envelope::Payload::SetWorkspaceLayout(SetWorkspaceLayout {
+        let deadline = session_reply_deadline()?;
+        self.send_workspace_request_until(
+            envelope::Payload::SetWorkspaceLayout(SetWorkspaceLayout {
                 workspace_revision,
                 layout_generation,
                 active_workspace_id,
                 workspace_tabs,
-            }))?;
-        self.receive_workspace()
+            }),
+            deadline,
+        )
     }
 
-    fn receive_workspace(&mut self) -> Result<WorkspaceState, String> {
-        match self.receive_reply()? {
+    fn send_workspace_request_until(
+        &mut self,
+        payload: envelope::Payload,
+        deadline: Instant,
+    ) -> Result<WorkspaceState, String> {
+        match self.send_request_until(payload, deadline)? {
             envelope::Payload::WorkspaceState(workspace) => Ok(workspace),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected workspace reply".to_string()),
         }
+    }
+
+    fn send_request_until(
+        &mut self,
+        payload: envelope::Payload,
+        deadline: Instant,
+    ) -> Result<envelope::Payload, String> {
+        self.connection.send_until(payload, deadline)?;
+        self.receive_reply_until(deadline)
     }
 
     /// Attaches one stable desktop lifetime to engine-owned market state.
@@ -414,8 +455,19 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the authenticated local connection cannot send the command.
     pub fn attach_client(&mut self, client_id: u64) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::AttachClient(AttachClient { client_id }))
+        let deadline = session_send_deadline()?;
+        self.attach_client_until(client_id, deadline)
+    }
+
+    /// Attaches one desktop lifetime without extending the caller's absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn attach_client_until(&mut self, client_id: u64, deadline: Instant) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::AttachClient(AttachClient { client_id }),
+            deadline,
+        )
     }
 
     /// Registers one independently generated chart consumer.
@@ -428,12 +480,29 @@ impl EngineClient {
         workspace_id: u64,
         consumer_id: u64,
     ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::RegisterConsumer(RegisterConsumer {
+        let deadline = session_send_deadline()?;
+        self.register_consumer_until(client_id, workspace_id, consumer_id, deadline)
+    }
+
+    /// Registers one chart consumer without extending the caller's absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn register_consumer_until(
+        &mut self,
+        client_id: u64,
+        workspace_id: u64,
+        consumer_id: u64,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::RegisterConsumer(RegisterConsumer {
                 client_id,
                 workspace_id,
                 consumer_id,
-            }))
+            }),
+            deadline,
+        )
     }
 
     /// Replaces one consumer's authoritative bar-series demand.
@@ -446,12 +515,29 @@ impl EngineClient {
         generation: u64,
         series: SeriesKey,
     ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::SeriesDemand(SeriesDemand {
+        let deadline = session_send_deadline()?;
+        self.set_series_demand_until(consumer_id, generation, series, deadline)
+    }
+
+    /// Replaces one consumer's series demand under an existing absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn set_series_demand_until(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        series: SeriesKey,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::SeriesDemand(SeriesDemand {
                 consumer_id,
                 generation,
                 series: Some(series),
-            }))
+            }),
+            deadline,
+        )
     }
 
     /// Installs one adapter-resolved provider instrument in the resident engine catalog.
@@ -462,9 +548,31 @@ impl EngineClient {
         &mut self,
         instrument: InstallProviderInstrument,
     ) -> Result<ProviderInstrumentInstalled, String> {
-        self.connection
-            .send(envelope::Payload::InstallProviderInstrument(instrument))?;
-        match self.receive_reply()? {
+        let deadline = Instant::now()
+            .checked_add(SESSION_REPLY_TIMEOUT)
+            .ok_or_else(|| {
+                "ipc_receive failed: local engine reply deadline overflowed".to_string()
+            })?;
+        self.install_provider_instrument_until(instrument, deadline)
+    }
+
+    /// Installs one provider instrument under an existing absolute deadline.
+    ///
+    /// Recovery uses this form so its outer deadline cannot be extended by a
+    /// resident that accepts commands but never emits the matching reply.
+    ///
+    /// # Errors
+    /// Returns an error when send, reply, validation, or the absolute deadline fails.
+    pub fn install_provider_instrument_until(
+        &mut self,
+        instrument: InstallProviderInstrument,
+        deadline: Instant,
+    ) -> Result<ProviderInstrumentInstalled, String> {
+        self.connection.send_until(
+            envelope::Payload::InstallProviderInstrument(instrument),
+            deadline,
+        )?;
+        match self.receive_reply_until(deadline)? {
             envelope::Payload::ProviderInstrumentInstalled(installed) => Ok(installed),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected instrument install reply".to_string()),
@@ -481,8 +589,23 @@ impl EngineClient {
         &mut self,
         request: SearchProviderInstruments,
     ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::SearchProviderInstruments(request))
+        let deadline = session_send_deadline()?;
+        self.search_provider_instruments_until(request, deadline)
+    }
+
+    /// Schedules a provider search without extending the caller's absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn search_provider_instruments_until(
+        &mut self,
+        request: SearchProviderInstruments,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::SearchProviderInstruments(request),
+            deadline,
+        )
     }
 
     /// Schedules one exact provider-neutral instrument selection.
@@ -495,8 +618,23 @@ impl EngineClient {
         &mut self,
         request: SelectProviderInstrument,
     ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::SelectProviderInstrument(request))
+        let deadline = session_send_deadline()?;
+        self.select_provider_instrument_until(request, deadline)
+    }
+
+    /// Schedules an exact provider selection under an existing absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn select_provider_instrument_until(
+        &mut self,
+        request: SelectProviderInstrument,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::SelectProviderInstrument(request),
+            deadline,
+        )
     }
 
     /// Updates the visible range for the exact current consumer generation.
@@ -510,13 +648,37 @@ impl EngineClient {
         start_unix_nanos: i64,
         end_unix_nanos: i64,
     ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::ViewportDemand(ViewportDemand {
+        let deadline = session_send_deadline()?;
+        self.set_market_viewport_until(
+            consumer_id,
+            generation,
+            start_unix_nanos,
+            end_unix_nanos,
+            deadline,
+        )
+    }
+
+    /// Updates a market viewport without extending the caller's absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn set_market_viewport_until(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::ViewportDemand(ViewportDemand {
                 consumer_id,
                 generation,
                 start_unix_nanos,
                 end_unix_nanos,
-            }))
+            }),
+            deadline,
+        )
     }
 
     /// Updates one consumer's presentation priority without changing market demand.
@@ -543,12 +705,28 @@ impl EngineClient {
         consumer_id: u64,
         resource_class: ConsumerResourceClass,
     ) -> Result<(), String> {
-        self.connection
-            .send(envelope::Payload::VisibilityDemand(VisibilityDemand {
+        let deadline = session_send_deadline()?;
+        self.set_market_resource_class_until(consumer_id, resource_class, deadline)
+    }
+
+    /// Updates presentation priority without extending the caller's absolute deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the authenticated local connection cannot send before `deadline`.
+    pub fn set_market_resource_class_until(
+        &mut self,
+        consumer_id: u64,
+        resource_class: ConsumerResourceClass,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.connection.send_until(
+            envelope::Payload::VisibilityDemand(VisibilityDemand {
                 consumer_id,
                 visible: resource_class == ConsumerResourceClass::Foreground,
                 resource_class: resource_class as i32,
-            }))
+            }),
+            deadline,
+        )
     }
 
     /// Receives the next market response from the authenticated engine session.
@@ -616,9 +794,16 @@ impl EngineClient {
         Ok(())
     }
 
-    fn receive_reply(&mut self) -> Result<envelope::Payload, String> {
+    fn receive_reply_until(&mut self, deadline: Instant) -> Result<envelope::Payload, String> {
         loop {
-            let (consumer_id, payload) = self.connection.receive_routed()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("ipc_receive failed: local engine reply timed out".to_string());
+            }
+            let Some((consumer_id, payload)) = self.connection.receive_routed_timeout(remaining)?
+            else {
+                return Err("ipc_receive failed: local engine reply timed out".to_string());
+            };
             if consumer_id == 0 {
                 return Ok(payload);
             }
@@ -659,12 +844,14 @@ impl EngineClient {
         client_id: u64,
         request_generation: u64,
     ) -> Result<LoginAuthorization, String> {
-        self.connection
-            .send(envelope::Payload::BeginLogin(BeginLogin {
+        let deadline = session_reply_deadline()?;
+        match self.send_request_until(
+            envelope::Payload::BeginLogin(BeginLogin {
                 client_id,
                 request_generation,
-            }))?;
-        match self.receive_reply()? {
+            }),
+            deadline,
+        )? {
             envelope::Payload::LoginAuthorization(authorization) => Ok(authorization),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected login reply".to_string()),
@@ -676,11 +863,11 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when no matching transaction is pending or the reply is invalid.
     pub fn cancel_login(&mut self, request_generation: u64) -> Result<AccountView, String> {
-        self.connection
-            .send(envelope::Payload::CancelLogin(CancelLogin {
-                request_generation,
-            }))?;
-        self.receive_account_view()
+        let deadline = session_reply_deadline()?;
+        self.send_account_request_until(
+            envelope::Payload::CancelLogin(CancelLogin { request_generation }),
+            deadline,
+        )
     }
 
     /// Returns the current sanitized engine-owned account view.
@@ -688,9 +875,11 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the request fails or the reply is invalid.
     pub fn account_status(&mut self) -> Result<AccountView, String> {
-        self.connection
-            .send(envelope::Payload::GetAccountStatus(GetAccountStatus {}))?;
-        self.receive_account_view()
+        let deadline = session_reply_deadline()?;
+        self.send_account_request_until(
+            envelope::Payload::GetAccountStatus(GetAccountStatus {}),
+            deadline,
+        )
     }
 
     /// Signs out the shared engine-owned account session.
@@ -698,18 +887,27 @@ impl EngineClient {
     /// # Errors
     /// Returns an error when the request fails or the reply is invalid.
     pub fn sign_out(&mut self) -> Result<AccountView, String> {
-        self.connection
-            .send(envelope::Payload::SignOut(SignOut {}))?;
-        self.receive_account_view()
+        let deadline = session_reply_deadline()?;
+        self.send_account_request_until(envelope::Payload::SignOut(SignOut {}), deadline)
     }
 
-    fn receive_account_view(&mut self) -> Result<AccountView, String> {
-        match self.receive_reply()? {
+    fn send_account_request_until(
+        &mut self,
+        payload: envelope::Payload,
+        deadline: Instant,
+    ) -> Result<AccountView, String> {
+        match self.send_request_until(payload, deadline)? {
             envelope::Payload::AccountView(view) => Ok(view),
             envelope::Payload::Fault(fault) => Err(fault.redacted_detail),
             _ => Err("engine returned an unexpected account reply".to_string()),
         }
     }
+}
+
+fn session_reply_deadline() -> Result<Instant, String> {
+    Instant::now()
+        .checked_add(SESSION_REPLY_TIMEOUT)
+        .ok_or_else(|| "ipc request/reply deadline overflowed".to_string())
 }
 
 fn market_response_consumer_id(payload: &envelope::Payload) -> Option<u64> {
@@ -744,6 +942,19 @@ fn unreached_failure(detail: String) -> EngineConnectionFailure {
     }
 }
 
+fn bounded_deadline(outer: Instant, maximum: Duration) -> Result<Instant, EngineConnectionFailure> {
+    let now = Instant::now();
+    if now >= outer {
+        return Err(reached_failure(
+            "resident engine connection deadline expired".to_string(),
+        ));
+    }
+    let local = now
+        .checked_add(maximum)
+        .ok_or_else(|| reached_failure("handshake deadline overflowed".to_string()))?;
+    Ok(local.min(outer))
+}
+
 fn fresh_session_nonce() -> Result<u64, EngineConnectionFailure> {
     let mut nonce_bytes = [0_u8; 8];
     getrandom::fill(&mut nonce_bytes)
@@ -768,6 +979,7 @@ fn open_session_stream(
     session_nonce: u64,
     stream_role: StreamRole,
     optional: bool,
+    deadline: Instant,
 ) -> Result<Option<LocalSocketStream>, EngineConnectionFailure> {
     let mut stream = match LocalSocketStream::connect(name) {
         Ok(stream) => stream,
@@ -779,9 +991,6 @@ fn open_session_stream(
             .set_nonblocking(true)
             .map_err(|error| reached_failure(error.to_string()))?;
     }
-    let deadline = Instant::now()
-        .checked_add(HANDSHAKE_TIMEOUT)
-        .ok_or_else(|| reached_failure("handshake deadline overflowed".to_string()))?;
     send_hello(
         &mut stream,
         installation_token,
@@ -968,44 +1177,89 @@ pub fn sibling_engine_executable() -> Result<PathBuf, String> {
 /// Returns an error when credentials, process launch, or readiness negotiation fail.
 pub fn connect_or_start_engine(engine_executable: &Path) -> Result<EngineClient, String> {
     let token = native_installation_token()?;
-    connect_or_start_engine_named(
+    let deadline = Instant::now()
+        .checked_add(ENGINE_START_TIMEOUT)
+        .ok_or_else(|| "resident engine start deadline overflowed".to_string())?;
+    connect_or_start_engine_named_until(
         ENGINE_SOCKET_NAME,
         engine_executable,
         token.as_slice(),
-        ENGINE_START_TIMEOUT,
+        deadline,
     )
 }
 
+/// Attaches to or starts the resident engine without extending an outer
+/// caller-owned deadline.
+///
+/// # Errors
+/// Returns an error when credentials, launch, or negotiation fail before the deadline.
+pub fn connect_or_start_engine_until(
+    engine_executable: &Path,
+    deadline: Instant,
+) -> Result<EngineClient, String> {
+    let token = native_installation_token()?;
+    connect_or_start_engine_named_until(
+        ENGINE_SOCKET_NAME,
+        engine_executable,
+        token.as_slice(),
+        deadline,
+    )
+}
+
+#[cfg(test)]
 fn connect_or_start_engine_named(
     socket_name: &str,
     engine_executable: &Path,
     installation_token: &[u8],
     start_timeout: Duration,
 ) -> Result<EngineClient, String> {
+    let deadline = Instant::now()
+        .checked_add(start_timeout)
+        .ok_or_else(|| "resident engine start deadline overflowed".to_string())?;
+    connect_or_start_engine_named_until(
+        socket_name,
+        engine_executable,
+        installation_token,
+        deadline,
+    )
+}
+
+fn connect_or_start_engine_named_until(
+    socket_name: &str,
+    engine_executable: &Path,
+    installation_token: &[u8],
+    deadline: Instant,
+) -> Result<EngineClient, String> {
     let mut engine_started = false;
-    let deadline = Instant::now() + start_timeout;
-    let mut last_error =
-        match EngineClient::connect_with_reachability(socket_name, installation_token) {
-            Ok(client) => return Ok(client),
-            Err(failure) if failure.legacy_stopped => {
-                replace_legacy_engine(
-                    socket_name,
-                    engine_executable,
-                    &mut engine_started,
-                    deadline,
-                )?;
-                failure.detail
+    let mut last_error = match EngineClient::connect_with_reachability_until(
+        socket_name,
+        installation_token,
+        deadline,
+    ) {
+        Ok(client) => return Ok(client),
+        Err(failure) if failure.legacy_stopped => {
+            replace_legacy_engine(
+                socket_name,
+                engine_executable,
+                &mut engine_started,
+                deadline,
+            )?;
+            failure.detail
+        }
+        Err(failure) => {
+            if !failure.endpoint_reached {
+                start_engine_process(engine_executable)?;
+                engine_started = true;
             }
-            Err(failure) => {
-                if !failure.endpoint_reached {
-                    start_engine_process(engine_executable)?;
-                    engine_started = true;
-                }
-                failure.detail
-            }
-        };
+            failure.detail
+        }
+    };
     while Instant::now() < deadline {
-        match EngineClient::connect_with_reachability(socket_name, installation_token) {
+        match EngineClient::connect_with_reachability_until(
+            socket_name,
+            installation_token,
+            deadline,
+        ) {
             Ok(client) => return Ok(client),
             Err(failure) if failure.legacy_stopped => {
                 replace_legacy_engine(
@@ -1024,7 +1278,10 @@ fn connect_or_start_engine_named(
                 last_error = failure.detail;
             }
         }
-        thread::sleep(Duration::from_millis(20));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            thread::sleep(remaining.min(Duration::from_millis(20)));
+        }
     }
     Err(last_error)
 }
@@ -1104,15 +1361,22 @@ impl FramedConnection {
     }
 
     fn send(&mut self, payload: envelope::Payload) -> Result<(), String> {
+        let deadline = Instant::now()
+            .checked_add(SESSION_SEND_TIMEOUT)
+            .ok_or_else(|| "ipc_send failed: local transport is busy".to_string())?;
+        self.send_until(payload, deadline)
+    }
+
+    fn send_until(&mut self, payload: envelope::Payload, deadline: Instant) -> Result<(), String> {
         let frame = encode_envelope(&Envelope {
             protocol_version: PROTOCOL_VERSION,
             target_consumer_id: 0,
             payload: Some(payload),
         })
         .map_err(|_| "ipc_send failed: local message encoding failed".to_string())?;
-        let deadline = Instant::now()
-            .checked_add(SESSION_SEND_TIMEOUT)
-            .ok_or_else(|| "ipc_send failed: local transport is busy".to_string())?;
+        if Instant::now() >= deadline {
+            return Err("ipc_send failed: local transport timed out".to_string());
+        }
         write_frame(&mut self.command, &frame, deadline)
     }
 
@@ -1875,6 +2139,469 @@ mod tests {
             .and_then(|(target, event)| (target == consumer_id || target == 0).then_some(event)))
     }
 
+    #[cfg(target_os = "windows")]
+    fn select_native_hyperliquid_instrument(
+        client: &mut EngineClient,
+        consumer_id: u64,
+        requested_symbol: &str,
+        command_generation: u64,
+    ) -> Result<InstallProviderInstrument, String> {
+        client.search_provider_instruments(SearchProviderInstruments {
+            consumer_id,
+            search_generation: command_generation,
+            provider: "hyperliquid".to_string(),
+            query: requested_symbol.to_string(),
+            maximum_results: 32,
+        })?;
+        let search_deadline = Instant::now() + Duration::from_secs(20);
+        let summary = loop {
+            if Instant::now() >= search_deadline {
+                return Err(format!(
+                    "Hyperliquid {requested_symbol} catalog search timed out"
+                ));
+            }
+            match receive_native_event(client, consumer_id)? {
+                Some(envelope::Payload::ProviderInstrumentSearchResult(result))
+                    if result.search_generation == command_generation =>
+                {
+                    break result
+                        .instruments
+                        .into_iter()
+                        .find(|candidate| candidate.symbol == requested_symbol)
+                        .ok_or_else(|| {
+                            format!(
+                                "Hyperliquid catalog has no exact selectable {requested_symbol}"
+                            )
+                        })?;
+                }
+                Some(envelope::Payload::ProviderCatalogRejected(rejection))
+                    if rejection.command_generation == command_generation =>
+                {
+                    let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
+                        .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
+                    return Err(format!(
+                        "Hyperliquid {requested_symbol} search rejected: {reason:?}"
+                    ));
+                }
+                _ => {}
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        client.select_provider_instrument(SelectProviderInstrument {
+            consumer_id,
+            selection_generation: command_generation,
+            search_generation: command_generation,
+            provider: "hyperliquid".to_string(),
+            symbol: summary.symbol,
+            exchange: summary.exchange,
+            entitlement_id: "hyperliquid-public".to_string(),
+        })?;
+        let selection_deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if Instant::now() >= selection_deadline {
+                return Err(format!(
+                    "Hyperliquid {requested_symbol} selection timed out"
+                ));
+            }
+            match receive_native_event(client, consumer_id)? {
+                Some(envelope::Payload::ProviderInstrumentSelection(selection))
+                    if selection.consumer_id == consumer_id
+                        && selection.command_generation == command_generation =>
+                {
+                    return selection.instrument.ok_or_else(|| {
+                        "Hyperliquid selection omitted canonical identity".to_string()
+                    });
+                }
+                Some(envelope::Payload::ProviderCatalogRejected(rejection))
+                    if rejection.command_generation == command_generation =>
+                {
+                    let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
+                        .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
+                    return Err(format!(
+                        "Hyperliquid {requested_symbol} selection rejected: {reason:?}"
+                    ));
+                }
+                _ => {}
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the optimized resident engine and live Hyperliquid public access"]
+    fn native_release_hyperliquid_month_snapshot_probe() {
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        client
+            .set_engine_resource_mode(ResourceMode::Interactive)
+            .expect("enable interactive provider work for native probe");
+        let client_id = u64::from(std::process::id()).saturating_mul(10) + 7;
+        let consumer_id = client_id;
+        client
+            .attach_client(client_id)
+            .expect("attach native probe");
+        client
+            .register_consumer(client_id, 1, consumer_id)
+            .expect("register native probe consumer");
+        let instrument = select_native_hyperliquid_instrument(&mut client, consumer_id, "BTC", 1)
+            .expect("select native Hyperliquid BTC");
+        let series = SeriesKey {
+            provider: "hyperliquid".to_string(),
+            instrument_id: instrument.instrument_id.clone(),
+            cadence_value: 1,
+            definition_revision: 1,
+            entitlement_id: instrument.entitlement_id.clone(),
+            cadence: SeriesCadence::CalendarMonths as i32,
+        };
+        client
+            .set_series_demand(consumer_id, 1, series)
+            .expect("demand native Hyperliquid month");
+        client
+            .set_market_visibility(consumer_id, true)
+            .expect("show native Hyperliquid month");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut provider = None;
+        let mut state = None;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "Hyperliquid 1M snapshot timed out: provider={provider:?} state={state:?}"
+            );
+            match receive_native_event(&mut client, consumer_id)
+                .expect("receive native Hyperliquid month")
+            {
+                Some(envelope::Payload::SeriesSnapshot(snapshot)) if snapshot.generation == 1 => {
+                    println!(
+                        "native_hyperliquid_month bars={} first={} last={} provider_generation={}",
+                        snapshot.bars.len(),
+                        snapshot
+                            .bars
+                            .first()
+                            .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
+                        snapshot
+                            .bars
+                            .last()
+                            .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
+                        snapshot.provider_generation,
+                    );
+                    assert!(!snapshot.bars.is_empty());
+                    break;
+                }
+                Some(envelope::Payload::ProviderState(value))
+                    if value.provider == "hyperliquid" =>
+                {
+                    provider = Some((value.state, value.generation, value.detail));
+                }
+                Some(envelope::Payload::SeriesState(value)) if value.generation == 1 => {
+                    state = Some((value.state, value.detail));
+                }
+                Some(envelope::Payload::DemandError(error)) if error.generation == 1 => {
+                    panic!(
+                        "Hyperliquid 1M demand failed: {error:?}; provider={provider:?}; state={state:?}"
+                    );
+                }
+                _ => {}
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        client
+            .remove_market_consumer(consumer_id)
+            .expect("remove native Hyperliquid month consumer");
+        client
+            .detach_client(client_id)
+            .expect("detach native Hyperliquid month probe");
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    #[ignore = "requires the optimized resident engine and live Hyperliquid public access"]
+    fn native_release_hyperliquid_all_timeframes_snapshot_probe() {
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        client
+            .set_engine_resource_mode(ResourceMode::Interactive)
+            .expect("enable interactive provider work for native probe");
+        let client_id = u64::from(std::process::id()).saturating_mul(10) + 8;
+        let consumer_id = client_id;
+        client
+            .attach_client(client_id)
+            .expect("attach native probe");
+        client
+            .register_consumer(client_id, 1, consumer_id)
+            .expect("register native probe consumer");
+        let instrument = select_native_hyperliquid_instrument(&mut client, consumer_id, "BTC", 1)
+            .expect("select native Hyperliquid BTC");
+        client
+            .set_market_visibility(consumer_id, true)
+            .expect("show native Hyperliquid probe");
+        let intervals = [
+            ("1m", SeriesCadence::FixedSeconds, 60),
+            ("3m", SeriesCadence::FixedSeconds, 180),
+            ("5m", SeriesCadence::FixedSeconds, 300),
+            ("15m", SeriesCadence::FixedSeconds, 900),
+            ("30m", SeriesCadence::FixedSeconds, 1_800),
+            ("1h", SeriesCadence::FixedSeconds, 3_600),
+            ("2h", SeriesCadence::FixedSeconds, 7_200),
+            ("4h", SeriesCadence::FixedSeconds, 14_400),
+            ("8h", SeriesCadence::FixedSeconds, 28_800),
+            ("12h", SeriesCadence::FixedSeconds, 43_200),
+            ("1D", SeriesCadence::FixedSeconds, 86_400),
+            ("3D", SeriesCadence::SessionDays, 3),
+            ("1W", SeriesCadence::CalendarWeeks, 1),
+            ("1M", SeriesCadence::CalendarMonths, 1),
+        ];
+        for (index, (label, cadence, cadence_value)) in intervals.into_iter().enumerate() {
+            let generation = u64::try_from(index + 1).expect("generation fits");
+            let series = SeriesKey {
+                provider: "hyperliquid".to_string(),
+                instrument_id: instrument.instrument_id.clone(),
+                cadence_value,
+                definition_revision: 1,
+                entitlement_id: instrument.entitlement_id.clone(),
+                cadence: cadence as i32,
+            };
+            client
+                .set_series_demand(consumer_id, generation, series)
+                .unwrap_or_else(|error| {
+                    panic!("Hyperliquid {label} demand dispatch failed: {error}")
+                });
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut provider = None;
+            let mut state = None;
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "Hyperliquid {label} snapshot timed out: provider={provider:?} state={state:?}"
+                );
+                match receive_native_event(&mut client, consumer_id)
+                    .expect("receive native Hyperliquid timeframe")
+                {
+                    Some(envelope::Payload::SeriesSnapshot(snapshot))
+                        if snapshot.generation == generation =>
+                    {
+                        println!(
+                            "native_hyperliquid_timeframe label={label} bars={} provider_generation={}",
+                            snapshot.bars.len(),
+                            snapshot.provider_generation
+                        );
+                        assert!(!snapshot.bars.is_empty());
+                        break;
+                    }
+                    Some(envelope::Payload::ProviderState(value))
+                        if value.provider == "hyperliquid" =>
+                    {
+                        provider = Some((value.state, value.generation, value.detail));
+                    }
+                    Some(envelope::Payload::SeriesState(value))
+                        if value.generation == generation =>
+                    {
+                        state = Some((value.state, value.detail));
+                    }
+                    Some(envelope::Payload::DemandError(error))
+                        if error.generation == generation =>
+                    {
+                        panic!(
+                            "Hyperliquid {label} demand failed: {error:?}; provider={provider:?}; state={state:?}"
+                        );
+                    }
+                    _ => {}
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let book_generation = 15;
+        client
+            .set_series_demand(
+                consumer_id,
+                book_generation,
+                SeriesKey {
+                    provider: "hyperliquid".to_string(),
+                    instrument_id: instrument.instrument_id.clone(),
+                    cadence_value: 60,
+                    definition_revision: 1,
+                    entitlement_id: instrument.entitlement_id.clone(),
+                    cadence: SeriesCadence::FixedSeconds as i32,
+                },
+            )
+            .expect("demand Hyperliquid order-book probe series");
+        let book_deadline = Instant::now() + Duration::from_secs(30);
+        let mut previous_revision = None;
+        let mut previous_received = None;
+        let mut book_samples = 0_u8;
+        while book_samples < 4 {
+            assert!(
+                Instant::now() < book_deadline,
+                "Hyperliquid order-book cadence probe timed out after {book_samples} samples"
+            );
+            let received = Instant::now();
+            match receive_native_event(&mut client, consumer_id)
+                .expect("receive native Hyperliquid order book")
+            {
+                Some(envelope::Payload::OrderBookSnapshot(book))
+                    if book.generation == book_generation
+                        && book.state == OrderBookState::Ready as i32
+                        && previous_revision != Some(book.revision) =>
+                {
+                    assert!(!book.bids.is_empty(), "Hyperliquid order book has bids");
+                    assert!(!book.asks.is_empty(), "Hyperliquid order book has asks");
+                    assert!(book.bids.len() <= 20 && book.asks.len() <= 20);
+                    assert!(book.bids[0].price < book.asks[0].price);
+                    assert_eq!(
+                        book.best_bid.as_ref().map(|level| level.price),
+                        Some(book.bids[0].price)
+                    );
+                    assert_eq!(
+                        book.best_ask.as_ref().map(|level| level.price),
+                        Some(book.asks[0].price)
+                    );
+                    let delta_ms = previous_received.map_or(0, |previous: Instant| {
+                        u64::try_from(received.duration_since(previous).as_millis())
+                            .unwrap_or(u64::MAX)
+                    });
+                    println!(
+                        "native_hyperliquid_order_book sample={} dt_ms={} revision={} source={} levels={}/{} best={}/{}",
+                        book_samples + 1,
+                        delta_ms,
+                        book.revision,
+                        book.source_watermark,
+                        book.bids.len(),
+                        book.asks.len(),
+                        book.bids[0].price,
+                        book.asks[0].price,
+                    );
+                    previous_revision = Some(book.revision);
+                    previous_received = Some(received);
+                    book_samples += 1;
+                }
+                Some(envelope::Payload::DemandError(error))
+                    if error.generation == book_generation =>
+                {
+                    panic!("Hyperliquid order-book probe demand failed: {error:?}");
+                }
+                _ => {}
+            }
+        }
+        client
+            .remove_market_consumer(consumer_id)
+            .expect("remove native Hyperliquid timeframe consumer");
+        client
+            .detach_client(client_id)
+            .expect("detach native Hyperliquid timeframe probe");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    #[ignore = "requires the optimized resident engine and live Hyperliquid public access"]
+    fn native_release_hyperliquid_sequential_symbol_selection_probe() {
+        let token = native_installation_token().expect("load native installation token");
+        let mut client = EngineClient::connect(ENGINE_SOCKET_NAME, token.as_slice())
+            .expect("connect optimized resident engine");
+        client
+            .set_engine_resource_mode(ResourceMode::Interactive)
+            .expect("enable interactive provider work for native symbol probe");
+        let client_id = u64::from(std::process::id()).saturating_mul(10) + 9;
+        let consumer_id = client_id;
+        client
+            .attach_client(client_id)
+            .expect("attach native symbol probe");
+        client
+            .register_consumer(client_id, 1, consumer_id)
+            .expect("register native symbol probe consumer");
+        client
+            .set_market_visibility(consumer_id, true)
+            .expect("show native symbol probe");
+
+        for (index, requested_symbol) in ["BTC", "PURR/USDC", "xyz:TSLA"].into_iter().enumerate() {
+            let command_generation = u64::try_from(index + 1).expect("small command generation");
+            let instrument = select_native_hyperliquid_instrument(
+                &mut client,
+                consumer_id,
+                requested_symbol,
+                command_generation,
+            )
+            .unwrap_or_else(|error| {
+                panic!("Hyperliquid {requested_symbol} selection failed: {error}")
+            });
+            println!(
+                "native_hyperliquid_selection query={requested_symbol} command_generation={command_generation} provider_selection_generation={} instrument={} venue={}",
+                instrument.selection_generation, instrument.instrument_id, instrument.venue_id
+            );
+
+            let series_generation = 100_u64
+                .checked_add(command_generation)
+                .expect("small series generation");
+            client
+                .set_series_demand(
+                    consumer_id,
+                    series_generation,
+                    SeriesKey {
+                        provider: "hyperliquid".to_string(),
+                        instrument_id: instrument.instrument_id.clone(),
+                        cadence_value: 60,
+                        definition_revision: 1,
+                        entitlement_id: instrument.entitlement_id.clone(),
+                        cadence: SeriesCadence::FixedSeconds as i32,
+                    },
+                )
+                .unwrap_or_else(|error| {
+                    panic!("Hyperliquid {requested_symbol} history dispatch failed: {error}")
+                });
+            let snapshot_deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                assert!(
+                    Instant::now() < snapshot_deadline,
+                    "Hyperliquid {requested_symbol} covering snapshot timed out"
+                );
+                match receive_native_event(&mut client, consumer_id)
+                    .expect("receive native Hyperliquid symbol history")
+                {
+                    Some(envelope::Payload::SeriesSnapshot(snapshot))
+                        if snapshot.generation == series_generation =>
+                    {
+                        assert!(
+                            !snapshot.bars.is_empty(),
+                            "Hyperliquid {requested_symbol} covering snapshot is empty"
+                        );
+                        println!(
+                            "native_hyperliquid_selection_history query={requested_symbol} bars={} provider_generation={}",
+                            snapshot.bars.len(),
+                            snapshot.provider_generation
+                        );
+                        break;
+                    }
+                    Some(envelope::Payload::DemandError(error))
+                        if error.generation == series_generation =>
+                    {
+                        panic!("Hyperliquid {requested_symbol} demand failed: {error:?}");
+                    }
+                    Some(envelope::Payload::SeriesState(state))
+                        if state.generation == series_generation
+                            && state.state
+                                == axiusflow_engine_protocol::SeriesLoadState::Failed as i32 =>
+                    {
+                        panic!(
+                            "Hyperliquid {requested_symbol} series failed: {}",
+                            state.detail.unwrap_or_else(|| "no detail".to_string())
+                        );
+                    }
+                    _ => {}
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        client
+            .remove_market_consumer(consumer_id)
+            .expect("remove native Hyperliquid symbol consumer");
+        client
+            .detach_client(client_id)
+            .expect("detach native Hyperliquid symbol probe");
+    }
     #[cfg(target_os = "windows")]
     fn select_native_rithmic_instrument(
         client: &mut EngineClient,

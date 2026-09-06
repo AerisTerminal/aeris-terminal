@@ -1,13 +1,14 @@
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{
-    DepthDelta, DepthSnapshot, DomColumnLevel, DomFrame, DomRow, MarketDataValidationError,
-    MarketEvent, OrderBook, OrderBookApplyOutcome, OrderBookPublication, OrderBookRecoveryReason,
+    DepthDelta, DepthSnapshot, MarketDataValidationError, MarketEvent, OrderBook,
+    OrderBookApplyOutcome, OrderBookColumnLevel, OrderBookFrame, OrderBookPublication,
+    OrderBookRecoveryReason, OrderBookRow,
 };
 use std::num::NonZeroUsize;
 
 /// Identity and display precision for one selected depth stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomSelection {
+pub struct OrderBookSelection {
     pub provider_id: String,
     pub instrument_id: String,
     pub entitlement_id: String,
@@ -16,7 +17,7 @@ pub struct DomSelection {
     pub precision: InstrumentPrecision,
 }
 
-impl DomSelection {
+impl OrderBookSelection {
     fn matches_snapshot(&self, snapshot: &DepthSnapshot) -> bool {
         self.matches_metadata(
             &snapshot.metadata.provider_id,
@@ -49,25 +50,25 @@ impl DomSelection {
     }
 }
 
-/// Result of offering a canonical event to the selected DOM runtime.
+/// Result of offering a canonical event to the selected Order Book runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DomUpdateOutcome {
-    Published(DomFrame),
-    RecoveryRequired(DomFrame, OrderBookRecoveryReason),
+pub enum OrderBookUpdateOutcome {
+    Published(OrderBookFrame),
+    RecoveryRequired(OrderBookFrame, OrderBookRecoveryReason),
     Ignored,
 }
 
 /// Single-writer, bounded order-book runtime and display projection.
 ///
 /// Callers run this outside the UI thread and publish only the latest immutable
-/// [`DomFrame`] on a frame boundary.
-pub struct ReadOnlyDom {
+/// [`OrderBookFrame`] on a frame boundary.
+pub struct ReadOnlyOrderBook {
     maximum_levels: NonZeroUsize,
-    selection: Option<DomSelection>,
+    selection: Option<OrderBookSelection>,
     book: OrderBook,
 }
 
-impl ReadOnlyDom {
+impl ReadOnlyOrderBook {
     #[must_use]
     pub fn new(maximum_levels: NonZeroUsize) -> Self {
         Self {
@@ -78,7 +79,7 @@ impl ReadOnlyDom {
     }
 
     /// Replaces the selected stream and fences every prior selection immediately.
-    pub fn select(&mut self, selection: DomSelection) {
+    pub fn select(&mut self, selection: OrderBookSelection) {
         self.selection = Some(selection);
         self.book = OrderBook::new(self.maximum_levels);
     }
@@ -90,7 +91,7 @@ impl ReadOnlyDom {
     }
 
     #[must_use]
-    pub const fn selection(&self) -> Option<&DomSelection> {
+    pub const fn selection(&self) -> Option<&OrderBookSelection> {
         self.selection.as_ref()
     }
 
@@ -103,9 +104,9 @@ impl ReadOnlyDom {
     pub fn apply_event(
         &mut self,
         event: &MarketEvent,
-    ) -> Result<DomUpdateOutcome, MarketDataValidationError> {
+    ) -> Result<OrderBookUpdateOutcome, MarketDataValidationError> {
         let Some(selection) = self.selection.as_ref() else {
-            return Ok(DomUpdateOutcome::Ignored);
+            return Ok(OrderBookUpdateOutcome::Ignored);
         };
         let outcome = match event {
             MarketEvent::DepthSnapshot(snapshot) if selection.matches_snapshot(snapshot) => {
@@ -114,14 +115,14 @@ impl ReadOnlyDom {
             MarketEvent::DepthDelta(delta) if selection.matches_delta(delta) => {
                 self.book.apply_delta(delta)?
             }
-            _ => return Ok(DomUpdateOutcome::Ignored),
+            _ => return Ok(OrderBookUpdateOutcome::Ignored),
         };
         Ok(self.project_outcome(outcome))
     }
 
-    /// Marks the last valid image stale and returns the updated immutable frame.
+    /// Marks depth stale, drops frozen liquidity, and returns the fail-closed frame.
     #[must_use]
-    pub fn mark_stale(&mut self) -> Option<DomFrame> {
+    pub fn mark_stale(&mut self) -> Option<OrderBookFrame> {
         self.selection.as_ref()?;
         self.book.mark_stale();
         Some(self.project(&self.book.publication()))
@@ -129,7 +130,7 @@ impl ReadOnlyDom {
 
     /// Returns the current frame, including the initial awaiting-snapshot state.
     #[must_use]
-    pub fn frame(&self) -> Option<DomFrame> {
+    pub fn frame(&self) -> Option<OrderBookFrame> {
         self.selection
             .as_ref()
             .map(|_| self.project(&self.book.publication()))
@@ -139,9 +140,9 @@ impl ReadOnlyDom {
     /// another candidate order book in the desktop process.
     #[must_use]
     pub fn project_publication(
-        selection: &DomSelection,
+        selection: &OrderBookSelection,
         publication: &OrderBookPublication,
-    ) -> Option<DomFrame> {
+    ) -> Option<OrderBookFrame> {
         if !publication.provider_id.is_empty()
             && (selection.provider_id != publication.provider_id
                 || selection.instrument_id != publication.instrument_id
@@ -153,39 +154,47 @@ impl ReadOnlyDom {
         Some(project_publication(selection, publication))
     }
 
-    fn project_outcome(&self, outcome: OrderBookApplyOutcome) -> DomUpdateOutcome {
+    fn project_outcome(&self, outcome: OrderBookApplyOutcome) -> OrderBookUpdateOutcome {
         match outcome {
             OrderBookApplyOutcome::Published(publication) => {
-                DomUpdateOutcome::Published(self.project(&publication))
+                OrderBookUpdateOutcome::Published(self.project(&publication))
             }
             OrderBookApplyOutcome::RecoveryRequired(reason) => {
-                DomUpdateOutcome::RecoveryRequired(self.project(&self.book.publication()), reason)
+                OrderBookUpdateOutcome::RecoveryRequired(
+                    self.project(&self.book.publication()),
+                    reason,
+                )
             }
-            OrderBookApplyOutcome::IgnoredStale => DomUpdateOutcome::Ignored,
+            OrderBookApplyOutcome::IgnoredStale => OrderBookUpdateOutcome::Ignored,
         }
     }
 
-    fn project(&self, publication: &OrderBookPublication) -> DomFrame {
+    fn project(&self, publication: &OrderBookPublication) -> OrderBookFrame {
         let selection = self
             .selection
             .as_ref()
-            .expect("DOM projection requires an active selection");
+            .expect("Order Book projection requires an active selection");
         project_publication(selection, publication)
     }
 }
 
-fn project_publication(selection: &DomSelection, publication: &OrderBookPublication) -> DomFrame {
+fn project_publication(
+    selection: &OrderBookSelection,
+    publication: &OrderBookPublication,
+) -> OrderBookFrame {
     let maximum_quantity = publication
         .bids
         .iter()
         .chain(&publication.asks)
+        .chain(publication.best_bid.iter())
+        .chain(publication.best_ask.iter())
         .map(|level| level.quantity)
         .max()
         .unwrap_or(0);
     let row_count = publication.bids.len().max(publication.asks.len());
     let mut rows = Vec::with_capacity(row_count);
     for index in 0..row_count {
-        rows.push(DomRow {
+        rows.push(OrderBookRow {
             bid: publication.bids.get(index).map(|level| {
                 project_level(
                     *level,
@@ -214,7 +223,7 @@ fn project_publication(selection: &DomSelection, publication: &OrderBookPublicat
             }),
         });
     }
-    DomFrame {
+    OrderBookFrame {
         provider_id: selection.provider_id.clone(),
         instrument_id: selection.instrument_id.clone(),
         entitlement_id: selection.entitlement_id.clone(),
@@ -222,7 +231,34 @@ fn project_publication(selection: &DomSelection, publication: &OrderBookPublicat
         selection_generation: selection.selection_generation,
         revision: publication.revision,
         source_watermark: publication.source_watermark,
+        bbo_source_watermark: publication.bbo_source_watermark,
         state: publication.state,
+        best_bid: publication.best_bid.map(|level| {
+            project_level(
+                level,
+                selection.precision.price_scale(),
+                selection.precision.quantity_scale(),
+                maximum_quantity,
+                publication
+                    .traded_volumes
+                    .get(&level.price)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        }),
+        best_ask: publication.best_ask.map(|level| {
+            project_level(
+                level,
+                selection.precision.price_scale(),
+                selection.precision.quantity_scale(),
+                maximum_quantity,
+                publication
+                    .traded_volumes
+                    .get(&level.price)
+                    .copied()
+                    .unwrap_or(0),
+            )
+        }),
         rows,
     }
 }
@@ -233,8 +269,8 @@ fn project_level(
     quantity_scale: u8,
     maximum_quantity: i64,
     traded_volume: i64,
-) -> DomColumnLevel {
-    DomColumnLevel {
+) -> OrderBookColumnLevel {
+    OrderBookColumnLevel {
         price: level.price,
         quantity: level.quantity,
         order_count: level.order_count,
@@ -341,8 +377,8 @@ mod tests {
         QualifiedTimestamp,
     };
 
-    fn selection(generation: u64, instrument_id: &str) -> DomSelection {
-        DomSelection {
+    fn selection(generation: u64, instrument_id: &str) -> OrderBookSelection {
+        OrderBookSelection {
             provider_id: "rithmic".to_string(),
             instrument_id: instrument_id.to_string(),
             entitlement_id: "test".to_string(),
@@ -404,9 +440,10 @@ mod tests {
 
     #[test]
     fn snapshot_projects_bounded_display_rows_and_relative_sizes() {
-        let mut dom = ReadOnlyDom::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
-        dom.select(selection(1, "mnq"));
-        let DomUpdateOutcome::Published(frame) = dom
+        let mut order_book =
+            ReadOnlyOrderBook::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
+        order_book.select(selection(1, "mnq"));
+        let OrderBookUpdateOutcome::Published(frame) = order_book
             .apply_event(&snapshot(10, "mnq"))
             .expect("snapshot projects")
         else {
@@ -449,10 +486,13 @@ mod tests {
 
     #[test]
     fn ordered_delta_publishes_and_gap_fails_closed_until_covering_snapshot() {
-        let mut dom = ReadOnlyDom::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
-        dom.select(selection(1, "mnq"));
-        dom.apply_event(&snapshot(10, "mnq")).expect("snapshot");
-        let DomUpdateOutcome::Published(updated) = dom
+        let mut order_book =
+            ReadOnlyOrderBook::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
+        order_book.select(selection(1, "mnq"));
+        order_book
+            .apply_event(&snapshot(10, "mnq"))
+            .expect("snapshot");
+        let OrderBookUpdateOutcome::Published(updated) = order_book
             .apply_event(&delta(11, BookSide::Ask, 20_050, 9))
             .expect("ordered delta")
         else {
@@ -465,36 +505,40 @@ mod tests {
         );
 
         assert!(matches!(
-            dom.apply_event(&delta(13, BookSide::Bid, 20_025, 1)),
+            order_book.apply_event(&delta(13, BookSide::Bid, 20_025, 1)),
             Err(MarketDataValidationError::DepthGap {
                 expected: 12,
                 actual: 13
             })
         ));
-        let recovering = dom.frame().expect("recovery frame");
+        let recovering = order_book.frame().expect("recovery frame");
         assert_eq!(
             recovering.state,
             OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
         );
         assert!(recovering.rows.is_empty());
         assert_eq!(
-            dom.apply_event(&snapshot(12, "mnq"))
+            order_book
+                .apply_event(&snapshot(12, "mnq"))
                 .expect("stale snapshot"),
-            DomUpdateOutcome::Ignored
+            OrderBookUpdateOutcome::Ignored
         );
         assert!(matches!(
-            dom.apply_event(&snapshot(13, "mnq")),
-            Ok(DomUpdateOutcome::Published(_))
+            order_book.apply_event(&snapshot(13, "mnq")),
+            Ok(OrderBookUpdateOutcome::Published(_))
         ));
     }
 
     #[test]
     fn selection_replacement_fences_late_depth_and_resets_book() {
-        let mut dom = ReadOnlyDom::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        dom.select(selection(1, "mnq"));
-        dom.apply_event(&snapshot(10, "mnq")).expect("snapshot");
-        dom.select(selection(2, "es"));
-        let reset = dom.frame().expect("selected frame");
+        let mut order_book =
+            ReadOnlyOrderBook::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
+        order_book.select(selection(1, "mnq"));
+        order_book
+            .apply_event(&snapshot(10, "mnq"))
+            .expect("snapshot");
+        order_book.select(selection(2, "es"));
+        let reset = order_book.frame().expect("selected frame");
         assert_eq!(reset.selection_generation, 2);
         assert_eq!(
             reset.state,
@@ -502,20 +546,22 @@ mod tests {
         );
         assert!(reset.rows.is_empty());
         assert_eq!(
-            dom.apply_event(&delta(11, BookSide::Bid, 20_025, 4))
+            order_book
+                .apply_event(&delta(11, BookSide::Bid, 20_025, 4))
                 .expect("late event ignored"),
-            DomUpdateOutcome::Ignored
+            OrderBookUpdateOutcome::Ignored
         );
         assert!(matches!(
-            dom.apply_event(&snapshot(1, "es")),
-            Ok(DomUpdateOutcome::Published(_))
+            order_book.apply_event(&snapshot(1, "es")),
+            Ok(OrderBookUpdateOutcome::Published(_))
         ));
     }
 
     #[test]
-    fn non_depth_events_are_ignored_and_stale_retains_last_rows() {
-        let mut dom = ReadOnlyDom::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        dom.select(selection(1, "mnq"));
+    fn non_depth_events_are_ignored_and_stale_drops_frozen_rows() {
+        let mut order_book =
+            ReadOnlyOrderBook::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
+        order_book.select(selection(1, "mnq"));
         let trade = MarketEvent::Trade(MarketTrade {
             metadata: metadata(1, "mnq"),
             trade_id: "trade-1".to_string(),
@@ -524,13 +570,15 @@ mod tests {
             aggressor: AggressorSide::Unknown,
         });
         assert_eq!(
-            dom.apply_event(&trade).expect("trade ignored"),
-            DomUpdateOutcome::Ignored
+            order_book.apply_event(&trade).expect("trade ignored"),
+            OrderBookUpdateOutcome::Ignored
         );
-        dom.apply_event(&snapshot(10, "mnq")).expect("snapshot");
-        let stale = dom.mark_stale().expect("stale frame");
+        order_book
+            .apply_event(&snapshot(10, "mnq"))
+            .expect("snapshot");
+        let stale = order_book.mark_stale().expect("stale frame");
         assert_eq!(stale.state, OrderBookState::Stale);
-        assert_eq!(stale.rows.len(), 2);
+        assert!(stale.rows.is_empty());
     }
 
     #[test]

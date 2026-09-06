@@ -32,6 +32,7 @@ mod terminal_chrome;
 #[path = "components/terminal_view.rs"]
 mod terminal_view;
 #[cfg(any(test, feature = "diagnostics"))]
+#[cfg_attr(all(test, not(feature = "diagnostics")), allow(dead_code))]
 mod transition_capture;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
@@ -60,7 +61,7 @@ use axiusflow_engine_protocol::{
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_observability::FeedConnectionState;
-use axiusflow_terminal_ui::{DomColumn, DomColumnVisibility, ReadOnlyDomView};
+use axiusflow_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
 #[cfg(test)]
 use chart_context_menus::{
     PriceAxisMenuRow, chart_context_menu_items, clamp_chart_context_menu_origin,
@@ -858,6 +859,14 @@ fn stable_connection_message(state: FeedConnectionState, incoming: String) -> St
     }
 }
 
+fn stopped_worker_chart_detail(chart_state: ChartState, existing: &str, fallback: &str) -> String {
+    if chart_state == ChartState::Error && !existing.trim().is_empty() {
+        existing.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
 const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
 
 /// The instrument menu should open with a default provider listing instead of
@@ -942,7 +951,7 @@ fn elapsed_nanos(started: Instant) -> u64 {
 
 struct WorkspaceSurface {
     chart: Option<Entity<NucleusChartView>>,
-    dom: Entity<ReadOnlyDomView>,
+    order_book: Entity<ReadOnlyOrderBookView>,
     side_panel: Option<SidePanel>,
     side_panel_width: f32,
     side_panel_resize: Option<SidePanelResize>,
@@ -1010,7 +1019,7 @@ struct WorkspaceSurface {
 
 #[derive(Default)]
 struct WorkspaceMenuState {
-    dom_column_open: bool,
+    order_book_column_open: bool,
     timeframe_flyout_keyboard: bool,
     chrome_list_keyboard: bool,
 }
@@ -1100,6 +1109,23 @@ impl RithmicSwitchState {
     const fn in_progress(self) -> bool {
         matches!(self, Self::Pending | Self::Swapping | Self::Initializing)
     }
+}
+
+const fn switch_requires_chart_cover(has_chart: bool, state: RithmicSwitchState) -> bool {
+    has_chart && state.in_progress()
+}
+
+/// A `Ready` control message can still be queued for the previously selected
+/// series while a catalog selection is making its UI -> worker round trip.
+/// Letting that old readiness retire `Pending` (or the pre-snapshot `Swapping`
+/// phase) drops the switch marker that follows and leaves the chart on the old
+/// symbol. Only an idle series or a replacement that has already installed its
+/// covering snapshot (`Initializing`) may complete on `Ready`.
+const fn ready_state_can_complete_switch(state: RithmicSwitchState) -> bool {
+    matches!(
+        state,
+        RithmicSwitchState::Idle | RithmicSwitchState::Initializing
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1385,7 +1411,7 @@ struct HeaderState {
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
     controls: HeaderControls,
-    dom_visible: bool,
+    order_book_visible: bool,
     connection_state: FeedConnectionState,
     chart_state: ChartState,
     delayed: bool,
@@ -1408,7 +1434,7 @@ struct HeaderPendingState {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SidePanel {
-    Dom,
+    OrderBook,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1433,19 +1459,19 @@ fn claim_once(claimed: &mut bool) -> bool {
 impl SidePanel {
     const fn title(self) -> &'static str {
         match self {
-            Self::Dom => "Order book",
+            Self::OrderBook => "Order Book",
         }
     }
 
     const fn toggle_label(self) -> &'static str {
         match self {
-            Self::Dom => "DOM",
+            Self::OrderBook => "Order Book",
         }
     }
 
     const fn toggle_tooltip(self) -> &'static str {
         match self {
-            Self::Dom => "Toggle read-only depth panel",
+            Self::OrderBook => "Toggle read-only order book",
         }
     }
 }
@@ -1583,7 +1609,7 @@ struct HeaderControls(u8);
 impl HeaderControls {
     const INSTRUMENT: u8 = 1;
     const SERIES: u8 = 2;
-    const DOM: u8 = 4;
+    const ORDER_BOOK: u8 = 4;
     const INDICATOR: u8 = 8;
     const CHART_TYPE: u8 = 16;
 
@@ -1597,7 +1623,7 @@ impl HeaderControls {
             controls |= Self::INSTRUMENT;
         }
         if selection {
-            controls |= Self::SERIES | Self::DOM;
+            controls |= Self::SERIES | Self::ORDER_BOOK;
         }
         Self(controls)
     }
@@ -1732,10 +1758,10 @@ impl WorkspaceSurface {
             |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
         );
         observe_chart(chart.as_ref(), cx);
-        let dom = cx.new(move |_| ReadOnlyDomView::new(theme));
+        let order_book = cx.new(move |_| ReadOnlyOrderBookView::new(theme));
         Self {
             chart,
-            dom,
+            order_book,
             side_panel: None,
             side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
             side_panel_resize: None,
@@ -1753,14 +1779,15 @@ impl WorkspaceSurface {
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
-            symbol_browser: if provider == TerminalProvider::Rithmic {
-                rithmic_shell::RithmicSymbolBrowser::rithmic_catalog_awaiting_search(
-                    std::num::NonZeroUsize::MIN,
-                    "",
-                )
-            } else {
-                rithmic_shell::RithmicSymbolBrowser::default()
-            },
+            // Both resident-engine providers support the empty catalog query
+            // used to populate the instrument menu. A successful selection
+            // consumes its one-shot search authorization, so reopening the
+            // menu must be able to issue another empty listing request instead
+            // of leaving Hyperliquid with an empty, non-refreshable browser.
+            symbol_browser: rithmic_shell::RithmicSymbolBrowser::rithmic_catalog_awaiting_search(
+                std::num::NonZeroUsize::MIN,
+                "",
+            ),
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
             series_browser: rithmic_history::RithmicSeriesBrowser::default(),
@@ -2694,20 +2721,20 @@ impl WorkspaceSurface {
         eprintln!("market worker invalidated the stream: {message}");
     }
 
-    /// Reports whether the chart on screen belongs to the selection the trader
-    /// just left.
+    /// Reports whether an engine selection handoff must keep the chart covered.
     ///
-    /// A switch keeps the previous chart up rather than blanking the surface, so
-    /// for as long as the replacement has not arrived the pixels are real market
-    /// data from the wrong series. The surface has to say so.
+    /// Before the replacement snapshot arrives, the pixels belong to the series
+    /// the trader just left. After that first snapshot arrives, the replacement
+    /// can still be retained/partial history until the provider-history/live
+    /// handoff declares it current. Both phases are deliberately hidden behind
+    /// the neutral loading surface so a stale range cannot appear to "wake up"
+    /// and jump when current coverage lands.
     fn showing_superseded_series(&self) -> bool {
-        self.chart.is_some()
-            && match self.provider {
-                TerminalProvider::Rithmic => self.series_browser.pending().is_some(),
-                // Hyperliquid switches track pending demand in the switch
-                // state machine, which already reports loading explicitly.
-                TerminalProvider::Hyperliquid => false,
+        match self.provider {
+            TerminalProvider::Rithmic | TerminalProvider::Hyperliquid => {
+                switch_requires_chart_cover(self.chart.is_some(), self.rithmic_switch)
             }
+        }
     }
 
     fn set_chart_state(&mut self, state: ChartState, message: String, cx: &mut Context<Self>) {
@@ -2772,6 +2799,9 @@ impl WorkspaceSurface {
                     self.provider,
                     TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
                 );
+                if self.stale_ready_during_engine_switch(state, engine_provider) {
+                    return;
+                }
                 if state == ChartState::Error && engine_provider {
                     let swapping = self.rithmic_switch.is_swapping();
                     self.rithmic_switch = RithmicSwitchState::Idle;
@@ -2828,9 +2858,10 @@ impl WorkspaceSurface {
             } => {
                 self.apply_rithmic_live(selection_generation, series_generation, update, cx);
             }
-            MarketWorkerMessage::RithmicDom(frame) => {
-                self.dom
-                    .update(cx, |dom, dom_cx| dom.replace_frame(frame, dom_cx));
+            MarketWorkerMessage::OrderBook(frame) => {
+                self.order_book.update(cx, |order_book, order_book_cx| {
+                    order_book.replace_frame(frame, order_book_cx)
+                });
             }
             MarketWorkerMessage::ChartViewport {
                 start_unix_nanos,
@@ -2849,6 +2880,15 @@ impl WorkspaceSurface {
                 }
             }
         }
+    }
+
+    fn stale_ready_during_engine_switch(&self, state: ChartState, engine_provider: bool) -> bool {
+        // The previous series can report one last Ready after the catalog
+        // response but before the worker processes the new EngineSelect
+        // command. Keep the switch pending until its marker/snapshot lands.
+        state == ChartState::Ready
+            && engine_provider
+            && !ready_state_can_complete_switch(self.rithmic_switch)
     }
 
     fn apply_provider_catalog_event(
@@ -2871,8 +2911,8 @@ impl WorkspaceSurface {
             .then_some(count)
     }
 
-    fn confirm_catalog_selection(&mut self, generation: u64) -> bool {
-        usize_generation(generation)
+    fn confirm_catalog_selection(&mut self, command_generation: u64) -> bool {
+        usize_generation(command_generation)
             .is_some_and(|generation| self.symbol_browser.confirm_selection(generation))
     }
 
@@ -2912,8 +2952,8 @@ impl WorkspaceSurface {
             // Price levels belong to one instrument: a product switch drops
             // the old book back to loading instead of showing BTC levels
             // under an ETH selection. Interval-only switches keep the book.
-            self.dom.update(cx, |dom, dom_cx| {
-                dom.clear(dom_cx);
+            self.order_book.update(cx, |order_book, order_book_cx| {
+                order_book.clear(order_book_cx);
             });
         }
         self.rithmic_pending_sequence = None;
@@ -2944,8 +2984,8 @@ impl WorkspaceSurface {
         self.rithmic_pending_product = None;
         self.rithmic_pending_sequence = None;
         self.rithmic_switch = RithmicSwitchState::Idle;
-        self.dom.update(cx, |dom, dom_cx| {
-            dom.clear(dom_cx);
+        self.order_book.update(cx, |order_book, order_book_cx| {
+            order_book.clear(order_book_cx);
         });
         let restored = product
             .and_then(|product| self.market_worker.try_select_engine(product, interval).ok());
@@ -2977,11 +3017,14 @@ impl WorkspaceSurface {
             && !matches!(self.connection_state, Some(FeedConnectionState::Stopped))
         {
             let display = terminal_provider_display(self.provider);
-            self.apply_connection_state(
-                FeedConnectionState::Stopped,
-                format!("{display} market worker stopped"),
-                cx,
-            );
+            let fallback = format!("{display} market worker stopped");
+            let detail =
+                stopped_worker_chart_detail(self.chart_state, &self.chart_state_message, &fallback);
+            self.apply_connection_state(FeedConnectionState::Stopped, fallback, cx);
+            if self.chart_state == ChartState::Error && self.chart_state_message != detail {
+                self.chart_state_message = detail;
+                cx.notify();
+            }
         } else if disconnected && self.chart_state != ChartState::Error {
             let message = match self.provider {
                 TerminalProvider::Rithmic => "Rithmic market worker stopped",
@@ -3076,37 +3119,37 @@ impl WorkspaceSurface {
         // every new frame out forever.
         match state {
             FeedConnectionState::Disconnected => {
-                self.dom.update(cx, |dom, dom_cx| {
-                    dom.set_connection_state(
-                        axiusflow_terminal_ui::DomConnectionState::Offline,
-                        dom_cx,
+                self.order_book.update(cx, |order_book, order_book_cx| {
+                    order_book.set_connection_state(
+                        axiusflow_terminal_ui::OrderBookConnectionState::Offline,
+                        order_book_cx,
                     );
                 });
             }
             FeedConnectionState::Discovering
             | FeedConnectionState::Authenticating
             | FeedConnectionState::Recovering => {
-                self.dom.update(cx, |dom, dom_cx| {
+                self.order_book.update(cx, |order_book, order_book_cx| {
                     if message == engine_market_worker::ENGINE_RESTARTED_MESSAGE {
-                        dom.clear(dom_cx);
+                        order_book.clear(order_book_cx);
                     }
-                    dom.set_connection_state(
-                        axiusflow_terminal_ui::DomConnectionState::Recovering,
-                        dom_cx,
+                    order_book.set_connection_state(
+                        axiusflow_terminal_ui::OrderBookConnectionState::Recovering,
+                        order_book_cx,
                     );
                 });
             }
             FeedConnectionState::Streaming => {
-                self.dom.update(cx, |dom, dom_cx| {
-                    dom.set_connection_state(
-                        axiusflow_terminal_ui::DomConnectionState::Online,
-                        dom_cx,
+                self.order_book.update(cx, |order_book, order_book_cx| {
+                    order_book.set_connection_state(
+                        axiusflow_terminal_ui::OrderBookConnectionState::Online,
+                        order_book_cx,
                     );
                 });
             }
             FeedConnectionState::Stopped => {
-                self.dom.update(cx, |dom, dom_cx| {
-                    dom.mark_unavailable(dom_cx);
+                self.order_book.update(cx, |order_book, order_book_cx| {
+                    order_book.mark_unavailable(order_book_cx);
                 });
             }
         }
@@ -3135,8 +3178,8 @@ impl WorkspaceSurface {
     }
 
     fn apply_theme(&mut self, theme: &AxiusflowTheme, cx: &mut Context<Self>) {
-        self.dom.update(cx, |dom, dom_cx| {
-            dom.set_theme(*theme, dom_cx);
+        self.order_book.update(cx, |order_book, order_book_cx| {
+            order_book.set_theme(*theme, order_book_cx);
         });
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -3373,8 +3416,8 @@ impl WorkspaceSurface {
         self.market_state.symbol_selection_pending = false;
         self.symbol_browser.invalidate_session();
         self.series_browser.reset();
-        self.dom
-            .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
+        self.order_book
+            .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
@@ -3401,8 +3444,8 @@ impl WorkspaceSurface {
         };
         let dispatched = if self.market_worker.try_select_provider(request).is_ok() {
             self.market_state.symbol_selection_pending = true;
-            self.dom
-                .update(cx, axiusflow_terminal_ui::ReadOnlyDomView::clear);
+            self.order_book
+                .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
             self.symbol_message = format!(
                 "Selecting {} · {}",
                 selection.instrument.symbol, selection.instrument.exchange
@@ -3427,11 +3470,14 @@ impl WorkspaceSurface {
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.apply_search_completed(result, cx);
             }
-            ProviderCatalogEvent::SelectionInstalled(instrument) => {
+            ProviderCatalogEvent::SelectionInstalled {
+                command_generation,
+                instrument,
+            } => {
                 // Both engine providers resolve selections through the same
                 // switch flow: the pending product replaces the chart only
                 // when its covering snapshot arrives.
-                if !self.confirm_catalog_selection(instrument.selection_generation) {
+                if !self.confirm_catalog_selection(command_generation) {
                     return;
                 }
                 self.consume_catalog_search_authorization();
@@ -3652,37 +3698,38 @@ impl WorkspaceSurface {
         self.chart_state_message = "Rithmic live candle is current".to_string();
     }
 
-    /// Whether a market is selected. The header enables the DOM toggle on this
-    /// and `toggle_dom` opens on it, so the two cannot drift apart again.
+    /// Whether a market is selected. The header enables the Order Book toggle on this
+    /// and `toggle_order_book` opens on it, so the two cannot drift apart again.
     fn has_market_selection(&self) -> bool {
         self.symbol_browser.selected().is_some() || self.product.is_some()
     }
 
-    fn toggle_dom(&mut self, cx: &mut Context<Self>) {
+    fn toggle_order_book(&mut self, cx: &mut Context<Self>) {
         if self.has_market_selection() {
-            self.side_panel = (self.side_panel != Some(SidePanel::Dom)).then_some(SidePanel::Dom);
+            self.side_panel =
+                (self.side_panel != Some(SidePanel::OrderBook)).then_some(SidePanel::OrderBook);
             if self.side_panel.is_none() {
-                self.menu_state.dom_column_open = false;
+                self.menu_state.order_book_column_open = false;
             }
             cx.notify();
         }
     }
 
-    fn toggle_dom_column_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu_state.dom_column_open = !self.menu_state.dom_column_open;
+    fn toggle_order_book_column_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu_state.order_book_column_open = !self.menu_state.order_book_column_open;
         cx.notify();
     }
 
-    fn close_dom_column_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu_state.dom_column_open {
-            self.menu_state.dom_column_open = false;
+    fn close_order_book_column_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu_state.order_book_column_open {
+            self.menu_state.order_book_column_open = false;
             cx.notify();
         }
     }
 
     fn close_side_panel(&mut self, cx: &mut Context<Self>) {
         self.side_panel_resize = None;
-        self.menu_state.dom_column_open = false;
+        self.menu_state.order_book_column_open = false;
         if self.side_panel.take().is_some() {
             cx.notify();
         }
@@ -3954,7 +4001,7 @@ fn catalog_rejection_message(
 fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
     match event {
         ProviderCatalogEvent::SearchCompleted(result) => &result.provider,
-        ProviderCatalogEvent::SelectionInstalled(instrument) => &instrument.provider,
+        ProviderCatalogEvent::SelectionInstalled { instrument, .. } => &instrument.provider,
         ProviderCatalogEvent::CommandRejected { rejection, .. } => &rejection.provider,
     }
 }
@@ -6368,24 +6415,25 @@ mod tests {
         InputEvent, InstrumentMenuEntry, InstrumentMenuSelection, LifecycleToggle,
         OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow,
         ProviderCatalogCommand, RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicReadyAction,
-        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement, SidePanel,
-        SidePanelResize, SymbolInputAction, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP,
-        TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup,
-        WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand,
-        WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-        active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
-        caption_pointer_owner, catalog_rejection_message, chart_status_detail,
-        chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
+        RithmicReconnectState, RithmicReconnectTarget, RithmicSessionRetirement,
+        RithmicSwitchState, SidePanel, SidePanelResize, SymbolInputAction, SymbolSubmitDecision,
+        TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider,
+        TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
+        WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
+        WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
+        caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+        chart_status_detail, chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
         chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
         clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
         connectivity_chart_state, current_instrument_menu_index, default_rithmic_contract_index,
         durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
         instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
         nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-        reconciled_bridge_state, reconnect_contract_index, reorder_workspace_ids,
-        resized_side_panel_width, rithmic_ready_action, series_selector_label,
-        should_finish_chrome_overlay_close, split_lifetime_mode, stabilized_connection_state,
-        stable_connection_message, symbol_input_action, symbol_submit_decision,
+        ready_state_can_complete_switch, reconciled_bridge_state, reconnect_contract_index,
+        reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action,
+        series_selector_label, should_finish_chrome_overlay_close, split_lifetime_mode,
+        stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
+        switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
         timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
         timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
         timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
@@ -6407,15 +6455,17 @@ mod tests {
     use std::{cell::Cell, ffi::OsString};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum CatalogCommandDomain {
+    enum CatalogCommandOrderBookain {
         Search,
         Selection,
     }
 
-    const fn catalog_rejection_domain(command: ProviderCatalogCommand) -> CatalogCommandDomain {
+    const fn catalog_rejection_order_bookain(
+        command: ProviderCatalogCommand,
+    ) -> CatalogCommandOrderBookain {
         match command {
-            ProviderCatalogCommand::Search => CatalogCommandDomain::Search,
-            ProviderCatalogCommand::Selection => CatalogCommandDomain::Selection,
+            ProviderCatalogCommand::Search => CatalogCommandOrderBookain::Search,
+            ProviderCatalogCommand::Selection => CatalogCommandOrderBookain::Selection,
         }
     }
 
@@ -6456,6 +6506,12 @@ mod tests {
             instrument_listing_refresh_needed(&browser, false),
             "consumed selection authorization reopens as a fresh default listing"
         );
+        let refreshed = browser
+            .begin_search("")
+            .expect("resident-provider catalog permits a fresh empty listing query");
+        assert_eq!(refreshed.query, "");
+        assert!(browser.search_pending());
+        assert!(browser.reject_search(refreshed.request_id));
 
         browser
             .retain_latest_search("ETH")
@@ -7136,14 +7192,14 @@ mod tests {
     }
 
     #[test]
-    fn catalog_rejections_preserve_search_and_selection_generation_domains() {
+    fn catalog_rejections_preserve_search_and_selection_generation_order_bookains() {
         assert_eq!(
-            catalog_rejection_domain(ProviderCatalogCommand::Search),
-            CatalogCommandDomain::Search
+            catalog_rejection_order_bookain(ProviderCatalogCommand::Search),
+            CatalogCommandOrderBookain::Search
         );
         assert_eq!(
-            catalog_rejection_domain(ProviderCatalogCommand::Selection),
-            CatalogCommandDomain::Selection
+            catalog_rejection_order_bookain(ProviderCatalogCommand::Selection),
+            CatalogCommandOrderBookain::Selection
         );
     }
 
@@ -7502,6 +7558,61 @@ mod tests {
         assert_eq!(repairing.placement, ChartNoticePlacement::BottomRight);
     }
 
+    #[test]
+    fn engine_switch_keeps_partial_replacement_covered_until_handoff_is_current() {
+        assert!(!switch_requires_chart_cover(
+            false,
+            RithmicSwitchState::Pending
+        ));
+        assert!(!switch_requires_chart_cover(true, RithmicSwitchState::Idle));
+        assert!(switch_requires_chart_cover(
+            true,
+            RithmicSwitchState::Pending
+        ));
+        assert!(switch_requires_chart_cover(
+            true,
+            RithmicSwitchState::Swapping
+        ));
+        assert!(switch_requires_chart_cover(
+            true,
+            RithmicSwitchState::Initializing
+        ));
+    }
+
+    #[test]
+    fn old_ready_cannot_cancel_a_pending_symbol_or_timeframe_switch() {
+        assert!(ready_state_can_complete_switch(RithmicSwitchState::Idle));
+        assert!(!ready_state_can_complete_switch(
+            RithmicSwitchState::Pending
+        ));
+        assert!(!ready_state_can_complete_switch(
+            RithmicSwitchState::Swapping
+        ));
+        assert!(ready_state_can_complete_switch(
+            RithmicSwitchState::Initializing
+        ));
+    }
+
+    #[test]
+    fn worker_stop_preserves_a_concrete_startup_error() {
+        assert_eq!(
+            stopped_worker_chart_detail(
+                ChartState::Error,
+                "provider instrument selection is stale",
+                "Hyperliquid market worker stopped",
+            ),
+            "provider instrument selection is stale"
+        );
+        assert_eq!(
+            stopped_worker_chart_detail(
+                ChartState::Loading,
+                "Loading Hyperliquid history",
+                "Hyperliquid market worker stopped",
+            ),
+            "Hyperliquid market worker stopped"
+        );
+    }
+
     /// A load in flight is not an outage, and labelling it as one is what made
     /// an ordinary switch look like the feed had dropped.
     #[test]
@@ -7684,7 +7795,7 @@ mod tests {
         let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));
-        assert!(controls.enabled(HeaderControls::DOM));
+        assert!(controls.enabled(HeaderControls::ORDER_BOOK));
         assert!(controls.enabled(HeaderControls::INDICATOR));
         assert!(controls.enabled(HeaderControls::CHART_TYPE));
     }
@@ -7951,11 +8062,11 @@ mod tests {
 
     #[test]
     fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
-        assert_eq!(SidePanel::Dom.toggle_label(), "DOM");
-        assert_eq!(SidePanel::Dom.title(), "Order book");
+        assert_eq!(SidePanel::OrderBook.toggle_label(), "Order Book");
+        assert_eq!(SidePanel::OrderBook.title(), "Order Book");
         assert_eq!(
-            SidePanel::Dom.toggle_tooltip(),
-            "Toggle read-only depth panel"
+            SidePanel::OrderBook.toggle_tooltip(),
+            "Toggle read-only order book"
         );
     }
 

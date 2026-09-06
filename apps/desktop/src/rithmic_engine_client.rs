@@ -1,7 +1,7 @@
 use crate::{
     rithmic_engine_history::{
-        DomIdentity, demand_error_message, dom_from_snapshot, engine_series, live_tail,
-        snapshot_bootstrap, validate_engine_instrument,
+        OrderBookIdentity, demand_error_message, engine_series, live_tail,
+        order_book_from_snapshot, snapshot_bootstrap, validate_engine_instrument,
     },
     rithmic_history::{RithmicSeries, RithmicSeriesRequest},
 };
@@ -403,14 +403,14 @@ fn handle_engine_event(
         envelope::Payload::OrderBookSnapshot(snapshot)
             if snapshot.consumer_id == state.catalog.consumer_id =>
         {
-            if let Ok(frame) = dom_from_snapshot(
-                &DomIdentity {
+            if let Ok(frame) = order_book_from_snapshot(
+                &OrderBookIdentity {
                     instrument: &active.instrument,
                     series_generation: series_generation(active.request),
                 },
                 &snapshot,
             ) {
-                let _ = messages.send(MarketWorkerMessage::RithmicDom(frame));
+                let _ = messages.send(MarketWorkerMessage::OrderBook(frame));
             }
         }
         envelope::Payload::SeriesState(series_state)
@@ -466,14 +466,14 @@ fn handle_catalog_event(
             }
             publish_search_result(messages, result);
         }
-        Some(ProviderCatalogEvent::SelectionInstalled(instrument)) => {
-            if !take_current_operation(
-                &mut state.pending_selection,
-                instrument.selection_generation,
-            ) {
+        Some(ProviderCatalogEvent::SelectionInstalled {
+            command_generation,
+            instrument,
+        }) => {
+            if !take_current_operation(&mut state.pending_selection, command_generation) {
                 return None;
             }
-            publish_selection(messages, state, instrument);
+            publish_selection(messages, state, command_generation, instrument);
         }
         Some(ProviderCatalogEvent::CommandRejected { rejection, command }) => {
             let current = match command {
@@ -617,6 +617,7 @@ fn publish_search_result(messages: &MarketWorkerSender, result: ProviderInstrume
 fn publish_selection(
     messages: &MarketWorkerSender,
     state: &mut WorkerState,
+    command_generation: u64,
     instrument: InstallProviderInstrument,
 ) {
     if NonZeroU64::new(instrument.session_generation).is_none()
@@ -630,7 +631,10 @@ fn publish_selection(
     state.active_series = None;
     state.installed = Some(instrument.clone());
     let _ = messages.send(MarketWorkerMessage::ProviderCatalog(
-        ProviderCatalogEvent::SelectionInstalled(instrument),
+        ProviderCatalogEvent::SelectionInstalled {
+            command_generation,
+            instrument,
+        },
     ));
     send_connection(
         messages,
@@ -665,8 +669,8 @@ struct EngineCatalogSession {
 
 impl EngineCatalogSession {
     fn connect() -> Result<Self, String> {
-        let client_id = random_identity()?;
-        let consumer_id = random_identity()?;
+        let client_id = ranorder_book_identity()?;
+        let consumer_id = ranorder_book_identity()?;
         let mut client = EngineSupervisor::connect(client_id)?;
         if let Err(error) = client.register_consumer(ENGINE_WORKSPACE_ID, consumer_id) {
             let _ = client.detach_client();
@@ -736,7 +740,7 @@ impl Drop for EngineCatalogSession {
     }
 }
 
-fn random_identity() -> Result<u64, String> {
+fn ranorder_book_identity() -> Result<u64, String> {
     let mut bytes = [0_u8; 8];
     getrandom::fill(&mut bytes).map_err(|_| "system CSPRNG is unavailable".to_string())?;
     Ok(NonZeroU64::new(u64::from_le_bytes(bytes))

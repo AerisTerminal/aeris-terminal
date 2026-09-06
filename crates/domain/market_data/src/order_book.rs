@@ -27,6 +27,12 @@ pub struct OrderBookPublication {
     pub session_generation: u64,
     pub revision: u64,
     pub source_watermark: u64,
+    /// Latest independently observed provider BBO. These fields never replace
+    /// aggregate/MBO depth; they are published alongside it so the UI can show
+    /// top-of-book even while a covering depth image is still pending.
+    pub best_bid: Option<DepthLevel>,
+    pub best_ask: Option<DepthLevel>,
+    pub bbo_source_watermark: u64,
     pub bids: Vec<DepthLevel>,
     pub asks: Vec<DepthLevel>,
     pub traded_volumes: BTreeMap<i64, i64>,
@@ -35,7 +41,7 @@ pub struct OrderBookPublication {
 
 /// One display-ready depth level with authoritative fixed-point values.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomColumnLevel {
+pub struct OrderBookColumnLevel {
     pub price: i64,
     pub quantity: i64,
     pub order_count: Option<u32>,
@@ -47,16 +53,16 @@ pub struct DomColumnLevel {
     pub relative_size_bps: u16,
 }
 
-/// One horizontally aligned DOM row, best prices first.
+/// One horizontally aligned Order Book row, best prices first.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomRow {
-    pub bid: Option<DomColumnLevel>,
-    pub ask: Option<DomColumnLevel>,
+pub struct OrderBookRow {
+    pub bid: Option<OrderBookColumnLevel>,
+    pub ask: Option<OrderBookColumnLevel>,
 }
 
-/// Immutable bounded provider-neutral DOM frame.
+/// Immutable bounded provider-neutral Order Book frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DomFrame {
+pub struct OrderBookFrame {
     pub provider_id: String,
     pub instrument_id: String,
     pub entitlement_id: String,
@@ -64,14 +70,17 @@ pub struct DomFrame {
     pub selection_generation: u64,
     pub revision: u64,
     pub source_watermark: u64,
+    pub bbo_source_watermark: u64,
     pub state: OrderBookState,
-    pub rows: Vec<DomRow>,
+    pub best_bid: Option<OrderBookColumnLevel>,
+    pub best_ask: Option<OrderBookColumnLevel>,
+    pub rows: Vec<OrderBookRow>,
 }
 
 /// Result of applying a snapshot or ordered delta.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OrderBookApplyOutcome {
-    Published(OrderBookPublication),
+    Published(Box<OrderBookPublication>),
     RecoveryRequired(OrderBookRecoveryReason),
     IgnoredStale,
 }
@@ -189,7 +198,9 @@ impl OrderBook {
         self.state = OrderBookState::Ready;
         self.snapshot_ready = true;
         self.required_snapshot_watermark = 0;
-        Ok(OrderBookApplyOutcome::Published(self.publication()))
+        Ok(OrderBookApplyOutcome::Published(Box::new(
+            self.publication(),
+        )))
     }
 
     /// Applies one exactly-next delta or discards candidate state on a gap.
@@ -285,13 +296,20 @@ impl OrderBook {
         self.revision = self.revision.saturating_add(1).max(1);
         self.state = OrderBookState::Ready;
         self.snapshot_ready = true;
-        Ok(OrderBookApplyOutcome::Published(self.publication()))
+        Ok(OrderBookApplyOutcome::Published(Box::new(
+            self.publication(),
+        )))
     }
 
-    /// Marks a valid book stale without discarding its last immutable image.
+    /// Marks a valid book stale and fails closed until a fresh covering snapshot arrives.
     pub fn mark_stale(&mut self) {
         if self.snapshot_ready && self.state == OrderBookState::Ready {
+            self.bids.clear();
+            self.asks.clear();
+            self.required_snapshot_watermark =
+                self.required_snapshot_watermark.max(self.source_watermark);
             self.state = OrderBookState::Stale;
+            self.snapshot_ready = false;
             self.revision = self.revision.saturating_add(1).max(1);
         }
     }
@@ -318,6 +336,9 @@ impl OrderBook {
             session_generation,
             revision: self.revision,
             source_watermark: self.source_watermark,
+            best_bid: None,
+            best_ask: None,
+            bbo_source_watermark: 0,
             bids: self.bids.values().rev().copied().collect(),
             asks: self.asks.values().copied().collect(),
             traded_volumes: BTreeMap::new(),

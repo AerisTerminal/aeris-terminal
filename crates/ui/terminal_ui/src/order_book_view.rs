@@ -1,4 +1,4 @@
-use crate::{DomColumnLevel, DomFrame, DomRow};
+use crate::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
 use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
 use gpui::{
@@ -10,16 +10,19 @@ use std::time::{Duration, Instant};
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 22.0;
 const TEXT_SIZE: f32 = 11.0;
-const PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
+// Bound ordinary Order Book repaint work to roughly one display frame while conflating
+// intermediate depth revisions. The previous 100 ms cadence made a healthy
+// provider appear stale at only ~10 visible updates per second.
+const PRESENTATION_INTERVAL: Duration = Duration::from_millis(16);
 const PNL_WIDTH: f32 = 0.12;
 const BOOK_WIDTH: f32 = 0.18;
 const PRICE_WIDTH: f32 = 0.22;
 const ORDERS_WIDTH: f32 = 0.14;
 const VOLUME_WIDTH: f32 = 0.16;
 
-/// Columns available in the read-only depth ladder.
+/// Columns available in the read-only order-book ladder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DomColumn {
+pub enum OrderBookColumn {
     ProfitLoss,
     Bid,
     Price,
@@ -30,13 +33,13 @@ pub enum DomColumn {
 
 /// Provider connectivity shown independently from the last valid book frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DomConnectionState {
+pub enum OrderBookConnectionState {
     Online,
     Offline,
     Recovering,
 }
 
-impl DomColumn {
+impl OrderBookColumn {
     pub const ALL: [Self; 6] = [
         Self::ProfitLoss,
         Self::Bid,
@@ -54,7 +57,7 @@ impl DomColumn {
             Self::Price => "Price",
             Self::Ask => "Ask",
             Self::Orders => "Orders",
-            Self::Volume => "Volume",
+            Self::Volume => "Traded",
         }
     }
 
@@ -88,29 +91,29 @@ impl DomColumn {
 
 /// Current depth-ladder column visibility.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DomColumnVisibility {
+pub struct OrderBookColumnVisibility {
     visible: u8,
 }
 
-impl Default for DomColumnVisibility {
+impl Default for OrderBookColumnVisibility {
     fn default() -> Self {
         Self {
-            visible: DomColumn::Bid.bit()
-                | DomColumn::Price.bit()
-                | DomColumn::Ask.bit()
-                | DomColumn::Orders.bit()
-                | DomColumn::Volume.bit(),
+            visible: OrderBookColumn::Bid.bit()
+                | OrderBookColumn::Price.bit()
+                | OrderBookColumn::Ask.bit()
+                | OrderBookColumn::Orders.bit()
+                | OrderBookColumn::Volume.bit(),
         }
     }
 }
 
-impl DomColumnVisibility {
+impl OrderBookColumnVisibility {
     #[must_use]
-    pub const fn is_visible(self, column: DomColumn) -> bool {
+    pub const fn is_visible(self, column: OrderBookColumn) -> bool {
         self.visible & column.bit() != 0
     }
 
-    fn toggle(&mut self, column: DomColumn) -> bool {
+    fn toggle(&mut self, column: OrderBookColumn) -> bool {
         if !column.available() {
             return false;
         }
@@ -118,11 +121,11 @@ impl DomColumnVisibility {
         true
     }
 
-    fn width(self, column: DomColumn) -> f32 {
-        let total = DomColumn::ALL
+    fn width(self, column: OrderBookColumn) -> f32 {
+        let total = OrderBookColumn::ALL
             .into_iter()
             .filter(|candidate| self.is_visible(*candidate))
-            .map(DomColumn::weight)
+            .map(OrderBookColumn::weight)
             .sum::<f32>();
         if total > 0.0 {
             column.weight() / total
@@ -132,53 +135,53 @@ impl DomColumnVisibility {
     }
 }
 
-/// Flush, square-edged GPUI view for one immutable read-only DOM frame.
-pub struct ReadOnlyDomView {
-    frame: Option<DomFrame>,
-    pending_frame: Option<DomFrame>,
+/// Flush, square-edged GPUI view for one immutable read-only Order Book frame.
+pub struct ReadOnlyOrderBookView {
+    frame: Option<OrderBookFrame>,
+    pending_frame: Option<OrderBookFrame>,
     unavailable: bool,
-    connection_state: DomConnectionState,
+    connection_state: OrderBookConnectionState,
     last_presented: Option<Instant>,
     presentation_task: Option<Task<()>>,
     theme: AxiusflowTheme,
     ask_scroll: ScrollHandle,
-    columns: DomColumnVisibility,
+    columns: OrderBookColumnVisibility,
 }
 
-impl ReadOnlyDomView {
+impl ReadOnlyOrderBookView {
     #[must_use]
     pub fn new(theme: AxiusflowTheme) -> Self {
         Self {
             frame: None,
             pending_frame: None,
             unavailable: false,
-            connection_state: DomConnectionState::Online,
+            connection_state: OrderBookConnectionState::Online,
             last_presented: None,
             presentation_task: None,
             theme,
             ask_scroll: ScrollHandle::new(),
-            columns: DomColumnVisibility::default(),
+            columns: OrderBookColumnVisibility::default(),
         }
     }
 
     #[must_use]
-    pub const fn frame(&self) -> Option<&DomFrame> {
+    pub const fn frame(&self) -> Option<&OrderBookFrame> {
         self.frame.as_ref()
     }
 
     #[must_use]
-    pub const fn columns(&self) -> DomColumnVisibility {
+    pub const fn columns(&self) -> OrderBookColumnVisibility {
         self.columns
     }
 
-    pub fn toggle_column(&mut self, column: DomColumn, cx: &mut Context<Self>) {
+    pub fn toggle_column(&mut self, column: OrderBookColumn, cx: &mut Context<Self>) {
         if self.columns.toggle(column) {
             cx.notify();
         }
     }
 
     /// Replaces the immutable frame. Older selections and revisions are rejected.
-    pub fn replace_frame(&mut self, frame: DomFrame, cx: &mut Context<Self>) -> bool {
+    pub fn replace_frame(&mut self, frame: OrderBookFrame, cx: &mut Context<Self>) -> bool {
         let newest = self.pending_frame.as_ref().or(self.frame.as_ref());
         if newest.is_some_and(|current| frame_precedes(&frame, current)) {
             return false;
@@ -206,7 +209,7 @@ impl ReadOnlyDomView {
         }
     }
 
-    /// Marks depth as known-unavailable after a concrete failure (dead
+    /// Marks the order book as known-unavailable after a concrete failure (dead
     /// worker, stopped provider). The stale frame is dropped so a frozen
     /// book is never presented as live. Any later frame or demand clears it,
     /// so the panel returns to loading and then data on recovery.
@@ -221,7 +224,11 @@ impl ReadOnlyDomView {
     }
 
     /// Updates the connectivity banner without discarding the last valid book.
-    pub fn set_connection_state(&mut self, state: DomConnectionState, cx: &mut Context<Self>) {
+    pub fn set_connection_state(
+        &mut self,
+        state: OrderBookConnectionState,
+        cx: &mut Context<Self>,
+    ) {
         if self.connection_state != state {
             self.connection_state = state;
             cx.notify();
@@ -235,7 +242,7 @@ impl ReadOnlyDomView {
         }
     }
 
-    fn install_frame(&mut self, frame: DomFrame, cx: &mut Context<Self>) {
+    fn install_frame(&mut self, frame: OrderBookFrame, cx: &mut Context<Self>) {
         let recenter = self.frame.as_ref().is_none_or(|current| {
             frame.selection_generation != current.selection_generation
                 || frame.session_generation != current.session_generation
@@ -269,7 +276,7 @@ impl ReadOnlyDomView {
     }
 }
 
-fn frame_precedes(candidate: &DomFrame, current: &DomFrame) -> bool {
+fn frame_precedes(candidate: &OrderBookFrame, current: &OrderBookFrame) -> bool {
     candidate.selection_generation < current.selection_generation
         || (candidate.selection_generation == current.selection_generation
             && (candidate.session_generation < current.session_generation
@@ -277,7 +284,10 @@ fn frame_precedes(candidate: &DomFrame, current: &DomFrame) -> bool {
                     && candidate.revision < current.revision)))
 }
 
-fn requires_immediate_presentation(current: Option<&DomFrame>, next: &DomFrame) -> bool {
+fn requires_immediate_presentation(
+    current: Option<&OrderBookFrame>,
+    next: &OrderBookFrame,
+) -> bool {
     current.is_none_or(|current| {
         next.selection_generation != current.selection_generation
             || next.session_generation != current.session_generation
@@ -286,7 +296,7 @@ fn requires_immediate_presentation(current: Option<&DomFrame>, next: &DomFrame) 
     })
 }
 
-impl Render for ReadOnlyDomView {
+impl Render for ReadOnlyOrderBookView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         let state = self.frame.as_ref().map(|frame| frame.state);
@@ -298,12 +308,20 @@ impl Render for ReadOnlyDomView {
             .frame
             .as_ref()
             .map_or(0, |frame| frame.source_watermark);
+        let best_bid = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.best_bid.as_ref());
+        let best_ask = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.best_ask.as_ref());
         let empty_copy = empty_book_copy(self.unavailable, self.frame.is_some());
         let ask_scroll = self.ask_scroll.clone();
         let columns = self.columns;
 
         div()
-            .id("read_only_dom")
+            .id("read_only_order_book")
             .flex()
             .flex_col()
             .size_full()
@@ -319,9 +337,14 @@ impl Render for ReadOnlyDomView {
                     .relative()
                     .overflow_hidden()
                     .child(render_header(columns, &self.theme))
-                    .children(connection_status_banner(self.connection_state, &self.theme))
+                    .children(connection_status_banner(
+                        self.connection_state,
+                        self.frame.is_some(),
+                        self.unavailable,
+                        &self.theme,
+                    ))
                     .children(
-                        (self.connection_state == DomConnectionState::Online)
+                        (self.connection_state == OrderBookConnectionState::Online)
                             .then(|| {
                                 state.and_then(|state| status_banner(state, watermark, &self.theme))
                             })
@@ -329,30 +352,39 @@ impl Render for ReadOnlyDomView {
                     )
                     .child(render_ladder(
                         rows,
+                        best_bid,
+                        best_ask,
                         empty_copy,
                         columns,
                         &self.theme,
                         &ask_scroll,
-                    ))
-                    .children(column_rails(columns, &self.theme)),
+                    )),
             )
     }
 }
 
 fn connection_status_banner(
-    state: DomConnectionState,
+    state: OrderBookConnectionState,
+    has_frame: bool,
+    unavailable: bool,
     theme: &AxiusflowTheme,
 ) -> Option<impl IntoElement + use<>> {
     let (label, color): (&str, StatusColor) = match state {
-        DomConnectionState::Online => return None,
-        DomConnectionState::Offline => ("Depth offline · internet disconnected", |theme| {
-            theme.colors.danger
-        }),
-        DomConnectionState::Recovering => {
-            ("Depth reconnecting · awaiting fresh snapshot", |theme| {
-                theme.colors.bearish
+        OrderBookConnectionState::Online => return None,
+        OrderBookConnectionState::Offline => {
+            ("Order Book offline · internet disconnected", |theme| {
+                theme.colors.danger
             })
         }
+        // Discovering/authenticating and the first provider snapshot all flow
+        // through Recovering at the desktop boundary. Until a concrete book
+        // has actually been presented, that is ordinary loading rather than
+        // a reconnect/failure and the ladder's neutral loading copy is enough.
+        OrderBookConnectionState::Recovering if !has_frame && !unavailable => return None,
+        OrderBookConnectionState::Recovering => (
+            "Order Book reconnecting · awaiting fresh snapshot",
+            |theme| theme.colors.bearish,
+        ),
     };
     Some(
         div()
@@ -370,7 +402,10 @@ fn connection_status_banner(
     )
 }
 
-fn render_header(columns: DomColumnVisibility, theme: &AxiusflowTheme) -> impl IntoElement + use<> {
+fn render_header(
+    columns: OrderBookColumnVisibility,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
     div()
         .h(px(HEADER_HEIGHT))
         .flex_none()
@@ -382,7 +417,7 @@ fn render_header(columns: DomColumnVisibility, theme: &AxiusflowTheme) -> impl I
         .text_color(gpui_color(theme.colors.text_secondary))
         .bg(gpui_color(theme.colors.surface_secondary))
         .children(
-            DomColumn::ALL
+            OrderBookColumn::ALL
                 .into_iter()
                 .filter(|column| columns.is_visible(*column))
                 .map(|column| {
@@ -400,30 +435,32 @@ fn render_header(columns: DomColumnVisibility, theme: &AxiusflowTheme) -> impl I
 /// book with no failure behind it is still loading, never an error.
 const fn empty_book_copy(unavailable: bool, has_frame: bool) -> &'static str {
     if unavailable {
-        "Depth unavailable"
+        "Order Book unavailable"
     } else if has_frame {
-        "Waiting for depth snapshot"
+        "Waiting for order-book snapshot"
     } else {
-        "Loading depth…"
+        "Loading order book…"
     }
 }
 
 fn render_ladder(
-    rows: &[DomRow],
+    rows: &[OrderBookRow],
+    best_bid: Option<&OrderBookColumnLevel>,
+    best_ask: Option<&OrderBookColumnLevel>,
     empty_copy: &'static str,
-    columns: DomColumnVisibility,
+    columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
     ask_scroll: &ScrollHandle,
 ) -> impl IntoElement + use<> {
     let body = div()
-        .id("read_only_dom_rows")
+        .id("read_only_order_book_rows")
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
         .overflow_hidden();
     if rows.is_empty() {
-        return body.child(
+        return body.children(spread_row(best_bid, best_ask, theme)).child(
             div()
                 .flex_1()
                 .flex()
@@ -443,33 +480,37 @@ fn render_ladder(
             .overflow_hidden()
             .child(
                 div()
-                    .id("read_only_dom_asks")
+                    .id("read_only_order_book_asks")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .overflow_y_scroll()
                     .track_scroll(ask_scroll)
                     .children(rows.iter().rev().filter_map(|row| {
                         row.ask.as_ref().map(|level| {
                             render_level_row(level, BookColumnSide::Ask, columns, theme)
                         })
-                    })),
+                    }))
+                    .children(column_rails(columns, theme)),
             )
-            .children(spread_row(rows, theme))
+            .children(spread_row(best_bid, best_ask, theme))
             .child(
                 div()
-                    .id("read_only_dom_bids")
+                    .id("read_only_order_book_bids")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .overflow_y_scroll()
                     .children(rows.iter().filter_map(|row| {
                         row.bid.as_ref().map(|level| {
                             render_level_row(level, BookColumnSide::Bid, columns, theme)
                         })
-                    })),
+                    }))
+                    .children(column_rails(columns, theme)),
             ),
     )
 }
@@ -488,15 +529,15 @@ enum CellAlignment {
 }
 
 fn render_level_row(
-    level: &DomColumnLevel,
+    level: &OrderBookColumnLevel,
     side: BookColumnSide,
-    columns: DomColumnVisibility,
+    columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let (price_color, row_id) = match side {
-        BookColumnSide::Bid => (colors.bullish, "dom_bid_row"),
-        BookColumnSide::Ask => (colors.bearish, "dom_ask_row"),
+        BookColumnSide::Bid => (colors.bullish, "order_book_bid_row"),
+        BookColumnSide::Ask => (colors.bearish, "order_book_ask_row"),
     };
     div()
         .id((row_id, u64::try_from(level.price).unwrap_or(0)))
@@ -510,7 +551,7 @@ fn render_level_row(
         .border_color(gpui_color(colors.border))
         .text_size(px(TEXT_SIZE))
         .children(
-            DomColumn::ALL
+            OrderBookColumn::ALL
                 .into_iter()
                 .filter(|column| columns.is_visible(*column))
                 .map(|column| render_level_cell(column, level, side, columns, price_color, theme)),
@@ -518,37 +559,37 @@ fn render_level_row(
 }
 
 fn render_level_cell(
-    column: DomColumn,
-    level: &DomColumnLevel,
+    column: OrderBookColumn,
+    level: &OrderBookColumnLevel,
     side: BookColumnSide,
-    columns: DomColumnVisibility,
+    columns: OrderBookColumnVisibility,
     price_color: ThemeColor,
     theme: &AxiusflowTheme,
 ) -> gpui::AnyElement {
     let width = columns.width(column);
     match column {
-        DomColumn::ProfitLoss => table_cell(width).into_any_element(),
-        DomColumn::Bid => quantity_cell(
+        OrderBookColumn::ProfitLoss => table_cell(width).into_any_element(),
+        OrderBookColumn::Bid => quantity_cell(
             width,
             (side == BookColumnSide::Bid).then_some(level),
             theme.colors.bullish,
             true,
         )
         .into_any_element(),
-        DomColumn::Price => table_cell(width)
+        OrderBookColumn::Price => table_cell(width)
             .px_1()
             .text_center()
             .text_color(gpui_color(price_color))
             .child(level.price_text.clone())
             .into_any_element(),
-        DomColumn::Ask => quantity_cell(
+        OrderBookColumn::Ask => quantity_cell(
             width,
             (side == BookColumnSide::Ask).then_some(level),
             theme.colors.bearish,
             false,
         )
         .into_any_element(),
-        DomColumn::Orders => table_cell(width)
+        OrderBookColumn::Orders => table_cell(width)
             .px_1()
             .text_right()
             .text_color(gpui_color(theme.colors.text_secondary))
@@ -558,7 +599,7 @@ fn render_level_cell(
                     .map_or_else(String::new, |count| count.to_string()),
             )
             .into_any_element(),
-        DomColumn::Volume => table_cell(width)
+        OrderBookColumn::Volume => table_cell(width)
             .px_1()
             .text_right()
             .text_color(gpui_color(theme.colors.text_secondary))
@@ -589,19 +630,20 @@ fn header_cell(width: f32, label: String, alignment: CellAlignment) -> impl Into
     }
 }
 
-const fn column_alignment(column: DomColumn) -> CellAlignment {
+const fn column_alignment(column: OrderBookColumn) -> CellAlignment {
     match column {
-        DomColumn::Ask => CellAlignment::Left,
-        DomColumn::Price => CellAlignment::Center,
-        DomColumn::ProfitLoss | DomColumn::Bid | DomColumn::Orders | DomColumn::Volume => {
-            CellAlignment::Right
-        }
+        OrderBookColumn::Ask => CellAlignment::Left,
+        OrderBookColumn::Price => CellAlignment::Center,
+        OrderBookColumn::ProfitLoss
+        | OrderBookColumn::Bid
+        | OrderBookColumn::Orders
+        | OrderBookColumn::Volume => CellAlignment::Right,
     }
 }
 
 fn quantity_cell(
     column_width: f32,
-    level: Option<&DomColumnLevel>,
+    level: Option<&OrderBookColumnLevel>,
     color: ThemeColor,
     align_right: bool,
 ) -> impl IntoElement + use<> {
@@ -633,12 +675,12 @@ fn quantity_cell(
 }
 
 fn column_rails(
-    columns: DomColumnVisibility,
+    columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
 ) -> impl Iterator<Item = gpui::AnyElement> + use<> {
     let border = gpui_color(theme.colors.border);
     let mut edge = 0.0;
-    DomColumn::ALL
+    OrderBookColumn::ALL
         .into_iter()
         .filter(move |column| columns.is_visible(*column))
         .filter_map(move |column| {
@@ -648,7 +690,7 @@ fn column_rails(
         .enumerate()
         .map(move |(index, edge)| {
             div()
-                .id(("dom_column_rail", index))
+                .id(("order_book_column_rail", index))
                 .absolute()
                 .top_0()
                 .bottom_0()
@@ -659,9 +701,13 @@ fn column_rails(
         })
 }
 
-fn spread_row(rows: &[DomRow], theme: &AxiusflowTheme) -> Option<impl IntoElement + use<>> {
-    let bid = rows.first()?.bid.as_ref()?;
-    let ask = rows.first()?.ask.as_ref()?;
+fn spread_row(
+    best_bid: Option<&OrderBookColumnLevel>,
+    best_ask: Option<&OrderBookColumnLevel>,
+    theme: &AxiusflowTheme,
+) -> Option<impl IntoElement + use<>> {
+    let bid = best_bid?;
+    let ask = best_ask?;
     Some(
         div()
             .w_full()
@@ -707,20 +753,20 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
     match state {
         OrderBookState::Ready => None,
         OrderBookState::Stale => Some((
-            format!("Depth stale · last sequence {watermark}"),
+            format!("Order Book stale · last sequence {watermark}"),
             |theme| theme.colors.bearish,
         )),
         // Awaiting the first snapshot is still loading, not a failure, so
         // it renders neutral. Red is reserved for a book that broke.
         OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot) => Some((
             format!(
-                "Depth recovering · {}",
+                "Order Book recovering · {}",
                 recovery_label(OrderBookRecoveryReason::AwaitingSnapshot)
             ),
             |theme| theme.colors.text_secondary,
         )),
         OrderBookState::Recovering(reason) => Some((
-            format!("Depth recovering · {}", recovery_label(reason)),
+            format!("Order Book recovering · {}", recovery_label(reason)),
             |theme| theme.colors.bearish,
         )),
     }
@@ -750,8 +796,8 @@ mod tests {
         revision: u64,
         state: OrderBookState,
         has_rows: bool,
-    ) -> DomFrame {
-        DomFrame {
+    ) -> OrderBookFrame {
+        OrderBookFrame {
             provider_id: "rithmic".into(),
             instrument_id: "BTC-USD".into(),
             entitlement_id: "public".into(),
@@ -759,9 +805,12 @@ mod tests {
             selection_generation,
             revision,
             source_watermark: revision,
+            bbo_source_watermark: revision,
             state,
+            best_bid: None,
+            best_ask: None,
             rows: has_rows
-                .then_some(DomRow {
+                .then_some(OrderBookRow {
                     bid: None,
                     ask: None,
                 })
@@ -772,26 +821,29 @@ mod tests {
 
     #[test]
     fn empty_book_reports_loading_until_a_concrete_failure() {
-        assert_eq!(empty_book_copy(false, false), "Loading depth…");
-        assert_eq!(empty_book_copy(false, true), "Waiting for depth snapshot");
-        assert_eq!(empty_book_copy(true, false), "Depth unavailable");
-        assert_eq!(empty_book_copy(true, true), "Depth unavailable");
+        assert_eq!(empty_book_copy(false, false), "Loading order book…");
+        assert_eq!(
+            empty_book_copy(false, true),
+            "Waiting for order-book snapshot"
+        );
+        assert_eq!(empty_book_copy(true, false), "Order Book unavailable");
+        assert_eq!(empty_book_copy(true, true), "Order Book unavailable");
     }
 
     #[test]
     fn routing_columns_start_hidden_and_cannot_be_enabled() {
-        let mut columns = DomColumnVisibility::default();
-        assert!(!columns.is_visible(DomColumn::ProfitLoss));
-        assert!(!columns.toggle(DomColumn::ProfitLoss));
-        assert!(!columns.is_visible(DomColumn::ProfitLoss));
+        let mut columns = OrderBookColumnVisibility::default();
+        assert!(!columns.is_visible(OrderBookColumn::ProfitLoss));
+        assert!(!columns.toggle(OrderBookColumn::ProfitLoss));
+        assert!(!columns.is_visible(OrderBookColumn::ProfitLoss));
     }
 
     #[test]
     fn available_columns_toggle_and_renormalize_widths() {
-        let mut columns = DomColumnVisibility::default();
-        assert!(columns.toggle(DomColumn::Orders));
-        assert!(!columns.is_visible(DomColumn::Orders));
-        let width = DomColumn::ALL
+        let mut columns = OrderBookColumnVisibility::default();
+        assert!(columns.toggle(OrderBookColumn::Orders));
+        assert!(!columns.is_visible(OrderBookColumn::Orders));
+        let width = OrderBookColumn::ALL
             .into_iter()
             .filter(|column| columns.is_visible(*column))
             .map(|column| columns.width(column))
@@ -807,9 +859,32 @@ mod tests {
     #[test]
     fn provider_connectivity_has_stable_actionable_book_feedback() {
         let theme = AxiusflowTheme::default();
-        assert!(connection_status_banner(DomConnectionState::Online, &theme).is_none());
-        assert!(connection_status_banner(DomConnectionState::Offline, &theme).is_some());
-        assert!(connection_status_banner(DomConnectionState::Recovering, &theme).is_some());
+        assert!(
+            connection_status_banner(OrderBookConnectionState::Online, false, false, &theme)
+                .is_none()
+        );
+        assert!(
+            connection_status_banner(OrderBookConnectionState::Offline, false, false, &theme)
+                .is_some()
+        );
+        assert!(
+            connection_status_banner(OrderBookConnectionState::Recovering, true, false, &theme)
+                .is_some()
+        );
+        assert!(
+            connection_status_banner(OrderBookConnectionState::Recovering, false, true, &theme)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn first_snapshot_recovery_is_presented_as_loading_not_reconnecting() {
+        let theme = AxiusflowTheme::default();
+        assert!(
+            connection_status_banner(OrderBookConnectionState::Recovering, false, false, &theme)
+                .is_none()
+        );
+        assert_eq!(empty_book_copy(false, false), "Loading order book…");
     }
 
     #[test]
@@ -817,7 +892,7 @@ mod tests {
         let stale = status_presentation(OrderBookState::Stale, 42)
             .map(|value| value.0)
             .expect("stale banner");
-        assert_eq!(stale, "Depth stale · last sequence 42");
+        assert_eq!(stale, "Order Book stale · last sequence 42");
         for (reason, expected) in [
             (
                 OrderBookRecoveryReason::AwaitingSnapshot,
@@ -830,7 +905,7 @@ mod tests {
             let label = status_presentation(OrderBookState::Recovering(reason), 0)
                 .map(|value| value.0)
                 .expect("recovery banner");
-            assert_eq!(label, format!("Depth recovering · {expected}"));
+            assert_eq!(label, format!("Order Book recovering · {expected}"));
         }
         // Awaiting the first snapshot is loading, not failure: it must not
         // share the failure color used by stale and broken books.

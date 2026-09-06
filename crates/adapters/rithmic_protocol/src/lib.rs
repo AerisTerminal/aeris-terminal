@@ -53,16 +53,19 @@ pub use history_adapter::{
     covering_snapshot_from_page, decode_rithmic_history_bar,
 };
 pub use market::{
-    DecodedMarketMessage, MarketIdentity, OrderBookLevel, OrderBookSides, OrderBookUpdate,
-    OrderBookUpdateKind, ProviderTimestamp, QuoteLevel, QuoteSideUpdate, QuoteUpdate,
-    TradeAggressor, TradeUpdate,
+    DecodedMarketMessage, DepthByOrderEndEvent, DepthByOrderMutation, DepthByOrderMutationKind,
+    DepthByOrderSide, DepthByOrderSnapshotLevel, DepthByOrderSnapshotMessage,
+    DepthByOrderSnapshotOrder, DepthByOrderUpdate, MarketIdentity, OrderBookLevel, OrderBookSides,
+    OrderBookUpdate, OrderBookUpdateKind, ProviderTimestamp, QuoteLevel, QuoteSideUpdate,
+    QuoteUpdate, TradeAggressor, TradeUpdate,
 };
 pub use protocol::{
-    DecodedControlMessage, InstrumentReferenceRequest, InstrumentType, LoginRequest,
-    MarketDataSubscription, OutboundRequest, ProtocolError, ReadOnlyPlant, RithmicKitUnavailable,
-    RithmicProtocolBackend, RithmicProtocolCodec, SearchPattern, SensitiveFrame,
-    SubscriptionAction, SymbolSearchRequest, TickBarReplayRequest, TickBarSubscription,
-    TimeBarReplayRequest, TimeBarSubscription, TimeBarType,
+    DecodedControlMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
+    InstrumentReferenceRequest, InstrumentType, LoginRequest, MarketDataSubscription,
+    OutboundRequest, ProtocolError, ReadOnlyPlant, RithmicKitUnavailable, RithmicProtocolBackend,
+    RithmicProtocolCodec, SearchPattern, SensitiveFrame, SubscriptionAction, SymbolSearchRequest,
+    TickBarReplayRequest, TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
+    TimeBarType,
 };
 pub use provider_runtime::{
     ConnectTrigger, NetworkEvent, ProviderCredentialRequirement, ProviderSessionDriver,

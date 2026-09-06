@@ -104,6 +104,85 @@ pub fn parse_decimal_to_fixed(raw: &str, scale: u32) -> Result<i64, String> {
     Ok(value)
 }
 
+/// Parses a provider aggregate decimal into `value * 10^scale`, rounding only
+/// when the wire carries more fractional precision than the canonical scale.
+///
+/// Hyperliquid aggregate candle volume can contain tiny extra decimal residue
+/// (for example `939217.2893600001`) even though executable sizes use the
+/// normalized quantity precision. Aggregate values are therefore quantized to
+/// the nearest canonical unit, with exact half values rounded away from zero.
+/// Trading prices and executable sizes continue to use the strict parser.
+///
+/// # Errors
+///
+/// Returns an error for malformed input, unsupported precision, or overflow.
+pub fn parse_aggregate_decimal_to_fixed(raw: &str, scale: u32) -> Result<i64, String> {
+    if scale > MAXIMUM_HYPERLIQUID_DECIMALS {
+        return Err("hyperliquid decimal scale is unsupported".to_string());
+    }
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("hyperliquid decimal value is empty".to_string());
+    }
+    let text = if text.bytes().any(|byte| byte == b'e' || byte == b'E') {
+        expand_exponent(text)?
+    } else {
+        text.to_string()
+    };
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(&text)),
+    };
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or("");
+    let fraction = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || (whole.is_empty() && fraction.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > usize::try_from(MAXIMUM_HYPERLIQUID_DECIMALS).unwrap_or(usize::MAX)
+    {
+        return Err("hyperliquid decimal value is malformed".to_string());
+    }
+    let scale_len =
+        usize::try_from(scale).map_err(|_| "hyperliquid decimal scale is unsupported")?;
+    if fraction.len() <= scale_len {
+        return parse_decimal_to_fixed(&text, scale);
+    }
+    let retained = &fraction[..scale_len];
+    let discarded = &fraction[scale_len..];
+    let mut truncated = String::new();
+    if negative {
+        truncated.push('-');
+    }
+    if whole.is_empty() {
+        truncated.push('0');
+    } else {
+        truncated.push_str(whole);
+    }
+    if scale_len > 0 {
+        truncated.push('.');
+        truncated.push_str(retained);
+    }
+    let value = parse_decimal_to_fixed(&truncated, scale)?;
+    if discarded
+        .as_bytes()
+        .first()
+        .is_some_and(|digit| *digit >= b'5')
+    {
+        if negative {
+            value
+                .checked_sub(1)
+                .ok_or_else(|| "hyperliquid decimal value overflowed".to_string())
+        } else {
+            value
+                .checked_add(1)
+                .ok_or_else(|| "hyperliquid decimal value overflowed".to_string())
+        }
+    } else {
+        Ok(value)
+    }
+}
 /// Expands one exponent-notation decimal (`1.25e-4`) into plain text.
 ///
 /// Used only for shortest-repr JSON numbers; provider strings are expected
@@ -192,6 +271,19 @@ impl RawDecimal {
             .unwrap_or(text);
         parse_decimal_to_fixed(text, scale)
     }
+    /// Converts an aggregate provider decimal into the canonical fixed scale,
+    /// quantizing only surplus fractional precision.
+    ///
+    /// # Errors
+    /// Returns an error for malformed input, unsupported precision, or overflow.
+    pub fn to_fixed_aggregate(&self, scale: u32) -> Result<i64, String> {
+        let text = self.0.get().trim();
+        let text = text
+            .strip_prefix('"')
+            .and_then(|inner| inner.strip_suffix('"'))
+            .unwrap_or(text);
+        parse_aggregate_decimal_to_fixed(text, scale)
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for RawDecimal {
@@ -270,6 +362,27 @@ mod tests {
         assert!(parse_decimal_to_fixed("9223372036854775808", 0).is_err());
     }
 
+    #[test]
+    fn aggregate_decimal_quantization_is_explicit_and_deterministic() {
+        assert_eq!(
+            parse_aggregate_decimal_to_fixed("939217.2893600001", 8),
+            Ok(93_921_728_936_000)
+        );
+        assert_eq!(
+            parse_aggregate_decimal_to_fixed("1.000000005", 8),
+            Ok(100_000_001)
+        );
+        assert_eq!(
+            parse_aggregate_decimal_to_fixed("-1.000000005", 8),
+            Ok(-100_000_001)
+        );
+        assert_eq!(
+            parse_aggregate_decimal_to_fixed("1.000000004", 8),
+            Ok(100_000_000)
+        );
+        // Strict executable-value conversion remains fail-closed.
+        assert!(parse_decimal_to_fixed("1.000000005", 8).is_err());
+    }
     #[test]
     fn live_precision_values_land_in_their_explicit_scales() {
         // Live funding rate with seven decimals decodes at funding scale.

@@ -1,14 +1,14 @@
 use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
-    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter, Duration,
-    EMPTY_REPAIR_RETRY_DELAY, EngineError, EngineResourceMode, FailureStage, HistoryRange,
-    HyperliquidLiveHandoff, InstallProviderInstrument, Instant, MAXIMUM_SERIES, MarketEngine,
-    MarketServiceStatus, MarketStream, Ordering, ProviderConnectionState, ProviderDispatch,
-    ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
-    ProviderRuntimeRegistry, ProviderState, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError,
-    Reply, ResourceMode, ResourcePolicyDecision, ResourcePolicyInput, RithmicLiveHandoff,
-    StorageRequest, StoredHistory, SyncSender, WarmSeries, authorize_consumer,
-    chart_stream_requirements, decide_resource_policy, envelope, publish_ready,
+    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
+    DemandWaiter, Duration, EMPTY_REPAIR_RETRY_DELAY, EngineError, EngineResourceMode,
+    FailureStage, HistoryRange, HyperliquidLiveHandoff, InstallProviderInstrument, Instant,
+    MAXIMUM_SERIES, MarketEngine, MarketServiceStatus, MarketStream, Ordering,
+    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
+    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
+    REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply, ResourceMode, ResourcePolicyDecision,
+    ResourcePolicyInput, RithmicLiveHandoff, StorageRequest, StoredHistory, SyncSender, WarmSeries,
+    authorize_consumer, chart_stream_requirements, decide_resource_policy, envelope, publish_ready,
     resource_policy_mode, thread,
 };
 
@@ -81,6 +81,7 @@ fn run_coordinator(
         consumer_clients: BTreeMap::new(),
         pending: BTreeMap::new(),
         history_inflight: BTreeMap::new(),
+        history_deferred: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
         suspended_history: BTreeSet::new(),
         deferred_publications: BTreeSet::new(),
@@ -106,8 +107,10 @@ fn run_coordinator(
         catalog_selections: BTreeMap::new(),
         rithmic_selection: None,
         rithmic_pending_selection: None,
+        rithmic_stop_pending: None,
         hyperliquid_engaged: false,
         hyperliquid_demand_dirty: false,
+        hyperliquid_stop_pending: None,
         hyperliquid_catalog_degraded: None,
     };
     loop {
@@ -122,6 +125,7 @@ fn run_coordinator(
         coordinator.flush_attached_events();
         coordinator.flush_rithmic_selection();
         coordinator.flush_hyperliquid_demand();
+        coordinator.stop_realtime_if_idle();
         coordinator.expire_local_history_reads();
         coordinator.retry_pending_empty_repairs();
         coordinator.retry_history();
@@ -178,6 +182,8 @@ pub(super) struct Coordinator<'a> {
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     pub(super) history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
+    pub(super) history_deferred:
+        BTreeMap<(BarSeriesKey, ProviderGeneration), DeferredHistoryRequest>,
     pub(super) history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
     /// Requests canceled by account/lifecycle suspension. Their response may be
     /// internally valid but belongs to retired market access and cannot install.
@@ -185,7 +191,8 @@ pub(super) struct Coordinator<'a> {
     pub(super) deferred_publications: BTreeSet<BarSeriesKey>,
     pub(super) pending_empty_repairs: BTreeMap<BarSeriesKey, HistoryRange>,
     pub(super) empty_repair_retry_at: Instant,
-    pub(super) history_retries: BTreeMap<(BarSeriesKey, ProviderGeneration), (Instant, u8)>,
+    pub(super) history_retries:
+        BTreeMap<(BarSeriesKey, ProviderGeneration), (Instant, u8, Option<HistoryRange>)>,
     pub(super) local_history_deadlines: BTreeMap<(BarSeriesKey, ProviderGeneration), Instant>,
     pub(super) local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     pub(super) warming: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
@@ -218,6 +225,7 @@ pub(super) struct Coordinator<'a> {
     /// selections, so a switch that arrives while the channel is full only has
     /// to survive until the next tick rather than fail the demand behind it.
     pub(super) rithmic_pending_selection: Option<InstallProviderInstrument>,
+    pub(super) rithmic_stop_pending: Option<ProviderGeneration>,
     /// Whether the Hyperliquid worker currently holds a subscription set.
     ///
     /// Unlike the single-instrument Rithmic worker there is no per-symbol
@@ -227,6 +235,7 @@ pub(super) struct Coordinator<'a> {
     /// Set whenever live handoffs or depth demand change the desired
     /// Hyperliquid subscriptions; cleared once the worker accepts the set.
     pub(super) hyperliquid_demand_dirty: bool,
+    pub(super) hyperliquid_stop_pending: Option<ProviderGeneration>,
     /// Engine generation at which a catalog refresh failure downgraded
     /// provider state. A later catalog success restores Online only when the
     /// session has not moved on meanwhile, so worker-driven states win.
@@ -253,8 +262,8 @@ impl Coordinator<'_> {
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
         }
-        self.providers.stop("rithmic");
-        self.providers.stop("hyperliquid");
+        let _ = self.providers.stop("rithmic");
+        let _ = self.providers.stop("hyperliquid");
     }
 
     pub(super) fn handle_command(&mut self, command: Command) {
@@ -630,16 +639,13 @@ impl Coordinator<'_> {
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
         }
-        self.providers.stop("rithmic");
-        self.rithmic_selection = None;
         self.rithmic_pending_selection = None;
         self.rithmic_live.clear();
-        self.providers.stop("hyperliquid");
-        self.hyperliquid_engaged = false;
         self.hyperliquid_demand_dirty = false;
         self.hyperliquid_catalog_degraded = None;
         self.hyperliquid_live.clear();
         self.order_books.clear();
+        self.stop_realtime_if_idle();
     }
 
     pub(super) fn status(&self) -> MarketServiceStatus {

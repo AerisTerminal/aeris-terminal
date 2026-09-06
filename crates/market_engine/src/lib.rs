@@ -375,7 +375,7 @@ impl MarketEngine {
         self.providers.reconnect_delay(provider)
     }
 
-    /// Registers one independently generated chart or DOM consumer.
+    /// Registers one independently generated chart or Order Book consumer.
     ///
     /// # Errors
     /// Returns an error for duplicate identity or the configured consumer bound.
@@ -1461,6 +1461,33 @@ mod tests {
     }
 
     #[test]
+    fn covering_history_repair_keeps_closed_tail_before_forming_tail() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(3))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(4), true)
+            .expect("forming bar appends");
+
+        let mut repaired = bars(3);
+        repaired[0].close = 101;
+        engine
+            .replace_covering_history(provider_generation(1), &btc, 2, 8, repaired, true)
+            .expect("repair ending before forming tail installs");
+
+        let snapshot = engine
+            .series_snapshot(&btc)
+            .expect("repaired series materializes");
+        assert!(snapshot.forming);
+        assert_eq!(snapshot.bars.len(), 4);
+        assert_eq!(snapshot.bars[0].close, 101);
+        assert_eq!(snapshot.bars[2].source_sequence, 3);
+        assert_eq!(snapshot.bars[3].source_sequence, 4);
+    }
+
+    #[test]
     fn realtime_tail_revisions_share_completed_history_until_bucket_roll() {
         let mut engine = engine(2, 1, 8);
         let btc = series("rithmic:spot:BTC-USD");
@@ -1942,6 +1969,14 @@ mod tests {
                 .map(|status| status.health),
             Some(ProviderHealth::Disconnected)
         );
+        assert!(matches!(
+            engine.verify_provider_request("rithmic", ProviderRequest::Trades),
+            Err(EngineError::ProviderSessionUnavailable(_))
+        ));
+        assert!(matches!(
+            engine.set_provider_health("rithmic", provider_generation(1), ProviderHealth::Online),
+            Err(EngineError::ProviderSessionUnavailable(_))
+        ));
         assert!(matches!(
             engine.begin_provider_session("rithmic", provider_generation(1)),
             Err(EngineError::StaleProviderGeneration { .. })

@@ -118,6 +118,7 @@ pub fn period_for_hyperliquid_interval(interval: &str) -> Result<BarPeriod, Stri
 ///
 /// Returns an error for malformed rows, out-of-order or invalid timestamps,
 /// missing fields, invalid OHLCV, over-long pages, or sequence overflow.
+#[allow(clippy::too_many_lines)]
 pub fn decode_candle_page(
     payload: &serde_json::value::RawValue,
     period: BarPeriod,
@@ -132,23 +133,44 @@ pub fn decode_candle_page(
         return Err("hyperliquid candle page exceeds the provider limit".to_string());
     }
     period.validate().map_err(|error| error.to_string())?;
-    let mut bars = Vec::with_capacity(rows.len());
-    let mut previous_open: Option<i64> = None;
-    for (index, row) in rows.iter().enumerate() {
+    // Provider snapshots can contain an adjacent corrected row for the same
+    // candle key. The later row is authoritative, matching the replacement
+    // semantics of the live candle channel. Only an exact open+close key may
+    // replace; backward time or a duplicate open with a different close still
+    // fails closed.
+    let mut normalized: Vec<WireCandle> = Vec::with_capacity(rows.len());
+    for row in rows {
         if row.t < 0 || row.T <= row.t {
             return Err("hyperliquid candle timestamp is invalid".to_string());
         }
-        if let Some(previous) = previous_open {
-            if row.t <= previous {
+        if let Some(previous) = normalized.last() {
+            if row.t < previous.t {
                 return Err("hyperliquid candles are not in open-time order".to_string());
             }
-            if period
+            if row.t == previous.t {
+                if row.T != previous.T {
+                    return Err("hyperliquid duplicate candle interval is inconsistent".to_string());
+                }
+                if let Some(tail) = normalized.last_mut() {
+                    *tail = row;
+                } else {
+                    return Err("hyperliquid candle normalization lost its tail".to_string());
+                }
+                continue;
+            }
+        }
+        normalized.push(row);
+    }
+    let mut bars = Vec::with_capacity(normalized.len());
+    let mut previous_open: Option<i64> = None;
+    for (index, row) in normalized.iter().enumerate() {
+        if let Some(previous) = previous_open
+            && period
                 .duration_nanos()
                 .and_then(|duration| duration.checked_div(1_000_000))
                 .is_some_and(|duration| row.t - previous != duration)
-            {
-                return Err("hyperliquid candle history has a time gap".to_string());
-            }
+        {
+            return Err("hyperliquid candle history has a time gap".to_string());
         }
         previous_open = Some(row.t);
         let (Some(open), Some(high), Some(low), Some(close), Some(volume)) =
@@ -160,7 +182,7 @@ pub fn decode_candle_page(
         let high = high.to_fixed(price_scale)?;
         let low = low.to_fixed(price_scale)?;
         let close = close.to_fixed(price_scale)?;
-        let volume = volume.to_fixed(quantity_scale)?;
+        let volume = volume.to_fixed_aggregate(quantity_scale)?;
         if volume < 0 {
             return Err("hyperliquid candle volume is invalid".to_string());
         }
@@ -185,7 +207,7 @@ pub fn decode_candle_page(
         bar.validate().map_err(|error| error.to_string())?;
         bars.push((row.T, bar));
     }
-    let handoff_close_millis = rows.last().map(|row| row.T);
+    let handoff_close_millis = normalized.last().map(|row| row.T);
     // Split closed history from the still-open period by close time.
     let mut closed = Vec::new();
     let mut forming = None;
@@ -408,6 +430,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_duplicate_key_uses_the_later_provider_correction() {
+        let payload = serde_json::value::to_raw_value(&json!([
+            {"t": 60_000, "T": 119_999, "o": "10", "h": "11", "l": "9", "c": "10", "v": "0"},
+            {"t": 60_000, "T": 119_999, "o": "12", "h": "13", "l": "11", "c": "12", "v": "0"},
+            {"t": 120_000, "T": 179_999, "o": "12", "h": "12", "l": "12", "c": "12", "v": "1"}
+        ]))
+        .expect("fixture");
+        let decoded = decode_candle_page(
+            &payload,
+            BarPeriod::time(60).expect("period"),
+            8,
+            8,
+            200_000,
+        )
+        .expect("corrected duplicate decodes");
+        assert_eq!(decoded.bars.len(), 2);
+        assert_eq!(decoded.bars[0].open, 1_200_000_000);
+        assert_eq!(decoded.bars[0].close, 1_200_000_000);
+
+        let inconsistent = serde_json::value::to_raw_value(&json!([
+            {"t": 60_000, "T": 119_999, "o": "10", "h": "10", "l": "10", "c": "10", "v": "1"},
+            {"t": 60_000, "T": 120_000, "o": "10", "h": "10", "l": "10", "c": "10", "v": "1"}
+        ]))
+        .expect("fixture");
+        assert_eq!(
+            decode_candle_page(
+                &inconsistent,
+                BarPeriod::time(60).expect("period"),
+                8,
+                8,
+                200_000,
+            ),
+            Err("hyperliquid duplicate candle interval is inconsistent".to_string())
+        );
+    }
     #[test]
     fn malformed_ohlc_timestamps_and_order_fail_closed() {
         let bad_ohlc = json!([

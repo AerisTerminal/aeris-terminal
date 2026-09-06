@@ -12,7 +12,7 @@ use axiusflow_engine_protocol::{
     SelectProviderInstrument, SeriesKey, envelope,
 };
 use axiusflow_local_engine_client::{
-    EngineClient, connect_or_start_engine, sibling_engine_executable,
+    EngineClient, connect_or_start_engine, connect_or_start_engine_until, sibling_engine_executable,
 };
 
 const RESTORE_DEADLINE: Duration = Duration::from_secs(4);
@@ -102,6 +102,27 @@ impl EngineSupervisor {
     ) -> Result<(), String> {
         self.client
             .set_series_demand(consumer_id, generation, series.clone())?;
+        self.record_series_demand(consumer_id, generation, series)
+    }
+
+    pub fn set_series_demand_until(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        series: SeriesKey,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.client
+            .set_series_demand_until(consumer_id, generation, series.clone(), deadline)?;
+        self.record_series_demand(consumer_id, generation, series)
+    }
+
+    fn record_series_demand(
+        &mut self,
+        consumer_id: u64,
+        generation: u64,
+        series: SeriesKey,
+    ) -> Result<(), String> {
         let previous_provider = self
             .consumers
             .get(&consumer_id)
@@ -190,7 +211,11 @@ impl EngineSupervisor {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(self.finish_event(event));
         }
-        match self.client.receive_market_event_timeout(timeout) {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "market receive deadline overflowed".to_string())?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.client.receive_market_event_timeout(remaining) {
             Ok(Some(event)) => Ok(self.finish_event(event)),
             Ok(None) => Ok(SupervisedEvent {
                 consumer_id: None,
@@ -198,7 +223,10 @@ impl EngineSupervisor {
                 reconnected: false,
             }),
             Err(disconnected) => {
-                self.reconnect_and_restore().map_err(|restore| {
+                let restore_deadline = Instant::now()
+                    .checked_add(RESTORE_DEADLINE)
+                    .ok_or_else(|| "engine recovery deadline overflowed".to_string())?;
+                self.reconnect_and_restore_until(restore_deadline).map_err(|restore| {
                     format!("resident engine connection failed: {disconnected}; recovery failed: {restore}")
                 })?;
                 Ok(SupervisedEvent {
@@ -215,6 +243,17 @@ impl EngineSupervisor {
         consumer_id: u64,
         timeout: Duration,
     ) -> Result<SupervisedEvent, String> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "market receive deadline overflowed".to_string())?;
+        self.receive_market_event_for_until(consumer_id, deadline)
+    }
+
+    pub fn receive_market_event_for_until(
+        &mut self,
+        consumer_id: u64,
+        deadline: Instant,
+    ) -> Result<SupervisedEvent, String> {
         if let Some(index) = self
             .pending_events
             .iter()
@@ -223,11 +262,15 @@ impl EngineSupervisor {
         {
             return Ok(self.finish_event(event));
         }
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| "market receive deadline overflowed".to_string())?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(SupervisedEvent {
+                    consumer_id: None,
+                    event: None,
+                    reconnected: false,
+                });
+            }
             match self.client.receive_market_event_timeout(remaining) {
                 Ok(Some(event)) if event.0 == consumer_id || event.0 == 0 => {
                     return Ok(self.finish_event(event));
@@ -246,7 +289,7 @@ impl EngineSupervisor {
                     });
                 }
                 Err(disconnected) => {
-                    self.reconnect_and_restore().map_err(|restore| {
+                    self.reconnect_and_restore_until(deadline).map_err(|restore| {
                         format!("resident engine connection failed: {disconnected}; recovery failed: {restore}")
                     })?;
                     return Ok(SupervisedEvent {
@@ -326,12 +369,10 @@ impl EngineSupervisor {
                 current
             }
             envelope::Payload::ProviderInstrumentSelection(selection) => {
-                let current = consumer.pending_selection.as_ref().is_some_and(|request| {
-                    selection.instrument.as_ref().is_some_and(|instrument| {
-                        request.provider == instrument.provider
-                            && request.selection_generation == instrument.selection_generation
-                    })
-                });
+                let current = consumer
+                    .pending_selection
+                    .as_ref()
+                    .is_some_and(|request| selection_completion_matches(request, selection));
                 if current {
                     consumer.pending_selection = None;
                 }
@@ -388,12 +429,7 @@ impl EngineSupervisor {
                 if consumer
                     .pending_selection
                     .as_ref()
-                    .is_some_and(|selection| {
-                        selection.provider == provider
-                            && (newer_session
-                                || selection.selection_generation
-                                    <= instrument.selection_generation)
-                    })
+                    .is_some_and(|selection| selection.provider == provider && newer_session)
                 {
                     consumer.pending_selection = None;
                 }
@@ -487,16 +523,15 @@ impl EngineSupervisor {
             .retain(|key| self.instruments.contains_key(key));
     }
 
-    fn reconnect_and_restore(&mut self) -> Result<(), String> {
-        let deadline = Instant::now()
-            .checked_add(RESTORE_DEADLINE)
-            .ok_or_else(|| "engine recovery deadline overflowed".to_string())?;
+    fn reconnect_and_restore_until(&mut self, deadline: Instant) -> Result<(), String> {
         let mut last_error = "resident engine recovery did not start".to_string();
         while Instant::now() < deadline {
             match self
-                .connect_replacement()
-                .and_then(|mut client| self.restore_into(&mut client).map(|()| client))
-            {
+                .connect_replacement_until(deadline)
+                .and_then(|mut client| {
+                    self.restore_into_until(&mut client, deadline)
+                        .map(|()| client)
+                }) {
                 Ok(client) => {
                     self.client = client;
                     self.pending_events.clear();
@@ -504,23 +539,36 @@ impl EngineSupervisor {
                 }
                 Err(error) => last_error = error,
             }
-            thread::sleep(RESTORE_RETRY_INTERVAL);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(remaining.min(RESTORE_RETRY_INTERVAL));
         }
         Err(last_error)
     }
 
-    fn connect_replacement(&mut self) -> Result<EngineClient, String> {
+    fn connect_replacement_until(&mut self, deadline: Instant) -> Result<EngineClient, String> {
         #[cfg(test)]
         if let Some(connect) = self.reconnect_fixture.as_mut() {
             return connect();
         }
-        connect_or_start_engine(&self.executable)
+        connect_or_start_engine_until(&self.executable, deadline)
     }
 
-    fn restore_into(&self, client: &mut EngineClient) -> Result<(), String> {
-        client.attach_client(self.client_id)?;
+    fn restore_into_until(
+        &self,
+        client: &mut EngineClient,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        client.attach_client_until(self.client_id, deadline)?;
         for (consumer_id, consumer) in &self.consumers {
-            client.register_consumer(self.client_id, consumer.workspace_id, *consumer_id)?;
+            client.register_consumer_until(
+                self.client_id,
+                consumer.workspace_id,
+                *consumer_id,
+                deadline,
+            )?;
         }
         let mut instruments = self.instruments.values().cloned().collect::<Vec<_>>();
         instruments.sort_by_key(|instrument| {
@@ -532,25 +580,44 @@ impl EngineSupervisor {
             )
         });
         for instrument in instruments {
-            client.install_provider_instrument(instrument)?;
+            client.install_provider_instrument_until(instrument, deadline)?;
         }
         for (consumer_id, consumer) in &self.consumers {
             if let Some(search) = &consumer.pending_search {
-                client.search_provider_instruments(search.clone())?;
+                client.search_provider_instruments_until(search.clone(), deadline)?;
             }
             if let Some(selection) = &consumer.pending_selection {
-                client.select_provider_instrument(selection.clone())?;
+                client.select_provider_instrument_until(selection.clone(), deadline)?;
             }
             if let Some((generation, series)) = &consumer.demand {
-                client.set_series_demand(*consumer_id, *generation, series.clone())?;
+                client.set_series_demand_until(
+                    *consumer_id,
+                    *generation,
+                    series.clone(),
+                    deadline,
+                )?;
             }
             if let Some((generation, start, end)) = consumer.viewport {
-                client.set_market_viewport(*consumer_id, generation, start, end)?;
+                client.set_market_viewport_until(*consumer_id, generation, start, end, deadline)?;
             }
-            client.set_market_resource_class(*consumer_id, consumer.resource_class)?;
+            client.set_market_resource_class_until(
+                *consumer_id,
+                consumer.resource_class,
+                deadline,
+            )?;
         }
         Ok(())
     }
+}
+
+fn selection_completion_matches(
+    request: &SelectProviderInstrument,
+    selection: &axiusflow_engine_protocol::ProviderInstrumentSelection,
+) -> bool {
+    selection.instrument.as_ref().is_some_and(|instrument| {
+        request.provider == instrument.provider
+            && request.selection_generation == selection.command_generation
+    })
 }
 
 fn abandon_matching_search(consumer: &mut ConsumerRestore, provider: &str, generation: u64) {
@@ -585,9 +652,9 @@ mod tests {
 
     use axiusflow_engine_protocol::{
         EngineReady, Envelope, EnvelopeDecoder, InstallProviderInstrument, MarketBar,
-        PROTOCOL_VERSION, ProviderInstrumentInstalled, SearchProviderInstruments,
-        SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesSnapshot, encode_envelope,
-        envelope,
+        PROTOCOL_VERSION, ProviderInstrumentInstalled, ProviderInstrumentSelection,
+        SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
+        SeriesSnapshot, encode_envelope, envelope,
     };
     use axiusflow_local_engine_client::EngineClient;
     use interprocess::local_socket::{
@@ -596,6 +663,7 @@ mod tests {
 
     use super::{
         ConsumerRestore, EngineSupervisor, abandon_matching_search, abandon_matching_selection,
+        selection_completion_matches,
     };
     use axiusflow_engine_protocol::ConsumerResourceClass;
 
@@ -635,6 +703,36 @@ mod tests {
         abandon_matching_selection(&mut consumer, "rithmic", 8);
         assert!(consumer.pending_search.is_none());
         assert!(consumer.pending_selection.is_none());
+    }
+
+    #[test]
+    fn provider_selection_completion_uses_command_generation_not_provider_generation() {
+        let request = SelectProviderInstrument {
+            consumer_id: 9,
+            selection_generation: 4,
+            search_generation: 3,
+            provider: "hyperliquid".to_string(),
+            symbol: "ETH".to_string(),
+            exchange: "Hyperliquid".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+        };
+        let selection = ProviderInstrumentSelection {
+            consumer_id: 9,
+            command_generation: 4,
+            instrument: Some(provider_instrument(
+                "hyperliquid",
+                "hyperliquid:perp:ETH",
+                7,
+                29,
+            )),
+        };
+        assert!(selection_completion_matches(&request, &selection));
+
+        let stale_command = ProviderInstrumentSelection {
+            command_generation: 3,
+            ..selection
+        };
+        assert!(!selection_completion_matches(&request, &stale_command));
     }
 
     struct FixtureServer {

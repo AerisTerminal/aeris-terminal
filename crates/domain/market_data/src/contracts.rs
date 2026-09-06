@@ -112,31 +112,35 @@ impl MarketTrade {
     }
 }
 
-/// One canonical best-bid and best-ask quote.
+/// One canonical top-of-book update. Either side may be absent after an
+/// explicit provider clear; callers must replace their retained BBO with the
+/// complete state carried here rather than retaining a cleared side.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TopOfBookQuote {
     pub metadata: EventMetadata,
-    pub bid_price: i64,
-    pub bid_quantity: i64,
-    pub ask_price: i64,
-    pub ask_quantity: i64,
+    pub bid: Option<DepthLevel>,
+    pub ask: Option<DepthLevel>,
 }
 
 impl TopOfBookQuote {
-    /// Validates metadata, positive quantities, and a non-crossed spread.
+    /// Validates metadata, present levels, and a non-crossed spread.
     ///
     /// # Errors
     ///
     /// Returns an error for invalid metadata or quote values.
     pub fn validate(&self) -> Result<(), MarketDataValidationError> {
         self.metadata.validate()?;
-        if self.bid_price <= 0 || self.ask_price <= 0 {
-            return Err(MarketDataValidationError::InvalidPrice);
+        if let Some(bid) = self.bid {
+            bid.validate(false)?;
         }
-        if self.bid_quantity <= 0 || self.ask_quantity <= 0 {
-            return Err(MarketDataValidationError::InvalidQuantity);
+        if let Some(ask) = self.ask {
+            ask.validate(false)?;
         }
-        if self.bid_price >= self.ask_price {
+        if self
+            .bid
+            .zip(self.ask)
+            .is_some_and(|(bid, ask)| bid.price >= ask.price)
+        {
             return Err(MarketDataValidationError::InvalidQuote);
         }
         Ok(())
@@ -524,17 +528,27 @@ mod tests {
         assert_eq!(trade.validate(), Ok(()));
         let mut quote = TopOfBookQuote {
             metadata: metadata(2),
-            bid_price: 9_999,
-            bid_quantity: 10,
-            ask_price: 10_001,
-            ask_quantity: 12,
+            bid: Some(DepthLevel {
+                price: 9_999,
+                quantity: 10,
+                order_count: Some(2),
+            }),
+            ask: Some(DepthLevel {
+                price: 10_001,
+                quantity: 12,
+                order_count: Some(3),
+            }),
         };
         assert_eq!(quote.validate(), Ok(()));
-        quote.ask_price = quote.bid_price;
+        quote.ask.as_mut().expect("ask exists").price = 9_999;
         assert_eq!(
             quote.validate(),
             Err(MarketDataValidationError::InvalidQuote)
         );
+        quote.ask = None;
+        assert_eq!(quote.validate(), Ok(()));
+        quote.bid = None;
+        assert_eq!(quote.validate(), Ok(()));
     }
 
     #[test]

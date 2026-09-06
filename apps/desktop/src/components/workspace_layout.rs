@@ -198,18 +198,18 @@ pub(super) fn workspace_pane_element(
         .is_some_and(|chart| chart.read(cx).has_market_data());
     let chart_state =
         connectivity_chart_state(surface.chart_state, connection_state, chart_has_market_data);
-    let dom_columns = surface.dom.read(cx).columns();
+    let order_book_columns = surface.order_book.read(cx).columns();
     let content = market_workspace(MarketWorkspaceState {
         app: pane.surface.clone(),
         pane_id,
         chart: surface.chart.as_ref(),
         chart_has_market_data,
         chart_is_superseded: surface.showing_superseded_series(),
-        dom: surface.dom.clone(),
+        order_book: surface.order_book.clone(),
         side_panel: surface.side_panel,
         side_panel_width: surface.side_panel_width,
-        dom_column_menu_open: surface.menu_state.dom_column_open,
-        dom_columns,
+        order_book_column_menu_open: surface.menu_state.order_book_column_open,
+        order_book_columns,
         chart_state,
         chart_status_detail: chart_status_detail(
             chart_state,

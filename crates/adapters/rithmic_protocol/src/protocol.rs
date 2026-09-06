@@ -148,6 +148,25 @@ pub struct MarketDataSubscription<'a> {
     pub order_book: bool,
 }
 
+/// Read-only depth-by-order subscription request.
+///
+/// Rithmic's DBO stream is distinct from the aggregate order-book bit carried
+/// by [`MarketDataSubscription`]. The ticker plant acknowledges this request
+/// before emitting order-level image/update messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepthByOrderSubscription<'a> {
+    pub symbol: &'a str,
+    pub exchange: &'a str,
+    pub action: SubscriptionAction,
+}
+
+/// Read-only covering depth-by-order snapshot request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepthByOrderSnapshotRequest<'a> {
+    pub symbol: &'a str,
+    pub exchange: &'a str,
+}
+
 /// Whether a complete market-data selection is installed or removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubscriptionAction {
@@ -253,6 +272,8 @@ pub enum OutboundRequest<'a> {
     Logout,
     Heartbeat,
     MarketData(MarketDataSubscription<'a>),
+    DepthByOrder(DepthByOrderSubscription<'a>),
+    DepthByOrderSnapshot(DepthByOrderSnapshotRequest<'a>),
     SearchSymbols(SymbolSearchRequest<'a>),
     InstrumentReference(InstrumentReferenceRequest<'a>),
     TimeBarUpdate(TimeBarSubscription<'a>),
@@ -269,6 +290,8 @@ impl fmt::Debug for OutboundRequest<'_> {
             Self::Logout => formatter.write_str("Logout"),
             Self::Heartbeat => formatter.write_str("Heartbeat"),
             Self::MarketData(_) => formatter.write_str("MarketData"),
+            Self::DepthByOrder(_) => formatter.write_str("DepthByOrder"),
+            Self::DepthByOrderSnapshot(_) => formatter.write_str("DepthByOrderSnapshot"),
             Self::SearchSymbols(_) => formatter.write_str("SearchSymbols"),
             Self::InstrumentReference(_) => formatter.write_str("InstrumentReference"),
             Self::TimeBarUpdate(_) => formatter.write_str("TimeBarUpdate"),
@@ -332,6 +355,9 @@ pub enum DecodedControlMessage {
         microseconds: Option<i32>,
     },
     MarketDataSubscription {
+        accepted: bool,
+    },
+    DepthByOrderSubscription {
         accepted: bool,
     },
 }
@@ -458,10 +484,11 @@ fn decode_control(_frame: &[u8]) -> Result<DecodedControlMessage, ProtocolError>
 #[cfg(rithmic_kit)]
 mod kit {
     use super::{
-        DecodedControlMessage, InstrumentReferenceRequest, InstrumentType, LoginRequest,
-        MarketDataSubscription, OutboundRequest, ProtocolError, ReadOnlyPlant, SearchPattern,
-        SensitiveFrame, SubscriptionAction, SymbolSearchRequest, TickBarReplayRequest,
-        TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription, TimeBarType,
+        DecodedControlMessage, DepthByOrderSnapshotRequest, InstrumentReferenceRequest,
+        InstrumentType, LoginRequest, MarketDataSubscription, OutboundRequest, ProtocolError,
+        ReadOnlyPlant, SearchPattern, SensitiveFrame, SubscriptionAction, SymbolSearchRequest,
+        TickBarReplayRequest, TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
+        TimeBarType,
     };
     use crate::generated::rti;
     use prost::Message;
@@ -485,6 +512,9 @@ mod kit {
     const HEARTBEAT_RESPONSE: i32 = 19;
     const MARKET_DATA_REQUEST: i32 = 100;
     const MARKET_DATA_RESPONSE: i32 = 101;
+    const DEPTH_BY_ORDER_SNAPSHOT_REQUEST: i32 = 115;
+    const DEPTH_BY_ORDER_UPDATES_REQUEST: i32 = 117;
+    const DEPTH_BY_ORDER_UPDATES_RESPONSE: i32 = 118;
     const REFERENCE_DATA_REQUEST: i32 = 14;
     const SEARCH_SYMBOLS_REQUEST: i32 = 109;
     const TIME_BAR_UPDATE_REQUEST: i32 = 200;
@@ -500,6 +530,8 @@ mod kit {
         SYSTEM_INFO_REQUEST,
         HEARTBEAT_REQUEST,
         MARKET_DATA_REQUEST,
+        DEPTH_BY_ORDER_SNAPSHOT_REQUEST,
+        DEPTH_BY_ORDER_UPDATES_REQUEST,
         SEARCH_SYMBOLS_REQUEST,
         TIME_BAR_UPDATE_REQUEST,
         TIME_BAR_REPLAY_REQUEST,
@@ -530,6 +562,10 @@ mod kit {
             }
             .encode_to_vec(),
             OutboundRequest::MarketData(request) => encode_market_data(request)?,
+            OutboundRequest::DepthByOrder(request) => encode_depth_by_order(request)?,
+            OutboundRequest::DepthByOrderSnapshot(request) => {
+                encode_depth_by_order_snapshot(request)?
+            }
             OutboundRequest::SearchSymbols(request) => encode_symbol_search(request)?,
             OutboundRequest::InstrumentReference(request) => encode_instrument_reference(request)?,
             OutboundRequest::TimeBarUpdate(request) => encode_time_bar_update(request)?,
@@ -600,6 +636,45 @@ mod kit {
             exchange: Some(request.exchange.to_string()),
             request: Some(operation.into()),
             update_bits: Some(update_bits),
+        }
+        .encode_to_vec())
+    }
+
+    fn encode_depth_by_order(
+        request: super::DepthByOrderSubscription<'_>,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        validate_field("symbol", request.symbol)?;
+        validate_field("exchange", request.exchange)?;
+        let operation = match request.action {
+            SubscriptionAction::Subscribe => {
+                rti::request_depth_by_order_updates::Request::Subscribe
+            }
+            SubscriptionAction::Unsubscribe => {
+                rti::request_depth_by_order_updates::Request::Unsubscribe
+            }
+        };
+        Ok(rti::RequestDepthByOrderUpdates {
+            template_id: DEPTH_BY_ORDER_UPDATES_REQUEST,
+            user_msg: Vec::new(),
+            request: Some(operation.into()),
+            symbol: Some(request.symbol.to_string()),
+            exchange: Some(request.exchange.to_string()),
+            depth_price: None,
+        }
+        .encode_to_vec())
+    }
+
+    fn encode_depth_by_order_snapshot(
+        request: DepthByOrderSnapshotRequest<'_>,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        validate_field("symbol", request.symbol)?;
+        validate_field("exchange", request.exchange)?;
+        Ok(rti::RequestDepthByOrderSnapshot {
+            template_id: DEPTH_BY_ORDER_SNAPSHOT_REQUEST,
+            user_msg: Vec::new(),
+            symbol: Some(request.symbol.to_string()),
+            exchange: Some(request.exchange.to_string()),
+            depth_price: None,
         }
         .encode_to_vec())
     }
@@ -878,6 +953,14 @@ mod kit {
                     accepted: accepted(&response.rp_code),
                 })
             }
+            DEPTH_BY_ORDER_UPDATES_RESPONSE => {
+                let response = rti::ResponseDepthByOrderUpdates::decode(frame)
+                    .map_err(|_| ProtocolError::Decode)?;
+                validate_response_fields(&response.user_msg, &response.rp_code)?;
+                Ok(DecodedControlMessage::DepthByOrderSubscription {
+                    accepted: accepted(&response.rp_code),
+                })
+            }
             template => Err(ProtocolError::UnsupportedTemplate(template)),
         }
     }
@@ -1043,6 +1126,15 @@ mod tests {
                 quotes: true,
                 order_book: true,
             }),
+            OutboundRequest::DepthByOrder(DepthByOrderSubscription {
+                symbol: "ESM7",
+                exchange: "CME",
+                action: SubscriptionAction::Subscribe,
+            }),
+            OutboundRequest::DepthByOrderSnapshot(DepthByOrderSnapshotRequest {
+                symbol: "ESM7",
+                exchange: "CME",
+            }),
             OutboundRequest::SearchSymbols(SymbolSearchRequest {
                 search_text: "ES",
                 exchange: Some("CME"),
@@ -1092,7 +1184,10 @@ mod tests {
                 template_id(&frame)
             })
             .collect::<Vec<_>>();
-        assert_eq!(emitted, [16, 10, 12, 18, 100, 109, 14, 200, 202, 204, 206]);
+        assert_eq!(
+            emitted,
+            [16, 10, 12, 18, 100, 117, 115, 109, 14, 200, 202, 204, 206]
+        );
         assert_eq!(
             emitted.len(),
             kit::READ_ONLY_OUTBOUND_TEMPLATES.len(),
@@ -1165,6 +1260,19 @@ mod tests {
                 .decode_control(&rejected_subscription)
                 .expect("single-code rejection decodes"),
             DecodedControlMessage::MarketDataSubscription { accepted: false }
+        );
+
+        let accepted_depth = rti::ResponseDepthByOrderUpdates {
+            template_id: 118,
+            user_msg: Vec::new(),
+            rp_code: vec!["0".to_string()],
+        }
+        .encode_to_vec();
+        assert_eq!(
+            codec
+                .decode_control(&accepted_depth)
+                .expect("DBO subscription acknowledgement decodes"),
+            DecodedControlMessage::DepthByOrderSubscription { accepted: true }
         );
 
         let login = rti::ResponseLogin {

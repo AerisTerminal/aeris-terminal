@@ -257,7 +257,20 @@ pub(super) fn order_book_snapshot(
     generation: GenerationId,
     order_book: &ProviderOrderBook,
 ) -> envelope::Payload {
-    let publication = order_book.book.publication();
+    let mut publication = order_book.book.publication();
+    if let Some(quote) = order_book.top_of_book.as_ref() {
+        publication.best_bid = quote.bid;
+        publication.best_ask = quote.ask;
+        publication.bbo_source_watermark = quote.metadata.source_sequence;
+    } else {
+        // Providers without a separate BBO stream (Hyperliquid today) still
+        // have an authoritative best price in the complete L2 snapshot. Expose
+        // that top level as BBO metadata without fabricating any additional
+        // depth. Explicit provider BBO always wins when present.
+        publication.best_bid = publication.bids.first().copied();
+        publication.best_ask = publication.asks.first().copied();
+        publication.bbo_source_watermark = publication.source_watermark;
+    }
     let provider_generation = if publication.session_generation == 0 {
         order_book.instrument.session_generation
     } else {
@@ -276,7 +289,26 @@ pub(super) fn order_book_snapshot(
         state: ipc_order_book_state(publication.state) as i32,
         bids: ipc_order_book_levels(&publication.bids, &order_book.traded_volumes),
         asks: ipc_order_book_levels(&publication.asks, &order_book.traded_volumes),
+        best_bid: publication
+            .best_bid
+            .map(|level| ipc_order_book_level(level, &order_book.traded_volumes)),
+        best_ask: publication
+            .best_ask
+            .map(|level| ipc_order_book_level(level, &order_book.traded_volumes)),
+        bbo_source_watermark: publication.bbo_source_watermark,
     })
+}
+
+fn ipc_order_book_level(
+    level: DepthLevel,
+    traded_volumes: &BTreeMap<i64, i64>,
+) -> IpcOrderBookLevel {
+    IpcOrderBookLevel {
+        price: level.price,
+        quantity: level.quantity,
+        order_count: level.order_count,
+        traded_volume: traded_volumes.get(&level.price).copied().unwrap_or(0),
+    }
 }
 
 pub(super) fn ipc_order_book_levels(
@@ -285,12 +317,7 @@ pub(super) fn ipc_order_book_levels(
 ) -> Vec<IpcOrderBookLevel> {
     levels
         .iter()
-        .map(|level| IpcOrderBookLevel {
-            price: level.price,
-            quantity: level.quantity,
-            order_count: level.order_count,
-            traded_volume: traded_volumes.get(&level.price).copied().unwrap_or(0),
-        })
+        .map(|level| ipc_order_book_level(*level, traded_volumes))
         .collect()
 }
 
@@ -348,19 +375,19 @@ pub(super) fn series_state_with_persistence(
     })
 }
 
-impl ConsumerEvents {
-    pub(super) fn front(&self) -> Option<&envelope::Payload> {
-        self.provider
-            .as_ref()
-            .or_else(|| self.series.front())
-            .or(self.series_state.as_ref())
-            .or(self.demand_error.as_ref())
-            .or(self.order_book.as_ref())
-            .or(self.order_flow.as_ref())
-            .or(self.catalog_selection.as_ref())
-            .or(self.catalog_search.as_ref())
-    }
+#[derive(Clone, Copy)]
+enum ConsumerEventSlot {
+    Provider,
+    Series,
+    SeriesState,
+    DemandError,
+    OrderBook,
+    OrderFlow,
+    CatalogSelection,
+    CatalogSearch,
+}
 
+impl ConsumerEvents {
     pub(super) fn pop(&mut self) -> Option<envelope::Payload> {
         self.provider
             .take()
@@ -371,6 +398,46 @@ impl ConsumerEvents {
             .or_else(|| self.order_flow.take())
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
+    }
+
+    fn pop_for_send(&mut self) -> Option<(ConsumerEventSlot, envelope::Payload)> {
+        if let Some(payload) = self.provider.take() {
+            return Some((ConsumerEventSlot::Provider, payload));
+        }
+        if let Some(payload) = self.series.pop_front() {
+            return Some((ConsumerEventSlot::Series, payload));
+        }
+        if let Some(payload) = self.series_state.take() {
+            return Some((ConsumerEventSlot::SeriesState, payload));
+        }
+        if let Some(payload) = self.demand_error.take() {
+            return Some((ConsumerEventSlot::DemandError, payload));
+        }
+        if let Some(payload) = self.order_book.take() {
+            return Some((ConsumerEventSlot::OrderBook, payload));
+        }
+        if let Some(payload) = self.order_flow.take() {
+            return Some((ConsumerEventSlot::OrderFlow, payload));
+        }
+        if let Some(payload) = self.catalog_selection.take() {
+            return Some((ConsumerEventSlot::CatalogSelection, payload));
+        }
+        self.catalog_search
+            .take()
+            .map(|payload| (ConsumerEventSlot::CatalogSearch, payload))
+    }
+
+    fn restore_after_full(&mut self, slot: ConsumerEventSlot, payload: envelope::Payload) {
+        match slot {
+            ConsumerEventSlot::Provider => self.provider = Some(payload),
+            ConsumerEventSlot::Series => self.series.push_front(payload),
+            ConsumerEventSlot::SeriesState => self.series_state = Some(payload),
+            ConsumerEventSlot::DemandError => self.demand_error = Some(payload),
+            ConsumerEventSlot::OrderBook => self.order_book = Some(payload),
+            ConsumerEventSlot::OrderFlow => self.order_flow = Some(payload),
+            ConsumerEventSlot::CatalogSelection => self.catalog_selection = Some(payload),
+            ConsumerEventSlot::CatalogSearch => self.catalog_search = Some(payload),
+        }
     }
 
     /// Queues one covering snapshot, discarding everything it already covers.
@@ -494,15 +561,17 @@ impl Coordinator<'_> {
                 continue;
             };
             while remaining > 0 {
-                let Some(event) = events.front().cloned() else {
+                let Some((slot, event)) = events.pop_for_send() else {
                     break;
                 };
                 match sender.try_send((consumer_id.0.get(), event)) {
                     Ok(()) => {
-                        let _ = events.pop();
                         remaining -= 1;
                     }
-                    Err(TrySendError::Full(_)) => break,
+                    Err(TrySendError::Full((_, event))) => {
+                        events.restore_after_full(slot, event);
+                        break;
+                    }
                     Err(TrySendError::Disconnected(_)) => {
                         disconnected.insert(client_id);
                         break;

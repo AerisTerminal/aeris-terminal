@@ -22,7 +22,7 @@ use axiusflow_market_data::{
     BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
     OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
-use axiusflow_terminal_ui::{DomSelection, DomUpdateOutcome, ReadOnlyDom};
+use axiusflow_terminal_ui::{OrderBookSelection, OrderBookUpdateOutcome, ReadOnlyOrderBook};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::{
@@ -286,7 +286,7 @@ struct DepthGapRecoveryEvidence {
 struct GenerationFencingEvidence {
     chart: ChartGenerationFencingEvidence,
     history: HistoryGenerationFencingEvidence,
-    dom: DomGenerationFencingEvidence,
+    order_book: OrderBookGenerationFencingEvidence,
 }
 
 #[derive(Serialize)]
@@ -301,9 +301,9 @@ struct HistoryGenerationFencingEvidence {
 }
 
 #[derive(Serialize)]
-struct DomGenerationFencingEvidence {
-    retired_dom_selection_ignored_without_mutation: bool,
-    current_dom_selection_recovers: bool,
+struct OrderBookGenerationFencingEvidence {
+    retired_order_book_selection_ignored_without_mutation: bool,
+    current_order_book_selection_recovers: bool,
 }
 
 pub(super) struct ProcessMemoryProbe {
@@ -488,12 +488,12 @@ fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn
             .newer_history_snapshot_recovers
         || !evidence
             .generation_fencing
-            .dom
-            .retired_dom_selection_ignored_without_mutation
+            .order_book
+            .retired_order_book_selection_ignored_without_mutation
         || !evidence
             .generation_fencing
-            .dom
-            .current_dom_selection_recovers
+            .order_book
+            .current_order_book_selection_recovers
     {
         return Err("desktop gap recovery contract failed".into());
     }
@@ -556,23 +556,23 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
     );
 
     let maximum_levels = NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN);
-    let mut dom = ReadOnlyDom::new(maximum_levels);
-    dom.select(dom_selection("mnq", 7, 1)?);
-    dom.apply_event(&depth_snapshot_for("mnq", 7, 10))?;
-    dom.select(dom_selection("es", 8, 2)?);
-    let retired_outcome = dom.apply_event(&depth_snapshot_for("mnq", 7, 11))?;
-    let retired_frame = dom
+    let mut order_book = ReadOnlyOrderBook::new(maximum_levels);
+    order_book.select(order_book_selection("mnq", 7, 1)?);
+    order_book.apply_event(&depth_snapshot_for("mnq", 7, 10))?;
+    order_book.select(order_book_selection("es", 8, 2)?);
+    let retired_outcome = order_book.apply_event(&depth_snapshot_for("mnq", 7, 11))?;
+    let retired_frame = order_book
         .frame()
-        .ok_or("DOM selection disappeared during generation fencing")?;
-    let retired_dom_selection_ignored_without_mutation = retired_outcome
-        == DomUpdateOutcome::Ignored
+        .ok_or("Order Book selection disappeared during generation fencing")?;
+    let retired_order_book_selection_ignored_without_mutation = retired_outcome
+        == OrderBookUpdateOutcome::Ignored
         && retired_frame.selection_generation == 2
         && retired_frame.session_generation == 8
         && retired_frame.source_watermark == 0
         && retired_frame.rows.is_empty();
-    let current_dom_selection_recovers = matches!(
-        dom.apply_event(&depth_snapshot_for("es", 8, 1))?,
-        DomUpdateOutcome::Published(frame)
+    let current_order_book_selection_recovers = matches!(
+        order_book.apply_event(&depth_snapshot_for("es", 8, 1))?,
+        OrderBookUpdateOutcome::Published(frame)
             if frame.selection_generation == 2
                 && frame.session_generation == 8
                 && frame.source_watermark == 1
@@ -587,9 +587,9 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
             stale_history_snapshot_rejected,
             newer_history_snapshot_recovers,
         },
-        dom: DomGenerationFencingEvidence {
-            retired_dom_selection_ignored_without_mutation,
-            current_dom_selection_recovers,
+        order_book: OrderBookGenerationFencingEvidence {
+            retired_order_book_selection_ignored_without_mutation,
+            current_order_book_selection_recovers,
         },
     })
 }
@@ -620,8 +620,8 @@ fn collect_history_gap_evidence() -> Result<HistoryGapRecoveryEvidence, Box<dyn 
 }
 
 fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Error>> {
-    let mut dom = ReadOnlyDom::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
-    dom.select(DomSelection {
+    let mut order_book = ReadOnlyOrderBook::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    order_book.select(OrderBookSelection {
         provider_id: "rithmic".to_string(),
         instrument_id: "mnq".to_string(),
         entitlement_id: "test".to_string(),
@@ -629,18 +629,18 @@ fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Erro
         selection_generation: 1,
         precision: InstrumentPrecision::try_new(2, 0)?,
     });
-    dom.apply_event(&depth_snapshot(10))?;
-    dom.apply_event(&depth_delta(11))?;
-    let depth_gap = dom.apply_event(&depth_delta(13));
-    let recovering = dom
+    order_book.apply_event(&depth_snapshot(10))?;
+    order_book.apply_event(&depth_delta(11))?;
+    let depth_gap = order_book.apply_event(&depth_delta(13));
+    let recovering = order_book
         .frame()
-        .ok_or("DOM selection disappeared during recovery")?;
+        .ok_or("Order Book selection disappeared during recovery")?;
     let depth_gap_clears_book = depth_gap.is_err()
         && recovering.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
         && recovering.rows.is_empty();
     let depth_covering_snapshot_recovers = matches!(
-        dom.apply_event(&depth_snapshot(13))?,
-        DomUpdateOutcome::Published(frame)
+        order_book.apply_event(&depth_snapshot(13))?,
+        OrderBookUpdateOutcome::Published(frame)
             if frame.state == OrderBookState::Ready && frame.source_watermark == 13
     );
     Ok(DepthGapRecoveryEvidence {
@@ -692,12 +692,12 @@ fn depth_snapshot_for(instrument_id: &str, session_generation: u64, sequence: u6
     })
 }
 
-fn dom_selection(
+fn order_book_selection(
     instrument_id: &str,
     session_generation: u64,
     selection_generation: u64,
-) -> Result<DomSelection, Box<dyn Error>> {
-    Ok(DomSelection {
+) -> Result<OrderBookSelection, Box<dyn Error>> {
+    Ok(OrderBookSelection {
         provider_id: "rithmic".to_string(),
         instrument_id: instrument_id.to_string(),
         entitlement_id: "test".to_string(),
@@ -1288,8 +1288,8 @@ mod tests {
             evidence
                 .gap_recovery
                 .generation_fencing
-                .dom
-                .retired_dom_selection_ignored_without_mutation
+                .order_book
+                .retired_order_book_selection_ignored_without_mutation
         );
     }
 
@@ -1322,14 +1322,14 @@ mod tests {
         assert!(
             evidence
                 .generation_fencing
-                .dom
-                .retired_dom_selection_ignored_without_mutation
+                .order_book
+                .retired_order_book_selection_ignored_without_mutation
         );
         assert!(
             evidence
                 .generation_fencing
-                .dom
-                .current_dom_selection_recovers
+                .order_book
+                .current_order_book_selection_recovers
         );
     }
 
@@ -1344,8 +1344,12 @@ mod tests {
         );
         assert!(evidence.history.stale_history_snapshot_rejected);
         assert!(evidence.history.newer_history_snapshot_recovers);
-        assert!(evidence.dom.retired_dom_selection_ignored_without_mutation);
-        assert!(evidence.dom.current_dom_selection_recovers);
+        assert!(
+            evidence
+                .order_book
+                .retired_order_book_selection_ignored_without_mutation
+        );
+        assert!(evidence.order_book.current_order_book_selection_recovers);
     }
 
     #[test]

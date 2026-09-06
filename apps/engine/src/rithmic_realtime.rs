@@ -13,17 +13,17 @@ use axiusflow_engine_protocol::{
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
 };
-use axiusflow_market_data::{DepthSnapshot, MarketEvent, MarketTrade};
+use axiusflow_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
 use axiusflow_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
 use axiusflow_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
-    ProviderSessionEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
-    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderConfig,
-    RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_TEST_VAULT_KEY,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent,
+    RithmicCatalogRejection, RithmicEnvironmentEvent, RithmicInstrumentSelection,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
     RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeState,
     RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
     SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
@@ -50,6 +50,7 @@ pub(crate) enum RithmicCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
     SelectionResolved {
         consumer_id: u64,
+        command_generation: u64,
         instrument: InstallProviderInstrument,
     },
     Rejected {
@@ -62,10 +63,11 @@ pub(crate) enum RithmicRealtimeEvent {
     Connecting(u64),
     Connected(u64),
     Trade(u64, MarketTrade),
+    Quote(u64, TopOfBookQuote),
     Depth(u64, DepthSnapshot),
     Heartbeat(u64),
-    Recovering(u64),
-    Disconnected(u64),
+    Recovering(u64, Option<ProviderInvalidationReason>),
+    Disconnected(u64, Option<ProviderInvalidationReason>),
 }
 
 type Runtime = RithmicProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
@@ -242,7 +244,8 @@ fn run_catalog_session(
                 &mut selections,
             ) {
                 if runtime.stop().is_err() {
-                    reject_deferred_selection(channels.catalog_publications, generation, selection);
+                    let publications = channels.catalog_publications;
+                    reject_deferred_selection(publications, generation, &selection);
                     return CatalogSessionExit::Closed;
                 }
                 return CatalogSessionExit::SelectionCompleted {
@@ -446,6 +449,7 @@ fn publish_catalog_callback(
             let consumer_id = selections.remove(&selection_generation.get())?;
             Some(RithmicCatalogEvent::SelectionResolved {
                 consumer_id,
+                command_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
                 instrument: protocol_instrument(
                     provider_generation,
                     selection_generation,
@@ -587,9 +591,8 @@ fn retire_pending_catalog_generation(
     searches: &mut BTreeMap<usize, u64>,
     selections: &mut BTreeMap<usize, u64>,
 ) -> u64 {
-    let generation = next_generation(generation, generation);
     reject_pending_catalog(publications, generation, searches, selections);
-    generation
+    next_generation(generation, generation)
 }
 
 fn retry_catalog_session(runtime: &mut Runtime, generation: u64) -> CatalogSessionExit {
@@ -600,18 +603,19 @@ fn retry_catalog_session(runtime: &mut Runtime, generation: u64) -> CatalogSessi
 fn reject_deferred_selection(
     publications: &SyncSender<RithmicCatalogEvent>,
     provider_generation: u64,
-    selection: RithmicCatalogEvent,
+    selection: &RithmicCatalogEvent,
 ) {
     if let RithmicCatalogEvent::SelectionResolved {
         consumer_id,
-        instrument,
+        command_generation,
+        instrument: _,
     } = selection
     {
         reject_catalog_generation(
             publications,
-            consumer_id,
+            *consumer_id,
             Some(provider_generation),
-            instrument.selection_generation,
+            *command_generation,
             true,
         );
     }
@@ -713,6 +717,8 @@ pub(crate) fn run(
                     }
                     SelectionExit::Idle { generation } => {
                         last_generation = generation;
+                        let _ = realtime_publications
+                            .send(RithmicRealtimeEvent::Disconnected(generation, None));
                         break;
                     }
                     SelectionExit::CatalogHandoff { generation } => {
@@ -722,7 +728,7 @@ pub(crate) fn run(
                     }
                     SelectionExit::Closed { generation } => {
                         let _ = realtime_publications
-                            .send(RithmicRealtimeEvent::Disconnected(generation));
+                            .send(RithmicRealtimeEvent::Disconnected(generation, None));
                         return;
                     }
                 }
@@ -820,6 +826,7 @@ fn reject_unavailable_provider(channels: ProviderChannels<'_>) {
                     .realtime_publications
                     .send(RithmicRealtimeEvent::Disconnected(
                         selected.session_generation,
+                        None,
                     ));
             }
             Ok(RithmicRealtimeControl::Stop) | Err(RecvTimeoutError::Timeout) => {}
@@ -882,7 +889,7 @@ fn handle_live_catalog(
             selections,
         ) {
             if runtime.stop().is_err() {
-                reject_deferred_selection(channels.catalog_publications, generation, selection);
+                reject_deferred_selection(channels.catalog_publications, generation, &selection);
                 return Some(SelectionExit::Closed { generation });
             }
             thread::park_timeout(channels.reconnect_delay);
@@ -904,7 +911,7 @@ fn run_selection(
     let Ok((mut runtime, events)) = opened else {
         let _ = channels
             .realtime_publications
-            .send(RithmicRealtimeEvent::Disconnected(generation));
+            .send(RithmicRealtimeEvent::Disconnected(generation, None));
         return wait_for_replacement(
             channels.realtime_controls,
             environment,
@@ -921,7 +928,7 @@ fn run_selection(
     if apply_current_environment(&mut runtime, &events, &mut retries, *environment_state).is_err() {
         let _ = channels
             .realtime_publications
-            .send(RithmicRealtimeEvent::Recovering(generation));
+            .send(RithmicRealtimeEvent::Recovering(generation, None));
     }
     loop {
         match poll_environment(
@@ -982,9 +989,12 @@ fn run_selection(
             .retry_due(&mut runtime, Instant::now())
             .is_ok_and(|started| started.is_some())
         {
-            generation = next_generation(generation, generation);
-            searches.clear();
-            selections.clear();
+            generation = retire_pending_catalog_generation(
+                channels.catalog_publications,
+                generation,
+                &mut searches,
+                &mut selections,
+            );
             let _ = channels
                 .realtime_publications
                 .send(RithmicRealtimeEvent::Connecting(generation));
@@ -1020,6 +1030,15 @@ fn drain_live_events(
                         .send(RithmicRealtimeEvent::Trade(generation, trade));
                 }
                 ProviderSessionEvent::Market {
+                    event: MarketEvent::Quote(mut quote),
+                    ..
+                } => {
+                    quote.metadata.session_generation = generation;
+                    let _ = channels
+                        .realtime_publications
+                        .send(RithmicRealtimeEvent::Quote(generation, quote));
+                }
+                ProviderSessionEvent::Market {
                     event: MarketEvent::DepthSnapshot(mut snapshot),
                     ..
                 } => {
@@ -1040,16 +1059,19 @@ fn drain_live_events(
                 | ProviderSessionEvent::Invalidated { .. }
                 | ProviderSessionEvent::Stopped => {}
             },
-            Ok(Some(AppliedRithmicEvent::RetryScheduled(_))) => {
+            Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket))) => {
                 let _ = channels
                     .realtime_publications
-                    .send(RithmicRealtimeEvent::Recovering(generation));
+                    .send(RithmicRealtimeEvent::Recovering(
+                        generation,
+                        Some(ticket.reason),
+                    ));
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
                 eprintln!("Axiusflow Rithmic live session failed: {reason:?}");
                 let _ = channels
                     .realtime_publications
-                    .send(RithmicRealtimeEvent::Disconnected(generation));
+                    .send(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
                 let _ = runtime.stop();
                 return Some(wait_for_replacement(
                     channels.realtime_controls,
@@ -1062,7 +1084,7 @@ fn drain_live_events(
                 eprintln!("Axiusflow Rithmic live callback failed: {error}");
                 let _ = channels
                     .realtime_publications
-                    .send(RithmicRealtimeEvent::Disconnected(generation));
+                    .send(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
                 return Some(wait_for_replacement(
                     channels.realtime_controls,
@@ -1104,11 +1126,11 @@ fn poll_environment(
             Ok(Some(generation))
         }
         Ok(None) => {
-            let _ = publications.send(RithmicRealtimeEvent::Disconnected(generation));
+            let _ = publications.send(RithmicRealtimeEvent::Disconnected(generation, None));
             Ok(None)
         }
         Err(_) => {
-            let _ = publications.send(RithmicRealtimeEvent::Recovering(generation));
+            let _ = publications.send(RithmicRealtimeEvent::Recovering(generation, None));
             Ok(None)
         }
     }
@@ -1377,6 +1399,7 @@ mod tests {
             deferred,
             RithmicCatalogEvent::SelectionResolved {
                 consumer_id: 41,
+                command_generation: 1,
                 instrument
             } if instrument.session_generation == 7
                 && instrument.provider_symbol == "MNQU6"
@@ -1388,6 +1411,7 @@ mod tests {
         let (publications, published) = mpsc::sync_channel(1);
         let selection = RithmicCatalogEvent::SelectionResolved {
             consumer_id: 41,
+            command_generation: 3,
             instrument: axiusflow_engine_protocol::InstallProviderInstrument {
                 provider: "rithmic".to_string(),
                 session_generation: 7,
@@ -1402,7 +1426,7 @@ mod tests {
             },
         };
 
-        reject_deferred_selection(&publications, 7, selection);
+        reject_deferred_selection(&publications, 7, &selection);
 
         assert!(matches!(
             published.recv().expect("close failure is published"),
@@ -1473,7 +1497,7 @@ mod tests {
         assert!(rejections.iter().all(|event| matches!(
             event,
             RithmicCatalogEvent::Rejected { rejection, .. }
-                if rejection.provider_generation == Some(10)
+                if rejection.provider_generation == Some(9)
         )));
     }
 
