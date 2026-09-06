@@ -2,7 +2,7 @@
 
 use std::{
     cell::Cell,
-    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,

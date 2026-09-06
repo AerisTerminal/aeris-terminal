@@ -42,8 +42,6 @@ use axiusflow_desktop::market_worker::{
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
-const MAXIMUM_STARTUP_ATTEMPTS: u8 = 4;
-const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
 const RETAINED_BAR_CAPACITY: usize = 32_768;
@@ -282,7 +280,6 @@ struct WorkerEndpoint {
     /// a `Partial` state is a background history repair, not a loading chart.
     live: bool,
     active_generation: u64,
-    selection_sequence: Arc<AtomicU64>,
     resource_class: ConsumerResourceClass,
     active: bool,
 }
@@ -384,7 +381,6 @@ fn worker_endpoint(
             publication: None,
             live: false,
             active_generation: initial_generation,
-            selection_sequence,
             resource_class: ConsumerResourceClass::Foreground,
             active: true,
         },
@@ -664,56 +660,11 @@ fn initialize_endpoint(
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
     client.install_provider_instrument(product.clone())?;
     let series = series_key(product, interval)?;
-    let mut attempt = 1_u8;
-    let result = loop {
-        match request_snapshot(
-            client,
-            endpoint.consumer_id,
-            endpoint.active_generation,
-            series.clone(),
-            &endpoint.messages,
-        ) {
-            Ok(snapshot) => break Ok(snapshot),
-            Err(_error) if attempt < MAXIMUM_STARTUP_ATTEMPTS => {
-                attempt += 1;
-                let Some(generation) = endpoint.active_generation.checked_add(1) else {
-                    break Err("Coinbase startup generation exhausted".to_string());
-                };
-                endpoint.active_generation = generation;
-                endpoint
-                    .selection_sequence
-                    .store(generation, Ordering::Release);
-                let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                    state: ChartState::Loading,
-                    message: "Retrying initial Coinbase market load".to_string(),
-                });
-                thread::sleep(STARTUP_RETRY_DELAY);
-            }
-            Err(error) => break Err(error),
-        }
-    };
-    match result {
-        Ok((snapshot, generation)) => {
-            let publication = MarketPublicationGeneration::from_generation(&generation);
-            send_publication(
-                &endpoint.messages,
-                ReplayStreamUpdate::Snapshot(snapshot),
-                publication,
-            )?;
-            endpoint.publication = Some(publication);
-            let (state, message) = snapshot_connection_state(interval);
-            let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
-                state,
-                message: message.to_string(),
-            });
-        }
-        Err(error) => {
-            let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message: error,
-            });
-        }
-    }
+    // Demand acknowledgement is synchronous, but history completion is not.
+    // Every pane must enter the shared event loop before any one of them waits
+    // for a covering snapshot; otherwise one slow initial fetch serializes all
+    // workspaces and can strand later panes in an unregistered loading state.
+    client.set_series_demand(endpoint.consumer_id, endpoint.active_generation, series)?;
     client.search_provider_instruments(SearchProviderInstruments {
         consumer_id: endpoint.consumer_id,
         search_generation: 1,
@@ -1473,6 +1424,7 @@ fn series_supports_realtime(series: &SeriesKey) -> bool {
         )
 }
 
+#[cfg(test)]
 const fn snapshot_connection_state(
     _interval: ChartInterval,
 ) -> (FeedConnectionState, &'static str) {

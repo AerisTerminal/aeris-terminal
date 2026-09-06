@@ -2417,9 +2417,9 @@ fn empty_viewport_completion_cannot_hide_an_initialized_live_series() {
 }
 
 #[test]
-fn initial_coinbase_request_with_explicit_range_arms_bounded_viewport_repair() {
+fn initial_coinbase_request_stops_at_latest_window_until_viewport_moves() {
     let (history_tx, history_rx) = mpsc::sync_channel(1);
-    let (storage_tx, _storage_rx) = mpsc::sync_channel(1);
+    let (storage_tx, storage_rx) = mpsc::sync_channel(2);
     let (realtime_tx, _realtime_rx) = mpsc::sync_channel(1);
     let realtime_stop = Arc::new(AtomicBool::new(true));
     let mut engine = configured_engine().expect("engine configures");
@@ -2473,16 +2473,29 @@ fn initial_coinbase_request_with_explicit_range_arms_bounded_viewport_repair() {
         }),
     );
 
-    let request = history_rx
-        .try_recv()
-        .expect("initial viewport repair queues");
-    let range = request.range.expect("initial repair range is explicit");
-    assert_eq!(request.kind, HistoryRequestKind::ViewportBackfill);
     assert!(
-        range.end_unix_nanos - range.start_unix_nanos
-            <= i64::try_from(HISTORY_BARS_PER_SERIES).expect("history bound fits") * interval
+        history_rx.try_recv().is_err(),
+        "initial completion must not start an unsolicited deep backfill"
     );
-    assert!(request.maximum_bars <= 350);
+    assert!(coordinator.viewport_history_ranges.is_empty());
+    assert!(matches!(
+        storage_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(StorageRequest::Persist(..))
+    ));
+
+    let viewport = Viewport::try_new((end_minute - 600) * interval, (end_minute - 500) * interval)
+        .expect("older viewport");
+    coordinator
+        .request_viewport_history(consumer_id, generation, viewport)
+        .expect("scrolling left requests older history");
+    assert!(matches!(
+        storage_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(StorageRequest::ReadRange(requested, current, range))
+            if requested == series
+                && current == provider_generation
+                && range.start_unix_nanos <= viewport.start_unix_nanos
+                && range.end_unix_nanos >= viewport.end_unix_nanos
+    ));
 }
 /// One consumer demanding BTC-USD 1m with a shorter-than-prefetch initial
 /// window installed, so the working-window backfill stays disarmed.

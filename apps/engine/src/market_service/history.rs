@@ -2,7 +2,7 @@ use super::{
     ActiveViewport, ActiveWorkerGuard, Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod,
     BarSeriesKey, COINBASE_PROVIDER_GENERATION, COINBASE_PUBLIC_ACCOUNT_ID, CoinbaseBarAggregator,
     CoinbaseBarAggregatorConfig, CoinbaseHistoryReadiness, CoinbaseInterval, Command, ConsumerId,
-    Coordinator, CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, Entry, FailureStage,
+    Coordinator, CoverageSnapshot, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, FailureStage,
     FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED,
     HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest, HistoryRequestKind, HistorySnapshot,
     HistorySource, HotSeries, HotSetManager, HotSetTier, InstallProviderInstrument, Instant,
@@ -1126,41 +1126,6 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn arm_initial_viewport_history(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-    ) {
-        let Ok(range) = recent_coinbase_history_range(series, HISTORY_BARS_PER_SERIES) else {
-            self.broadcast_demand_error_for(
-                series,
-                FailureStage::ProviderHistory,
-                "Coinbase initial-history range is unavailable",
-                None,
-            );
-            return;
-        };
-        if let Entry::Vacant(entry) = self
-            .viewport_history_ranges
-            .entry((series.clone(), generation))
-        {
-            entry.insert(range);
-        }
-    }
-
-    pub(super) fn should_arm_initial_viewport_history(
-        &self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        kind: HistoryRequestKind,
-        snapshot: &HistorySnapshot,
-    ) -> bool {
-        series.provider_id == "coinbase"
-            && kind == HistoryRequestKind::Initial
-            && !self.local_loaded.contains(&(series.clone(), generation))
-            && snapshot.bars.len() >= self.resource_policy.history_prefetch_bars.max(1)
-    }
-
     /// Seeds the live aggregator from installed history and drains the buffer.
     ///
     /// The seam is closed in three steps, in this order:
@@ -1591,8 +1556,6 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let arm_initial_viewport =
-            self.should_arm_initial_viewport_history(series, generation, kind, &snapshot);
         let repair = kind != HistoryRequestKind::Initial;
         let replace_covering = series.provider_id == "coinbase" && repair;
         let provider_bars = snapshot.bars.clone();
@@ -1672,9 +1635,9 @@ impl Coordinator<'_> {
         if kind == HistoryRequestKind::ViewportBackfill {
             self.viewport_history_retries.remove(&key);
         }
-        if arm_initial_viewport {
-            self.arm_initial_viewport_history(series, generation);
-        }
+        // Initial demand stops at the newest bounded window. Older coverage is
+        // requested only from `request_viewport_history` when a chart actually
+        // moves left, then persisted for the next consumer of the same series.
         self.schedule_next_coinbase_viewport_page(series, generation);
     }
 
