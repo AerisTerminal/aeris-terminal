@@ -1140,6 +1140,11 @@ pub(super) fn connection_presentation(
             theme.colors.bearish
         });
     }
+    if chart_state == ChartState::Provisional {
+        return (format!("{provider} · Provisional"), |theme| {
+            theme.colors.bearish
+        });
+    }
     // A switch or a first load is in flight. The trader is waiting on this
     // chart, not watching a feed fail, and calling that "Reconnecting" is what
     // made an ordinary switch look like an outage. A real outage still outranks

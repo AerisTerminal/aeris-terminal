@@ -855,6 +855,10 @@ fn apply_series_state(
             })
             .map_err(|error| error.to_string())
     };
+    let provisional = state
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("provisional until its authoritative close"));
     match load_state {
         SeriesLoadState::Live => {
             if !realtime {
@@ -890,6 +894,21 @@ fn apply_series_state(
             announce(
                 ChartState::Ready,
                 "Coinbase provider history is current".to_string(),
+            )?;
+            Ok(())
+        }
+        // Coinbase cannot watermark the trade coverage inside a provider-built
+        // open candle. The snapshot and live stream are usable, but the candle
+        // must remain visibly provisional until its authoritative close. This
+        // is not an in-flight load: long intervals may stay provisional for a
+        // week or month, so keeping the loader active strands a complete chart.
+        SeriesLoadState::Partial if realtime && published && provisional => {
+            *live = true;
+            announce(
+                ChartState::Provisional,
+                state.detail.unwrap_or_else(|| {
+                    "The current candle is provisional until its authoritative close".to_string()
+                }),
             )?;
             Ok(())
         }
@@ -1857,6 +1876,41 @@ mod tests {
         assert!(
             drained_states(&receiver).is_empty(),
             "a repair behind a live chart must not put it back into loading"
+        );
+    }
+
+    #[test]
+    fn provisional_forming_history_renders_without_an_indefinite_loader() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
+        let mut live = false;
+        apply_series_state(
+            SeriesState {
+                consumer_id: 1,
+                generation: 1,
+                series: None,
+                state: SeriesLoadState::Partial as i32,
+                persistence: 0,
+                detail: Some(
+                    "The current Coinbase candle is provisional until its authoritative close"
+                        .to_string(),
+                ),
+            },
+            true,
+            true,
+            &mut live,
+            &sender,
+        )
+        .expect("provisional coverage is usable");
+
+        assert!(live, "the live handoff is advancing the provisional candle");
+        assert_eq!(
+            drained_states(&receiver),
+            vec![(
+                ChartState::Provisional,
+                "The current Coinbase candle is provisional until its authoritative close"
+                    .to_string(),
+            )]
         );
     }
 

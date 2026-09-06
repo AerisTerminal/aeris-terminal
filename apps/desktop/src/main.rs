@@ -800,7 +800,7 @@ fn publication_chart_state(accepted: bool, recovery_pending: bool) -> ChartState
 }
 
 fn reconciled_bridge_state(current: ChartState, recovery_pending: bool) -> ChartState {
-    if current == ChartState::Ready && recovery_pending {
+    if matches!(current, ChartState::Ready | ChartState::Provisional) && recovery_pending {
         ChartState::Recovering
     } else {
         current
@@ -1457,12 +1457,14 @@ fn chart_surface_notice(
             tone: ChartNoticeTone::Muted,
         }),
         ChartState::Ready => None,
-        ChartState::Stale | ChartState::Recovering => Some(ChartSurfaceNotice {
-            label: state.label(),
-            detail,
-            placement,
-            tone: ChartNoticeTone::Warning,
-        }),
+        ChartState::Provisional | ChartState::Stale | ChartState::Recovering => {
+            Some(ChartSurfaceNotice {
+                label: state.label(),
+                detail,
+                placement,
+                tone: ChartNoticeTone::Warning,
+            })
+        }
         ChartState::Error => Some(ChartSurfaceNotice {
             label: state.label(),
             detail,
@@ -2772,7 +2774,8 @@ impl WorkspaceSurface {
                     } else {
                         self.coinbase_previous_selection = None;
                     }
-                } else if self.provider == TerminalProvider::Coinbase && state == ChartState::Ready
+                } else if self.provider == TerminalProvider::Coinbase
+                    && matches!(state, ChartState::Ready | ChartState::Provisional)
                 {
                     self.coinbase_switch = CoinbaseSwitchState::Idle;
                     self.coinbase_previous_selection = None;
@@ -7985,6 +7988,17 @@ mod tests {
         );
         assert_eq!(loading.placement, ChartNoticePlacement::Center);
         assert_eq!(loading.tone, ChartNoticeTone::Muted);
+
+        let provisional = chart_surface_notice(
+            ChartState::Provisional,
+            true,
+            false,
+            "The current Coinbase candle is provisional until its authoritative close",
+        )
+        .expect("provisional notice");
+        assert_eq!(provisional.label, "Chart provisional");
+        assert_eq!(provisional.placement, ChartNoticePlacement::BottomRight);
+        assert_eq!(provisional.tone, ChartNoticeTone::Warning);
 
         let recovery = chart_surface_notice(
             ChartState::Recovering,

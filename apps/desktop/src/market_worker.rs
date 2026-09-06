@@ -67,6 +67,7 @@ pub type DesktopMarketGeneration = MarketGeneration<ProvenancedMarketBar>;
 pub enum ChartState {
     Loading,
     Ready,
+    Provisional,
     Stale,
     Recovering,
     Error,
@@ -78,6 +79,7 @@ impl ChartState {
         match self {
             Self::Loading => "Loading chart",
             Self::Ready => "Chart ready",
+            Self::Provisional => "Chart provisional",
             Self::Stale => "Chart stale",
             Self::Recovering => "Reconnecting chart",
             Self::Error => "Chart unavailable",
@@ -1768,6 +1770,7 @@ mod tests {
     fn chart_states_have_explicit_user_facing_labels() {
         assert_eq!(ChartState::Loading.label(), "Loading chart");
         assert_eq!(ChartState::Ready.label(), "Chart ready");
+        assert_eq!(ChartState::Provisional.label(), "Chart provisional");
         assert_eq!(ChartState::Stale.label(), "Chart stale");
         assert_eq!(ChartState::Recovering.label(), "Reconnecting chart");
         assert_eq!(ChartState::Error.label(), "Chart unavailable");
