@@ -6,7 +6,7 @@
 //! Stable packaging launcher/updater. This binary lives outside version directories.
 
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -87,6 +87,10 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
         require_no_more(arguments)?;
         return bootstrap_update_and_launch(&executable, &verifying_key);
     }
+    if command.as_deref() == Some("--promote-stable-launcher") {
+        require_no_more(arguments)?;
+        return promote_stable_launcher(&executable, &verifying_key);
+    }
     let install_root = executable
         .parent()
         .map(Path::to_path_buf)
@@ -163,7 +167,7 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             remove_relocated_binary(&staged);
             result
         }
-        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--update|--recover|--remove-all-local-data>".to_string()),
+        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--update|--recover|--remove-all-local-data|--promote-stable-launcher>".to_string()),
     }
 }
 
@@ -178,10 +182,7 @@ fn bootstrap_update_and_launch(
     // rejects a pre-created symlinked install root before the first write.
     let installer = ReleaseInstaller::new(&install_root, *verifying_key, ReleasePolicy::native(0))
         .map_err(|error| error.to_string())?;
-    let stable_launcher = install_root.join(format!(
-        "axiusflow_launcher{}",
-        std::env::consts::EXE_SUFFIX
-    ));
+    let stable_launcher = stable_launcher_path(&install_root);
     if executable != stable_launcher {
         persist_stable_launcher(executable, &stable_launcher)?;
     }
@@ -271,12 +272,91 @@ fn persist_stable_launcher(source: &Path, destination: &Path) -> Result<(), Stri
         .open(&staging)
         .and_then(|file| file.sync_all())
         .map_err(|_| "stable launcher staging copy could not be committed".to_string())?;
-    if destination.exists() {
-        fs::remove_file(destination)
-            .map_err(|_| "existing stable launcher could not be replaced".to_string())?;
-    }
     fs::rename(&staging, destination)
         .map_err(|_| "stable launcher could not be committed".to_string())
+}
+
+fn stable_launcher_path(install_root: &Path) -> PathBuf {
+    install_root.join(format!(
+        "axiusflow_launcher{}",
+        std::env::consts::EXE_SUFFIX
+    ))
+}
+
+fn promote_stable_launcher(executable: &Path, verifying_key: &VerifyingKey) -> Result<(), String> {
+    let install_root = native_install_root().map_err(|error| error.to_string())?;
+    let stable_launcher = stable_launcher_path(&install_root);
+    if executable == stable_launcher {
+        return Ok(());
+    }
+
+    let installer = ReleaseInstaller::new(&install_root, *verifying_key, ReleasePolicy::native(0))
+        .map_err(|error| error.to_string())?;
+    let active = installer
+        .audit_active_release()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+    let expected = installer
+        .release_directory(&active)
+        .map_err(|error| error.to_string())?
+        .join(format!(
+            "axiusflow_launcher{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    let executable = fs::canonicalize(executable)
+        .map_err(|_| "versioned launcher path could not be verified".to_string())?;
+    let expected = fs::canonicalize(expected)
+        .map_err(|_| "signed versioned launcher is unavailable".to_string())?;
+    if executable != expected {
+        return Err("launcher promotion source is not the active signed release".to_string());
+    }
+
+    if files_match(&executable, &stable_launcher)? {
+        return Ok(());
+    }
+
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    while process_is_running(&stable_launcher) {
+        if Instant::now() >= deadline {
+            return Err("stable launcher did not exit before promotion".to_string());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    persist_stable_launcher(&executable, &stable_launcher)
+}
+
+fn files_match(left: &Path, right: &Path) -> Result<bool, String> {
+    let left_metadata = fs::symlink_metadata(left)
+        .map_err(|_| "versioned launcher metadata is unavailable".to_string())?;
+    if !left_metadata.is_file() || left_metadata.file_type().is_symlink() {
+        return Err("versioned launcher is not a regular file".to_string());
+    }
+    let right_metadata = match fs::symlink_metadata(right) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("stable launcher metadata is unavailable".to_string()),
+    };
+    if !right_metadata.is_file() || right_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut left = File::open(left).map_err(redacted)?;
+    let mut right = File::open(right).map_err(redacted)?;
+    let mut left_buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut right_buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let left_count = left.read(&mut left_buffer).map_err(redacted)?;
+        let right_count = right.read(&mut right_buffer).map_err(redacted)?;
+        if left_count != right_count || left_buffer[..left_count] != right_buffer[..right_count] {
+            return Ok(false);
+        }
+        if left_count == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 fn install_remote_update(
@@ -343,12 +423,42 @@ fn install_remote_update(
     installer
         .install(signed, &bundle_root, hooks)
         .map_err(|error| error.to_string())?;
+    if let Err(error) = spawn_active_launcher_promotion(installer) {
+        eprintln!("Axiusflow launcher promotion deferred: {error}");
+    }
     fs::remove_dir_all(&bundle_root)
         .map_err(|_| "release installed but its download cache could not be removed".to_string())?;
     if fs::read_dir(&downloads_root).is_ok_and(|mut entries| entries.next().is_none()) {
         let _ = fs::remove_dir(downloads_root);
     }
     Ok(())
+}
+
+fn spawn_active_launcher_promotion(installer: &ReleaseInstaller) -> Result<(), String> {
+    let active = installer
+        .audit_active_release()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+    let launcher = installer
+        .release_directory(&active)
+        .map_err(|error| error.to_string())?
+        .join(format!(
+            "axiusflow_launcher{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    let metadata = fs::symlink_metadata(&launcher)
+        .map_err(|_| "signed versioned launcher is unavailable".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("signed versioned launcher is invalid".to_string());
+    }
+    Command::new(launcher)
+        .arg("--promote-stable-launcher")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())
 }
 
 fn bootstrap_minimum_generation() -> Result<u64, String> {
@@ -1130,6 +1240,37 @@ mod tests {
         // installed-lifecycle campaign: its Windows path schedules an
         // OS-owned delayed delete that a unit test cannot await
         // deterministically.
+    }
+
+    #[test]
+    fn stable_launcher_persistence_replaces_existing_copy() {
+        let base = temporary_base("stable-replace");
+        let source = base.join("source.exe");
+        let destination = base.join("axiusflow_launcher.exe");
+        fs::write(&source, b"new-launcher").expect("source fixture");
+        fs::write(&destination, b"old-launcher").expect("destination fixture");
+
+        persist_stable_launcher(&source, &destination).expect("replace stable launcher");
+
+        assert_eq!(
+            fs::read(&destination).expect("committed launcher"),
+            b"new-launcher"
+        );
+        assert!(!base.join(".axiusflow_launcher.exe.next").exists());
+        fs::remove_dir_all(base).expect("remove temporary base");
+    }
+
+    #[test]
+    fn launcher_content_comparison_is_exact() {
+        let base = temporary_base("content-match");
+        let left = base.join("left.exe");
+        let right = base.join("right.exe");
+        fs::write(&left, b"same").expect("left fixture");
+        fs::write(&right, b"same").expect("right fixture");
+        assert!(files_match(&left, &right).expect("matching files"));
+        fs::write(&right, b"diff").expect("replace right fixture");
+        assert!(!files_match(&left, &right).expect("different files"));
+        fs::remove_dir_all(base).expect("remove temporary base");
     }
 
     #[test]

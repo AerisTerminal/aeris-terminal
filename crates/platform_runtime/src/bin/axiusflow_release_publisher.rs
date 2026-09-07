@@ -436,11 +436,14 @@ fn package_release(
         .map_err(|_| "release output directory could not be created".to_string())?;
 
     let setup_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+    let launcher_name = format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX);
     let desktop_name = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
     let engine_name = format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX);
     let setup_path = release_directory.join(&setup_name);
+    let launcher_path = release_directory.join(&launcher_name);
     let desktop_path = release_directory.join(&desktop_name);
     let engine_path = release_directory.join(&engine_name);
+    copy_release_binary(&binaries.launcher, &launcher_path)?;
     copy_release_binary(&binaries.desktop, &desktop_path)?;
     copy_release_binary(&binaries.engine, &engine_path)?;
 
@@ -457,6 +460,13 @@ fn package_release(
             &engine_path,
             &engine_name,
             &format!("{release_public_root}/{engine_name}"),
+            &config.base_url,
+        )?,
+        release_file(
+            ReleaseFileRole::RuntimeAsset,
+            &launcher_path,
+            &launcher_name,
+            &format!("{release_public_root}/{launcher_name}"),
             &config.base_url,
         )?,
     ];
@@ -490,7 +500,7 @@ fn package_release(
             compile_windows_installer(
                 repository,
                 config,
-                binaries,
+                &launcher_path,
                 &manifest_path,
                 &desktop_path,
                 &engine_path,
@@ -501,7 +511,7 @@ fn package_release(
         // The public native installer is currently a Windows product. Keep
         // non-Windows publisher tests/builds viable without inventing another
         // packaging format here.
-        copy_release_binary(&binaries.launcher, &setup_path)?;
+        copy_release_binary(&launcher_path, &setup_path)?;
     }
 
     let manifest_url = format!("{}/{release_public_root}/manifest.json", config.base_url);
@@ -539,6 +549,11 @@ fn package_release(
         UploadObject {
             local_path: setup_path,
             object_key: format!("{release_object_root}/{setup_name}"),
+            content_type: executable_content_type,
+        },
+        UploadObject {
+            local_path: launcher_path,
+            object_key: format!("{release_object_root}/{launcher_name}"),
             content_type: executable_content_type,
         },
         UploadObject {
@@ -590,7 +605,7 @@ fn copy_release_binary(source: &Path, destination: &Path) -> Result<(), String> 
 fn compile_windows_installer(
     repository: &Path,
     config: &PublisherConfig,
-    binaries: &ReleaseBinaries,
+    launcher_path: &Path,
     manifest_path: &Path,
     desktop_path: &Path,
     engine_path: &Path,
@@ -601,7 +616,7 @@ fn compile_windows_installer(
     for input in [
         script.as_path(),
         icon.as_path(),
-        binaries.launcher.as_path(),
+        launcher_path,
         manifest_path,
         desktop_path,
         engine_path,
@@ -621,7 +636,7 @@ fn compile_windows_installer(
     let status = Command::new(&config.iscc)
         .arg("/Qp")
         .arg(format!("/DAppVersion={}", env!("CARGO_PKG_VERSION")))
-        .arg(format!("/DLauncherPath={}", binaries.launcher.display()))
+        .arg(format!("/DLauncherPath={}", launcher_path.display()))
         .arg(format!("/DManifestPath={}", manifest_path.display()))
         .arg(format!("/DDesktopPath={}", desktop_path.display()))
         .arg(format!("/DEnginePath={}", engine_path.display()))
@@ -1023,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn package_emits_signed_manifest_and_matching_channel_without_setup_inventory() {
+    fn package_emits_signed_manifest_with_versioned_launcher_and_matching_channel() {
         let root = temporary_root("package");
         let binaries_root = root.join("binaries");
         fs::create_dir_all(&binaries_root).expect("fixture binaries root");
@@ -1056,7 +1071,7 @@ mod tests {
         .expect("signed manifest");
         verify_release_manifest(&signed, &key.verifying_key(), &ReleasePolicy::native(0))
             .expect("signed release verifies");
-        assert_eq!(signed.manifest.files.len(), 2);
+        assert_eq!(signed.manifest.files.len(), 3);
         assert!(
             signed
                 .manifest
@@ -1064,6 +1079,10 @@ mod tests {
                 .iter()
                 .all(|file| !file.path.contains("Setup"))
         );
+        assert!(signed.manifest.files.iter().any(|file| {
+            file.role == ReleaseFileRole::RuntimeAsset
+                && file.path == format!("axiusflow_launcher{suffix}")
+        }));
         let channel: ReleaseChannelPointer =
             serde_json::from_slice(&fs::read(&published.channel_path).expect("channel bytes"))
                 .expect("channel pointer");
@@ -1099,6 +1118,11 @@ mod tests {
                 .iter()
                 .any(|object| object.object_key.contains("Axiusflow-Setup"))
         );
+        assert!(published.immutable_objects.iter().any(|object| {
+            object
+                .object_key
+                .ends_with(&format!("axiusflow_launcher{suffix}"))
+        }));
         let wire: serde_json::Value =
             serde_json::from_slice(&fs::read(&published.channel_path).expect("channel wire bytes"))
                 .expect("channel wire JSON");

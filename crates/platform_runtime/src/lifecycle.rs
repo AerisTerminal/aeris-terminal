@@ -1509,11 +1509,18 @@ mod tests {
         fs::create_dir_all(&bundle).expect("bundle");
         let desktop = format!("desktop-{generation}").into_bytes();
         let engine = format!("engine-{generation}").into_bytes();
+        let launcher = format!("launcher-{generation}").into_bytes();
         fs::write(bundle.join("axiusflow_desktop"), &desktop).expect("desktop");
         fs::write(bundle.join("axiusflow_engine"), &engine).expect("engine");
+        fs::write(bundle.join("axiusflow_launcher"), &launcher).expect("launcher");
         let files = [
             (ReleaseFileRole::Desktop, "axiusflow_desktop", desktop),
             (ReleaseFileRole::Engine, "axiusflow_engine", engine),
+            (
+                ReleaseFileRole::RuntimeAsset,
+                "axiusflow_launcher",
+                launcher,
+            ),
         ]
         .into_iter()
         .map(|(role, path, bytes)| ReleaseFile {

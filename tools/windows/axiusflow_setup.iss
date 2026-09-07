@@ -53,6 +53,7 @@ VersionInfoProductVersion={#AppVersion}
 [Files]
 Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "axiusflow_launcher.exe"; Flags: ignoreversion
 Source: "{#ManifestPath}"; DestDir: "{tmp}\AxiusflowRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
+Source: "{#LauncherPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_launcher.exe"; Flags: deleteafterinstall
 Source: "{#DesktopPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_desktop.exe"; Flags: deleteafterinstall
 Source: "{#EnginePath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_engine.exe"; Flags: deleteafterinstall
 

@@ -1348,6 +1348,8 @@ mod tests {
             "installer.recover(&hooks)",
             "audit_active_release()",
             "--remove-all-local-data",
+            "--promote-stable-launcher",
+            "spawn_active_launcher_promotion",
             "--desktop-readiness",
             "DesktopReadinessReport",
             "owned_process_is_running(&self.install_root)",
@@ -1363,6 +1365,8 @@ mod tests {
             "client.restore_workspace()",
             "client.engine_status()",
             "client.shutdown_engine()",
+            "schedule_versioned_launcher_promotion()",
+            "--promote-stable-launcher",
         ] {
             assert!(
                 desktop.contains(contract),
@@ -1412,6 +1416,7 @@ mod tests {
             "AppUserModelID: \"com.axiusflow.desktop\"",
             "procedure RegisterExtraCloseApplicationsResources;",
             "RegisterExtraCloseApplicationsResource",
+            "DestDir: \"{tmp}\\AxiusflowRelease\\bundle\"; DestName: \"axiusflow_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
             "--remove-all-local-data",
         ] {
@@ -1424,8 +1429,10 @@ mod tests {
         assert!(
             publisher.contains("compile_windows_installer")
                 && publisher.contains("tools/windows/axiusflow_setup.iss")
+                && publisher.contains("ReleaseFileRole::RuntimeAsset")
+                && publisher.contains("axiusflow_launcher")
                 && publisher.contains("--iscc"),
-            "release publisher must produce the Windows installer through Inno Setup"
+            "release publisher must sign the versioned launcher and produce the Windows installer through Inno Setup"
         );
     }
 

@@ -6200,6 +6200,11 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
 }
 
 fn main() {
+    if std::env::args_os().len() == 1
+        && let Err(error) = schedule_versioned_launcher_promotion()
+    {
+        eprintln!("Axiusflow launcher promotion deferred: {error}");
+    }
     let account =
         match axiusflow_desktop::account::DesktopAccount::install(u64::from(std::process::id())) {
             Ok(account) => account,
@@ -6233,6 +6238,34 @@ fn main() {
         }
     };
     run_desktop(configured, lifecycle);
+}
+
+fn schedule_versioned_launcher_promotion() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "desktop executable path is unavailable".to_string())?;
+    let release_root = executable
+        .parent()
+        .ok_or_else(|| "desktop release directory is unavailable".to_string())?;
+    let launcher = release_root.join(format!(
+        "axiusflow_launcher{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let metadata = match std::fs::symlink_metadata(&launcher) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("versioned launcher metadata is unavailable".to_string()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("versioned launcher is invalid".to_string());
+    }
+    std::process::Command::new(launcher)
+        .arg("--promote-stable-launcher")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())
 }
 
 fn wait_for_authenticated_account(
