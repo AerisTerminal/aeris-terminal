@@ -576,8 +576,15 @@ impl MarketWorkerSender {
         {
             let replace = match (&queue[index], &message) {
                 (MarketWorkerMessage::OrderBook(current), MarketWorkerMessage::OrderBook(next)) => {
-                    (next.selection_generation, next.revision)
-                        >= (current.selection_generation, current.revision)
+                    (
+                        next.session_generation,
+                        next.selection_generation,
+                        next.revision,
+                    ) >= (
+                        current.session_generation,
+                        current.selection_generation,
+                        current.revision,
+                    )
                 }
                 _ => false,
             };
@@ -3147,6 +3154,41 @@ mod tests {
             messages.as_slice(),
             [MarketWorkerMessage::OrderBook(frame)]
                 if frame.revision == 3 && frame.state == OrderBookState::Ready
+        ));
+    }
+
+    #[test]
+    fn order_book_mailbox_accepts_new_session_with_lower_revision() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let frame = |session_generation, selection_generation, revision| OrderBookFrame {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "rithmic:CME:MNQ".to_string(),
+            entitlement_id: "test".to_string(),
+            session_generation,
+            selection_generation,
+            revision,
+            source_watermark: revision,
+            bbo_source_watermark: revision,
+            state: OrderBookState::Ready,
+            best_bid: None,
+            best_ask: None,
+            rows: Vec::new(),
+        };
+        sender
+            .send(MarketWorkerMessage::OrderBook(frame(7, 99, 40)))
+            .expect("old session frame queues");
+        sender
+            .send(MarketWorkerMessage::OrderBook(frame(8, 1, 1)))
+            .expect("new session frame queues");
+        sender
+            .send(MarketWorkerMessage::OrderBook(frame(7, 100, 99)))
+            .expect("late old session frame is safely ignored");
+
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::OrderBook(frame)]
+                if frame.session_generation == 8 && frame.revision == 1
         ));
     }
 

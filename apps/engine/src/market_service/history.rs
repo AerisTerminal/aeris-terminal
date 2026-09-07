@@ -6,11 +6,12 @@ use super::{
     HotSetManager, HotSetTier, HyperliquidHandoffSeed, InstallProviderInstrument, Instant,
     MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering,
     PersistenceState, ProviderCatalogCommand, ProviderGeneration, ProviderRequest,
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RithmicHandoffSeed, SearchProviderInstruments,
-    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, StorageRequest, SyncSender,
-    TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId, WorkspaceState,
-    engine_install_failure_stage, fail_waiters, hyperliquid_interval_for_period, ipc_series,
-    publish_state, series_state, thread, try_enqueue_history,
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, ResourceMode, RithmicHandoffSeed,
+    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
+    StorageRequest, SyncSender, TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries,
+    WorkspaceId, WorkspaceState, engine_install_failure_stage, fail_waiters,
+    hyperliquid_interval_for_period, ipc_series, publish_state, series_state, thread,
+    try_enqueue_history,
 };
 use crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID;
 
@@ -55,6 +56,58 @@ pub(super) fn reconcile_history_repair(
         return Err("covering history repair is not canonical".to_string());
     }
     Ok(retained)
+}
+
+fn merge_deferred_history_request(
+    deferred: &mut DeferredHistoryRequest,
+    range: Option<HistoryRange>,
+) {
+    match (deferred, range) {
+        (DeferredHistoryRequest::Full, _) => {}
+        (slot, None) => *slot = DeferredHistoryRequest::Full,
+        (DeferredHistoryRequest::Range(existing), Some(range)) => {
+            existing.start_unix_nanos = existing.start_unix_nanos.min(range.start_unix_nanos);
+            existing.end_unix_nanos = existing.end_unix_nanos.max(range.end_unix_nanos);
+        }
+    }
+}
+
+fn deferred_history_request(range: Option<HistoryRange>) -> DeferredHistoryRequest {
+    range.map_or(DeferredHistoryRequest::Full, DeferredHistoryRequest::Range)
+}
+
+pub(super) fn merge_history_ranges(left: HistoryRange, right: HistoryRange) -> HistoryRange {
+    HistoryRange {
+        start_unix_nanos: left.start_unix_nanos.min(right.start_unix_nanos),
+        end_unix_nanos: left.end_unix_nanos.max(right.end_unix_nanos),
+    }
+}
+
+fn viewport_history_range(
+    series: &BarSeriesKey,
+    snapshot: &axiusflow_market_engine::SeriesSnapshot,
+    viewport: Viewport,
+) -> Option<HistoryRange> {
+    let first = snapshot.bars.first()?;
+    if viewport.start_unix_nanos >= first.exchange_timestamp_unix_nanos {
+        return None;
+    }
+    let mut start_unix_nanos = viewport.start_unix_nanos;
+    let end_unix_nanos = first.exchange_timestamp_unix_nanos;
+    if let Some(duration) = series.period.duration_nanos() {
+        let maximum = HISTORY_BARS_PER_SERIES
+            .saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE)
+            .max(1);
+        if let Ok(maximum) = i64::try_from(maximum)
+            && let Some(span) = duration.checked_mul(maximum)
+        {
+            start_unix_nanos = start_unix_nanos.max(end_unix_nanos.saturating_sub(span));
+        }
+    }
+    (start_unix_nanos < end_unix_nanos).then_some(HistoryRange {
+        start_unix_nanos,
+        end_unix_nanos,
+    })
 }
 
 pub(super) fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
@@ -256,22 +309,24 @@ impl Coordinator<'_> {
         }
     }
     pub(super) fn restore_hot_series(&mut self, series: Vec<WarmSeries>) {
-        for warm in series
+        for (index, warm) in series
             .into_iter()
             .filter(|warm| {
                 warm.series.provider_id == "rithmic" || warm.series.provider_id == "hyperliquid"
             })
-            .take(self.resource_policy.maximum_derived_series.max(1))
+            .take(MAXIMUM_SERIES)
+            .enumerate()
         {
             let generation = ProviderGeneration(
                 NonZeroU64::new(warm.provider_watermark.max(1)).unwrap_or(NonZeroU64::MIN),
             );
             self.warm_priority.push(warm.series.clone());
             self.warm_series.insert(warm.series.clone(), warm.clone());
-            if self
-                .storage
-                .try_send(StorageRequest::Read(warm.series.clone(), generation))
-                .is_ok()
+            if index < self.resource_policy.maximum_cached_series
+                && self
+                    .storage
+                    .try_send(StorageRequest::Read(warm.series.clone(), generation))
+                    .is_ok()
             {
                 self.warming.insert((warm.series, generation));
             }
@@ -281,39 +336,25 @@ impl Coordinator<'_> {
         self.retained_live.extend(self.rithmic_live.keys().cloned());
         self.retained_live
             .extend(self.hyperliquid_live.keys().cloned());
-        if let Some(series) = self
-            .warm_priority
-            .iter()
-            .find(|series| series.provider_id == "rithmic")
-            .cloned()
-            && let Some(warm) = self.warm_series.get(&series)
-        {
-            let provider_symbol = warm.instrument.provider_symbol.clone();
-            self.warm_rithmic_search_generation = self
-                .warm_rithmic_search_generation
-                .checked_add(1)
-                .unwrap_or(1);
-            let _ = self.providers.dispatch_catalog(
-                "rithmic",
-                ProviderCatalogCommand::Search(SearchProviderInstruments {
-                    consumer_id: 0,
-                    search_generation: self.warm_rithmic_search_generation,
-                    provider: "rithmic".to_string(),
-                    query: provider_symbol,
-                    maximum_results: 16,
-                }),
-            );
-        }
-        self.activate_markets_live_hyperliquid_hot_set();
+        self.activate_markets_live_provider_hot_set("rithmic");
+        self.activate_markets_live_provider_hot_set("hyperliquid");
     }
 
-    /// Resolves the warm Hyperliquid instrument without user action, mirroring
-    /// the Rithmic markets-live path so a retained BTC perp survives restart.
-    pub(super) fn activate_markets_live_hyperliquid_hot_set(&mut self) {
+    pub(super) fn activate_markets_live_provider_hot_set(&mut self, provider: &str) {
+        if self.resource_mode != ResourceMode::MarketsLive
+            || self.warm_restore_pending.contains_key(provider)
+            || self.retained_live.len() >= self.resource_policy.maximum_derived_series
+        {
+            return;
+        }
         let Some(series) = self
             .warm_priority
             .iter()
-            .find(|series| series.provider_id == "hyperliquid")
+            .find(|series| {
+                series.provider_id == provider
+                    && !self.retained_live.contains(*series)
+                    && !self.warm_restore_skipped.contains(*series)
+            })
             .cloned()
         else {
             return;
@@ -322,20 +363,41 @@ impl Coordinator<'_> {
             return;
         };
         let provider_symbol = warm.instrument.provider_symbol.clone();
-        self.warm_hyperliquid_search_generation = self
-            .warm_hyperliquid_search_generation
+        let generation = self
+            .warm_search_generations
+            .get(provider)
+            .copied()
+            .unwrap_or(0)
             .checked_add(1)
             .unwrap_or(1);
-        let _ = self.providers.dispatch_catalog(
-            "hyperliquid",
+        match self.providers.dispatch_catalog(
+            provider,
             ProviderCatalogCommand::Search(SearchProviderInstruments {
                 consumer_id: 0,
-                search_generation: self.warm_hyperliquid_search_generation,
-                provider: "hyperliquid".to_string(),
+                search_generation: generation,
+                provider: provider.to_string(),
                 query: provider_symbol,
                 maximum_results: 16,
             }),
-        );
+        ) {
+            Ok(()) => {
+                self.warm_search_generations
+                    .insert(provider.to_string(), generation);
+                self.warm_restore_pending
+                    .insert(provider.to_string(), series);
+            }
+            Err(error) if error.ends_with("catalog command capacity is exhausted") => {
+                // Capacity pressure is transient. Leave this series eligible so
+                // the coordinator-tick retry below can dispatch it as soon as
+                // the bounded catalog lane drains.
+            }
+            Err(_) => {
+                // A disconnected/unavailable catalog worker cannot make forward
+                // progress by being hammered every tick. Skip this retained item
+                // until a later MarketsLive activation rebuilds restore state.
+                self.warm_restore_skipped.insert(series);
+            }
+        }
     }
     pub(super) fn prepare_cached_demand(
         &mut self,
@@ -476,6 +538,10 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn retry_history(&mut self) {
+        if self.resource_mode == ResourceMode::MarketsLive {
+            self.activate_markets_live_provider_hot_set("rithmic");
+            self.activate_markets_live_provider_hot_set("hyperliquid");
+        }
         let now = Instant::now();
         let Some(key) = self
             .history_retries
@@ -647,37 +713,41 @@ impl Coordinator<'_> {
             // for older coverage without duplicating startup work.
             return Ok(());
         };
-        let Some(first) = snapshot.bars.first() else {
+        let Some(range) = viewport_history_range(&series, &snapshot, viewport) else {
             return Ok(());
         };
-        if viewport.start_unix_nanos >= first.exchange_timestamp_unix_nanos {
-            return Ok(());
-        }
-        let mut start_unix_nanos = viewport.start_unix_nanos;
-        let end_unix_nanos = first.exchange_timestamp_unix_nanos;
-        if let Some(duration) = series.period.duration_nanos() {
-            let maximum = HISTORY_BARS_PER_SERIES
-                .saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE)
-                .max(1);
-            if let Ok(maximum) = i64::try_from(maximum)
-                && let Some(span) = duration.checked_mul(maximum)
-            {
-                start_unix_nanos = start_unix_nanos.max(end_unix_nanos.saturating_sub(span));
-            }
-        }
-        if start_unix_nanos >= end_unix_nanos {
-            return Ok(());
-        }
         let provider_generation = self.provider_generation_for_series(&series)?;
-        self.enqueue_history_request(
-            &series,
-            provider_generation,
-            Some(HistoryRange {
-                start_unix_nanos,
-                end_unix_nanos,
-            }),
-        )
-        .map_err(str::to_string)
+        let key = (series.clone(), provider_generation);
+        if let Some(pending) = self.local_history_deadlines.get(&key) {
+            if pending.range == Some(range) {
+                return Ok(());
+            }
+            // The current viewport already lives in the demand registry. Keep
+            // one local read in flight; its completion re-derives the newest
+            // aggregate viewport before any provider fallback, so rapid pans do
+            // not bypass available cache or require a second scheduling queue.
+            return Ok(());
+        }
+        match self.enqueue_local_history_range(&series, provider_generation, range) {
+            Ok(()) => Ok(()),
+            Err(_) => self
+                .enqueue_history_request(&series, provider_generation, Some(range))
+                .map_err(str::to_string),
+        }
+    }
+
+    pub(super) fn current_viewport_history_range(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Option<HistoryRange> {
+        let snapshot = self.engine.series_snapshot(series)?;
+        self.events
+            .keys()
+            .filter_map(|consumer_id| self.engine.current_demand(*consumer_id))
+            .filter(|demand| demand.series.as_ref() == Some(series))
+            .filter_map(|demand| demand.viewport)
+            .filter_map(|viewport| viewport_history_range(series, &snapshot, viewport))
+            .reduce(merge_history_ranges)
     }
 
     /// Seeds the live aggregator from installed history and drains the buffer.
@@ -718,19 +788,8 @@ impl Coordinator<'_> {
         if self.history_inflight.contains_key(&key) {
             self.history_deferred
                 .entry(key)
-                .and_modify(|deferred| match (deferred, range) {
-                    (DeferredHistoryRequest::Full, _) => {}
-                    (slot, None) => *slot = DeferredHistoryRequest::Full,
-                    (DeferredHistoryRequest::Range(existing), Some(range)) => {
-                        existing.start_unix_nanos =
-                            existing.start_unix_nanos.min(range.start_unix_nanos);
-                        existing.end_unix_nanos = existing.end_unix_nanos.max(range.end_unix_nanos);
-                    }
-                })
-                .or_insert_with(|| match range {
-                    Some(range) => DeferredHistoryRequest::Range(range),
-                    None => DeferredHistoryRequest::Full,
-                });
+                .and_modify(|deferred| merge_deferred_history_request(deferred, range))
+                .or_insert_with(|| deferred_history_request(range));
             return Ok(());
         }
         let instrument = if series.provider_id == "rithmic" || series.provider_id == "hyperliquid" {
@@ -843,15 +902,16 @@ impl Coordinator<'_> {
             Err(error) => {
                 if !self.schedule_history_retry(series, generation, range, &error) {
                     if range.is_none() {
+                        self.history_deferred.remove(&key);
                         self.history_failed(series, generation);
                     } else {
-                        self.history_deferred.remove(&(series.clone(), generation));
-                        self.broadcast_series_resolution_for(
+                        self.broadcast_demand_error_for(
                             series,
-                            SeriesLoadState::Partial,
-                            PersistenceState::Durable,
-                            Some("Visible history backfill is temporarily unavailable"),
+                            FailureStage::ProviderHistory,
+                            "Visible history backfill is temporarily unavailable",
+                            None,
                         );
+                        self.dispatch_deferred_history(series, generation);
                     }
                 }
                 None
@@ -871,14 +931,9 @@ impl Coordinator<'_> {
         };
         if snapshot.bars.is_empty() {
             if range.is_some() {
-                self.history_deferred.remove(&(series.clone(), generation));
-                self.broadcast_series_resolution_for(
-                    series,
-                    SeriesLoadState::Partial,
-                    PersistenceState::Durable,
-                    Some("No additional provider history is available for this viewport"),
-                );
+                self.dispatch_deferred_history(series, generation);
             } else {
+                self.history_deferred.remove(&(series.clone(), generation));
                 self.history_failed(series, generation);
             }
             return;
@@ -1275,5 +1330,123 @@ impl Coordinator<'_> {
         });
         self.deferred_publications
             .retain(|series| self.engine.has_subscription(series));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex, mpsc};
+
+    fn test_series(instrument_id: &str) -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: instrument_id.to_string(),
+            entitlement_id: "fixture-entitlement".to_string(),
+            period: BarPeriod::time(60).expect("fixture period"),
+            definition_version: 1,
+        }
+    }
+
+    fn test_history_request(instrument_id: &str) -> HistoryRequest {
+        HistoryRequest {
+            series: test_series(instrument_id),
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            instrument: None,
+            maximum_bars: 10,
+            range: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    struct RecordingHistorySource {
+        calls: StdArc<StdMutex<Vec<String>>>,
+    }
+
+    impl HistorySource for RecordingHistorySource {
+        fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.series.instrument_id.clone());
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: Vec::new(),
+                forming: None,
+                handoff_boundary_unix_nanos: None,
+            })
+        }
+    }
+
+    #[test]
+    fn history_worker_processes_provider_requests_serially_in_queue_order() {
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let (requests_tx, requests_rx) = mpsc::sync_channel(2);
+        let (completions_tx, completions_rx) = mpsc::sync_channel(2);
+        requests_tx
+            .send(test_history_request("first"))
+            .expect("first request queues");
+        requests_tx
+            .send(test_history_request("second"))
+            .expect("second request queues");
+        drop(requests_tx);
+
+        run_history_worker(
+            Box::new(RecordingHistorySource {
+                calls: StdArc::clone(&calls),
+            }),
+            &requests_rx,
+            &completions_tx,
+            &AtomicBool::new(false),
+        );
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["first".to_string(), "second".to_string()]
+        );
+        assert!(matches!(
+            completions_rx.try_recv(),
+            Ok(Command::HistoryCompleted(series, _, None, Ok(_))) if series.instrument_id == "first"
+        ));
+        assert!(matches!(
+            completions_rx.try_recv(),
+            Ok(Command::HistoryCompleted(series, _, None, Ok(_))) if series.instrument_id == "second"
+        ));
+    }
+
+    #[test]
+    fn deferred_history_coalesces_ranges_and_full_request_supersedes_them() {
+        let mut deferred = DeferredHistoryRequest::Range(HistoryRange {
+            start_unix_nanos: 100,
+            end_unix_nanos: 200,
+        });
+        merge_deferred_history_request(
+            &mut deferred,
+            Some(HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 150,
+            }),
+        );
+        assert_eq!(
+            deferred,
+            DeferredHistoryRequest::Range(HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 200,
+            })
+        );
+
+        merge_deferred_history_request(&mut deferred, None);
+        assert_eq!(deferred, DeferredHistoryRequest::Full);
+        merge_deferred_history_request(
+            &mut deferred,
+            Some(HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 300,
+            }),
+        );
+        assert_eq!(deferred, DeferredHistoryRequest::Full);
     }
 }

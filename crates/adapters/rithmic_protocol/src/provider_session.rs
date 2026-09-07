@@ -207,9 +207,14 @@ pub struct RithmicInstrumentSelection {
     symbol: String,
     exchange: String,
     entitlement_id: String,
-    trades: bool,
-    quotes: bool,
-    order_book: bool,
+    subscription: RithmicReadOnlySubscription,
+    mode: RithmicSelectionMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RithmicSelectionMode {
+    Subscribe,
+    ReferenceOnly,
 }
 
 /// Read-only market-data families enabled for one selected instrument.
@@ -301,11 +306,7 @@ impl RithmicInstrumentSelection {
 
     #[must_use]
     pub const fn subscription(&self) -> RithmicReadOnlySubscription {
-        RithmicReadOnlySubscription {
-            trades: self.trades,
-            quotes: self.quotes,
-            order_book: self.order_book,
-        }
+        self.subscription
     }
 
     /// Creates one bounded read-only selection.
@@ -320,6 +321,51 @@ impl RithmicInstrumentSelection {
         exchange: impl Into<String>,
         entitlement_id: impl Into<String>,
         subscription: RithmicReadOnlySubscription,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        Self::try_new_inner(
+            selection_generation,
+            search_generation,
+            symbol,
+            exchange,
+            entitlement_id,
+            subscription,
+            RithmicSelectionMode::Subscribe,
+        )
+    }
+
+    /// Creates one bounded catalog selection that resolves instrument metadata
+    /// without changing the active market-data subscription set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identities or an empty market-data intent.
+    pub fn try_new_reference_only(
+        selection_generation: NonZeroUsize,
+        search_generation: NonZeroUsize,
+        symbol: impl Into<String>,
+        exchange: impl Into<String>,
+        entitlement_id: impl Into<String>,
+        subscription: RithmicReadOnlySubscription,
+    ) -> Result<Self, RithmicProviderCommandError> {
+        Self::try_new_inner(
+            selection_generation,
+            search_generation,
+            symbol,
+            exchange,
+            entitlement_id,
+            subscription,
+            RithmicSelectionMode::ReferenceOnly,
+        )
+    }
+
+    fn try_new_inner(
+        selection_generation: NonZeroUsize,
+        search_generation: NonZeroUsize,
+        symbol: impl Into<String>,
+        exchange: impl Into<String>,
+        entitlement_id: impl Into<String>,
+        subscription: RithmicReadOnlySubscription,
+        mode: RithmicSelectionMode,
     ) -> Result<Self, RithmicProviderCommandError> {
         let symbol = symbol.into();
         let exchange = exchange.into();
@@ -337,9 +383,8 @@ impl RithmicInstrumentSelection {
             symbol,
             exchange,
             entitlement_id,
-            trades: subscription.trades,
-            quotes: subscription.quotes,
-            order_book: subscription.order_book,
+            subscription,
+            mode,
         })
     }
 }
@@ -545,6 +590,30 @@ impl RithmicProviderInstrument {
             exchange: &self.descriptor.venue_id,
         }
     }
+}
+
+fn validate_provider_instruments(
+    instruments: &[RithmicProviderInstrument],
+) -> Result<(), RithmicProviderCommandError> {
+    if instruments.len() > MAXIMUM_INSTRUMENTS {
+        return Err(RithmicProviderCommandError::InvalidRequest);
+    }
+    let mut provider_identities = BTreeSet::new();
+    let mut canonical_identities = BTreeSet::new();
+    for instrument in instruments {
+        if instrument.descriptor.validate().is_err()
+            || !valid_identity(&instrument.entitlement_id)
+            || !(instrument.trades || instrument.quotes || instrument.order_book)
+            || !provider_identities.insert((
+                instrument.descriptor.venue_id.as_str(),
+                instrument.descriptor.provider_symbol.as_str(),
+            ))
+            || !canonical_identities.insert(instrument.descriptor.instrument_id.as_str())
+        {
+            return Err(RithmicProviderCommandError::InvalidRequest);
+        }
+    }
+    Ok(())
 }
 
 /// Invalid direct Rithmic driver configuration.
@@ -894,6 +963,25 @@ impl RithmicProviderEvents {
         self.send_command(generation, RithmicSessionCommand::Select(request))
     }
 
+    /// Replaces the complete bounded read-only subscription set without
+    /// replacing the authenticated provider session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error for invalid demand, a missing/stale session,
+    /// or a full command queue.
+    pub fn replace_subscriptions(
+        &self,
+        generation: SessionGeneration,
+        instruments: Vec<RithmicProviderInstrument>,
+    ) -> Result<(), RithmicProviderCommandError> {
+        validate_provider_instruments(&instruments)?;
+        self.send_command(
+            generation,
+            RithmicSessionCommand::ReplaceSubscriptions(instruments),
+        )
+    }
+
     fn send_command(
         &self,
         generation: SessionGeneration,
@@ -957,6 +1045,7 @@ struct ActiveSession {
 enum RithmicSessionCommand {
     Search(RithmicSymbolSearch),
     Select(RithmicInstrumentSelection),
+    ReplaceSubscriptions(Vec<RithmicProviderInstrument>),
 }
 
 impl fmt::Debug for RithmicSessionCommand {
@@ -964,6 +1053,10 @@ impl fmt::Debug for RithmicSessionCommand {
         match self {
             Self::Search(request) => formatter.debug_tuple("Search").field(request).finish(),
             Self::Select(request) => formatter.debug_tuple("Select").field(request).finish(),
+            Self::ReplaceSubscriptions(instruments) => formatter
+                .debug_struct("ReplaceSubscriptions")
+                .field("instrument_count", &instruments.len())
+                .finish(),
         }
     }
 }
@@ -1978,15 +2071,15 @@ enum PendingCatalogCommand {
 enum SubscriptionPhase {
     UnsubscribeMarket(usize),
     UnsubscribeDepth(usize),
-    SubscribeMarket,
-    SubscribeDepth,
-    SubscribeDepthSnapshot,
+    SubscribeMarket(usize),
+    SubscribeDepth(usize),
+    SubscribeDepthSnapshot(usize),
 }
 
 struct PendingSubscription {
-    selection: RithmicInstrumentSelection,
-    instrument: RithmicProviderInstrument,
-    previous: Vec<RithmicProviderInstrument>,
+    selection: Option<(RithmicInstrumentSelection, RithmicProviderInstrument)>,
+    removed: Vec<RithmicProviderInstrument>,
+    added: Vec<RithmicProviderInstrument>,
     phase: SubscriptionPhase,
     deadline: Instant,
 }
@@ -2067,8 +2160,8 @@ fn collect_market(
                 commands,
                 generation,
                 emitter,
-                &mut state.catalog.pending_catalog,
-                state.catalog.latest_search.as_ref(),
+                &mut state.catalog,
+                &mut canonical,
                 config.session_limits.response_timeout,
             )?;
         }
@@ -2236,29 +2329,37 @@ fn handle_session_message(
                 response_timeout,
             )?;
         }
-        RithmicSessionMessage::Market(message) => {
-            let snapshot_completion = match &message {
+        RithmicSessionMessage::Market(mut message) => {
+            let snapshot_completion = match &mut message {
                 DecodedMarketMessage::DepthByOrderSnapshot(
                     DepthByOrderSnapshotMessage::Complete {
                         accepted, identity, ..
                     },
                 ) => {
                     if let Some(plan) = state.catalog.pending_subscription.as_ref()
-                        && plan.phase == SubscriptionPhase::SubscribeDepthSnapshot
+                        && let SubscriptionPhase::SubscribeDepthSnapshot(index) = plan.phase
                     {
-                        if identity
-                            .as_ref()
-                            .is_some_and(|identity| !plan.instrument.identity_matches(identity))
+                        let instrument = plan.added.get(index).ok_or_else(malformed)?;
+                        if let Some(identity) = identity.as_ref()
+                            && !instrument.identity_matches(identity)
                         {
                             return Err(malformed());
                         }
+                        if identity.is_none() {
+                            *identity = Some(MarketIdentity {
+                                symbol: instrument.descriptor.provider_symbol.clone(),
+                                exchange: instrument.descriptor.venue_id.clone(),
+                            });
+                        }
                         if !*accepted {
-                            send_rejection(
-                                emitter,
-                                generation,
-                                plan.selection.selection_generation,
-                                RithmicCatalogRejection::SubscriptionRejected,
-                            );
+                            if let Some((selection, _)) = plan.selection.as_ref() {
+                                send_rejection(
+                                    emitter,
+                                    generation,
+                                    selection.selection_generation,
+                                    RithmicCatalogRejection::SubscriptionRejected,
+                                );
+                            }
                             return Err((
                                 ProviderInvalidationReason::Transport,
                                 RetryDisposition::Transient,
@@ -2277,14 +2378,29 @@ fn handle_session_message(
                 stop.store(true, Ordering::Release);
                 return Ok(false);
             }
-            if snapshot_completion.is_some_and(|accepted| accepted)
-                && state
-                    .catalog
-                    .pending_subscription
-                    .as_ref()
-                    .is_some_and(|plan| plan.phase == SubscriptionPhase::SubscribeDepthSnapshot)
-            {
-                finish_subscription(&mut state.catalog.pending_subscription, generation, emitter)?;
+            if snapshot_completion.is_some_and(|accepted| accepted) {
+                let complete = {
+                    let Some(plan) = state.catalog.pending_subscription.as_mut() else {
+                        return Err(malformed());
+                    };
+                    let SubscriptionPhase::SubscribeDepthSnapshot(index) = plan.phase else {
+                        return Err(malformed());
+                    };
+                    advance_added_subscription(
+                        connection,
+                        plan,
+                        index,
+                        canonical,
+                        response_timeout,
+                    )?
+                };
+                if complete {
+                    finish_subscription(
+                        &mut state.catalog.pending_subscription,
+                        generation,
+                        emitter,
+                    )?;
+                }
             }
         }
         RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
@@ -2318,8 +2434,8 @@ fn process_session_commands(
     commands: &Receiver<RithmicSessionCommand>,
     session_generation: SessionGeneration,
     emitter: &SessionEmitter,
-    pending: &mut Option<PendingCatalogCommand>,
-    latest_search: Option<&LatestSymbolSearch>,
+    state: &mut CatalogCommandState,
+    canonical: &mut CanonicalSessionState,
     response_timeout: Duration,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     for _ in 0..SESSION_COMMAND_BATCH {
@@ -2346,7 +2462,7 @@ fn process_session_commands(
                     }
                     continue;
                 }
-                *pending = Some(PendingCatalogCommand::Search {
+                state.pending_catalog = Some(PendingCatalogCommand::Search {
                     generation: request.search_generation,
                     collector,
                     deadline: Instant::now() + response_timeout,
@@ -2354,13 +2470,19 @@ fn process_session_commands(
                 return Ok(());
             }
             RithmicSessionCommand::Select(selection) => {
-                let available = latest_search.is_some_and(|(generation, symbols)| {
-                    *generation == selection.search_generation
-                        && symbols
-                            .contains_key(&(selection.exchange.clone(), selection.symbol.clone()))
-                });
+                let available =
+                    state
+                        .latest_search
+                        .as_ref()
+                        .is_some_and(|(generation, symbols)| {
+                            *generation == selection.search_generation
+                                && symbols.contains_key(&(
+                                    selection.exchange.clone(),
+                                    selection.symbol.clone(),
+                                ))
+                        });
                 if !available {
-                    let reason = latest_search.map_or(
+                    let reason = state.latest_search.as_ref().map_or(
                         RithmicCatalogRejection::SupersededSearch,
                         |(generation, _)| {
                             if *generation == selection.search_generation {
@@ -2386,10 +2508,22 @@ fn process_session_commands(
                         exchange: market_data_exchange(&selection.exchange),
                     })
                     .map_err(session_failure)?;
-                *pending = Some(PendingCatalogCommand::Reference {
+                state.pending_catalog = Some(PendingCatalogCommand::Reference {
                     selection,
                     deadline: Instant::now() + response_timeout,
                 });
+                return Ok(());
+            }
+            RithmicSessionCommand::ReplaceSubscriptions(instruments) => {
+                state.pending_subscription = start_subscription_replacement(
+                    connection,
+                    &instruments,
+                    None,
+                    canonical,
+                    session_generation,
+                    emitter,
+                    response_timeout,
+                )?;
                 return Ok(());
             }
         }
@@ -2479,43 +2613,83 @@ fn handle_catalog_message(
                 return Ok(());
             };
             let instrument = selected_instrument(&selection, reference)?;
-            let previous = canonical.instruments.clone();
-            let phase = if previous.is_empty() {
-                begin_subscription(connection, &instrument, canonical)?;
-                SubscriptionPhase::SubscribeMarket
-            } else {
-                connection
-                    .update_market_data(subscription_request(
-                        &previous[0],
-                        SubscriptionAction::Unsubscribe,
-                    ))
-                    .map_err(session_failure)?;
-                SubscriptionPhase::UnsubscribeMarket(0)
-            };
-            state.pending_subscription = Some(PendingSubscription {
-                selection,
-                instrument,
-                previous,
-                phase,
-                deadline: Instant::now() + response_timeout,
-            });
+            if selection.mode == RithmicSelectionMode::ReferenceOnly {
+                if !emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
+                    session_generation,
+                    selection_generation: selection.selection_generation,
+                    instrument: instrument.descriptor,
+                    entitlement_id: instrument.entitlement_id,
+                }) {
+                    return Err((
+                        ProviderInvalidationReason::QueueOverflow,
+                        RetryDisposition::Transient,
+                    ));
+                }
+                return Ok(());
+            }
+            let target = [instrument];
+            state.pending_subscription = start_subscription_replacement(
+                connection,
+                &target,
+                Some(selection),
+                canonical,
+                session_generation,
+                emitter,
+                response_timeout,
+            )?;
             Ok(())
         }
     }
 }
 
-fn begin_subscription(
+fn start_subscription_replacement(
     connection: &mut crate::RithmicTickerConnection,
-    instrument: &RithmicProviderInstrument,
+    target: &[RithmicProviderInstrument],
+    selection: Option<RithmicInstrumentSelection>,
     canonical: &mut CanonicalSessionState,
-) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-    canonical.replace_instrument(instrument.clone())?;
-    connection
-        .update_market_data(subscription_request(
-            instrument,
-            SubscriptionAction::Subscribe,
-        ))
-        .map_err(session_failure)
+    session_generation: SessionGeneration,
+    emitter: &SessionEmitter,
+    response_timeout: Duration,
+) -> Result<Option<PendingSubscription>, (ProviderInvalidationReason, RetryDisposition)> {
+    validate_provider_instruments(target).map_err(|_| malformed())?;
+    let removed = canonical
+        .instruments
+        .iter()
+        .filter(|current| !target.contains(current))
+        .cloned()
+        .collect::<Vec<_>>();
+    let added = target
+        .iter()
+        .filter(|requested| !canonical.instruments.contains(requested))
+        .cloned()
+        .collect::<Vec<_>>();
+    if removed.is_empty() && added.is_empty() {
+        if let Some(selection) = selection.as_ref() {
+            let instrument = target.first().cloned().ok_or_else(malformed)?;
+            emit_selection_installed(emitter, session_generation, selection, instrument)?;
+        }
+        return Ok(None);
+    }
+    let phase = if let Some(instrument) = removed.first() {
+        connection
+            .update_market_data(subscription_request(
+                instrument,
+                SubscriptionAction::Unsubscribe,
+            ))
+            .map_err(session_failure)?;
+        SubscriptionPhase::UnsubscribeMarket(0)
+    } else {
+        begin_added_subscription(connection, &added, 0, canonical)?;
+        SubscriptionPhase::SubscribeMarket(0)
+    };
+    let selection = selection.zip(target.first().cloned());
+    Ok(Some(PendingSubscription {
+        selection,
+        removed,
+        added,
+        phase,
+        deadline: Instant::now() + response_timeout,
+    }))
 }
 
 fn advance_subscription(
@@ -2527,67 +2701,96 @@ fn advance_subscription(
     canonical: &mut CanonicalSessionState,
     response_timeout: Duration,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-    let Some(plan) = pending.as_mut() else {
-        return Err(malformed());
+    let complete = {
+        let Some(plan) = pending.as_mut() else {
+            return Err(malformed());
+        };
+        if !acknowledgement.accepted() {
+            if let Some((selection, _)) = plan.selection.as_ref() {
+                send_rejection(
+                    emitter,
+                    session_generation,
+                    selection.selection_generation,
+                    RithmicCatalogRejection::SubscriptionRejected,
+                );
+            }
+            return Err((
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Transient,
+            ));
+        }
+        match (plan.phase, acknowledgement) {
+            (
+                SubscriptionPhase::UnsubscribeMarket(index),
+                SubscriptionAcknowledgement::MarketData(_),
+            ) => {
+                let instrument = plan.removed.get(index).ok_or_else(malformed)?;
+                if instrument.order_book {
+                    connection
+                        .update_depth_by_order(
+                            instrument.depth_request(SubscriptionAction::Unsubscribe),
+                        )
+                        .map_err(session_failure)?;
+                    plan.phase = SubscriptionPhase::UnsubscribeDepth(index);
+                    plan.deadline = Instant::now() + response_timeout;
+                    false
+                } else {
+                    advance_removed_unsubscribe(
+                        connection,
+                        plan,
+                        index,
+                        canonical,
+                        response_timeout,
+                    )?
+                }
+            }
+            (
+                SubscriptionPhase::UnsubscribeDepth(index),
+                SubscriptionAcknowledgement::DepthByOrder(_),
+            ) => advance_removed_unsubscribe(connection, plan, index, canonical, response_timeout)?,
+            (
+                SubscriptionPhase::SubscribeMarket(index),
+                SubscriptionAcknowledgement::MarketData(_),
+            ) => {
+                let instrument = plan.added.get(index).ok_or_else(malformed)?;
+                if instrument.order_book {
+                    connection
+                        .update_depth_by_order(
+                            instrument.depth_request(SubscriptionAction::Subscribe),
+                        )
+                        .map_err(session_failure)?;
+                    plan.phase = SubscriptionPhase::SubscribeDepth(index);
+                    plan.deadline = Instant::now() + response_timeout;
+                    false
+                } else {
+                    advance_added_subscription(
+                        connection,
+                        plan,
+                        index,
+                        canonical,
+                        response_timeout,
+                    )?
+                }
+            }
+            (
+                SubscriptionPhase::SubscribeDepth(index),
+                SubscriptionAcknowledgement::DepthByOrder(_),
+            ) => {
+                let instrument = plan.added.get(index).ok_or_else(malformed)?;
+                connection
+                    .request_depth_by_order_snapshot(instrument.depth_snapshot_request())
+                    .map_err(session_failure)?;
+                plan.phase = SubscriptionPhase::SubscribeDepthSnapshot(index);
+                plan.deadline = Instant::now() + response_timeout;
+                false
+            }
+            _ => return Err(malformed()),
+        }
     };
-    if !acknowledgement.accepted() {
-        send_rejection(
-            emitter,
-            session_generation,
-            plan.selection.selection_generation,
-            RithmicCatalogRejection::SubscriptionRejected,
-        );
-        return Err((
-            ProviderInvalidationReason::Transport,
-            RetryDisposition::Transient,
-        ));
+    if complete {
+        finish_subscription(pending, session_generation, emitter)?;
     }
-    match (plan.phase, acknowledgement) {
-        (
-            SubscriptionPhase::UnsubscribeMarket(index),
-            SubscriptionAcknowledgement::MarketData(_),
-        ) => {
-            if plan.previous[index].order_book {
-                connection
-                    .update_depth_by_order(
-                        plan.previous[index].depth_request(SubscriptionAction::Unsubscribe),
-                    )
-                    .map_err(session_failure)?;
-                plan.phase = SubscriptionPhase::UnsubscribeDepth(index);
-                plan.deadline = Instant::now() + response_timeout;
-                Ok(())
-            } else {
-                advance_previous_unsubscribe(connection, plan, index, canonical, response_timeout)
-            }
-        }
-        (
-            SubscriptionPhase::UnsubscribeDepth(index),
-            SubscriptionAcknowledgement::DepthByOrder(_),
-        ) => advance_previous_unsubscribe(connection, plan, index, canonical, response_timeout),
-        (SubscriptionPhase::SubscribeMarket, SubscriptionAcknowledgement::MarketData(_)) => {
-            if plan.instrument.order_book {
-                connection
-                    .update_depth_by_order(
-                        plan.instrument.depth_request(SubscriptionAction::Subscribe),
-                    )
-                    .map_err(session_failure)?;
-                plan.phase = SubscriptionPhase::SubscribeDepth;
-                plan.deadline = Instant::now() + response_timeout;
-                Ok(())
-            } else {
-                finish_subscription(pending, session_generation, emitter)
-            }
-        }
-        (SubscriptionPhase::SubscribeDepth, SubscriptionAcknowledgement::DepthByOrder(_)) => {
-            connection
-                .request_depth_by_order_snapshot(plan.instrument.depth_snapshot_request())
-                .map_err(session_failure)?;
-            plan.phase = SubscriptionPhase::SubscribeDepthSnapshot;
-            plan.deadline = Instant::now() + response_timeout;
-            Ok(())
-        }
-        _ => Err(malformed()),
-    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2604,15 +2807,33 @@ impl SubscriptionAcknowledgement {
     }
 }
 
-fn advance_previous_unsubscribe(
+fn begin_added_subscription(
+    connection: &mut crate::RithmicTickerConnection,
+    added: &[RithmicProviderInstrument],
+    index: usize,
+    canonical: &mut CanonicalSessionState,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    let instrument = added.get(index).ok_or_else(malformed)?;
+    canonical.add_instrument(instrument.clone())?;
+    connection
+        .update_market_data(subscription_request(
+            instrument,
+            SubscriptionAction::Subscribe,
+        ))
+        .map_err(session_failure)
+}
+
+fn advance_removed_unsubscribe(
     connection: &mut crate::RithmicTickerConnection,
     plan: &mut PendingSubscription,
     index: usize,
     canonical: &mut CanonicalSessionState,
     response_timeout: Duration,
-) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+) -> Result<bool, (ProviderInvalidationReason, RetryDisposition)> {
+    let removed = plan.removed.get(index).ok_or_else(malformed)?;
+    canonical.remove_instrument(&removed.descriptor.instrument_id);
     let next = index + 1;
-    if let Some(instrument) = plan.previous.get(next) {
+    if let Some(instrument) = plan.removed.get(next) {
         connection
             .update_market_data(subscription_request(
                 instrument,
@@ -2620,12 +2841,34 @@ fn advance_previous_unsubscribe(
             ))
             .map_err(session_failure)?;
         plan.phase = SubscriptionPhase::UnsubscribeMarket(next);
-    } else {
-        begin_subscription(connection, &plan.instrument, canonical)?;
-        plan.phase = SubscriptionPhase::SubscribeMarket;
+        plan.deadline = Instant::now() + response_timeout;
+        return Ok(false);
     }
-    plan.deadline = Instant::now() + response_timeout;
-    Ok(())
+    if !plan.added.is_empty() {
+        begin_added_subscription(connection, &plan.added, 0, canonical)?;
+        plan.phase = SubscriptionPhase::SubscribeMarket(0);
+        plan.deadline = Instant::now() + response_timeout;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn advance_added_subscription(
+    connection: &mut crate::RithmicTickerConnection,
+    plan: &mut PendingSubscription,
+    index: usize,
+    canonical: &mut CanonicalSessionState,
+    response_timeout: Duration,
+) -> Result<bool, (ProviderInvalidationReason, RetryDisposition)> {
+    let next = index + 1;
+    if plan.added.get(next).is_some() {
+        begin_added_subscription(connection, &plan.added, next, canonical)?;
+        plan.phase = SubscriptionPhase::SubscribeMarket(next);
+        plan.deadline = Instant::now() + response_timeout;
+        Ok(false)
+    } else {
+        Ok(true)
+    }
 }
 
 fn finish_subscription(
@@ -2634,18 +2877,31 @@ fn finish_subscription(
     emitter: &SessionEmitter,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
     let plan = pending.take().ok_or_else(malformed)?;
-    if !emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
-        session_generation,
-        selection_generation: plan.selection.selection_generation,
-        instrument: plan.instrument.descriptor,
-        entitlement_id: plan.instrument.entitlement_id,
-    }) {
-        return Err((
-            ProviderInvalidationReason::QueueOverflow,
-            RetryDisposition::Transient,
-        ));
+    if let Some((selection, instrument)) = plan.selection {
+        emit_selection_installed(emitter, session_generation, &selection, instrument)?;
     }
     Ok(())
+}
+
+fn emit_selection_installed(
+    emitter: &SessionEmitter,
+    session_generation: SessionGeneration,
+    selection: &RithmicInstrumentSelection,
+    instrument: RithmicProviderInstrument,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    if emitter.send_catalog(RithmicCatalogEvent::SelectionInstalled {
+        session_generation,
+        selection_generation: selection.selection_generation,
+        instrument: instrument.descriptor,
+        entitlement_id: instrument.entitlement_id,
+    }) {
+        Ok(())
+    } else {
+        Err((
+            ProviderInvalidationReason::QueueOverflow,
+            RetryDisposition::Transient,
+        ))
+    }
 }
 
 fn selected_instrument(
@@ -2672,9 +2928,9 @@ fn selected_instrument(
     Ok(RithmicProviderInstrument {
         descriptor,
         entitlement_id: selection.entitlement_id.clone(),
-        trades: selection.trades,
-        quotes: selection.quotes,
-        order_book: selection.order_book,
+        trades: selection.subscription.trades,
+        quotes: selection.subscription.quotes,
+        order_book: selection.subscription.order_book,
     })
 }
 
@@ -3461,16 +3717,19 @@ impl CanonicalSessionState {
             .ok_or_else(malformed)
     }
 
-    fn replace_instrument(
+    fn add_instrument(
         &mut self,
         instrument: RithmicProviderInstrument,
     ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-        self.instruments.clear();
-        self.instruments.push(instrument);
-        self.quotes.clear();
-        self.books.clear();
-        self.mbo_books.clear();
-        let instrument = &self.instruments[0];
+        if self.instruments.len() >= MAXIMUM_INSTRUMENTS
+            || self.instruments.iter().any(|current| {
+                current.descriptor.instrument_id == instrument.descriptor.instrument_id
+                    || (current.descriptor.provider_symbol == instrument.descriptor.provider_symbol
+                        && current.descriptor.venue_id == instrument.descriptor.venue_id)
+            })
+        {
+            return Err(malformed());
+        }
         if instrument.order_book {
             let limits = AggregateBookLimits::try_new(
                 NonZeroUsize::new(4_096).unwrap_or(NonZeroUsize::MIN),
@@ -3495,7 +3754,16 @@ impl CanonicalSessionState {
                 }),
             );
         }
+        self.instruments.push(instrument);
         Ok(())
+    }
+
+    fn remove_instrument(&mut self, instrument_id: &str) {
+        self.instruments
+            .retain(|instrument| instrument.descriptor.instrument_id != instrument_id);
+        self.quotes.remove(instrument_id);
+        self.books.remove(instrument_id);
+        self.mbo_books.remove(instrument_id);
     }
 }
 
@@ -3874,6 +4142,48 @@ mod tests {
             vec![instrument()],
         )
         .expect("fixture configuration validates")
+    }
+
+    #[test]
+    fn canonical_session_accepts_multiple_instruments_and_removes_only_retired_identity() {
+        let mut second = instrument();
+        second.descriptor.instrument_id = "future-cme-nq-2027-06".to_string();
+        second.descriptor.provider_symbol = "NQM7".to_string();
+        second.descriptor.display_symbol = "NQ Jun 2027".to_string();
+        let config = RithmicProviderConfig::try_new(
+            crate::RITHMIC_APPLICATION_NAME,
+            "0.1.0",
+            RithmicSessionLimits::default(),
+            Duration::from_secs(30),
+            Vec::new(),
+        )
+        .expect("empty live set validates");
+        let mut canonical =
+            CanonicalSessionState::try_new(&config, generation(1)).expect("canonical session");
+
+        canonical.add_instrument(instrument()).expect("first");
+        canonical.add_instrument(second.clone()).expect("second");
+        assert_eq!(canonical.instruments.len(), 2);
+        canonical.remove_instrument("future-cme-es-2027-06");
+        assert_eq!(canonical.instruments, vec![second]);
+    }
+
+    #[test]
+    fn replacement_set_rejects_duplicate_provider_or_canonical_identity() {
+        let first = instrument();
+        let mut duplicate_provider = first.clone();
+        duplicate_provider.descriptor.instrument_id = "different-id".to_string();
+        assert_eq!(
+            validate_provider_instruments(&[first.clone(), duplicate_provider]),
+            Err(RithmicProviderCommandError::InvalidRequest)
+        );
+
+        let mut duplicate_canonical = first.clone();
+        duplicate_canonical.descriptor.provider_symbol = "NQM7".to_string();
+        assert_eq!(
+            validate_provider_instruments(&[first, duplicate_canonical]),
+            Err(RithmicProviderCommandError::InvalidRequest)
+        );
     }
 
     #[test]
@@ -4435,7 +4745,7 @@ mod tests {
         let mut canonical =
             CanonicalSessionState::try_new(&empty, generation(9)).expect("state initializes");
         canonical
-            .replace_instrument(instrument())
+            .add_instrument(instrument())
             .expect("pending instrument installs before subscribe");
 
         let event = canonical

@@ -67,14 +67,7 @@ pub(super) fn fetch(
     if stop.load(Ordering::Acquire) {
         return Err("Rithmic history request was cancelled".to_string());
     }
-    if installed.provider != "rithmic"
-        || installed.instrument_id != series.instrument_id
-        || installed.entitlement_id != series.entitlement_id
-        || installed.session_generation != provider_generation
-        || series.definition_version != 1
-    {
-        return Err("Rithmic history identity is inconsistent".to_string());
-    }
+    validate_history_identity(series, provider_generation, installed)?;
     let interval = chart_interval(series.period)?;
     let maximum_visible_bars = window.maximum_bars.clamp(1, MAXIMUM_VISIBLE_BARS);
     let replay = match window.range {
@@ -108,6 +101,29 @@ pub(super) fn fetch(
         forming,
         handoff_boundary_unix_nanos,
     })
+}
+
+fn validate_history_identity(
+    series: &BarSeriesKey,
+    provider_generation: u64,
+    installed: &InstallProviderInstrument,
+) -> Result<(), String> {
+    // Instrument metadata is retained across provider reconnects. Its install
+    // generation records when that metadata was resolved; the HistoryRequest's
+    // provider generation is the current engine/session fence. Requiring those
+    // to be equal forces an unrelated catalog re-selection after every
+    // reconnect and makes multi-instrument recovery impossible.
+    if provider_generation == 0
+        || installed.provider != "rithmic"
+        || installed.instrument_id != series.instrument_id
+        || installed.entitlement_id != series.entitlement_id
+        || installed.session_generation == 0
+        || installed.session_generation > provider_generation
+        || series.definition_version != 1
+    {
+        return Err("Rithmic history identity is inconsistent".to_string());
+    }
+    Ok(())
 }
 
 /// Runs both replay passes and returns closed history, the open period, and the
@@ -503,5 +519,43 @@ pub(super) fn chart_interval(period: BarPeriod) -> Result<ChartInterval, String>
         | BarPeriod::Session { .. }
         | BarPeriod::Week { .. }
         | BarPeriod::Month { .. } => Err("unsupported Rithmic engine interval".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn series() -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+            period: BarPeriod::time(60).expect("period"),
+            definition_version: 1,
+        }
+    }
+
+    fn installed(session_generation: u64) -> InstallProviderInstrument {
+        let series = series();
+        InstallProviderInstrument {
+            provider: series.provider_id,
+            session_generation,
+            selection_generation: 1,
+            instrument_id: series.instrument_id,
+            provider_symbol: "MNQU6".to_string(),
+            display_symbol: "MNQ Sep 2026".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
+            entitlement_id: series.entitlement_id,
+        }
+    }
+
+    #[test]
+    fn retained_instrument_metadata_is_valid_for_newer_history_generation() {
+        assert!(validate_history_identity(&series(), 7, &installed(3)).is_ok());
+        assert!(validate_history_identity(&series(), 7, &installed(8)).is_err());
+        assert!(validate_history_identity(&series(), 0, &installed(3)).is_err());
     }
 }

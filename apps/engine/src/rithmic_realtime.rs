@@ -23,11 +23,11 @@ use axiusflow_rithmic_protocol_adapter::{
     ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
     RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
     RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
-    RithmicInstrumentSelection, RithmicProviderConfig, RithmicProviderDriver,
-    RithmicProviderEvents, RithmicProviderInstrument, RithmicProviderRuntime,
-    RithmicProviderRuntimeConfig, RithmicProviderRuntimeState, RithmicReadOnlySubscription,
-    RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch, SearchPattern,
-    SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
+    RithmicInstrumentSelection, RithmicProviderCommandError, RithmicProviderConfig,
+    RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeState,
+    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
+    SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 
 use crate::market_service::ProviderCoordinatorWake;
@@ -42,8 +42,35 @@ const EVENT_WAIT: Duration = Duration::from_millis(2);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const ENVIRONMENT_CAPACITY: usize = 8;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RithmicInstrumentDemand {
+    pub(crate) instrument: InstallProviderInstrument,
+    pub(crate) trades: bool,
+    pub(crate) quotes: bool,
+    pub(crate) order_book: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RithmicRealtimeDemand {
+    pub(crate) instruments: Vec<RithmicInstrumentDemand>,
+}
+
+impl RithmicRealtimeDemand {
+    fn requested_generation(&self) -> u64 {
+        self.instruments
+            .iter()
+            .map(|demand| demand.instrument.session_generation)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.instruments.is_empty()
+    }
+}
+
 pub(crate) enum RithmicRealtimeControl {
-    Select(InstallProviderInstrument),
+    Subscribe(RithmicRealtimeDemand),
     Stop,
 }
 
@@ -399,7 +426,12 @@ fn dispatch_catalog_control(
                 .zip(search_generation)
                 .zip(subscription)
                 .and_then(|((generation, search_generation), subscription)| {
-                    RithmicInstrumentSelection::try_new(
+                    let constructor = if realtime_selection {
+                        RithmicInstrumentSelection::try_new_reference_only
+                    } else {
+                        RithmicInstrumentSelection::try_new
+                    };
+                    constructor(
                         generation,
                         search_generation,
                         selection.symbol,
@@ -709,27 +741,27 @@ pub(crate) fn run(
     let mut reusable_generation = None;
     loop {
         match realtime_controls.try_recv() {
-            Ok(RithmicRealtimeControl::Select(mut selected)) => {
+            Ok(RithmicRealtimeControl::Subscribe(mut demand)) if !demand.is_empty() => {
                 let mut transport_recovery = false;
                 loop {
                     let mut stop_requested = false;
                     while let Ok(control) = realtime_controls.try_recv() {
                         match control {
-                            RithmicRealtimeControl::Select(newer) => {
-                                selected = newer;
+                            RithmicRealtimeControl::Subscribe(newer) => {
+                                demand = newer;
                                 stop_requested = false;
                             }
                             RithmicRealtimeControl::Stop => stop_requested = true,
                         }
                     }
-                    if stop_requested {
+                    if stop_requested || demand.is_empty() {
                         break;
                     }
                     let generation = reusable_generation
                         .take()
-                        .filter(|generation| *generation == selected.session_generation)
+                        .filter(|generation| *generation == demand.requested_generation())
                         .unwrap_or_else(|| {
-                            next_generation(last_generation, selected.session_generation)
+                            next_generation(last_generation, demand.requested_generation())
                         });
                     let reconnect_delay =
                         reconnect_backoff_delay(transport_recovery, channels.reconnect_delay);
@@ -737,19 +769,19 @@ pub(crate) fn run(
                         thread::park_timeout(reconnect_delay);
                     }
                     let (environment_events, environment_state) = environment.parts();
-                    match run_selection(
-                        &selected,
+                    match run_demand(
+                        demand,
                         generation,
                         channels,
                         environment_events,
                         environment_state,
                     ) {
                         SelectionExit::Replace {
-                            selected: replacement,
+                            demand: replacement,
                             generation,
                             transport_recovery: replacement_transport_recovery,
                         } => {
-                            selected = replacement;
+                            demand = replacement;
                             last_generation = generation;
                             transport_recovery = replacement_transport_recovery;
                         }
@@ -767,7 +799,8 @@ pub(crate) fn run(
                     }
                 }
             }
-            Ok(RithmicRealtimeControl::Stop) | Err(TryRecvError::Empty) => {}
+            Ok(RithmicRealtimeControl::Subscribe(_) | RithmicRealtimeControl::Stop)
+            | Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return,
         }
 
@@ -856,13 +889,14 @@ fn reject_unavailable_provider(channels: ProviderChannels<'_>) {
             reject_catalog_control(channels.catalog_publications, control, None);
         }
         match channels.realtime_controls.recv_timeout(EVENT_WAIT) {
-            Ok(RithmicRealtimeControl::Select(selected)) => {
+            Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(
-                    selected.session_generation,
+                    demand.requested_generation(),
                     None,
                 ));
             }
-            Ok(RithmicRealtimeControl::Stop) | Err(RecvTimeoutError::Timeout) => {}
+            Ok(RithmicRealtimeControl::Subscribe(_) | RithmicRealtimeControl::Stop)
+            | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -870,7 +904,7 @@ fn reject_unavailable_provider(channels: ProviderChannels<'_>) {
 
 enum SelectionExit {
     Replace {
-        selected: InstallProviderInstrument,
+        demand: RithmicRealtimeDemand,
         generation: u64,
         transport_recovery: bool,
     },
@@ -890,54 +924,11 @@ const fn reconnect_backoff_delay(transport_recovery: bool, configured: Duration)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RealtimeReplacementAction {
-    ReuseActiveSession,
-    Reconnect,
-}
-
-fn realtime_replacement_action(
-    generation: u64,
-    installed_selection: Option<&InstallProviderInstrument>,
-    replacement: &InstallProviderInstrument,
-) -> RealtimeReplacementAction {
-    if replacement.session_generation == generation
-        && installed_selection.is_some_and(|installed| installed == replacement)
-    {
-        RealtimeReplacementAction::ReuseActiveSession
-    } else {
-        RealtimeReplacementAction::Reconnect
-    }
-}
-
-fn handle_realtime_replacement(
-    runtime: &mut Runtime,
-    generation: u64,
-    installed_selection: Option<&InstallProviderInstrument>,
-    replacement: InstallProviderInstrument,
-) -> Option<SelectionExit> {
-    match realtime_replacement_action(generation, installed_selection, &replacement) {
-        RealtimeReplacementAction::ReuseActiveSession => None,
-        RealtimeReplacementAction::Reconnect => {
-            let _ = runtime.stop();
-            Some(SelectionExit::Replace {
-                selected: replacement,
-                generation,
-                transport_recovery: false,
-            })
-        }
-    }
-}
-
 fn publish_live_catalog_selection(
     publications: &SyncSender<RithmicCatalogEvent>,
     coordinator_wake: Option<&ProviderCoordinatorWake>,
-    installed_selection: &mut Option<InstallProviderInstrument>,
     selection: RithmicCatalogEvent,
 ) {
-    if let RithmicCatalogEvent::SelectionResolved { instrument, .. } = &selection {
-        *installed_selection = Some(instrument.clone());
-    }
     if publications.send(selection).is_ok()
         && let Some(coordinator_wake) = coordinator_wake
     {
@@ -952,7 +943,6 @@ fn handle_live_catalog(
     generation: u64,
     searches: &mut BTreeMap<usize, u64>,
     selections: &mut BTreeMap<usize, u64>,
-    installed_selection: &mut Option<InstallProviderInstrument>,
 ) -> Option<SelectionExit> {
     loop {
         match channels.catalog_controls.try_recv() {
@@ -984,14 +974,9 @@ fn handle_live_catalog(
             searches,
             selections,
         ) {
-            // The adapter has already unsubscribed the old instrument and subscribed
-            // this replacement on the authenticated session. Keep that runtime alive;
-            // the later realtime Select is only the engine acknowledging the installed
-            // identity, not a reason to reconnect the transport.
             publish_live_catalog_selection(
                 channels.catalog_publications,
                 Some(channels.coordinator_wake),
-                installed_selection,
                 selection,
             );
         }
@@ -1000,14 +985,14 @@ fn handle_live_catalog(
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_selection(
-    selected: &InstallProviderInstrument,
+fn run_demand(
+    mut demand: RithmicRealtimeDemand,
     mut generation: u64,
     channels: ProviderChannels<'_>,
     environment: &Receiver<EnvironmentMessage>,
     environment_state: &mut EnvironmentState,
 ) -> SelectionExit {
-    let opened = open_runtime(selected);
+    let opened = open_catalog_runtime();
     let Ok((mut runtime, events)) = opened else {
         channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
         return wait_for_replacement(
@@ -1022,7 +1007,8 @@ fn run_selection(
     let mut retries = RithmicRetryScheduler::default();
     let mut searches = BTreeMap::new();
     let mut selections = BTreeMap::new();
-    let mut installed_selection = None;
+    let mut subscription_generation = None;
+    let mut subscription_dirty = true;
     if apply_current_environment(&mut runtime, &events, &mut retries, *environment_state).is_err() {
         channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, None));
     }
@@ -1038,7 +1024,8 @@ fn run_selection(
         ) {
             Ok(Some(updated)) => {
                 generation = updated;
-                installed_selection = None;
+                subscription_generation = None;
+                subscription_dirty = true;
             }
             Ok(None) => {}
             Err(()) => {
@@ -1046,25 +1033,24 @@ fn run_selection(
                 return SelectionExit::Closed { generation };
             }
         }
-        match channels.realtime_controls.try_recv() {
-            Ok(RithmicRealtimeControl::Select(replacement)) => {
-                if let Some(exit) = handle_realtime_replacement(
-                    &mut runtime,
-                    generation,
-                    installed_selection.as_ref(),
-                    replacement,
-                ) {
-                    return exit;
+        loop {
+            match channels.realtime_controls.try_recv() {
+                Ok(RithmicRealtimeControl::Subscribe(replacement)) => {
+                    demand = replacement;
+                    subscription_dirty = true;
+                    if demand.is_empty() {
+                        return stop_selection(&mut runtime, generation);
+                    }
+                }
+                Ok(RithmicRealtimeControl::Stop) => {
+                    return stop_selection(&mut runtime, generation);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    let _ = runtime.stop();
+                    return SelectionExit::Closed { generation };
                 }
             }
-            Ok(RithmicRealtimeControl::Stop) => {
-                return stop_selection(&mut runtime, generation);
-            }
-            Err(TryRecvError::Disconnected) => {
-                let _ = runtime.stop();
-                return SelectionExit::Closed { generation };
-            }
-            Err(TryRecvError::Empty) => {}
         }
         if let Some(exit) = handle_live_catalog(
             &mut runtime,
@@ -1073,7 +1059,6 @@ fn run_selection(
             generation,
             &mut searches,
             &mut selections,
-            &mut installed_selection,
         ) {
             return exit;
         }
@@ -1082,11 +1067,35 @@ fn run_selection(
             &events,
             &mut retries,
             channels,
-            environment,
-            environment_state,
+            (environment, &mut *environment_state),
             generation,
+            &mut subscription_generation,
         ) {
             return exit;
+        }
+        if subscription_dirty
+            && subscription_generation
+                .is_some_and(|ready| active_generation(&runtime) == Some(ready))
+        {
+            match replace_live_subscriptions(&events, subscription_generation, &demand) {
+                Ok(()) => subscription_dirty = false,
+                Err(RithmicProviderCommandError::QueueFull) => {}
+                Err(
+                    RithmicProviderCommandError::SessionUnavailable
+                    | RithmicProviderCommandError::StaleGeneration,
+                ) => subscription_generation = None,
+                Err(RithmicProviderCommandError::InvalidRequest) => {
+                    channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
+                    let _ = runtime.stop();
+                    return wait_for_replacement(
+                        channels.realtime_controls,
+                        environment,
+                        environment_state,
+                        generation,
+                        false,
+                    );
+                }
+            }
         }
         if retries
             .retry_due(&mut runtime, Instant::now())
@@ -1098,7 +1107,8 @@ fn run_selection(
                 &mut searches,
                 &mut selections,
             );
-            installed_selection = None;
+            subscription_generation = None;
+            subscription_dirty = true;
             channels.publish_realtime(RithmicRealtimeEvent::Connecting(generation));
         }
         std::thread::sleep(EVENT_WAIT);
@@ -1110,14 +1120,19 @@ fn drain_live_events(
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     channels: ProviderChannels<'_>,
-    environment: &Receiver<EnvironmentMessage>,
-    environment_state: &mut EnvironmentState,
+    environment: (&Receiver<EnvironmentMessage>, &mut EnvironmentState),
     generation: u64,
+    subscription_generation: &mut Option<SessionGeneration>,
 ) -> Option<SelectionExit> {
+    let (environment, environment_state) = environment;
     while events.has_ready() {
         match try_recv_rithmic_event(runtime, events, retries, Instant::now()) {
             Ok(Some(AppliedRithmicEvent::Semantic(event))) => match event {
-                ProviderSessionEvent::InstrumentsDiscovered { .. } => {
+                ProviderSessionEvent::InstrumentsDiscovered {
+                    generation: ready_generation,
+                    ..
+                } => {
+                    *subscription_generation = Some(ready_generation);
                     channels.publish_realtime(RithmicRealtimeEvent::Connected(generation));
                 }
                 ProviderSessionEvent::Market {
@@ -1158,6 +1173,7 @@ fn drain_live_events(
                 | ProviderSessionEvent::Stopped => {}
             },
             Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket))) => {
+                *subscription_generation = None;
                 channels.publish_realtime(RithmicRealtimeEvent::Recovering(
                     generation,
                     Some(ticket.reason),
@@ -1247,14 +1263,14 @@ fn wait_for_replacement(
             Err(TryRecvError::Empty) => {}
         }
         match controls.recv_timeout(EVENT_WAIT) {
-            Ok(RithmicRealtimeControl::Select(selected)) => {
+            Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
                 return SelectionExit::Replace {
-                    selected,
+                    demand,
                     generation,
                     transport_recovery,
                 };
             }
-            Ok(RithmicRealtimeControl::Stop) => {
+            Ok(RithmicRealtimeControl::Subscribe(_) | RithmicRealtimeControl::Stop) => {
                 return SelectionExit::Idle { generation };
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1372,26 +1388,41 @@ fn spawn_environment_monitor(
         .map_err(|_| "Rithmic native environment monitor could not start".to_string())
 }
 
-fn open_runtime(
-    selected: &InstallProviderInstrument,
-) -> Result<(Runtime, RithmicProviderEvents), String> {
+fn provider_instrument(
+    demand: &RithmicInstrumentDemand,
+) -> Result<RithmicProviderInstrument, RithmicProviderCommandError> {
+    let selected = &demand.instrument;
     let descriptor = InstrumentDescriptor {
         instrument_id: selected.instrument_id.clone(),
         provider_symbol: selected.provider_symbol.clone(),
         display_symbol: selected.display_symbol.clone(),
         venue_id: selected.venue_id.clone(),
         price_scale: u8::try_from(selected.price_scale)
-            .map_err(|_| "Rithmic live price scale is invalid".to_string())?,
+            .map_err(|_| RithmicProviderCommandError::InvalidRequest)?,
         quantity_scale: u8::try_from(selected.quantity_scale)
-            .map_err(|_| "Rithmic live quantity scale is invalid".to_string())?,
+            .map_err(|_| RithmicProviderCommandError::InvalidRequest)?,
     };
-    open_runtime_with_instruments(vec![RithmicProviderInstrument {
+    Ok(RithmicProviderInstrument {
         descriptor,
         entitlement_id: selected.entitlement_id.clone(),
-        trades: true,
-        quotes: true,
-        order_book: true,
-    }])
+        trades: demand.trades,
+        quotes: demand.quotes,
+        order_book: demand.order_book,
+    })
+}
+
+fn replace_live_subscriptions(
+    events: &RithmicProviderEvents,
+    generation: Option<SessionGeneration>,
+    demand: &RithmicRealtimeDemand,
+) -> Result<(), RithmicProviderCommandError> {
+    let generation = generation.ok_or(RithmicProviderCommandError::SessionUnavailable)?;
+    let instruments = demand
+        .instruments
+        .iter()
+        .map(provider_instrument)
+        .collect::<Result<Vec<_>, _>>()?;
+    events.replace_subscriptions(generation, instruments)
 }
 
 fn open_catalog_runtime() -> Result<(Runtime, RithmicProviderEvents), String> {
@@ -1453,12 +1484,10 @@ mod tests {
     };
 
     use super::{
-        EnvironmentState, RealtimeReplacementAction, RithmicCatalogEvent,
-        catalog_selection_subscription, next_generation, publish_catalog_callback,
-        publish_live_catalog_selection, realtime_replacement_action, reconnect_backoff_delay,
-        reject_deferred_selection, reject_pending_catalog, retire_pending_catalog_generation,
+        EnvironmentState, RithmicCatalogEvent, catalog_selection_subscription, next_generation,
+        publish_catalog_callback, reject_deferred_selection, reject_pending_catalog,
+        retire_pending_catalog_generation,
     };
-    use axiusflow_engine_protocol::InstallProviderInstrument;
     use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
     use axiusflow_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
@@ -1506,25 +1535,6 @@ mod tests {
         ));
     }
 
-    fn installed_instrument(
-        session_generation: u64,
-        selection_generation: u64,
-        symbol: &str,
-    ) -> InstallProviderInstrument {
-        InstallProviderInstrument {
-            provider: "rithmic".to_string(),
-            session_generation,
-            selection_generation,
-            instrument_id: format!("rithmic:CME:{symbol}"),
-            provider_symbol: symbol.to_string(),
-            display_symbol: symbol.to_string(),
-            venue_id: "CME".to_string(),
-            price_scale: 2,
-            quantity_scale: 0,
-            entitlement_id: format!("rithmic-test:CME:{symbol}"),
-        }
-    }
-
     #[test]
     fn live_catalog_selection_uses_full_realtime_subscription() {
         let live = catalog_selection_subscription(true).expect("live subscription validates");
@@ -1537,70 +1547,6 @@ mod tests {
         assert!(!catalog.trades());
         assert!(catalog.quotes());
         assert!(!catalog.order_book());
-    }
-
-    #[test]
-    fn warm_replacement_reuses_active_session_generation_without_reconnect_backoff() {
-        let replacement = installed_instrument(7, 3, "MNQU6");
-        let selection = RithmicCatalogEvent::SelectionResolved {
-            consumer_id: 41,
-            command_generation: 3,
-            instrument: replacement.clone(),
-        };
-        let (publications, published) = mpsc::sync_channel(1);
-        let mut installed_selection = None;
-
-        publish_live_catalog_selection(&publications, None, &mut installed_selection, selection);
-
-        assert_eq!(installed_selection.as_ref(), Some(&replacement));
-        assert_eq!(
-            realtime_replacement_action(
-                replacement.session_generation,
-                installed_selection.as_ref(),
-                &replacement,
-            ),
-            RealtimeReplacementAction::ReuseActiveSession
-        );
-        assert_eq!(
-            realtime_replacement_action(
-                replacement.session_generation,
-                installed_selection.as_ref(),
-                &replacement,
-            ),
-            RealtimeReplacementAction::ReuseActiveSession
-        );
-        assert!(matches!(
-            published.recv().expect("installed selection publishes immediately"),
-            RithmicCatalogEvent::SelectionResolved { instrument, .. }
-                if instrument == replacement
-        ));
-        // A same-generation cold replacement would advance to 8 in the outer reopen
-        // loop. The confirmed warm action stays inside run_selection instead, so it
-        // neither advances generation 7 nor reaches the reconnect-delay park.
-        assert_eq!(next_generation(7, 7), 8);
-        assert_eq!(
-            reconnect_backoff_delay(false, std::time::Duration::from_millis(250)),
-            std::time::Duration::ZERO
-        );
-        assert_eq!(
-            reconnect_backoff_delay(true, std::time::Duration::from_millis(250)),
-            std::time::Duration::from_millis(250)
-        );
-    }
-
-    #[test]
-    fn unconfirmed_or_cross_generation_replacement_still_reconnects() {
-        let replacement = installed_instrument(7, 3, "MNQU6");
-        assert_eq!(
-            realtime_replacement_action(7, None, &replacement),
-            RealtimeReplacementAction::Reconnect
-        );
-
-        let stale_confirmation = installed_instrument(6, 3, "MNQU6");
-        assert_eq!(
-            realtime_replacement_action(7, Some(&stale_confirmation), &replacement),
-            RealtimeReplacementAction::Reconnect
-        );
     }
 
     #[test]

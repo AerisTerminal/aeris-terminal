@@ -100,20 +100,11 @@ impl EngineSupervisor {
         generation: u64,
         series: SeriesKey,
     ) -> Result<(), String> {
+        if !self.consumers.contains_key(&consumer_id) {
+            return Err("desktop engine consumer is not registered".to_string());
+        }
         self.client
             .set_series_demand(consumer_id, generation, series.clone())?;
-        self.record_series_demand(consumer_id, generation, series)
-    }
-
-    pub fn set_series_demand_until(
-        &mut self,
-        consumer_id: u64,
-        generation: u64,
-        series: SeriesKey,
-        deadline: Instant,
-    ) -> Result<(), String> {
-        self.client
-            .set_series_demand_until(consumer_id, generation, series.clone(), deadline)?;
         self.record_series_demand(consumer_id, generation, series)
     }
 
@@ -409,27 +400,21 @@ impl EngineSupervisor {
             .max();
         let newer_session =
             current_session.is_none_or(|session| instrument.session_generation > session);
-        if newer_session || provider == "rithmic" {
-            self.instruments
-                .retain(|_, installed| installed.provider != provider);
+        if newer_session {
+            // Unresolved installs belong to the retired provider session, but
+            // already-demanded instruments are restore state for independent
+            // panes. Keep those until each instrument is refreshed or no
+            // consumer demands it; a provider reconnect must not collapse a
+            // multi-instrument workspace to the first new selection.
             self.pending_instruments
                 .retain(|(installed_provider, _)| installed_provider != &provider);
         }
-        if provider == "rithmic" {
+        if provider == "rithmic" && newer_session {
             for consumer in self.consumers.values_mut() {
-                let obsolete = consumer.demand.as_ref().is_some_and(|(_, series)| {
-                    series.provider == provider
-                        && (series.instrument_id != instrument.instrument_id
-                            || series.entitlement_id != instrument.entitlement_id)
-                });
-                if obsolete {
-                    consumer.demand = None;
-                    consumer.viewport = None;
-                }
                 if consumer
                     .pending_selection
                     .as_ref()
-                    .is_some_and(|selection| selection.provider == provider && newer_session)
+                    .is_some_and(|selection| selection.provider == provider)
                 {
                     consumer.pending_selection = None;
                 }
@@ -477,38 +462,9 @@ impl EngineSupervisor {
                 )
             })
             .collect::<BTreeSet<_>>();
-        let current_session = self
-            .instruments
-            .values()
-            .filter(|instrument| instrument.provider == provider)
-            .map(|instrument| instrument.session_generation)
-            .max();
-        let latest_selection = current_session.and_then(|session| {
-            self.instruments
-                .values()
-                .filter(|instrument| {
-                    instrument.provider == provider && instrument.session_generation == session
-                })
-                .map(|instrument| instrument.selection_generation)
-                .max()
-        });
         self.instruments.retain(|_, instrument| {
             if instrument.provider != provider {
                 return true;
-            }
-            if Some(instrument.session_generation) != current_session {
-                return false;
-            }
-            if provider == "rithmic" {
-                return Some(instrument.selection_generation) == latest_selection
-                    && (demanded.contains(&(
-                        instrument.provider.clone(),
-                        instrument.instrument_id.clone(),
-                        instrument.entitlement_id.clone(),
-                    )) || pending.contains(&(
-                        instrument.provider.clone(),
-                        instrument.instrument_id.clone(),
-                    )));
             }
             demanded.contains(&(
                 instrument.provider.clone(),
@@ -1044,9 +1000,9 @@ mod tests {
     }
 
     fn configure_generation_ordered_restore(supervisor: &mut EngineSupervisor) {
-        // Two providers restore together: the multiplexed Hyperliquid catalog
-        // accumulates installed instruments across sessions, while the
-        // single-selection Rithmic session keeps only its latest install.
+        // Both providers restore every demanded instrument from only their
+        // newest provider session. Rithmic selection generations order catalog
+        // commands; they do not collapse the engine's set-based market demand.
         let hyperliquid_old_z = provider_instrument("hyperliquid", "hyperliquid:perp:BTC", 4, 1);
         let hyperliquid_old_a =
             provider_instrument("hyperliquid", "hyperliquid:spot:1:BTC/USDC", 4, 2);
@@ -1098,18 +1054,18 @@ mod tests {
             })
             .expect("queue old-session selection");
         supervisor
-            .install_provider_instrument(rithmic_new_z)
+            .install_provider_instrument(rithmic_new_z.clone())
             .expect("advance Rithmic provider session");
         supervisor
             .install_provider_instrument(rithmic_current.clone())
             .expect("install authoritative Rithmic selection");
         supervisor
-            .set_series_demand(13, 4, provider_series(&rithmic_current, 60))
+            .set_series_demand(13, 4, provider_series(&rithmic_new_z, 60))
             .expect("set current Rithmic chart demand");
         supervisor
             .set_series_demand(14, 9, provider_series(&rithmic_current, 300))
             .expect("set concurrent current Rithmic demand");
-        assert_eq!(supervisor.instruments.len(), 3);
+        assert_eq!(supervisor.instruments.len(), 4);
     }
 
     fn assert_generation_ordered_restore(commands: &[envelope::Payload]) {
@@ -1130,6 +1086,7 @@ mod tests {
             vec![
                 ("hyperliquid", 5, 1, "hyperliquid:perp:BTC"),
                 ("hyperliquid", 5, 2, "hyperliquid:spot:1:BTC/USDC"),
+                ("rithmic", 8, 1, "z-replaced-session"),
                 ("rithmic", 8, 2, "a-current"),
             ]
         );
@@ -1152,14 +1109,14 @@ mod tests {
             vec![
                 (11, 1, "hyperliquid", "hyperliquid:perp:BTC"),
                 (12, 1, "hyperliquid", "hyperliquid:spot:1:BTC/USDC"),
-                (13, 4, "rithmic", "a-current"),
+                (13, 4, "rithmic", "z-replaced-session"),
                 (14, 9, "rithmic", "a-current"),
             ]
         );
         assert!(!commands.iter().any(|payload| matches!(
             payload,
             envelope::Payload::InstallProviderInstrument(instrument)
-                if instrument.provider == "rithmic" && instrument.instrument_id != "a-current"
+                if instrument.provider == "rithmic" && instrument.session_generation < 8
         )));
         assert!(
             !commands

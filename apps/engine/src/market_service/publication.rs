@@ -3,11 +3,12 @@ use super::{
     ClientId, ConsumerEvents, ConsumerId, Coordinator, DemandError, DemandWaiter, DepthLevel,
     EngineError, EngineFaultCode, FailureStage, GenerationId, IpcOrderBookLevel,
     IpcOrderBookSnapshot, IpcOrderBookState, IpcOrderFlowLevel, IpcOrderFlowSnapshot,
-    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, NonZeroU64, OrderBookRecoveryReason,
-    OrderFlowAggressor, OrderFlowPublicationKind, PersistenceState, ProviderConnectionState,
-    ProviderGeneration, ProviderOrderBook, ProviderState, REALTIME_DRAIN_BUDGET, Reply, SeriesKey,
-    SeriesLoadState, SeriesState, SeriesTailOperation, SeriesUpdateOperation, SyncSender,
-    TrySendError, authorize_consumer, envelope, ipc_bar, ipc_series,
+    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, MAXIMUM_PUBLISHED_DEPTH_LEVELS,
+    NonZeroU64, OrderBookRecoveryReason, OrderFlowAggressor, OrderFlowPublicationKind,
+    PersistenceState, ProviderConnectionState, ProviderGeneration, ProviderOrderBook,
+    ProviderState, REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState, SeriesState,
+    SeriesTailOperation, SeriesUpdateOperation, SyncSender, TrySendError, authorize_consumer,
+    envelope, ipc_bar, ipc_series,
 };
 
 pub(super) fn fail_waiters(
@@ -96,12 +97,25 @@ pub(super) fn publish_ready(
     events: &mut ConsumerEvents,
     publication: &axiusflow_market_engine::ConsumerPublication,
 ) {
+    let (persistence, detail) = match events.series_state.as_ref() {
+        Some(envelope::Payload::SeriesState(state)) => {
+            let persistence = PersistenceState::try_from(state.persistence)
+                .unwrap_or(PersistenceState::NotRequested);
+            let detail = if persistence == PersistenceState::Degraded {
+                state.detail.clone()
+            } else {
+                None
+            };
+            (persistence, detail)
+        }
+        _ => (PersistenceState::NotRequested, None),
+    };
     publish_state(
         events,
         publication,
         SeriesLoadState::Ready,
-        PersistenceState::NotRequested,
-        None,
+        persistence,
+        detail.as_deref(),
     );
 }
 
@@ -299,6 +313,7 @@ pub(super) fn ipc_order_book_levels(
 ) -> Vec<IpcOrderBookLevel> {
     levels
         .iter()
+        .take(MAXIMUM_PUBLISHED_DEPTH_LEVELS)
         .map(|level| ipc_order_book_level(*level, traded_volumes))
         .collect()
 }
@@ -529,36 +544,42 @@ impl Coordinator<'_> {
         let consumers = self.events.keys().copied().collect::<Vec<_>>();
         let mut disconnected = BTreeSet::new();
         let mut remaining = REALTIME_DRAIN_BUDGET;
-        for consumer_id in consumers {
-            if remaining == 0 {
-                break;
-            }
-            let Some(&client_id) = self.consumer_clients.get(&consumer_id) else {
-                continue;
-            };
-            let Some(sender) = self.attached_sinks.get(&client_id).cloned() else {
-                continue;
-            };
-            let Some(events) = self.events.get_mut(&consumer_id) else {
-                continue;
-            };
-            while remaining > 0 {
+        while remaining > 0 {
+            let mut progressed = false;
+            for consumer_id in &consumers {
+                let Some(&client_id) = self.consumer_clients.get(consumer_id) else {
+                    continue;
+                };
+                if disconnected.contains(&client_id) {
+                    continue;
+                }
+                let Some(sender) = self.attached_sinks.get(&client_id).cloned() else {
+                    continue;
+                };
+                let Some(events) = self.events.get_mut(consumer_id) else {
+                    continue;
+                };
                 let Some((slot, event)) = events.pop_for_send() else {
-                    break;
+                    continue;
                 };
                 match sender.try_send((consumer_id.0.get(), event)) {
                     Ok(()) => {
                         remaining -= 1;
+                        progressed = true;
+                        if remaining == 0 {
+                            break;
+                        }
                     }
                     Err(TrySendError::Full((_, event))) => {
                         events.restore_after_full(slot, event);
-                        break;
                     }
                     Err(TrySendError::Disconnected(_)) => {
                         disconnected.insert(client_id);
-                        break;
                     }
                 }
+            }
+            if !progressed {
+                break;
             }
         }
         for client_id in disconnected {
@@ -591,14 +612,41 @@ impl Coordinator<'_> {
     ) -> Result<(), String> {
         let needs_covering_repair =
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
+        let persistence_key = (series.clone(), provider_generation);
+        let current_persistence = if self.persistence_degraded.contains(&persistence_key) {
+            Some((
+                PersistenceState::Degraded,
+                Some("Local history persistence is degraded"),
+            ))
+        } else if self
+            .persistence_pending
+            .get(&persistence_key)
+            .is_some_and(|pending| *pending > 0)
+        {
+            Some((PersistenceState::Pending, None))
+        } else {
+            None
+        };
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             if needs_covering_repair {
+                let (persistence, persistence_detail) =
+                    current_persistence.unwrap_or((PersistenceState::Durable, None));
                 publish_state(
                     events,
                     publication,
                     SeriesLoadState::Partial,
-                    PersistenceState::Durable,
-                    Some("Showing retained local history while provider coverage repairs"),
+                    persistence,
+                    persistence_detail.or(Some(
+                        "Showing retained local history while provider coverage repairs",
+                    )),
+                );
+            } else if let Some((persistence, detail)) = current_persistence {
+                publish_state(
+                    events,
+                    publication,
+                    SeriesLoadState::Ready,
+                    persistence,
+                    detail,
                 );
             } else {
                 publish_ready(events, publication);
@@ -626,7 +674,8 @@ impl Coordinator<'_> {
             .and_then(|status| status.generation)
             .unwrap_or(ProviderGeneration(NonZeroU64::MIN));
         let local_loaded = &self.local_loaded;
-        let live = &self.rithmic_live;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
         let engine = &self.engine;
         for (consumer_id, events) in &mut self.events {
             let Some(demand) = self.engine.current_demand(*consumer_id) else {
@@ -640,9 +689,12 @@ impl Coordinator<'_> {
                 let state = if local_loaded.contains(&(series.clone(), current_provider_generation))
                 {
                     SeriesLoadState::Partial
-                } else if live
+                } else if rithmic_live
                     .get(series)
                     .is_some_and(|live| live.connected && live.history_ready)
+                    || hyperliquid_live
+                        .get(series)
+                        .is_some_and(|live| live.connected && live.history_ready)
                 {
                     SeriesLoadState::Live
                 } else if engine.has_publication(*consumer_id) {
@@ -725,6 +777,9 @@ impl Coordinator<'_> {
         let Some(demand) = self.engine.current_demand(consumer_id) else {
             return;
         };
+        if !demand.resource_class.publishes_ui() {
+            return;
+        }
         let Some(series) = demand.series.as_ref() else {
             return;
         };
@@ -751,6 +806,9 @@ impl Coordinator<'_> {
             .keys()
             .filter_map(|consumer_id| {
                 let demand = self.engine.current_demand(*consumer_id)?;
+                if !demand.resource_class.publishes_ui() {
+                    return None;
+                }
                 let generation = demand.generation?;
                 let series = demand.series.as_ref()?;
                 (series.provider_id == provider && series.instrument_id == instrument_id)
@@ -869,5 +927,30 @@ impl Coordinator<'_> {
                 Some(detail.to_string()),
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipc_depth_projection_is_bounded_independently_from_canonical_depth() {
+        let levels = (0..MAXIMUM_PUBLISHED_DEPTH_LEVELS + 7)
+            .map(|index| DepthLevel {
+                price: 10_000 + i64::try_from(index).expect("bounded index"),
+                quantity: 1,
+                order_count: Some(1),
+            })
+            .collect::<Vec<_>>();
+        let projected = ipc_order_book_levels(&levels, &BTreeMap::new());
+        let display_limit = i64::try_from(MAXIMUM_PUBLISHED_DEPTH_LEVELS).expect("bounded depth");
+
+        assert_eq!(projected.len(), MAXIMUM_PUBLISHED_DEPTH_LEVELS);
+        assert_eq!(projected.first().map(|level| level.price), Some(10_000));
+        assert_eq!(
+            projected.last().map(|level| level.price),
+            Some(10_000 + display_limit - 1)
+        );
     }
 }

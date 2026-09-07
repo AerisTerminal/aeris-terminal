@@ -1,6 +1,6 @@
 use super::{
     BarSeriesKey, ClientId, ConsumerId, Coordinator, InstallProviderInstrument,
-    MAXIMUM_CATALOG_FIELD_BYTES, MAXIMUM_CATALOG_INSTRUMENTS, MarketStream, NonZeroU64, Ordering,
+    MAXIMUM_CATALOG_FIELD_BYTES, MAXIMUM_CATALOG_INSTRUMENTS, MarketStream, NonZeroU64,
     ProviderCatalogCommand, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderGeneration, ProviderHealth, ProviderInstrumentSelection, Reply, ResourceMode,
     RithmicCatalogControl, RithmicCatalogEvent, SearchProviderInstruments,
@@ -177,61 +177,44 @@ impl Coordinator<'_> {
             .engine
             .provider_status(&provider)
             .and_then(|status| status.generation);
-        let session = self.catalog_sessions.get(&provider).copied();
-        if session.is_some_and(|current| instrument.session_generation < current) {
+        let catalog_session = self.catalog_sessions.get(&provider).copied();
+        let engine_session = engine_generation.map(|generation| generation.0.get());
+        let current_session = catalog_session.into_iter().chain(engine_session).max();
+        if current_session.is_some_and(|current| instrument.session_generation < current) {
             return Err("provider instrument session is stale".to_string());
         }
-        let newer_session = session.is_none_or(|current| instrument.session_generation > current);
-        let selection = (!newer_session)
-            .then(|| self.catalog_selections.get(&provider).copied())
-            .flatten();
-        if selection.is_some_and(|current| instrument.selection_generation < current) {
-            return Err("provider instrument selection is stale".to_string());
-        }
         let key = (provider.clone(), instrument.instrument_id.clone());
-        if selection == Some(instrument.selection_generation) {
-            return self
-                .catalog
-                .get(&key)
-                .filter(|installed| *installed == instrument)
-                .map(|_| ())
-                .ok_or_else(|| "provider instrument selection conflicts".to_string());
-        }
-        let retained_catalog_len = if newer_session {
-            self.catalog
-                .keys()
-                .filter(|(installed_provider, _)| installed_provider != &provider)
-                .count()
-        } else {
-            self.catalog.len()
-        };
-        let key_exists_after_reset = !newer_session && self.catalog.contains_key(&key);
-        if !key_exists_after_reset && retained_catalog_len >= MAXIMUM_CATALOG_INSTRUMENTS {
+        if let Some(installed) = self.catalog.get(&key) {
+            if instrument.session_generation < installed.session_generation
+                || (instrument.session_generation == installed.session_generation
+                    && instrument.selection_generation < installed.selection_generation)
+            {
+                return Err("provider instrument selection is stale".to_string());
+            }
+            if instrument.session_generation == installed.session_generation
+                && instrument.selection_generation == installed.selection_generation
+            {
+                return (installed == instrument)
+                    .then_some(())
+                    .ok_or_else(|| "provider instrument selection conflicts".to_string());
+            }
+        } else if self.catalog.len() >= MAXIMUM_CATALOG_INSTRUMENTS {
             return Err("provider instrument catalog capacity is exhausted".to_string());
         }
-        // A newer install generation proves the provider opened a newer catalog
-        // session, so the engine session must advance with it: Rithmic history
-        // demands are fenced against the engine generation, and the realtime
-        // worker only announces its generation after history succeeds.
+        // Provider session generation dominates selection generation. Selection
+        // counters are consumer/command-local and may restart or overlap across
+        // instruments, while a newer provider session retires every older
+        // callback. Retained instrument metadata remains valid across that
+        // transport change and is refreshed per instrument when/if selected.
         if engine_generation.is_none_or(|current| provider_generation > current) {
             self.engine
                 .begin_provider_session(&provider, provider_generation)
                 .map_err(|error| error.to_string())?;
         }
-        if newer_session {
-            for ((series, _), stop) in &self.history_cancellations {
-                if series.provider_id == provider {
-                    stop.store(true, Ordering::Release);
-                }
-            }
-            self.catalog
-                .retain(|(installed_provider, _), _| installed_provider != &provider);
-            self.catalog_sessions
-                .insert(provider.clone(), instrument.session_generation);
-            self.catalog_selections.remove(&provider);
-        }
-        self.catalog_selections
-            .insert(provider.clone(), instrument.selection_generation);
+        self.catalog_sessions
+            .entry(provider.clone())
+            .and_modify(|current| *current = (*current).max(instrument.session_generation))
+            .or_insert(instrument.session_generation);
         let instrument_id = instrument.instrument_id.clone();
         self.catalog.insert(key, instrument.clone());
         self.reconcile_order_books();
@@ -380,11 +363,7 @@ impl Coordinator<'_> {
         result: axiusflow_engine_protocol::ProviderInstrumentSearchResult,
     ) {
         if result.consumer_id == 0 {
-            if result.provider == "hyperliquid" {
-                self.select_warm_hyperliquid_instrument(&result);
-            } else {
-                self.select_warm_rithmic_instrument(&result);
-            }
+            self.select_warm_instrument(&result);
             return;
         }
         let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
@@ -395,74 +374,55 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn select_warm_rithmic_instrument(
-        &self,
+    pub(super) fn select_warm_instrument(
+        &mut self,
         result: &axiusflow_engine_protocol::ProviderInstrumentSearchResult,
     ) {
-        if result.search_generation != self.warm_rithmic_search_generation {
+        if self.warm_search_generations.get(&result.provider).copied()
+            != Some(result.search_generation)
+        {
             return;
         }
-        let Some(warm) = self
-            .warm_priority
-            .iter()
-            .find(|series| series.provider_id == "rithmic")
-            .and_then(|series| self.warm_series.get(series))
-        else {
+        let Some(series) = self.warm_restore_pending.get(&result.provider).cloned() else {
+            return;
+        };
+        let Some(warm) = self.warm_series.get(&series).cloned() else {
             return;
         };
         if !result.instruments.iter().any(|candidate| {
             candidate.symbol == warm.instrument.provider_symbol
                 && candidate.exchange == warm.instrument.venue_id
         }) {
+            self.warm_restore_pending.remove(&result.provider);
+            self.warm_restore_skipped.insert(series);
+            self.activate_markets_live_provider_hot_set(&result.provider);
             return;
         }
-        let _ = self.providers.dispatch_catalog(
-            "rithmic",
+        match self.providers.dispatch_catalog(
+            &result.provider,
             ProviderCatalogCommand::Select(SelectProviderInstrument {
                 consumer_id: 0,
                 selection_generation: result.search_generation,
                 search_generation: result.search_generation,
-                provider: "rithmic".to_string(),
+                provider: result.provider.clone(),
                 symbol: warm.instrument.provider_symbol.clone(),
                 exchange: warm.instrument.venue_id.clone(),
                 entitlement_id: warm.instrument.entitlement_id.clone(),
             }),
-        );
-    }
-
-    pub(super) fn select_warm_hyperliquid_instrument(
-        &self,
-        result: &axiusflow_engine_protocol::ProviderInstrumentSearchResult,
-    ) {
-        if result.search_generation != self.warm_hyperliquid_search_generation {
-            return;
+        ) {
+            Ok(()) => {}
+            Err(error) if error.ends_with("catalog command capacity is exhausted") => {
+                // A full bounded control lane is transient. Re-run the search on
+                // a later coordinator tick instead of turning queue pressure into
+                // a permanent saved-demand rejection.
+                self.warm_restore_pending.remove(&result.provider);
+            }
+            Err(_) => {
+                self.warm_restore_pending.remove(&result.provider);
+                self.warm_restore_skipped.insert(series);
+                self.activate_markets_live_provider_hot_set(&result.provider);
+            }
         }
-        let Some(warm) = self
-            .warm_priority
-            .iter()
-            .find(|series| series.provider_id == "hyperliquid")
-            .and_then(|series| self.warm_series.get(series))
-        else {
-            return;
-        };
-        if !result.instruments.iter().any(|candidate| {
-            candidate.symbol == warm.instrument.provider_symbol
-                && candidate.exchange == warm.instrument.venue_id
-        }) {
-            return;
-        }
-        let _ = self.providers.dispatch_catalog(
-            "hyperliquid",
-            ProviderCatalogCommand::Select(SelectProviderInstrument {
-                consumer_id: 0,
-                selection_generation: result.search_generation,
-                search_generation: result.search_generation,
-                provider: "hyperliquid".to_string(),
-                symbol: warm.instrument.provider_symbol.clone(),
-                exchange: warm.instrument.venue_id.clone(),
-                entitlement_id: warm.instrument.entitlement_id.clone(),
-            }),
-        );
     }
 
     pub(super) fn handle_catalog_selection(
@@ -472,37 +432,29 @@ impl Coordinator<'_> {
         instrument: InstallProviderInstrument,
     ) {
         if consumer_id == 0 {
-            if instrument.provider == "hyperliquid" {
-                let exact = self
-                    .warm_priority
-                    .iter()
-                    .find(|series| series.provider_id == "hyperliquid")
-                    .and_then(|series| self.warm_series.get(series))
-                    .is_some_and(|warm| {
-                        instrument.instrument_id == warm.instrument.instrument_id
-                            && instrument.provider_symbol == warm.instrument.provider_symbol
-                            && instrument.venue_id == warm.instrument.venue_id
-                            && instrument.entitlement_id == warm.instrument.entitlement_id
-                    });
-                if exact {
-                    let _ = self.install_provider_instrument(&instrument);
-                }
+            if self
+                .warm_search_generations
+                .get(&instrument.provider)
+                .copied()
+                != Some(command_generation)
+            {
                 return;
             }
-            let exact = self
-                .warm_priority
-                .iter()
-                .find(|series| series.provider_id == "rithmic")
-                .and_then(|series| self.warm_series.get(series))
-                .is_some_and(|warm| {
-                    instrument.instrument_id == warm.instrument.instrument_id
-                        && instrument.provider_symbol == warm.instrument.provider_symbol
-                        && instrument.venue_id == warm.instrument.venue_id
-                        && instrument.entitlement_id == warm.instrument.entitlement_id
-                });
-            if exact {
-                let _ = self.install_provider_instrument(&instrument);
+            let provider = instrument.provider.clone();
+            let Some(series) = self.warm_restore_pending.get(&provider).cloned() else {
+                return;
+            };
+            let exact = self.warm_series.get(&series).is_some_and(|warm| {
+                instrument.instrument_id == warm.instrument.instrument_id
+                    && instrument.provider_symbol == warm.instrument.provider_symbol
+                    && instrument.venue_id == warm.instrument.venue_id
+                    && instrument.entitlement_id == warm.instrument.entitlement_id
+            });
+            self.warm_restore_pending.remove(&provider);
+            if !exact || self.install_provider_instrument(&instrument).is_err() {
+                self.warm_restore_skipped.insert(series);
             }
+            self.activate_markets_live_provider_hot_set(&provider);
             return;
         }
         let Ok(id) = id(consumer_id).map(ConsumerId) else {
@@ -534,13 +486,15 @@ impl Coordinator<'_> {
         selection: bool,
     ) {
         if rejection.consumer_id == 0 {
-            if self.resource_mode == ResourceMode::MarketsLive
-                && (rejection.provider == "hyperliquid"
-                    && self.warm_hyperliquid_search_generation < 3
-                    || rejection.provider != "hyperliquid"
-                        && self.warm_rithmic_search_generation < 3)
+            if self
+                .warm_search_generations
+                .get(&rejection.provider)
+                .copied()
+                == Some(rejection.command_generation)
+                && let Some(series) = self.warm_restore_pending.remove(&rejection.provider)
             {
-                self.activate_markets_live_hot_set();
+                self.warm_restore_skipped.insert(series);
+                self.activate_markets_live_provider_hot_set(&rejection.provider);
             }
             return;
         }

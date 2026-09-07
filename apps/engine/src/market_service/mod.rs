@@ -54,12 +54,14 @@ use crate::hyperliquid_realtime::{
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent,
 };
 use crate::rithmic_realtime::{
-    RithmicCatalogControl, RithmicCatalogEvent, RithmicRealtimeControl, RithmicRealtimeEvent,
+    RithmicCatalogControl, RithmicCatalogEvent, RithmicInstrumentDemand, RithmicRealtimeControl,
+    RithmicRealtimeDemand, RithmicRealtimeEvent,
 };
 
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
 const STORAGE_CAPACITY: usize = 16;
+const PERSISTENCE_BACKLOG_CAPACITY: usize = STORAGE_CAPACITY;
 const REALTIME_CAPACITY: usize = 2_048;
 const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 const REALTIME_DRAIN_BUDGET: usize = 256;
@@ -151,6 +153,12 @@ enum Command {
         ProviderGeneration,
         Result<Option<StoredHistory>, String>,
     ),
+    LocalHistoryRangeCompleted(
+        BarSeriesKey,
+        ProviderGeneration,
+        HistoryRange,
+        Result<Option<StoredHistory>, String>,
+    ),
     ConfirmedEmptyResolved(BarSeriesKey, HistoryRange, Result<(), LocalHistoryError>),
     PersistenceCompleted(
         BarSeriesKey,
@@ -226,6 +234,7 @@ struct WarmSeries {
 
 enum StorageRequest {
     Read(BarSeriesKey, ProviderGeneration),
+    ReadRange(BarSeriesKey, ProviderGeneration, HistoryRange),
     Persist(
         BarSeriesKey,
         ProviderGeneration,
@@ -235,6 +244,12 @@ enum StorageRequest {
         Instant,
     ),
     ResolveConfirmedEmpty(BarSeriesKey, HistoryRange),
+}
+
+#[derive(Clone, Copy)]
+struct PendingLocalHistoryRead {
+    deadline: Instant,
+    range: Option<HistoryRange>,
 }
 
 struct HistorySnapshot {
@@ -342,6 +357,8 @@ struct HyperliquidLiveHandoff {
     forming: Option<MarketBar>,
     /// Live updates that arrived before history seeded the seam, bounded.
     buffered: VecDeque<HyperliquidLiveCandle>,
+    pending_publications: VecDeque<MarketBar>,
+    pending_persistence: VecDeque<MarketBar>,
     connected: bool,
     history_ready: bool,
     dirty: bool,
@@ -355,6 +372,8 @@ struct RithmicLiveHandoff {
     quantity_scale: u8,
     bars: Vec<MarketBar>,
     buffered: VecDeque<MarketTrade>,
+    pending_publications: VecDeque<MarketBar>,
+    pending_persistence: VecDeque<MarketBar>,
     connected: bool,
     history_ready: bool,
     dirty: bool,
@@ -641,7 +660,7 @@ mod storage;
 use storage::spawn_storage_worker;
 
 mod coordinator;
-use coordinator::{Coordinator, OwnedCoordinatorChannels, RithmicSelection, spawn_coordinator};
+use coordinator::{Coordinator, OwnedCoordinatorChannels, spawn_coordinator};
 
 fn try_enqueue_history(
     history: &SyncSender<HistoryRequest>,

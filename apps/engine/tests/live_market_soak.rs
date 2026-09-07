@@ -44,8 +44,8 @@ const CONSUMER_ID: u64 = 1;
 /// When the venue goes quiet on a slow market, the anchor distinguishes "the
 /// engine stalled" (anchor silent too: fail) from "the venue had nothing to
 /// say" (anchor flowing: the shared worker, session, and publish path are
-/// proven live). Only multiplexed providers can hold two instruments at once;
-/// single-selection venues leave this unused.
+/// proven live). Providers used by this gate multiplex the anchor with the
+/// switching chart demand in one owned session.
 const ANCHOR_CONSUMER_ID: u64 = 2;
 
 /// Default soak length. The maintainer asked for five to ten minutes; six gives
@@ -1046,9 +1046,9 @@ fn live_rithmic_streams_across_timeframe_and_instrument_switches() {
         provider: "rithmic",
         symbols: &RITHMIC_SYMBOLS,
         timeframes: &RITHMIC_TIMEFRAMES,
-        // Rithmic selects one product set at a time: a second instrument
-        // would fight the worker for the single session.
-        anchor: None,
+        // The resident provider session owns the full replacement set, so an
+        // anchor can remain subscribed while the chart switches instruments.
+        anchor: Some("MNQ"),
     });
 }
 

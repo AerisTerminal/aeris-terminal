@@ -42,9 +42,6 @@ use axiusflow_desktop::market_worker::{
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
-const MAXIMUM_STARTUP_ATTEMPTS: u8 = 4;
-const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
-const SNAPSHOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const STARTUP_CATALOG_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(12);
 const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 const MESSAGE_CAPACITY: usize = 256;
@@ -290,11 +287,11 @@ struct WorkerEndpoint {
         Arc<Mutex<Option<Box<axiusflow_desktop::market_worker::EngineSelectionRequest>>>>,
     shutdown: mpsc::SyncSender<()>,
     publication: Option<MarketPublicationGeneration>,
+    pending_recovery: Option<ReplayRecoveryCommand>,
     /// Set once the engine has reported this demand generation live. After that
     /// a `Partial` state is a background history repair, not a loading chart.
     live: bool,
     active_generation: u64,
-    selection_sequence: Arc<AtomicU64>,
     resource_class: ConsumerResourceClass,
     active: bool,
 }
@@ -354,21 +351,14 @@ fn worker_endpoint(
     restored_viewport: Option<(i64, i64)>,
     initial_generation: u64,
 ) -> (WorkspaceMarketPane, EndpointRecord) {
-    let (subscription_id, worker_label) = if product.provider == "hyperliquid" {
-        (
-            HYPERLIQUID_SUBSCRIPTION_ID.to_string(),
-            HYPERLIQUID_WORKER_LABEL.to_string(),
-        )
-    } else {
-        (SUBSCRIPTION_ID.to_string(), WORKER_LABEL.to_string())
-    };
+    let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
     let startup = MarketWorkerStartup::Loading(Box::new(
         axiusflow_desktop::market_worker::EngineWorkerStartup {
             product: product.clone(),
             interval,
             restored_viewport,
-            subscription_id,
-            worker_label,
+            subscription_id: subscription_id.to_string(),
+            worker_label: worker_label.to_string(),
         },
     ));
     let (message_tx, message_rx) =
@@ -410,9 +400,9 @@ fn worker_endpoint(
             pending_engine_selection,
             shutdown: shutdown_tx,
             publication: None,
+            pending_recovery: None,
             live: false,
             active_generation: initial_generation,
-            selection_sequence,
             resource_class: ConsumerResourceClass::Foreground,
             active: true,
         },
@@ -686,6 +676,9 @@ fn receive_and_apply_event(
         None => event,
     };
     let Some(event) = event else { return Ok(true) };
+    if complete_pending_recovery(&event, &record.product, endpoint)? {
+        return Ok(true);
+    }
     let result = apply_pushed_event(
         event,
         &PushedEventContext {
@@ -749,51 +742,17 @@ fn initialize_endpoint(
     product.clone_from(&canonical);
     let provider_name = provider_display_name(product.provider.as_str());
     let series = series_key(product, interval)?;
-    let mut attempt = 1_u8;
-    let result = loop {
-        match request_snapshot(
-            client,
-            endpoint.consumer_id,
-            endpoint.active_generation,
-            series.clone(),
-            product.session_generation,
-            &endpoint.messages,
-        ) {
-            Ok(snapshot) => break Ok(snapshot),
-            Err(_error) if attempt < MAXIMUM_STARTUP_ATTEMPTS => {
-                attempt += 1;
-                let Some(generation) = endpoint.active_generation.checked_add(1) else {
-                    break Err(format!("{provider_name} startup generation exhausted"));
-                };
-                endpoint.active_generation = generation;
-                endpoint
-                    .selection_sequence
-                    .store(generation, Ordering::Release);
-                let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                    state: ChartState::Loading,
-                    message: format!("Retrying initial {provider_name} market load"),
-                });
-                thread::sleep(STARTUP_RETRY_DELAY);
-            }
-            Err(error) => break Err(error),
-        }
-    };
-    match result {
-        Ok((snapshot, generation)) => {
-            let publication = MarketPublicationGeneration::from_generation(&generation);
-            send_publication(
-                &endpoint.messages,
-                ReplayStreamUpdate::Snapshot(snapshot),
-                publication,
-            )?;
-            endpoint.publication = Some(publication);
-        }
-        Err(error) => {
-            let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message: error,
-            });
-        }
+    let _ = endpoint.messages.send(MarketWorkerMessage::State {
+        state: ChartState::Loading,
+        message: format!("Loading {provider_name} history through the resident engine"),
+    });
+    if let Err(error) =
+        client.set_series_demand(endpoint.consumer_id, endpoint.active_generation, series)
+    {
+        let _ = endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: error,
+        });
     }
     client.search_provider_instruments(SearchProviderInstruments {
         consumer_id: endpoint.consumer_id,
@@ -1018,6 +977,10 @@ fn process_command(
                     return Ok(());
                 }
             };
+            cancel_pending_recovery(
+                endpoint,
+                "market recovery was superseded by a new market selection",
+            )?;
             let _ = endpoint
                 .messages
                 .send(MarketWorkerMessage::EngineSwitchMarker {
@@ -1273,7 +1236,17 @@ fn apply_realtime_snapshot(
     let generation = generation_from_snapshot(snapshot, &replay)?;
     let status = MarketPublicationGeneration::from_generation(&generation);
     *publication = Some(status);
-    send_publication(messages, ReplayStreamUpdate::Snapshot(replay), status)
+    let provider = snapshot
+        .series
+        .as_ref()
+        .map(|series| series.provider.as_str())
+        .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
+    send_publication(
+        messages,
+        ReplayStreamUpdate::Snapshot(replay),
+        status,
+        provider,
+    )
 }
 
 fn apply_realtime_update(
@@ -1302,7 +1275,12 @@ fn apply_realtime_update(
         &tail,
     );
     *publication = Some(status);
-    send_publication(messages, ReplayStreamUpdate::Tail(tail), status)
+    let provider = update
+        .series
+        .as_ref()
+        .map(|series| series.provider.as_str())
+        .ok_or_else(|| "engine update has no series identity".to_string())?;
+    send_publication(messages, ReplayStreamUpdate::Tail(tail), status, provider)
 }
 
 fn apply_realtime_series_state(
@@ -1419,153 +1397,6 @@ fn apply_provider_state(
         .map_err(|error| error.to_string())
 }
 
-fn request_snapshot(
-    client: &mut EngineSupervisor,
-    consumer_id: u64,
-    generation: u64,
-    series: SeriesKey,
-    minimum_provider_generation: u64,
-    messages: &MarketWorkerSender,
-) -> Result<(ReplaySnapshot, DesktopMarketGeneration), String> {
-    let realtime = series_supports_realtime(&series);
-    let provider = series.provider.clone();
-    let deadline = Instant::now()
-        .checked_add(SNAPSHOT_REQUEST_TIMEOUT)
-        .ok_or_else(|| "resident engine snapshot deadline overflowed".to_string())?;
-    client.set_series_demand_until(consumer_id, generation, series, deadline)?;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(format!(
-                "resident engine timed out while resolving {} market history",
-                provider_display_name(provider.as_str())
-            ));
-        }
-        let poll = client.receive_market_event_for_until(consumer_id, deadline)?;
-        if poll.reconnected {
-            let _ = messages.send(MarketWorkerMessage::Connection {
-                state: FeedConnectionState::Recovering,
-                message: ENGINE_RESTARTED_MESSAGE.to_string(),
-                transport_rtt_nanos: None,
-            });
-        }
-        let Some(event) = poll.event else {
-            continue;
-        };
-        // Catalog results are delivered once, so they are forwarded rather than
-        // dropped while a snapshot is outstanding.
-        let (catalog, event) =
-            classify_provider_catalog_event(event, provider.as_str(), consumer_id);
-        if let Some(catalog) = catalog {
-            let _ = messages.send(MarketWorkerMessage::ProviderCatalog(catalog));
-            continue;
-        }
-        let Some(event) = event else { continue };
-        if let Some(snapshot) = handle_snapshot_event(
-            event,
-            consumer_id,
-            generation,
-            minimum_provider_generation,
-            realtime,
-            provider.as_str(),
-            messages,
-        )? {
-            return Ok(snapshot);
-        }
-    }
-}
-
-fn handle_snapshot_event(
-    event: envelope::Payload,
-    consumer_id: u64,
-    generation: u64,
-    minimum_provider_generation: u64,
-    realtime: bool,
-    provider: &str,
-    messages: &MarketWorkerSender,
-) -> Result<Option<(ReplaySnapshot, DesktopMarketGeneration)>, String> {
-    let provider_name = provider_display_name(provider);
-    match event {
-        envelope::Payload::SeriesState(state) => {
-            if state.consumer_id != consumer_id {
-                return Err("engine snapshot state consumer mismatched".to_string());
-            }
-            if stale_generation(
-                state.generation,
-                generation,
-                "engine snapshot state generation advanced unexpectedly",
-            )? {
-                return Ok(None);
-            }
-            match SeriesLoadState::try_from(state.state)
-                .map_err(|_| "engine returned an invalid series state".to_string())?
-            {
-                SeriesLoadState::Resolving => {
-                    let _ = messages.send(MarketWorkerMessage::State {
-                        state: ChartState::Loading,
-                        message: format!("Resident engine is resolving {provider_name} history"),
-                    });
-                }
-                SeriesLoadState::Ready | SeriesLoadState::Live => {
-                    return Err(
-                        "engine marked history ready without a covering snapshot".to_string()
-                    );
-                }
-                SeriesLoadState::Failed => {
-                    return Err(state.detail.unwrap_or_else(|| {
-                        format!("resident engine could not resolve {provider_name} history")
-                    }));
-                }
-                SeriesLoadState::Superseded => {
-                    return Err(format!("{provider_name} history demand was superseded"));
-                }
-                SeriesLoadState::Empty | SeriesLoadState::Partial => {}
-            }
-        }
-        envelope::Payload::ProviderState(state) => {
-            if stale_generation(
-                state.generation,
-                minimum_provider_generation,
-                "engine snapshot provider generation advanced unexpectedly",
-            )? {
-                return Ok(None);
-            }
-            apply_provider_state(&state, provider, realtime, messages)?;
-        }
-        envelope::Payload::SeriesSnapshot(snapshot) => {
-            if snapshot.consumer_id != consumer_id
-                || snapshot.generation != generation
-                || snapshot.provider_generation < minimum_provider_generation
-            {
-                return Ok(None);
-            }
-            let replay = replay_snapshot(&snapshot)?;
-            let publication = generation_from_snapshot(&snapshot, &replay)?;
-            return Ok(Some((replay, publication)));
-        }
-        envelope::Payload::DemandError(error) => {
-            if error.consumer_id != consumer_id {
-                return Err("engine snapshot demand-error consumer mismatched".to_string());
-            }
-            if stale_generation(
-                error.generation,
-                generation,
-                "engine snapshot demand-error generation advanced unexpectedly",
-            )? {
-                return Ok(None);
-            }
-            return Err(demand_error(&error));
-        }
-        envelope::Payload::Fault(fault) => return Err(fault.redacted_detail),
-        envelope::Payload::OrderBookSnapshot(_)
-        | envelope::Payload::OrderFlowSnapshot(_)
-        | envelope::Payload::OrderFlowUpdate(_)
-        | envelope::Payload::SeriesUpdate(_) => {}
-        _ => return Err("engine returned an unexpected market response".to_string()),
-    }
-    Ok(None)
-}
-
 fn send_recovery(
     client: &mut EngineSupervisor,
     product: &InstallProviderInstrument,
@@ -1573,43 +1404,120 @@ fn send_recovery(
     endpoint: &mut WorkerEndpoint,
     command: ReplayRecoveryCommand,
 ) -> Result<(), String> {
-    let result = request_snapshot(
-        client,
+    if let Some(previous) = endpoint.pending_recovery.replace(command) {
+        endpoint
+            .messages
+            .send(MarketWorkerMessage::Recovery {
+                request_id: previous.request_id,
+                result: Err("market recovery was superseded by a newer request".to_string()),
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    if let Err(error) = client.set_series_demand(
         endpoint.consumer_id,
         endpoint.active_generation,
         series_key(product, interval)?,
-        product.session_generation,
-        &endpoint.messages,
-    )
-    .map(|(snapshot, generation)| {
-        endpoint.publication = Some(MarketPublicationGeneration::from_generation(&generation));
-        MarketWorkerBootstrap {
-            snapshot,
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            generation,
-            worker_label: WORKER_LABEL.to_string(),
-        }
-    });
+    ) {
+        let pending = endpoint
+            .pending_recovery
+            .take()
+            .expect("recovery was installed before demand was issued");
+        endpoint
+            .messages
+            .send(MarketWorkerMessage::Recovery {
+                request_id: pending.request_id,
+                result: Err(error),
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint, reason: &str) -> Result<(), String> {
+    let Some(pending) = endpoint.pending_recovery.take() else {
+        return Ok(());
+    };
     endpoint
         .messages
         .send(MarketWorkerMessage::Recovery {
-            request_id: command.request_id,
-            result,
+            request_id: pending.request_id,
+            result: Err(reason.to_string()),
         })
         .map_err(|error| error.to_string())
+}
+
+fn complete_pending_recovery(
+    event: &envelope::Payload,
+    product: &InstallProviderInstrument,
+    endpoint: &mut WorkerEndpoint,
+) -> Result<bool, String> {
+    let Some(command) = endpoint.pending_recovery else {
+        return Ok(false);
+    };
+    match event {
+        envelope::Payload::SeriesSnapshot(snapshot)
+            if snapshot.consumer_id == endpoint.consumer_id
+                && snapshot.generation == endpoint.active_generation
+                && snapshot.provider_generation >= product.session_generation =>
+        {
+            let replay = replay_snapshot(snapshot)?;
+            let generation = generation_from_snapshot(snapshot, &replay)?;
+            endpoint.publication = Some(MarketPublicationGeneration::from_generation(&generation));
+            endpoint.pending_recovery = None;
+            let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
+            endpoint
+                .messages
+                .send(MarketWorkerMessage::Recovery {
+                    request_id: command.request_id,
+                    result: Ok(MarketWorkerBootstrap {
+                        snapshot: replay,
+                        subscription_id: subscription_id.to_string(),
+                        generation,
+                        worker_label: worker_label.to_string(),
+                    }),
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        envelope::Payload::DemandError(error)
+            if error.consumer_id == endpoint.consumer_id
+                && error.generation == endpoint.active_generation =>
+        {
+            endpoint.pending_recovery = None;
+            endpoint
+                .messages
+                .send(MarketWorkerMessage::Recovery {
+                    request_id: command.request_id,
+                    result: Err(demand_error(error)),
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn worker_identity(provider: &str) -> (&'static str, &'static str) {
+    if provider == "hyperliquid" {
+        (HYPERLIQUID_SUBSCRIPTION_ID, HYPERLIQUID_WORKER_LABEL)
+    } else {
+        (SUBSCRIPTION_ID, WORKER_LABEL)
+    }
 }
 
 fn send_publication(
     messages: &MarketWorkerSender,
     update: ReplayStreamUpdate,
     generation: MarketPublicationGeneration,
+    provider: &str,
 ) -> Result<(), String> {
+    let (subscription_id, worker_label) = worker_identity(provider);
     messages
         .send(MarketWorkerMessage::Update(MarketWorkerPublication {
             update,
             generation,
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: WORKER_LABEL.to_string(),
+            subscription_id: subscription_id.to_string(),
+            worker_label: worker_label.to_string(),
             ui_diagnostics: None,
         }))
         .map_err(|error| error.to_string())
@@ -1996,16 +1904,6 @@ fn replay_bar_definition(series: &SeriesKey) -> Result<BarDefinition, String> {
         trades_per_bar: None,
         calendar_months,
     })
-}
-
-fn series_supports_realtime(series: &SeriesKey) -> bool {
-    series.cadence_value > 0
-        && matches!(
-            SeriesCadence::try_from(series.cadence),
-            Ok(SeriesCadence::FixedSeconds
-                | SeriesCadence::CalendarWeeks
-                | SeriesCadence::CalendarMonths)
-        )
 }
 
 fn default_product(product_id: &str) -> InstallProviderInstrument {
@@ -2574,6 +2472,104 @@ mod tests {
             publication.map(MarketPublicationGeneration::sequence_range),
             Some((1, 1))
         );
+    }
+
+    #[test]
+    fn recovery_completes_from_pushed_snapshot_without_blocking_the_shared_reader() {
+        let product = default_hyperliquid_product();
+        let (mut pane, mut record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
+        record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
+            request_id: 9,
+            reason: axiusflow_application::ResnapshotReason::QueueOverflow,
+        });
+        let snapshot = envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+            consumer_id: 41,
+            generation: 3,
+            series: Some(series_key(&product, ChartInterval::Minute1).expect("series")),
+            provider_generation: product.session_generation,
+            price_scale: product.price_scale,
+            quantity_scale: product.quantity_scale,
+            bars: vec![IpcMarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            publication_generation: 1,
+            forming: false,
+        });
+
+        assert!(
+            complete_pending_recovery(&snapshot, &product, &mut record.endpoint)
+                .expect("pushed recovery completes")
+        );
+        assert!(record.endpoint.pending_recovery.is_none());
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Recovery {
+                request_id: 9,
+                result: Ok(bootstrap),
+            }] if bootstrap.generation.publication_generation() == 1
+        ));
+    }
+
+    #[test]
+    fn engine_selection_cancels_old_recovery_before_new_snapshot_can_complete_it() {
+        let product = default_hyperliquid_product();
+        let (mut pane, mut record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
+        record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
+            request_id: 9,
+            reason: axiusflow_application::ResnapshotReason::QueueOverflow,
+        });
+
+        cancel_pending_recovery(
+            &mut record.endpoint,
+            "market recovery was superseded by a new market selection",
+        )
+        .expect("selection cancels old recovery");
+        record.endpoint.active_generation = 4;
+        let snapshot = envelope::Payload::SeriesSnapshot(SeriesSnapshot {
+            consumer_id: 41,
+            generation: 4,
+            series: Some(series_key(&product, ChartInterval::Minute1).expect("series")),
+            provider_generation: product.session_generation,
+            price_scale: product.price_scale,
+            quantity_scale: product.quantity_scale,
+            bars: vec![IpcMarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            publication_generation: 1,
+            forming: false,
+        });
+
+        assert!(
+            !complete_pending_recovery(&snapshot, &product, &mut record.endpoint)
+                .expect("new snapshot is not consumed by old recovery")
+        );
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Recovery {
+                request_id: 9,
+                result: Err(error),
+            }] if error == "market recovery was superseded by a new market selection"
+        ));
     }
 
     #[test]
@@ -3444,6 +3440,53 @@ mod tests {
         assert_eq!(snapshot.instrument().precision.price_scale(), 8);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.instrument().symbol, "BTC");
+    }
+
+    #[test]
+    fn hyperliquid_publication_uses_hyperliquid_worker_identity() {
+        let product = default_hyperliquid_product();
+        let snapshot = SeriesSnapshot {
+            consumer_id: 1,
+            generation: 1,
+            series: Some(series_key(&product, ChartInterval::Minute1).expect("HL series")),
+            provider_generation: 7,
+            price_scale: 8,
+            quantity_scale: 8,
+            bars: vec![IpcMarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 6_700_050_000_000,
+                high: 6_700_100_000_000,
+                low: 6_699_900_000_000,
+                close: 6_700_075_000_000,
+                volume: 98_639_000,
+            }],
+            publication_generation: 1,
+            forming: false,
+        };
+        let replay = replay_snapshot(&snapshot).expect("HL snapshot converts");
+        let generation = MarketPublicationGeneration::from_generation(
+            &generation_from_snapshot(&snapshot, &replay).expect("generation validates"),
+        );
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+
+        send_publication(
+            &sender,
+            ReplayStreamUpdate::Snapshot(replay),
+            generation,
+            "hyperliquid",
+        )
+        .expect("publication queues");
+
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Update(publication)]
+                if publication.subscription_id == HYPERLIQUID_SUBSCRIPTION_ID
+                    && publication.worker_label == HYPERLIQUID_WORKER_LABEL
+        ));
     }
 
     #[test]

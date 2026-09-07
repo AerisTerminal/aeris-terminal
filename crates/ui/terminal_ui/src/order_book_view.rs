@@ -180,7 +180,7 @@ impl ReadOnlyOrderBookView {
         }
     }
 
-    /// Replaces the immutable frame. Older selections and revisions are rejected.
+    /// Replaces the immutable frame. Older sessions, selections, and revisions are rejected.
     pub fn replace_frame(&mut self, frame: OrderBookFrame, cx: &mut Context<Self>) -> bool {
         let newest = self.pending_frame.as_ref().or(self.frame.as_ref());
         if newest.is_some_and(|current| frame_precedes(&frame, current)) {
@@ -277,10 +277,10 @@ impl ReadOnlyOrderBookView {
 }
 
 fn frame_precedes(candidate: &OrderBookFrame, current: &OrderBookFrame) -> bool {
-    candidate.selection_generation < current.selection_generation
-        || (candidate.selection_generation == current.selection_generation
-            && (candidate.session_generation < current.session_generation
-                || (candidate.session_generation == current.session_generation
+    candidate.session_generation < current.session_generation
+        || (candidate.session_generation == current.session_generation
+            && (candidate.selection_generation < current.selection_generation
+                || (candidate.selection_generation == current.selection_generation
                     && candidate.revision < current.revision)))
 }
 
@@ -962,11 +962,11 @@ mod tests {
             &current
         ));
         assert!(!frame_precedes(
-            &frame(2, 5, 1, OrderBookState::Ready, true),
+            &frame(1, 5, 1, OrderBookState::Ready, true),
             &current
         ));
         assert!(frame_precedes(
-            &frame(1, 9, 99, OrderBookState::Ready, true),
+            &frame(9, 3, 99, OrderBookState::Ready, true),
             &current
         ));
     }

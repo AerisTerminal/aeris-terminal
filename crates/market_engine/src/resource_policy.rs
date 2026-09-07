@@ -15,6 +15,7 @@ pub struct ResourcePolicyInput {
     pub available_memory_bytes: u64,
     pub consumer_count: usize,
     pub visible_consumer_count: usize,
+    pub stored_series_count: usize,
     pub provider_series_limit: usize,
     pub hot_set_priority_count: usize,
 }
@@ -23,8 +24,8 @@ pub struct ResourcePolicyInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourcePolicyDecision {
     pub maximum_decoded_bars: usize,
+    pub maximum_cached_series: usize,
     pub maximum_derived_series: usize,
-    pub retain_hidden_depth: bool,
     pub history_prefetch_bars: usize,
     pub warm_retention_seconds: u64,
 }
@@ -40,8 +41,8 @@ pub fn decide(input: ResourcePolicyInput) -> ResourcePolicyDecision {
     if input.mode == EngineResourceMode::OfflineSuspended {
         return ResourcePolicyDecision {
             maximum_decoded_bars: 0,
+            maximum_cached_series: 0,
             maximum_derived_series: 0,
-            retain_hidden_depth: false,
             history_prefetch_bars: 0,
             warm_retention_seconds: 0,
         };
@@ -52,6 +53,7 @@ pub fn decide(input: ResourcePolicyInput) -> ResourcePolicyDecision {
     let relevant_series = input
         .consumer_count
         .max(input.hot_set_priority_count)
+        .max(input.stored_series_count)
         .max(1)
         .min(input.provider_series_limit.max(1));
     let mode_prefetch = match input.mode {
@@ -76,10 +78,22 @@ pub fn decide(input: ResourcePolicyInput) -> ResourcePolicyDecision {
         EngineResourceMode::Constrained => input.hot_set_priority_count.min(2),
         EngineResourceMode::OfflineSuspended => 0,
     };
+    let cached_series_cap = match input.mode {
+        EngineResourceMode::Interactive => 16,
+        EngineResourceMode::MarketsLive => 12,
+        EngineResourceMode::Warm => 8,
+        EngineResourceMode::Constrained => 2,
+        EngineResourceMode::OfflineSuspended => 0,
+    };
+    let maximum_cached_series = input
+        .stored_series_count
+        .max(relevant_series)
+        .min(input.provider_series_limit)
+        .min(cached_series_cap);
     ResourcePolicyDecision {
         maximum_decoded_bars,
+        maximum_cached_series,
         maximum_derived_series,
-        retain_hidden_depth: input.mode == EngineResourceMode::MarketsLive,
         history_prefetch_bars,
         warm_retention_seconds: match input.mode {
             EngineResourceMode::Interactive => 15 * 60,
@@ -102,12 +116,12 @@ mod tests {
             available_memory_bytes: 8 * 1024 * 1024 * 1024,
             consumer_count: 4,
             visible_consumer_count: 1,
+            stored_series_count: 4,
             provider_series_limit: 128,
             hot_set_priority_count: 20,
         });
         assert_eq!(constrained.history_prefetch_bars, 160);
         assert_eq!(constrained.maximum_derived_series, 2);
-        assert!(!constrained.retain_hidden_depth);
         assert!(constrained.maximum_decoded_bars >= 4 * 100);
 
         let offline = decide(ResourcePolicyInput {
@@ -115,6 +129,7 @@ mod tests {
             available_memory_bytes: u64::MAX,
             consumer_count: 4,
             visible_consumer_count: 4,
+            stored_series_count: 4,
             provider_series_limit: 128,
             hot_set_priority_count: 20,
         });
@@ -124,18 +139,35 @@ mod tests {
     }
 
     #[test]
-    fn markets_live_is_bounded_and_explicitly_retains_hidden_depth() {
+    fn markets_live_keeps_bounded_cache_and_hot_set_budgets() {
         let live = decide(ResourcePolicyInput {
             mode: EngineResourceMode::MarketsLive,
             available_memory_bytes: 16 * 1024 * 1024 * 1024,
             consumer_count: 2,
             visible_consumer_count: 1,
+            stored_series_count: 2,
             provider_series_limit: 64,
             hot_set_priority_count: 10,
         });
         assert_eq!(live.history_prefetch_bars, 350);
         assert_eq!(live.maximum_derived_series, 10);
-        assert!(live.retain_hidden_depth);
         assert_eq!(live.warm_retention_seconds, 24 * 60 * 60);
+    }
+
+    #[test]
+    fn warm_cache_retention_does_not_create_hot_set_work() {
+        let warm = decide(ResourcePolicyInput {
+            mode: EngineResourceMode::Warm,
+            available_memory_bytes: 8 * 1024 * 1024 * 1024,
+            consumer_count: 0,
+            visible_consumer_count: 0,
+            stored_series_count: 3,
+            provider_series_limit: 64,
+            hot_set_priority_count: 0,
+        });
+
+        assert_eq!(warm.maximum_cached_series, 3);
+        assert_eq!(warm.maximum_derived_series, 0);
+        assert!(warm.maximum_decoded_bars >= 3 * (warm.history_prefetch_bars + 1));
     }
 }

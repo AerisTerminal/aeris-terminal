@@ -4,16 +4,18 @@ use super::{
     HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication,
-    MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream,
-    MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering, PersistenceState,
-    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderOrderBook, ResourceMode,
-    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff,
-    RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection, SeriesLoadState,
-    TopOfBookQuote, VecDeque, chart_stream_requirements, hyperliquid_interval_for_period, id,
-    ipc_series, merge_live_candle, order_flow_payload, series_state_with_persistence,
+    MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
+    OrderBookApplyOutcome, Ordering, PersistenceState, ProviderConnectionState, ProviderGeneration,
+    ProviderHealth, ProviderOrderBook, ResourceMode, RithmicCalendarPeriod,
+    RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff,
+    RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState,
+    TopOfBookQuote, VecDeque, chart_stream_requirements, envelope, hyperliquid_interval_for_period,
+    id, ipc_series, merge_live_candle, order_flow_payload, series_state_with_persistence,
     series_update_message,
 };
 use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
+
+const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 
 const fn rithmic_invalidation_detail(reason: Option<ProviderInvalidationReason>) -> &'static str {
     match reason {
@@ -47,12 +49,79 @@ const fn rithmic_invalidation_detail(reason: Option<ProviderInvalidationReason>)
     }
 }
 
+const fn rithmic_auto_recovers(reason: Option<ProviderInvalidationReason>) -> bool {
+    matches!(
+        reason,
+        None | Some(
+            ProviderInvalidationReason::Transport
+                | ProviderInvalidationReason::HeartbeatSilence
+                | ProviderInvalidationReason::MessageSilence
+                | ProviderInvalidationReason::SequenceGap
+                | ProviderInvalidationReason::QueueOverflow
+        )
+    )
+}
+
+fn enqueue_bar_transition(
+    queue: &mut VecDeque<MarketBar>,
+    bar: MarketBar,
+    overflow: &'static str,
+) -> Result<(), String> {
+    if let Some(last) = queue.back_mut() {
+        if last.source_sequence == bar.source_sequence {
+            *last = bar;
+            return Ok(());
+        }
+        if last.source_sequence > bar.source_sequence {
+            return Err("live bar transition sequence regressed".to_string());
+        }
+    }
+    if queue.len() == LIVE_BUFFER_CAPACITY {
+        return Err(overflow.to_string());
+    }
+    queue.push_back(bar);
+    Ok(())
+}
+
+fn enqueue_completed_bar(
+    queue: &mut VecDeque<MarketBar>,
+    bar: MarketBar,
+    overflow: &'static str,
+) -> Result<(), String> {
+    if queue
+        .back()
+        .is_some_and(|last| last.source_sequence == bar.source_sequence)
+    {
+        if let Some(last) = queue.back_mut() {
+            *last = bar;
+        }
+        return Ok(());
+    }
+    if queue.len() == LIVE_BUFFER_CAPACITY {
+        return Err(overflow.to_string());
+    }
+    queue.push_back(bar);
+    Ok(())
+}
+
+fn persistence_for_live_state(
+    state: Option<&envelope::Payload>,
+) -> (PersistenceState, Option<String>) {
+    match state {
+        Some(envelope::Payload::SeriesState(state)) => (
+            PersistenceState::try_from(state.persistence).unwrap_or(PersistenceState::NotRequested),
+            state.detail.clone(),
+        ),
+        _ => (PersistenceState::NotRequested, None),
+    }
+}
+
 impl ProviderOrderBook {
     pub(super) fn new(instrument: InstallProviderInstrument) -> Self {
         Self {
             instrument,
             book: OrderBook::new(
-                NonZeroUsize::new(MAXIMUM_PUBLISHED_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
+                NonZeroUsize::new(MAXIMUM_CANONICAL_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
             top_of_book: None,
             traded_volumes: BTreeMap::new(),
@@ -136,6 +205,8 @@ impl RithmicLiveHandoff {
             quantity_scale: 0,
             bars: Vec::new(),
             buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
+            pending_publications: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
+            pending_persistence: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
             connected: false,
             history_ready: false,
             dirty: false,
@@ -150,6 +221,8 @@ impl RithmicLiveHandoff {
         self.generation = generation;
         self.bars.clear();
         self.buffered.clear();
+        self.pending_publications.clear();
+        self.pending_persistence.clear();
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
@@ -177,6 +250,8 @@ impl RithmicLiveHandoff {
         forming: Option<FormingBar>,
         handoff_boundary_unix_nanos: Option<i64>,
     ) -> Result<(), String> {
+        self.pending_publications.clear();
+        self.pending_persistence.clear();
         // A tick bundle whose trade count is unknown cannot be resumed: the
         // cadence would not know when it closes, so it is treated as complete.
         let forming = forming.filter(|forming| {
@@ -217,7 +292,14 @@ impl RithmicLiveHandoff {
         }
         // The open period has to reach the consumer even if no trade arrives
         // next: it is the candle the chart opens on.
-        self.dirty = forming.is_some();
+        if let Some(forming) = forming.as_ref() {
+            enqueue_bar_transition(
+                &mut self.pending_publications,
+                forming.bar,
+                "Rithmic live publication buffer overflowed",
+            )?;
+        }
+        self.dirty = !self.pending_publications.is_empty();
         let buffered = std::mem::take(&mut self.buffered);
         self.history_ready = true;
         for trade in &buffered {
@@ -232,9 +314,13 @@ impl RithmicLiveHandoff {
         if !self.connected || !self.history_ready || !self.dirty {
             return None;
         }
-        let active = self.bars.last().copied()?;
+        let tails = self.pending_publications.drain(..).collect::<Vec<_>>();
         self.dirty = false;
-        Some(LiveSeriesPublication::Tails(vec![active]))
+        (!tails.is_empty()).then_some(LiveSeriesPublication::Tails(tails))
+    }
+
+    pub(super) fn take_completed_bars(&mut self) -> Vec<MarketBar> {
+        self.pending_persistence.drain(..).collect()
     }
 
     pub(super) fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
@@ -335,11 +421,30 @@ impl RithmicLiveHandoff {
                 }
             }
         };
+        self.commit_trade_bar(last, next, trade)?;
+        Ok(true)
+    }
+
+    fn commit_trade_bar(
+        &mut self,
+        last: MarketBar,
+        next: MarketBar,
+        trade: &MarketTrade,
+    ) -> Result<(), String> {
         if next.source_sequence == last.source_sequence {
             if let Some(forming) = self.bars.last_mut() {
                 *forming = next;
             }
         } else {
+            if self.last_trade_sequence.is_some()
+                || self.forming_tail_sequence == Some(last.source_sequence)
+            {
+                enqueue_completed_bar(
+                    &mut self.pending_persistence,
+                    last,
+                    "Rithmic live persistence buffer overflowed",
+                )?;
+            }
             self.bars.push(next);
             if self.bars.len() > LIVE_HANDOFF_HISTORY_BARS {
                 let excess = self.bars.len() - LIVE_HANDOFF_HISTORY_BARS;
@@ -348,7 +453,13 @@ impl RithmicLiveHandoff {
         }
         self.live_session_generation = Some(trade.metadata.session_generation);
         self.last_trade_sequence = Some(trade.metadata.source_sequence);
-        Ok(true)
+        enqueue_bar_transition(
+            &mut self.pending_publications,
+            next,
+            "Rithmic live publication buffer overflowed",
+        )?;
+        self.dirty = true;
+        Ok(())
     }
 }
 
@@ -404,6 +515,8 @@ impl HyperliquidLiveHandoff {
             bars: Vec::new(),
             forming: None,
             buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
+            pending_publications: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
+            pending_persistence: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
             connected: false,
             history_ready: false,
             dirty: false,
@@ -415,6 +528,8 @@ impl HyperliquidLiveHandoff {
         self.bars.clear();
         self.forming = None;
         self.buffered.clear();
+        self.pending_publications.clear();
+        self.pending_persistence.clear();
         self.connected = false;
         self.history_ready = false;
         self.dirty = false;
@@ -435,6 +550,8 @@ impl HyperliquidLiveHandoff {
         bars: &[MarketBar],
         forming: Option<FormingBar>,
     ) -> Result<(), String> {
+        self.pending_publications.clear();
+        self.pending_persistence.clear();
         let forming = forming.map(|forming| forming.bar).filter(|forming| {
             bars.last()
                 .is_none_or(|last| last.source_sequence < forming.source_sequence)
@@ -450,7 +567,14 @@ impl HyperliquidLiveHandoff {
         self.forming = forming;
         // The open period has to reach the consumer even if no candle arrives
         // next: it is the candle the chart opens on.
-        self.dirty = self.forming.is_some();
+        if let Some(forming) = self.forming {
+            enqueue_bar_transition(
+                &mut self.pending_publications,
+                forming,
+                "Hyperliquid live publication buffer overflowed",
+            )?;
+        }
+        self.dirty = !self.pending_publications.is_empty();
         let buffered = std::mem::take(&mut self.buffered);
         self.history_ready = true;
         for candle in &buffered {
@@ -465,9 +589,13 @@ impl HyperliquidLiveHandoff {
         if !self.connected || !self.history_ready || !self.dirty {
             return None;
         }
-        let active = self.forming.or_else(|| self.bars.last().copied())?;
+        let tails = self.pending_publications.drain(..).collect::<Vec<_>>();
         self.dirty = false;
-        Some(LiveSeriesPublication::Tails(vec![active]))
+        (!tails.is_empty()).then_some(LiveSeriesPublication::Tails(tails))
+    }
+
+    pub(super) fn take_completed_bars(&mut self) -> Vec<MarketBar> {
+        self.pending_persistence.drain(..).collect()
     }
 
     pub(super) fn accept_candle(&mut self, candle: &HyperliquidLiveCandle) -> Result<(), String> {
@@ -522,11 +650,27 @@ impl HyperliquidLiveHandoff {
             volume: candle.volume,
         };
         bar.validate().map_err(|error| error.to_string())?;
+        let completed = self
+            .forming
+            .filter(|forming| candle.open_nanos > forming.exchange_timestamp_unix_nanos);
         merge_live_candle(&mut self.bars, &mut self.forming, bar)?;
         if self.bars.len() > LIVE_HANDOFF_HISTORY_BARS {
             let excess = self.bars.len() - LIVE_HANDOFF_HISTORY_BARS;
             self.bars.drain(..excess);
         }
+        if let Some(completed) = completed {
+            enqueue_completed_bar(
+                &mut self.pending_persistence,
+                completed,
+                "Hyperliquid live persistence buffer overflowed",
+            )?;
+        }
+        enqueue_bar_transition(
+            &mut self.pending_publications,
+            bar,
+            "Hyperliquid live publication buffer overflowed",
+        )?;
+        self.dirty = true;
         Ok(true)
     }
 }
@@ -556,6 +700,69 @@ impl Coordinator<'_> {
         }
     }
 
+    pub(super) fn rithmic_realtime_demand(&self) -> Result<RithmicRealtimeDemand, String> {
+        let mut instruments = BTreeMap::<String, RithmicInstrumentDemand>::new();
+        for series in self.rithmic_live.keys() {
+            let Some(streams) = self
+                .engine
+                .subscription_status(series)
+                .map(|status| status.streams)
+                .or_else(|| {
+                    (self.resource_mode == ResourceMode::MarketsLive
+                        && self.retained_live.contains(series))
+                    .then(|| chart_stream_requirements(series))
+                })
+            else {
+                continue;
+            };
+            let instrument = self
+                .catalog
+                .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                .cloned()
+                .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+            let demand = instruments
+                .entry(instrument.instrument_id.clone())
+                .or_insert_with(|| RithmicInstrumentDemand {
+                    instrument,
+                    trades: false,
+                    quotes: false,
+                    order_book: false,
+                });
+            demand.trades |= streams.contains(MarketStream::Trades);
+            demand.quotes |= streams.contains(MarketStream::Quotes);
+            demand.order_book |= streams.contains(MarketStream::Depth);
+        }
+        Ok(RithmicRealtimeDemand {
+            instruments: instruments
+                .into_values()
+                .filter(|demand| demand.trades || demand.quotes || demand.order_book)
+                .collect(),
+        })
+    }
+
+    fn send_rithmic_demand(&mut self) -> Result<(), String> {
+        if !self.providers.rithmic_realtime_enabled() {
+            return Ok(());
+        }
+        let demand = self.rithmic_realtime_demand()?;
+        if demand.instruments.is_empty() {
+            return Ok(());
+        }
+        if self.rithmic_demand.as_ref() == Some(&demand) && self.rithmic_pending_demand.is_none() {
+            return Ok(());
+        }
+        if self
+            .providers
+            .send_rithmic_realtime(RithmicRealtimeControl::Subscribe(demand.clone()))?
+        {
+            self.rithmic_pending_demand = None;
+            self.rithmic_demand = Some(demand);
+        } else {
+            self.rithmic_pending_demand = Some(demand);
+        }
+        Ok(())
+    }
+
     pub(super) fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
         let streams = self
             .engine
@@ -582,31 +789,6 @@ impl Coordinator<'_> {
             return Ok(());
         }
         if series.provider_id == "rithmic" {
-            // A timeframe change keeps the same instrument and generation, so
-            // it sends nothing; a symbol change, or a session that has been
-            // retired and replaced, sends the worker its replacement selection.
-            if self.providers.rithmic_realtime_enabled() {
-                let selection = RithmicSelection {
-                    instrument_id: series.instrument_id.clone(),
-                    generation: self.provider_generation_for_series(series)?,
-                };
-                if self.rithmic_selection.as_ref() != Some(&selection) {
-                    let instrument = self
-                        .catalog
-                        .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                        .cloned()
-                        .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
-                    if !self
-                        .providers
-                        .send_rithmic_realtime(RithmicRealtimeControl::Select(instrument.clone()))?
-                    {
-                        // The worker coalesces queued selections to the newest, so a
-                        // full channel is retried on the next coordinator tick.
-                        self.rithmic_pending_selection = Some(instrument);
-                    }
-                    self.rithmic_selection = Some(selection);
-                }
-            }
             if !self.rithmic_live.contains_key(series) {
                 let venue_id = self
                     .catalog
@@ -626,6 +808,7 @@ impl Coordinator<'_> {
                     self.rithmic_live.insert(series.clone(), handoff);
                 }
             }
+            self.send_rithmic_demand()?;
             return Ok(());
         }
         if series.provider_id == "hyperliquid" {
@@ -692,26 +875,24 @@ impl Coordinator<'_> {
                 self.rithmic_recovering(generation, rithmic_invalidation_detail(reason));
             }
             RithmicRealtimeEvent::Disconnected(generation, reason) => {
+                let auto_recover = rithmic_auto_recovers(reason);
                 if self
                     .rithmic_stop_pending
                     .is_some_and(|pending| pending.0.get() == generation)
                 {
                     self.rithmic_stop_pending = None;
                     if !self.rithmic_live.is_empty() {
-                        self.rithmic_selection = None;
-                        self.rithmic_pending_selection = None;
-                        let demanded = self.rithmic_live.keys().cloned().collect::<Vec<_>>();
-                        for series in demanded {
-                            let _ = self.ensure_realtime(&series);
-                        }
+                        self.rithmic_demand = None;
+                        self.rithmic_pending_demand = None;
+                        let _ = self.send_rithmic_demand();
                         self.rithmic_recovering(
                             generation,
                             "Rithmic realtime restarted after idle-stop overlap",
                         );
                         return;
                     }
-                    self.rithmic_selection = None;
-                    self.rithmic_pending_selection = None;
+                    self.rithmic_demand = None;
+                    self.rithmic_pending_demand = None;
                     if let Ok(generation) = id(generation).map(ProviderGeneration) {
                         let _ = self.engine.end_provider_session("rithmic", generation);
                         self.broadcast_provider_for(
@@ -723,12 +904,15 @@ impl Coordinator<'_> {
                     }
                     return;
                 }
-                self.rithmic_selection = None;
-                self.rithmic_pending_selection = None;
+                self.rithmic_demand = None;
+                self.rithmic_pending_demand = None;
                 if let Some(reason) = reason {
                     self.rithmic_failed(generation, rithmic_invalidation_detail(Some(reason)));
                 } else {
                     self.rithmic_recovering(generation, "Rithmic live session is recovering");
+                }
+                if auto_recover && !self.rithmic_live.is_empty() {
+                    let _ = self.send_rithmic_demand();
                 }
             }
         }
@@ -972,6 +1156,8 @@ impl Coordinator<'_> {
                 live.history_ready = false;
                 live.dirty = false;
                 live.buffered.clear();
+                live.pending_publications.clear();
+                live.pending_persistence.clear();
             }
             return;
         }
@@ -1020,6 +1206,8 @@ impl Coordinator<'_> {
             live.history_ready = false;
             live.dirty = false;
             live.buffered.clear();
+            live.pending_publications.clear();
+            live.pending_persistence.clear();
         }
         self.broadcast_series_recovery_for(series, detail);
         if !self
@@ -1191,6 +1379,8 @@ impl Coordinator<'_> {
                 live.history_ready = false;
                 live.dirty = false;
                 live.buffered.clear();
+                live.pending_publications.clear();
+                live.pending_persistence.clear();
             }
             return;
         }
@@ -1258,6 +1448,8 @@ impl Coordinator<'_> {
             live.history_ready = false;
             live.dirty = false;
             live.buffered.clear();
+            live.pending_publications.clear();
+            live.pending_persistence.clear();
         }
         self.broadcast_series_recovery_for(series, detail);
         if !self
@@ -1445,16 +1637,18 @@ impl Coordinator<'_> {
             .rithmic_live
             .values_mut()
             .filter_map(|live| {
+                let update = live.take_publication()?;
                 Some((
                     live.series.clone(),
                     live.generation,
                     live.price_scale,
                     live.quantity_scale,
-                    live.take_publication()?,
+                    update,
+                    live.take_completed_bars(),
                 ))
             })
             .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, update) in ready {
+        for (series, generation, price_scale, quantity_scale, update, completed) in ready {
             let published: Result<(), axiusflow_market_engine::EngineError> = match update {
                 LiveSeriesPublication::Tails(bars) => bars.into_iter().try_for_each(|bar| {
                     let publications = self.engine.install_realtime_tail(
@@ -1468,14 +1662,6 @@ impl Coordinator<'_> {
                     for publication in publications {
                         if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                             events.publish_series_update(series_update_message(&publication));
-                            events.series_state = Some(series_state_with_persistence(
-                                publication.consumer_id,
-                                publication.generation,
-                                ipc_series(&publication.series),
-                                SeriesLoadState::Live,
-                                PersistenceState::Durable,
-                                None,
-                            ));
                         }
                     }
                     Ok(())
@@ -1488,6 +1674,15 @@ impl Coordinator<'_> {
                     generation,
                     FailureStage::Publication,
                     "Rithmic live publication requires covering history",
+                );
+            } else if !completed.is_empty() {
+                self.broadcast_persistence_for(&series, PersistenceState::Pending, None);
+                self.enqueue_persistence(
+                    &series,
+                    generation,
+                    completed,
+                    false,
+                    "Rithmic live persistence is unavailable",
                 );
             }
         }
@@ -1503,12 +1698,29 @@ impl Coordinator<'_> {
                 .get(series)
                 .is_some_and(|live| live.connected && live.history_ready);
         if ready {
-            self.broadcast_series_resolution_for(
-                series,
-                SeriesLoadState::Live,
-                PersistenceState::Durable,
-                None,
-            );
+            for (consumer_id, events) in &mut self.events {
+                let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                    continue;
+                };
+                let (Some(generation), Some(selected)) =
+                    (demand.generation, demand.series.as_ref())
+                else {
+                    continue;
+                };
+                if selected != series {
+                    continue;
+                }
+                let (persistence, detail) =
+                    persistence_for_live_state(events.series_state.as_ref());
+                events.series_state = Some(series_state_with_persistence(
+                    *consumer_id,
+                    generation,
+                    ipc_series(series),
+                    SeriesLoadState::Live,
+                    persistence,
+                    detail,
+                ));
+            }
         }
         ready
     }
@@ -1603,16 +1815,18 @@ impl Coordinator<'_> {
             .hyperliquid_live
             .values_mut()
             .filter_map(|live| {
+                let update = live.take_publication()?;
                 Some((
                     live.series.clone(),
                     live.generation,
                     live.price_scale,
                     live.quantity_scale,
-                    live.take_publication()?,
+                    update,
+                    live.take_completed_bars(),
                 ))
             })
             .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, update) in ready {
+        for (series, generation, price_scale, quantity_scale, update, completed) in ready {
             let published: Result<(), axiusflow_market_engine::EngineError> = match update {
                 LiveSeriesPublication::Tails(bars) => bars.into_iter().try_for_each(|bar| {
                     let publications = self.engine.install_realtime_tail(
@@ -1626,14 +1840,6 @@ impl Coordinator<'_> {
                     for publication in publications {
                         if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                             events.publish_series_update(series_update_message(&publication));
-                            events.series_state = Some(series_state_with_persistence(
-                                publication.consumer_id,
-                                publication.generation,
-                                ipc_series(&publication.series),
-                                SeriesLoadState::Live,
-                                PersistenceState::Durable,
-                                None,
-                            ));
                         }
                     }
                     Ok(())
@@ -1646,6 +1852,15 @@ impl Coordinator<'_> {
                     generation,
                     FailureStage::Publication,
                     "Hyperliquid live publication requires covering history",
+                );
+            } else if !completed.is_empty() {
+                self.broadcast_persistence_for(&series, PersistenceState::Pending, None);
+                self.enqueue_persistence(
+                    &series,
+                    generation,
+                    completed,
+                    false,
+                    "Hyperliquid live persistence is unavailable",
                 );
             }
         }
@@ -1688,11 +1903,15 @@ impl Coordinator<'_> {
                 }
             }
         }
+        let retained_rithmic = self.rithmic_live.len();
         self.rithmic_live.retain(|series, _| {
             self.engine.has_subscription(series)
                 || self.resource_mode == ResourceMode::MarketsLive
                     && self.retained_live.contains(series)
         });
+        if self.rithmic_live.len() != retained_rithmic && !self.rithmic_live.is_empty() {
+            let _ = self.send_rithmic_demand();
+        }
         for series in self.hyperliquid_live.keys().filter(|series| {
             !(self.engine.has_subscription(series)
                 || self.resource_mode == ResourceMode::MarketsLive
@@ -1717,28 +1936,25 @@ impl Coordinator<'_> {
 
     pub(super) fn release_unused_live_market_data(&mut self) {
         self.prune_history_tracking();
-        if self.resource_mode == ResourceMode::MarketsLive {
-            return;
-        }
         self.prune_unused_live_series();
         self.stop_realtime_if_idle();
     }
-    /// Hands the worker a replacement selection the control channel refused.
-    pub(super) fn flush_rithmic_selection(&mut self) {
-        let Some(instrument) = self.rithmic_pending_selection.take() else {
+    /// Hands the worker a replacement subscription set the control channel refused.
+    pub(super) fn flush_rithmic_demand(&mut self) {
+        let Some(demand) = self.rithmic_pending_demand.take() else {
             return;
         };
-        if self
+        match self
             .providers
-            .send_rithmic_realtime(RithmicRealtimeControl::Select(instrument.clone()))
-            .is_ok_and(|sent| !sent)
+            .send_rithmic_realtime(RithmicRealtimeControl::Subscribe(demand.clone()))
         {
-            self.rithmic_pending_selection = Some(instrument);
+            Ok(true) => self.rithmic_demand = Some(demand),
+            Ok(false) | Err(_) => self.rithmic_pending_demand = Some(demand),
         }
     }
     pub(super) fn stop_realtime_if_idle(&mut self) {
         if self.rithmic_live.is_empty()
-            && self.rithmic_selection.is_some()
+            && self.rithmic_demand.is_some()
             && self.rithmic_stop_pending.is_none()
             && let Some(generation) = self
                 .engine
@@ -1749,8 +1965,8 @@ impl Coordinator<'_> {
                 Ok(true) => self.rithmic_stop_pending = Some(generation),
                 Ok(false) => {}
                 Err(_) => {
-                    self.rithmic_selection = None;
-                    self.rithmic_pending_selection = None;
+                    self.rithmic_demand = None;
+                    self.rithmic_pending_demand = None;
                     let _ = self.engine.end_provider_session("rithmic", generation);
                 }
             }
@@ -1773,5 +1989,182 @@ impl Coordinator<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroU64;
+
+    fn generation() -> ProviderGeneration {
+        ProviderGeneration(NonZeroU64::new(1).expect("generation"))
+    }
+
+    fn bar(sequence: u64, open_nanos: i64, close: i64) -> MarketBar {
+        MarketBar {
+            source_sequence: sequence,
+            exchange_timestamp_seconds: open_nanos.div_euclid(1_000_000_000),
+            exchange_timestamp_unix_nanos: open_nanos,
+            open: 10_000,
+            high: close.max(10_000),
+            low: close.min(10_000),
+            close,
+            volume: 1,
+        }
+    }
+
+    fn rithmic_tick_series() -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+            period: BarPeriod::tick(2).expect("tick period"),
+            definition_version: 1,
+        }
+    }
+
+    fn rithmic_trade(sequence: u64, timestamp: i64, price: i64) -> MarketTrade {
+        MarketTrade {
+            metadata: axiusflow_market_data::EventMetadata {
+                provider_id: "rithmic".to_string(),
+                instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+                entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+                source_sequence: sequence,
+                session_generation: 1,
+                timestamps: axiusflow_market_data::QualifiedTimestamp {
+                    exchange_unix_nanos: Some(timestamp),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: timestamp,
+                },
+            },
+            trade_id: format!("trade-{sequence}"),
+            price,
+            quantity: 1,
+            aggressor: axiusflow_market_data::AggressorSide::Unknown,
+        }
+    }
+
+    #[test]
+    fn rithmic_tick_burst_keeps_completed_revision_before_next_forming_bar() {
+        let series = rithmic_tick_series();
+        let mut live = RithmicLiveHandoff::new(&series, generation(), "CME").expect("handoff");
+        live.seed(2, 0, &[bar(10, 1_000_000_000, 10_000)], None, None)
+            .expect("seed");
+        live.connected = true;
+
+        live.accept_trade(&rithmic_trade(1, 2_000_000_000, 10_100))
+            .expect("first");
+        live.accept_trade(&rithmic_trade(2, 3_000_000_000, 10_200))
+            .expect("second");
+        live.accept_trade(&rithmic_trade(3, 4_000_000_000, 10_300))
+            .expect("third");
+
+        let LiveSeriesPublication::Tails(bars) = live.take_publication().expect("burst");
+        assert_eq!(
+            bars.iter()
+                .map(|bar| bar.source_sequence)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        assert_eq!(bars[0].close, 10_200, "final prior tick bar is retained");
+        let completed = live.take_completed_bars();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].source_sequence, 11);
+        assert_eq!(completed[0].close, 10_200);
+    }
+
+    #[test]
+    fn hyperliquid_rollover_keeps_final_prior_revision_before_append() {
+        let series = BarSeriesKey {
+            provider_id: "hyperliquid".to_string(),
+            instrument_id: "instrument:hyperliquid:BTC".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+            period: BarPeriod::time(60).expect("time period"),
+            definition_version: 1,
+        };
+        let mut live =
+            HyperliquidLiveHandoff::new(series, generation(), "BTC".to_string(), "1m".to_string());
+        live.seed(
+            2,
+            2,
+            &[bar(10, 60_000_000_000, 10_000)],
+            Some(FormingBar {
+                bar: bar(11, 120_000_000_000, 10_100),
+                trades: None,
+            }),
+        )
+        .expect("seed");
+        live.connected = true;
+        let _ = live.take_publication().expect("seed tail");
+
+        live.accept_candle(&HyperliquidLiveCandle {
+            open_nanos: 120_000_000_000,
+            open: 10_000,
+            high: 10_400,
+            low: 9_900,
+            close: 10_250,
+            volume: 4,
+        })
+        .expect("final revision");
+        live.accept_candle(&HyperliquidLiveCandle {
+            open_nanos: 180_000_000_000,
+            open: 10_250,
+            high: 10_500,
+            low: 10_200,
+            close: 10_300,
+            volume: 1,
+        })
+        .expect("rollover");
+
+        let LiveSeriesPublication::Tails(bars) = live.take_publication().expect("rollover tails");
+        assert_eq!(
+            bars.iter()
+                .map(|bar| bar.source_sequence)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        assert_eq!(bars[0].close, 10_250);
+        let completed = live.take_completed_bars();
+        assert_eq!(completed, vec![bars[0]]);
+    }
+
+    #[test]
+    fn terminal_rithmic_failures_do_not_auto_resubscribe() {
+        for reason in [
+            ProviderInvalidationReason::Authentication,
+            ProviderInvalidationReason::AgreementRequired,
+            ProviderInvalidationReason::UnsupportedSystem,
+            ProviderInvalidationReason::SchemaMismatch,
+            ProviderInvalidationReason::MalformedMessage,
+        ] {
+            assert!(!rithmic_auto_recovers(Some(reason)), "{reason:?}");
+        }
+        for reason in [
+            ProviderInvalidationReason::Transport,
+            ProviderInvalidationReason::HeartbeatSilence,
+            ProviderInvalidationReason::MessageSilence,
+            ProviderInvalidationReason::SequenceGap,
+            ProviderInvalidationReason::QueueOverflow,
+        ] {
+            assert!(rithmic_auto_recovers(Some(reason)), "{reason:?}");
+        }
+        assert!(rithmic_auto_recovers(None));
+    }
+
+    #[test]
+    fn live_readiness_preserves_pending_persistence() {
+        let pending = envelope::Payload::SeriesState(axiusflow_engine_protocol::SeriesState {
+            consumer_id: 1,
+            generation: 1,
+            series: None,
+            state: SeriesLoadState::Ready as i32,
+            persistence: PersistenceState::Pending as i32,
+            detail: Some("storage ack pending".to_string()),
+        });
+        let (persistence, detail) = persistence_for_live_state(Some(&pending));
+        assert_eq!(persistence, PersistenceState::Pending);
+        assert_eq!(detail.as_deref(), Some("storage ack pending"));
+        assert_ne!(persistence, PersistenceState::Durable);
     }
 }
