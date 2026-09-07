@@ -661,14 +661,17 @@ fn run_session(
     wake: &ProviderCoordinatorWake,
 ) -> SessionExit {
     let sink = RealtimeEventSink { events, stop, wake };
+    let started = Instant::now();
     let mut state = SessionState {
         active: BTreeMap::new(),
         instruments: BTreeMap::new(),
         next_trade_sequence: 1,
         book_sequences: BTreeMap::new(),
         decode_failures: 0,
-        last_inbound: Instant::now(),
-        last_ping: Instant::now(),
+        last_inbound: started,
+        // Make the first qualified RTT probe due immediately. Subsequent
+        // probes retain the normal interval from the actual send instant.
+        last_ping: started.checked_sub(PING_INTERVAL).unwrap_or(started),
         pending_ping: None,
     };
     if reconcile_subscriptions(socket, demand, &mut state).is_err() {
@@ -1260,6 +1263,23 @@ mod tests {
             Some(12_000_000)
         );
         assert_eq!(application_ping_rtt_nanos(&mut state, due), None);
+    }
+
+    #[test]
+    fn first_application_ping_is_due_immediately_for_live_rtt() {
+        let started = Instant::now();
+        let state = SessionState {
+            active: BTreeMap::new(),
+            instruments: BTreeMap::new(),
+            next_trade_sequence: 1,
+            book_sequences: BTreeMap::new(),
+            decode_failures: 0,
+            last_inbound: started,
+            last_ping: started.checked_sub(PING_INTERVAL).unwrap_or(started),
+            pending_ping: None,
+        };
+
+        assert!(application_ping_due(&state, started));
     }
 
     #[test]

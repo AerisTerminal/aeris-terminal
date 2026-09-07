@@ -210,7 +210,15 @@ impl Render for OnboardingApp {
             return terminal.clone().into_any_element();
         }
         self.start_account_poll(window, cx);
-        if self.loading {
+        if axiusflow_desktop::account::DesktopAccount::shared()
+            .is_some_and(|account| account.verification_pending())
+        {
+            return session_verification_surface(window, &self.theme).into_any_element();
+        }
+        if self.loading
+            || axiusflow_desktop::account::DesktopAccount::shared()
+                .is_some_and(|account| account.authenticated())
+        {
             return div()
                 .size_full()
                 .flex()
@@ -246,6 +254,48 @@ impl Render for OnboardingApp {
         }
         onboarding_surface(window, &self.theme, None).into_any_element()
     }
+}
+
+fn session_verification_surface(window: &Window, theme: &AxiusflowTheme) -> gpui::Div {
+    let colors = theme.colors;
+    div()
+        .relative()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui_color(colors.surface))
+        .text_color(gpui_color(colors.text_primary))
+        .font_family("HK Grotesk")
+        .child(onboarding_title_bar(window, theme))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .size(px(80.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(brand_mark_sized(px(72.0))),
+                )
+                .child(
+                    div()
+                        .mt_6()
+                        .text_lg()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Verifying your session…"),
+                )
+                .child(
+                    div()
+                        .mt_2()
+                        .text_sm()
+                        .text_color(gpui_color(colors.text_secondary))
+                        .child("Checking your existing Axiusflow credentials."),
+                ),
+        )
 }
 
 fn onboarding_status(

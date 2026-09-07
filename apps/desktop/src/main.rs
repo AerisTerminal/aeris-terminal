@@ -6325,7 +6325,7 @@ fn main() {
                 return;
             }
         };
-    if !wait_for_authenticated_account(&account, Duration::from_secs(2)) {
+    if !account.authenticated() {
         run_onboarding();
         return;
     }
@@ -6377,23 +6377,6 @@ fn schedule_versioned_launcher_promotion() -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())
-}
-
-fn wait_for_authenticated_account(
-    account: &axiusflow_desktop::account::DesktopAccount,
-    timeout: Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let _ = account.poll();
-        if account.authenticated() {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 fn run_onboarding() {

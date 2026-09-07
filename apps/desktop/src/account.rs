@@ -327,6 +327,10 @@ struct AccountShared {
     status_in_flight: AtomicBool,
     /// Sequence of the latest status fetch.
     status_seq: AtomicU64,
+    /// False until the first authoritative account-status reply arrives from
+    /// the resident engine. The local default `SignedOut` view is not a real
+    /// startup authentication result.
+    initial_status_resolved: AtomicBool,
     /// Whether a browser transaction is open. Set when the engine accepts
     /// the login request, cleared when the view leaves Authorizing.
     login_open: AtomicBool,
@@ -374,6 +378,7 @@ static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 /// budget, slow enough to keep one bounded IPC fetch in flight. Idle
 /// sessions poll slowly for restore and expiry.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const INITIAL_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Briefly poll the engine faster after returning from Manage Profile so a
 /// completed engine-owned refresh reaches presentation promptly.
 const PROFILE_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -427,6 +432,13 @@ impl DesktopAccount {
         })
     }
 
+    /// Whether startup is still waiting for the resident engine's first
+    /// authoritative account status.
+    #[must_use]
+    pub fn verification_pending(&self) -> bool {
+        !self.shared.initial_status_resolved.load(Ordering::Acquire)
+    }
+
     fn spawn(client_id: u64) -> Result<Self, String> {
         Self::spawn_with(client_id, handle_account_request)
     }
@@ -463,6 +475,7 @@ impl DesktopAccount {
             epoch: AtomicU64::new(0),
             status_in_flight: AtomicBool::new(false),
             status_seq: AtomicU64::new(0),
+            initial_status_resolved: AtomicBool::new(false),
             login_open: AtomicBool::new(false),
             requests: request_tx,
         });
@@ -763,7 +776,9 @@ impl DesktopAccount {
                             false
                         }
                     });
-            let interval = if transactional {
+            let interval = if self.verification_pending() {
+                INITIAL_STATUS_POLL_INTERVAL
+            } else if transactional {
                 STATUS_POLL_INTERVAL
             } else if profile_refresh_active {
                 PROFILE_REFRESH_POLL_INTERVAL
@@ -812,6 +827,9 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
                 // stale result drops without touching current state.
                 return;
             }
+            shared
+                .initial_status_resolved
+                .store(true, Ordering::Release);
             if !is_authorizing(&view) {
                 shared.login_open.store(false, Ordering::Release);
                 if let Ok(mut url) = shared.authorization_url.lock() {
@@ -865,6 +883,9 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
         AccountResponse::Cancelled(view) | AccountResponse::SignedOut(view) => {
+            shared
+                .initial_status_resolved
+                .store(true, Ordering::Release);
             shared.pending.store(false, Ordering::Release);
             shared.login_open.store(false, Ordering::Release);
             if let Ok(mut url) = shared.authorization_url.lock() {
@@ -1376,6 +1397,16 @@ mod tests {
     }
 
     #[test]
+    fn failed_startup_status_remains_in_verification_state() {
+        let session =
+            DesktopAccount::spawn_with(31, inert_engine).expect("isolated session spawns");
+        wait_for(&session, "startup status failure", || {
+            session.error().is_some()
+        });
+        assert!(session.verification_pending());
+    }
+
+    #[test]
     fn generations_seed_from_the_wall_clock_for_engine_fencing() {
         use super::unix_millis;
         use std::sync::atomic::Ordering;
@@ -1670,6 +1701,7 @@ mod tests {
         wait_for(&session, "restored session", || {
             session.presentation().action == "Account"
         });
+        assert!(!session.verification_pending());
         assert_eq!(session.presentation().display_name, "Ada Trader");
     }
 

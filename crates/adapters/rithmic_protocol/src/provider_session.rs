@@ -2018,6 +2018,10 @@ fn catalog_command_timed_out(state: &CatalogCommandState, now: Instant) -> bool 
     catalog_command_deadline(state).is_some_and(|deadline| now >= deadline)
 }
 
+fn heartbeat_due(state: &DirectSessionState, now: Instant, initial_messages_pending: bool) -> bool {
+    !initial_messages_pending && state.heartbeat_deadline.is_none() && now >= state.next_heartbeat
+}
+
 struct DirectSessionState {
     last_message: Instant,
     next_heartbeat: Instant,
@@ -2045,7 +2049,9 @@ fn collect_market(
     let started = Instant::now();
     let mut state = DirectSessionState {
         last_message: started,
-        next_heartbeat: started + heartbeat_interval,
+        // Take the first RTT sample as soon as buffered subscription messages
+        // are drained. Later heartbeats retain the negotiated provider cadence.
+        next_heartbeat: started,
         heartbeat_deadline: None,
         response_timeout: config.session_limits.response_timeout,
         source_ordinal: 0,
@@ -2073,7 +2079,7 @@ fn collect_market(
         if let Some(invalidation) = silence_invalidation(&state, config, now) {
             return Err(invalidation);
         }
-        if state.heartbeat_deadline.is_none() && now >= state.next_heartbeat {
+        if heartbeat_due(&state, now, !initial_messages.is_empty()) {
             connection.send_heartbeat().map_err(session_failure)?;
             state.heartbeat_deadline = Some(now + config.session_limits.response_timeout);
             state.next_heartbeat = now + heartbeat_interval;
@@ -3941,6 +3947,22 @@ mod tests {
             ..state
         };
         assert_eq!(heartbeat_transport_rtt_nanos(&no_pending, started), None);
+    }
+
+    #[test]
+    fn first_heartbeat_is_due_as_soon_as_initial_messages_are_drained() {
+        let started = Instant::now();
+        let state = DirectSessionState {
+            last_message: started,
+            next_heartbeat: started,
+            heartbeat_deadline: None,
+            response_timeout: Duration::from_secs(5),
+            source_ordinal: 0,
+            catalog: CatalogCommandState::default(),
+        };
+
+        assert!(!heartbeat_due(&state, started, true));
+        assert!(heartbeat_due(&state, started, false));
     }
 
     #[test]
