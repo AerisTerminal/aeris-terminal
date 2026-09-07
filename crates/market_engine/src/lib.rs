@@ -360,6 +360,20 @@ impl MarketEngine {
         self.providers.verify_request(provider, request)
     }
 
+    /// Verifies provider stream capabilities without requiring an active
+    /// provider session. Resume code uses this before sending the control that
+    /// causes a suspended provider worker to create its next generation.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown provider or unsupported stream set.
+    pub fn verify_provider_stream_requirements(
+        &self,
+        provider: &str,
+        streams: StreamRequirements,
+    ) -> Result<(), EngineError> {
+        self.providers.verify_streams(provider, streams)
+    }
+
     #[must_use]
     pub fn provider_status(&self, provider: &str) -> Option<ProviderStatus> {
         self.providers.status(provider)
@@ -1973,6 +1987,12 @@ mod tests {
             engine.verify_provider_request("rithmic", ProviderRequest::Trades),
             Err(EngineError::ProviderSessionUnavailable(_))
         ));
+        engine
+            .verify_provider_stream_requirements(
+                "rithmic",
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("capability preflight remains available while the session is inactive");
         assert!(matches!(
             engine.set_provider_health("rithmic", provider_generation(1), ProviderHealth::Online),
             Err(EngineError::ProviderSessionUnavailable(_))

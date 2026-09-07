@@ -491,7 +491,7 @@ impl RadiusToken {
     pub const fn logical_pixels(self) -> u16 {
         match self {
             Self::Sm => 4,
-            Self::Default => 6,
+            Self::Default => 8,
             Self::Full => 999,
         }
     }
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn radius_and_header_dimensions_match_the_platform_contract() {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
-        assert_eq!(RadiusToken::Default.logical_pixels(), 6);
+        assert_eq!(RadiusToken::Default.logical_pixels(), 8);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
         assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius-small");
         assert_eq!(

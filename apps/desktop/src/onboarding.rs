@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axiusflow_design_system::AxiusflowTheme;
+use axiusflow_design_system::{AxiusflowTheme, RadiusToken};
 use gpui::{App, Context, Entity, FontWeight, Render, Role, Window, div, prelude::*, px};
 
 use crate::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
@@ -183,7 +183,7 @@ fn onboarding_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
         .border_color(gpui_color(if primary {
             colors.primary

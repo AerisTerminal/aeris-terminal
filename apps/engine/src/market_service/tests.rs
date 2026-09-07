@@ -415,3 +415,311 @@ fn hyperliquid_handoff_bounds_pre_history_candles_and_resets_on_reconnect() {
     handoff.connected = true;
     assert!(handoff.take_publication().is_none());
 }
+
+fn resume_test_coordinator<'a>(
+    engine: MarketEngine,
+    providers: ProviderDispatch<'a>,
+    storage: &'a SyncSender<StorageRequest>,
+    consumer_id: ConsumerId,
+) -> Coordinator<'a> {
+    let policy = decide_resource_policy(ResourcePolicyInput {
+        mode: EngineResourceMode::Warm,
+        available_memory_bytes: 8 * 1024 * 1024 * 1024,
+        consumer_count: 1,
+        visible_consumer_count: 1,
+        provider_series_limit: MAXIMUM_SERIES,
+        hot_set_priority_count: 0,
+    });
+    Coordinator {
+        engine,
+        providers,
+        storage,
+        resource_mode: ResourceMode::OfflineSuspended,
+        resource_policy: policy,
+        available_memory_bytes: 8 * 1024 * 1024 * 1024,
+        hot_set_priority_count: 0,
+        last_consumer_activity: Instant::now(),
+        attached: BTreeSet::new(),
+        attached_sinks: BTreeMap::new(),
+        consumer_clients: BTreeMap::new(),
+        pending: BTreeMap::new(),
+        history_inflight: BTreeMap::new(),
+        history_deferred: BTreeMap::new(),
+        history_cancellations: BTreeMap::new(),
+        suspended_history: BTreeSet::new(),
+        deferred_publications: BTreeSet::new(),
+        pending_empty_repairs: BTreeMap::new(),
+        empty_repair_retry_at: Instant::now(),
+        history_retries: BTreeMap::new(),
+        local_history_deadlines: BTreeMap::new(),
+        local_loaded: BTreeSet::new(),
+        warming: BTreeSet::new(),
+        warm_series: BTreeMap::new(),
+        warm_priority: Vec::new(),
+        retained_history: BTreeMap::new(),
+        prewarmed: BTreeSet::new(),
+        retained_live: BTreeSet::new(),
+        warm_rithmic_search_generation: 0,
+        warm_hyperliquid_search_generation: 0,
+        events: BTreeMap::from([(consumer_id, ConsumerEvents::default())]),
+        rithmic_live: BTreeMap::new(),
+        hyperliquid_live: BTreeMap::new(),
+        order_books: BTreeMap::new(),
+        catalog: BTreeMap::new(),
+        catalog_sessions: BTreeMap::new(),
+        catalog_selections: BTreeMap::new(),
+        rithmic_selection: None,
+        rithmic_pending_selection: None,
+        rithmic_stop_pending: None,
+        hyperliquid_engaged: false,
+        hyperliquid_demand_dirty: false,
+        hyperliquid_stop_pending: None,
+        hyperliquid_catalog_degraded: None,
+    }
+}
+
+fn resume_test_identity() -> (ClientId, ConsumerId, GenerationId, ConsumerIdentity) {
+    let client_id = ClientId(NonZeroU64::new(1).expect("client id"));
+    let consumer_id = ConsumerId(NonZeroU64::new(1).expect("consumer id"));
+    let generation = GenerationId(NonZeroU64::new(1).expect("consumer generation"));
+    let identity = ConsumerIdentity {
+        client_id,
+        workspace_id: WorkspaceId(NonZeroU64::new(1).expect("workspace id")),
+        consumer_id,
+    };
+    (client_id, consumer_id, generation, identity)
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn hyperliquid_completed_stop_resumes_on_next_generation_and_gate_retry() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let old_generation = ProviderGeneration(NonZeroU64::new(1).expect("old generation"));
+    let new_generation = ProviderGeneration(NonZeroU64::new(2).expect("new generation"));
+    let mut engine = configured_engine().expect("test engine configures");
+    engine
+        .begin_provider_session("hyperliquid", old_generation)
+        .expect("old Hyperliquid session begins");
+    engine
+        .set_provider_health("hyperliquid", old_generation, ProviderHealth::Online)
+        .expect("old Hyperliquid session is online");
+    engine
+        .register_consumer(identity, true)
+        .expect("consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("demand installs");
+
+    let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
+    let (realtime_controls, realtime_control_rx) = mpsc::sync_channel(REALTIME_CAPACITY);
+    let (_realtime_event_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::from([(
+            "hyperliquid",
+            ProviderDispatchRecord {
+                history: &history_tx,
+                lifecycle: None,
+                realtime: ProviderRealtimeDispatch::Hyperliquid {
+                    controls: &realtime_controls,
+                    events: &realtime_events,
+                },
+                catalog: ProviderCatalogDispatch::Disabled,
+            },
+        )]),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.catalog.insert(
+        (series.provider_id.clone(), series.instrument_id.clone()),
+        InstallProviderInstrument {
+            provider: "hyperliquid".to_string(),
+            session_generation: old_generation.0.get(),
+            selection_generation: 1,
+            instrument_id: series.instrument_id.clone(),
+            provider_symbol: "BTC".to_string(),
+            display_symbol: "BTC".to_string(),
+            venue_id: "Hyperliquid".to_string(),
+            price_scale: 8,
+            quantity_scale: 8,
+            entitlement_id: series.entitlement_id.clone(),
+        },
+    );
+    coordinator.hyperliquid_engaged = true;
+    coordinator.hyperliquid_stop_pending = Some(old_generation);
+
+    coordinator.handle_hyperliquid_realtime(HyperliquidRealtimeEvent::Disconnected(
+        old_generation.0.get(),
+    ));
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| status.health),
+        Some(ProviderHealth::Disconnected),
+        "completed Stop -> Disconnected must retire the old provider session"
+    );
+    assert!(
+        coordinator
+            .engine
+            .verify_provider_request("hyperliquid", ProviderRequest::HistoricalBars)
+            .is_err(),
+        "the completed stop must leave the old generation inactive"
+    );
+
+    let first_resume = coordinator.apply_resource_mode(ResourceMode::Warm);
+    assert!(
+        first_resume.is_err(),
+        "the first resume may fail history preflight until Connecting(G+1) activates the provider"
+    );
+    coordinator.flush_hyperliquid_demand();
+    match realtime_control_rx
+        .try_recv()
+        .expect("resume queues the provider wake-up before returning its transient error")
+    {
+        HyperliquidRealtimeControl::Subscribe(demand) => {
+            assert!(
+                !demand.candles.is_empty() || !demand.trades.is_empty() || !demand.books.is_empty()
+            );
+        }
+        HyperliquidRealtimeControl::Stop => panic!("resume must subscribe, not stop"),
+    }
+
+    coordinator
+        .handle_hyperliquid_realtime(HyperliquidRealtimeEvent::Connecting(new_generation.0.get()));
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| (status.generation, status.health)),
+        Some((Some(new_generation), ProviderHealth::Connecting))
+    );
+
+    coordinator
+        .apply_resource_mode(ResourceMode::Warm)
+        .expect("gate retry succeeds after Connecting activates G+1");
+    let request = history_rx
+        .try_recv()
+        .expect("successful retry dispatches covering history");
+    assert_eq!(request.provider_generation, new_generation);
+    assert_eq!(request.series, series);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn rithmic_completed_stop_resumes_on_next_generation_and_gate_retry() {
+    let series = rithmic_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let old_generation = ProviderGeneration(NonZeroU64::new(1).expect("old generation"));
+    let new_generation = ProviderGeneration(NonZeroU64::new(2).expect("new generation"));
+    let mut engine = configured_engine().expect("test engine configures");
+    engine
+        .begin_provider_session("rithmic", old_generation)
+        .expect("old Rithmic session begins");
+    engine
+        .set_provider_health("rithmic", old_generation, ProviderHealth::Online)
+        .expect("old Rithmic session is online");
+    engine
+        .register_consumer(identity, true)
+        .expect("consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("demand installs");
+
+    let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
+    let (realtime_controls, realtime_control_rx) =
+        mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
+    let (_realtime_event_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::from([(
+            "rithmic",
+            ProviderDispatchRecord {
+                history: &history_tx,
+                lifecycle: None,
+                realtime: ProviderRealtimeDispatch::Rithmic {
+                    controls: &realtime_controls,
+                    events: &realtime_events,
+                },
+                catalog: ProviderCatalogDispatch::Disabled,
+            },
+        )]),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.catalog.insert(
+        (series.provider_id.clone(), series.instrument_id.clone()),
+        InstallProviderInstrument {
+            provider: "rithmic".to_string(),
+            session_generation: old_generation.0.get(),
+            selection_generation: 1,
+            instrument_id: series.instrument_id.clone(),
+            provider_symbol: "MNQU6".to_string(),
+            display_symbol: "MNQ Sep 2026".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
+            entitlement_id: series.entitlement_id.clone(),
+        },
+    );
+    coordinator.rithmic_selection = Some(RithmicSelection {
+        instrument_id: series.instrument_id.clone(),
+        generation: old_generation,
+    });
+    coordinator.rithmic_stop_pending = Some(old_generation);
+
+    coordinator.handle_rithmic_realtime(RithmicRealtimeEvent::Disconnected(
+        old_generation.0.get(),
+        None,
+    ));
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("rithmic")
+            .map(|status| status.health),
+        Some(ProviderHealth::Disconnected),
+        "completed Stop -> Disconnected must retire the old provider session"
+    );
+
+    let first_resume = coordinator.apply_resource_mode(ResourceMode::Warm);
+    assert!(
+        first_resume.is_err(),
+        "the first resume may fail history preflight until Connecting(G+1) activates the provider"
+    );
+    match realtime_control_rx
+        .try_recv()
+        .expect("resume queues the replacement selection before returning its transient error")
+    {
+        RithmicRealtimeControl::Select(instrument) => {
+            assert_eq!(instrument.instrument_id, series.instrument_id);
+        }
+        RithmicRealtimeControl::Stop => panic!("resume must select, not stop"),
+    }
+
+    coordinator.handle_rithmic_realtime(RithmicRealtimeEvent::Connecting(new_generation.0.get()));
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("rithmic")
+            .map(|status| (status.generation, status.health)),
+        Some((Some(new_generation), ProviderHealth::Connecting))
+    );
+
+    coordinator
+        .apply_resource_mode(ResourceMode::Warm)
+        .expect("gate retry succeeds after Connecting activates G+1");
+    let request = history_rx
+        .try_recv()
+        .expect("successful retry dispatches covering history");
+    assert_eq!(request.provider_generation, new_generation);
+    assert_eq!(request.series, series);
+}

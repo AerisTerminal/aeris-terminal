@@ -6,12 +6,12 @@ use super::{
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication,
     MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream,
     MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering, PersistenceState,
-    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderOrderBook,
-    ProviderRequest, ResourceMode, RithmicCalendarPeriod, RithmicExchangeCalendar,
-    RithmicLiveCadence, RithmicLiveHandoff, RithmicRealtimeControl, RithmicRealtimeEvent,
-    RithmicSelection, SeriesLoadState, TopOfBookQuote, VecDeque, chart_stream_requirements,
-    hyperliquid_interval_for_period, id, ipc_series, merge_live_candle, order_flow_payload,
-    series_state_with_persistence, series_update_message,
+    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderOrderBook, ResourceMode,
+    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicLiveCadence, RithmicLiveHandoff,
+    RithmicRealtimeControl, RithmicRealtimeEvent, RithmicSelection, SeriesLoadState,
+    TopOfBookQuote, VecDeque, chart_stream_requirements, hyperliquid_interval_for_period, id,
+    ipc_series, merge_live_candle, order_flow_payload, series_state_with_persistence,
+    series_update_message,
 };
 use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
 
@@ -543,21 +543,14 @@ impl Coordinator<'_> {
                 .then(|| chart_stream_requirements(series))
             })
             .ok_or_else(|| "series has no accepted upstream subscription".to_string())?;
-        if streams.contains(MarketStream::Trades) {
-            self.engine
-                .verify_provider_request(&series.provider_id, ProviderRequest::Trades)
-                .map_err(|error| error.to_string())?;
-        }
-        if streams.contains(MarketStream::Quotes) {
-            self.engine
-                .verify_provider_request(&series.provider_id, ProviderRequest::Quotes)
-                .map_err(|error| error.to_string())?;
-        }
-        if streams.contains(MarketStream::Depth) {
-            self.engine
-                .verify_provider_request(&series.provider_id, ProviderRequest::Depth)
-                .map_err(|error| error.to_string())?;
-        }
+        // This is deliberately capability-only. After an account/offline
+        // suspension the provider session is inactive; the Select/Subscribe
+        // control queued below is what wakes the worker and creates the next
+        // active generation. Requiring an active session here deadlocks that
+        // recovery before the wake-up control can be sent.
+        self.engine
+            .verify_provider_stream_requirements(&series.provider_id, streams)
+            .map_err(|error| error.to_string())?;
         if !streams.contains(MarketStream::Trades)
             && !streams.contains(MarketStream::Quotes)
             && !streams.contains(MarketStream::Depth)

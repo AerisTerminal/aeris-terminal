@@ -2145,7 +2145,7 @@ fn handle_engine_control_message(
 fn handle_account_message(
     connection: &mut FramedConnection,
     state: &EngineState,
-    market: Option<&MarketService>,
+    _market: Option<&MarketService>,
     payload: &envelope::Payload,
 ) -> Result<(), String> {
     match payload {
@@ -2171,10 +2171,11 @@ fn handle_account_message(
         envelope::Payload::RefreshAccountProfile(_) => connection.send(
             envelope::Payload::AccountView(state.account().request_profile_refresh()),
         ),
+        // Account state is the single source of truth. The account-market gate
+        // observes SignedOut and owns the OfflineSuspended transition; doing a
+        // second synchronous market transition here created a competing owner
+        // and made sign-out success depend on provider teardown timing.
         envelope::Payload::SignOut(_) => {
-            if let Some(market) = market {
-                market.set_resource_mode(ResourceMode::OfflineSuspended)?;
-            }
             connection.send(envelope::Payload::AccountView(state.account().sign_out()))
         }
         _ => unreachable!("only account messages reach account dispatch"),

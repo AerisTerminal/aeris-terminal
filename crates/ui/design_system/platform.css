@@ -53,7 +53,7 @@
   --ring: color-mix(in srgb, #141414 20%, transparent);
 
   /* Radius */
-  --radius-default: 6px;
+  --radius-default: 8px;
   --radius-small: 4px;
   --radius-large: 999px;
 

@@ -513,15 +513,16 @@ pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> D
         .child(controls)
 }
 
+const HEADER_GLOBAL_CONTROLS_WIDTH: f32 = chart_chrome::CHART_CONTROL_SIZE + 8.0 + 28.0 + 8.0;
+
 pub(super) fn header_controls(
     terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
 ) -> impl IntoElement {
-    // Keep the global controls out of the market strip's flex sizing. The
-    // market controls are intentionally allowed to clip on narrow/high-DPI
-    // windows, while theme/account must remain pinned to the right edge.
-    const GLOBAL_CONTROLS_WIDTH: f32 = chart_chrome::CHART_CONTROL_SIZE + 8.0 + 28.0 + 8.0;
+    // Give the global controls an explicit, non-shrinking track. GPUI cannot
+    // infer a stable intrinsic width for this mixed Button/avatar group, which
+    // previously let the flex item collapse to zero even on wide windows.
     let order_book_toggle = side_panel_toggle(
         app.clone(),
         &state.theme,
@@ -536,13 +537,12 @@ pub(super) fn header_controls(
         state.delayed,
     );
     let market_controls = div()
-        .w_full()
         .h_full()
         .min_w_0()
+        .flex_1()
         .flex()
         .items_center()
         .gap_2()
-        .pr(px(GLOBAL_CONTROLS_WIDTH))
         .overflow_x_hidden()
         .child(connection_status_indicator(
             connection_label,
@@ -609,11 +609,12 @@ pub(super) fn header_controls(
     let global_controls = header_global_controls(terminal, &state.account, &state.theme);
 
     div()
-        .relative()
         .w_full()
         .h_full()
         .min_w_0()
         .flex_1()
+        .flex()
+        .items_center()
         .child(market_controls)
         .child(global_controls)
 }
@@ -624,12 +625,12 @@ fn header_global_controls(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     div()
-        .absolute()
-        .top_0()
-        .right_0()
+        .w(px(HEADER_GLOBAL_CONTROLS_WIDTH))
         .h_full()
+        .flex_none()
         .flex()
         .items_center()
+        .justify_end()
         .gap_2()
         .pl_2()
         .child(theme_toggle(terminal.clone(), theme))
