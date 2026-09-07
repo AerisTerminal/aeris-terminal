@@ -1,259 +1,150 @@
 # AGENTS.md
 
-Instructions for coding agents working in Axiusflow. Read this file before changing the repository.
+Instructions for coding agents working in the Axiusflow native repository.
 
-Axiusflow is a local-first native trading terminal built with Rust and GPUI. It consists of a
-desktop application and a resident local engine that owns provider sessions, canonical market
-series, and history. Charting uses [Nucleus Charts](https://github.com/NucleusCharts/financial-charts)
-as a pinned Git dependency.
+Axiusflow is a local-first Rust/GPUI trading terminal. The desktop is a presentation/client process;
+the resident engine owns provider sessions, canonical market state, history, account runtime, and
+durable lifecycle behavior.
 
-## Engineering priorities
+## Branch and Git workflow
 
-- Build the requested product outcome, not speculative infrastructure.
-- Read the real call path and edit the component that owns the behavior.
-- Prefer the smallest complete change that preserves correctness and recovery.
-- Replace obsolete paths instead of adding compatibility layers or duplicate state.
-- Reuse existing code, `std`, platform facilities, and pinned dependencies before adding anything.
-- Add no crate, framework, service layer, feature flag, tool script, or third-party dependency unless
-  the requirement genuinely needs it.
-- Do not weaken behavior, validation, or tests to make a change easier.
+- Work on `main` only. Do not create, switch to, or leave work on feature/continuity/scratch branches
+  unless the maintainer explicitly requests a branch for that task.
+- Start every task with `git status --short --branch` and confirm the repo is on `main`.
+- Preserve unrelated work already present in the worktree. Never reset, checkout over, stash, or
+  delete changes you do not own.
+- Prefer one coherent implementation batch. Commit only after the relevant checks pass.
+- Use the existing `type(scope): outcome` commit style and push verified work directly to `origin/main`.
+- Never force-push or use destructive Git commands.
 
-## Verify contracts before implementation
+## How to work
 
-- Before editing, trace the real call path, identify the owner of the behavior, and inspect existing
-  reusable code. Briefly state the intended change and evidence supporting it in the conversation;
-  do not create a planning document.
-- For external integrations, verify request/response shapes and field semantics against current
-  official documentation and representative public responses when available. Do not invent protocol
-  behavior from naming conventions or another provider's implementation.
-- Resolve correctness-critical unknowns before writing dependent code: identity, precision,
-  timestamp meaning, ordering, continuity, snapshot semantics, and recovery. If evidence is
-  unavailable, state the uncertainty and continue only independent work.
-- Never treat an identifier or hash as an ordered sequence without an explicit provider guarantee.
-  Keep provider identity, local ingestion order, and evidence of continuity distinct.
-- Choose fixed-point scales from verified field requirements. Prices, quantities, rates, and
-  notional values may require different scales. Do not reject valid provider values merely to
-  simplify normalization.
-- Preserve required wire fields and validate them explicitly. Do not default missing required
-  fields to plausible values or support undocumented alternative payload shapes speculatively.
-- Base protocol tests on minimal sanitized fixtures faithful to official examples or observed public
-  responses. Preserve real nesting, field names, namespaces, indexes, and precision. Record the
-  source beside the fixture; never store credentials, private account data, or raw production
-  payload dumps.
-- Test assumptions with counterexamples: nonconsecutive IDs, already-prefixed symbols, explicit
-  indexes differing from array positions, high-precision decimals, missing fields, and actual stream
-  envelopes. Expected results must follow the verified contract, not the implementation.
-- Build and verify one coherent slice before expanding dependent integration. Run focused
-  compilation and behavioral tests as soon as the slice is testable; do not accumulate an entire
-  uncompiled adapter.
-- Before handoff, remove unused state, redundant collections, speculative wrappers, and comments
-  that claim behavior the code does not provide. Preserve meaningful regression coverage when
-  removing old implementations.
+1. Read the real call path before editing. Identify the component that owns the behavior.
+2. Make the smallest complete fix at that ownership boundary. Do not add duplicate state,
+   compatibility layers, speculative abstractions, or extra services to avoid changing the owner.
+3. Reuse existing code, `std`, platform facilities, and pinned dependencies before adding anything.
+4. Add deterministic regression coverage for concrete bugs when practical.
+5. Run focused checks while iterating, then broader gates before delivery or release.
+6. For behavior that depends on IPC, persistence, provider lifecycle, rendering, updates, or the
+   installed app, exercise the real path; compilation alone is not proof.
 
-## Correctness invariants
+## Architecture invariants
 
-These constraints are load-bearing:
-
-- Market data uses fixed-point values with explicit provenance, sequence, timestamp, and generation
-  validation.
-- History/live handoff maintains one canonical forming candle and contiguous completed history.
-- Retired clients, selections, sessions, and publications never mutate current state.
-- Queues, caches, retries, history requests, and background work remain bounded with explicit
-  overflow and cancellation behavior.
-- Loading always resolves to data, recovery/retry, or an actionable terminal error.
-- Never log credentials, tokens, or raw provider payloads. Preserve native credential storage and
-  zeroizing memory where established.
-- Provider credentials live only in the native vault (DPAPI/Keychain/Secret Service) and are
-  provisioned only through the interactive terminal prompter, never pasted into chat, email,
-  environment, CI secrets, or the repo. CI and live gates use test/paper credentials exclusively;
-  production credentials never enter a scheduled job, and the single live session belongs to the
-  resident engine or one designated probe, never both at once.
+- `MarketEngine` is the single market-demand owner. Provider sessions are created and owned only by
+  `apps/engine`; never create a session/runtime per chart or UI surface.
+- Symbol, timeframe, viewport, tab, and layout changes must not tear down a healthy provider session.
+- The engine is the single owner that merges history and live state. Preserve one canonical forming
+  candle, contiguous completed history, exact generation fencing, and explicit recovery.
+- Retired clients, generations, selections, sessions, and publications must never mutate current state.
+- Production queues, caches, retries, and background work remain bounded with explicit overflow and
+  cancellation behavior.
+- The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
+  or canonical candle state.
+- `local_history` is the engine-facing storage boundary. IPC remains bounded and versioned.
+- UI-thread code performs no blocking network, disk, process, or shutdown work. Background workers do
+  not mutate GPUI state directly.
 - Workspace-wide `unsafe_code` remains forbidden.
-- The UI thread performs no network, disk, process, or shutdown work. Background workers do not
-  mutate GPUI state directly.
 
-## Architecture boundaries
+Architecture assertions in `tools/naming_check` are authoritative when they are stricter than prose.
 
-Architecture assertions live in `tools/naming_check` and should be read alongside the code they
-protect.
+## Market-data and provider work
 
-- `MarketEngine` is the single market-demand owner. Provider sessions are created only by
-  `apps/engine`; never create a session or runtime per chart.
-- Symbol, timeframe, viewport, tab, and layout changes are presentation changes and must not tear
-  down a provider session.
-- The desktop depends on no provider adapter, storage implementation, or `market_engine` crate.
-  Provider wire types stop at adapter boundaries; UI and IPC models remain provider-neutral.
-- `local_history` is the engine-facing storage boundary.
-- The workspace has two applications: desktop and engine. They use one bounded IPC path, with no
-  shared-memory or distributed-systems layer.
-- Production queues are bounded, and production traits must represent real multi-implementation or
-  platform boundaries.
+- Verify protocol fields, precision, timestamp meaning, ordering, snapshot semantics, and recovery
+  against current provider documentation or representative observed responses before depending on them.
+- Keep provider identity, local ingestion order, and continuity evidence separate. Never infer sequence
+  semantics from an opaque identifier or hash.
+- Use fixed-point values with explicit scales and provenance. Do not round provider data merely to fit
+  an existing assumption.
+- Required wire fields must be validated, not silently defaulted.
+- Tests should use minimal sanitized fixtures faithful to real shapes. Never store credentials, account
+  data, or raw private payload dumps.
+- Rithmic production credentials never enter source, chat, logs, CI, or environment files. Native vault
+  storage is the credential boundary. Live/test provider sessions must respect provider concurrency limits.
 
-Nucleus Charts is a separate repository fetched by Cargo. Do not clone or vendor it here. The host
-integration lives in `crates/ui/chart_integration`; host chrome, pointer behavior, legends, and
-layout belong there. When updating Nucleus, change only the `nucleuscharts_*` revisions and do not
-update GPUI incidentally.
+The licensed Rithmic Provider Kit remains outside Git. The canonical local copy is
+`C:\axiusflow-deps\provider-kit`; do not vendor or modify that permanent copy.
 
-## Authentication control plane (cross-repository)
+## Nucleus Charts
 
-Authentication is one end-to-end system split across this repository and the sibling website
-repository at `C:\Users\devraj\Downloads\axiusflow-website`. Any authentication, signup, account,
-profile, subscription, entitlement, checkout, portal, email OTP, OAuth/OIDC, or browser-callback
-change must inspect and verify both repositories. Do not conclude that authentication is fixed from
-only the desktop or only the browser page.
+Nucleus Charts is a separate pinned Git dependency. Do not clone or vendor it into this repository.
+Host integration belongs in `crates/ui/chart_integration`. When intentionally updating Nucleus, change
+only the `nucleuscharts_*` revisions required by that update; do not update GPUI incidentally.
 
-- This repository owns the native side: `apps/desktop/src/account.rs` presents account state and
-  initiates IPC; `apps/engine/src/account_service` owns PKCE, the loopback callback, token exchange
-  and verification, refresh material, native vault storage, account linking, and entitlement leases;
-  `crates/engine_protocol/src/account.rs` is the bounded sanitized IPC contract.
-- The website repository owns the Cloudflare control plane under `workers/auth`: Better Auth and its
-  OAuth/OIDC provider, browser sign-in and account pages, D1 identity/account/billing state, Google
-  and email-OTP entry points, the Axiusflow link and lease routes, checkout/portal routes, and Dodo
-  webhook reconciliation. The marketing site only links into that Worker.
-- The deployed issuer is `https://auth.axiusflow.com/api/auth`; the registered native public client
-  is `axiusflow-desktop`, using Authorization Code with S256 PKCE and an ephemeral literal
-  `127.0.0.1` callback. Keep provider tokens and cookies out of desktop UI and logs.
-- Transactional OTP mail uses Cloudflare Email Service through the Worker's `EMAIL` `send_email`
-  binding. Do not request or reintroduce a Resend key or another mail provider unless the maintainer
-  explicitly changes that decision. Verify the Cloudflare sending domain and real delivery before
-  claiming email signup works.
-- Browser success is not native success. End-to-end proof requires the callback, code exchange,
-  issuer/audience/signature/nonce checks, canonical account link, vault commit, sanitized IPC update,
-  and the correct profile in the running desktop. Also verify full engine restart restoration,
-  account switching, cancellation, timeout recovery, and sign-out during refresh.
-- Billing and entitlement changes must keep the website account view, desktop plan, subscription
-  status, and signed lease consistent. Test duplicate, delayed, interrupted, and out-of-order
-  webhooks before production.
+## Authentication and website coordination
 
-The licensed Rithmic Provider Kits are kept permanently outside Git. The maintainer's
-canonical copy currently lives at `C:\axiusflow-deps\provider-kit` (the Rithmic live gate
-restores `proto/` from there, overridable per runner via `AXIUSFLOW_RITHMIC_KIT_ROOT`). If
-`provider_kit/current/proto` is missing, restore it from the canonical copy before building
-or concluding that Rithmic is unavailable, and never treat a kitless build as live-path
-evidence: without the kit the adapter cannot speak R|Protocol. Keep the permanent copy
-unchanged.
+Authentication is an end-to-end system shared with:
+`C:\Users\devraj\Downloads\Devlopment\axiusflow-website`.
 
-## Repository map
+- Native ownership: desktop account presentation/IPC, engine PKCE and loopback callback, token
+  exchange/verification, native vault material, account linking, lease validation, and sanitized IPC.
+- Website ownership: `workers/auth` Better Auth/OIDC, browser sign-in/account pages, D1 account and
+  billing state, OAuth/email entry points, native link/lease endpoints, checkout/portal, and webhooks.
+- Any auth/profile/subscription/entitlement change must inspect both repositories and verify the full
+  browser -> callback -> engine -> vault -> IPC -> desktop path when relevant.
+- Browser success alone is not native authentication success.
+- Keep OAuth tokens, provider cookies, refresh material, and credentials out of desktop UI and logs.
 
-| Path | Responsibility |
-| --- | --- |
-| `apps/desktop` | GPUI windows, workspaces, chart chrome, DOM, and engine-client wiring |
-| `apps/engine` | Resident provider sessions, canonical publication, and persistence |
-| `crates/ui/chart_integration` | Nucleus host, legends, drawings, and indicator panes |
-| `crates/ui/design_system`, `crates/ui/terminal_ui` | Theme tokens and native UI primitives |
-| `crates/application` | Transport- and provider-neutral use-case contracts |
-| `crates/market_engine` | Headless canonical market state |
-| `crates/domain/*` | Instruments and fixed-point market-data models |
-| `crates/adapters/*` | Rithmic wire boundaries |
-| `crates/local_storage`, `crates/local_history`, `crates/provider_history` | Engine-side history |
-| `crates/engine_protocol`, `crates/local_engine_client`, `crates/transport` | Versioned local IPC |
-| `crates/platform_runtime`, `crates/observability` | OS capabilities and diagnostics |
-| `tools/naming_check` | Enforced repository and dependency boundaries |
+## Design system coordination
 
-## Workflow and verification
+`crates/ui/design_system/platform.css` and the Rust tokens in `crates/ui/design_system/src/lib.rs` are
+the native platform design-system source. The website keeps a mirrored portable stylesheet at
+`src/styles/platform.css` in the sibling repo.
 
-Work directly on `main` unless the maintainer explicitly requests another branch.
-Inspect `git status` before and after edits, preserve unrelated work, and stage only files owned
-by the task.
+When changing shared platform tokens such as colors, typography, radii, or interaction states:
 
-Use focused checks while iterating:
+1. update the native source and Rust token mapping together;
+2. update the website mirror in the same coordinated task;
+3. run the website sync/tests so auth receives the same stylesheet;
+4. do not reintroduce one-off duplicate platform tokens in landing/auth/account CSS.
+
+## Verification
+
+Use focused checks first:
 
 ```text
-cargo check -p <crate>
-cargo test -p <crate>
-cargo clippy -p <crate> --all-targets --all-features -- -D warnings
+cargo check -p <crate> --locked
+cargo test -p <crate> --locked
+cargo clippy -p <crate> --all-targets --all-features --locked -- -D warnings
 ```
 
-Before delivery, run the workspace gates:
+Before a completed native delivery, run the relevant broad gates; for release-quality changes use:
 
 ```text
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build --workspace --all-targets --all-features
-cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
 ```
 
-Do not hide or suppress a failure. Fix failures caused by the change; report any independently
-reproducible baseline failure precisely.
+Do not suppress a new failure just to make a gate green. Fix failures caused by the change and report
+independent baseline failures precisely.
 
-Compilation is not proof for streaming, persistence, IPC, lifecycle, or rendering changes. Build
-and run the release desktop, exercise the real path, and verify that the running desktop and engine
-are the intended binaries. If live verification is impossible, state exactly what remains untested.
+## Release workflow
 
-## Self-hosted CI (manual, zero-cost; GitHub-hosted runners are forbidden)
+Only publish/install when the maintainer asks for a release or end-to-end installed validation.
 
-The account carries no paid Actions quota, so every lane runs on maintainer hardware. CI is a final
-qualification step after local implementation and verification, not a feedback loop for partial
-work. Both workflows are manual-only (`workflow_dispatch`) and currently disabled in GitHub; enable
-only the workflow needed for one deliberate run, then disable it again after completion. The
-`*-latest` ban, the two supported-target lanes, and the job-scoped credential rule are pinned in
-`tools/naming_check`; the full saga lives in `plan/plan.md`. What a new session must know:
+- Release from a clean, pushed `main` worktree only.
+- Read the current public stable channel first and choose the next install generation.
+- Use `tools/publish_release.ps1 -Generation <N>`; do not bypass its qualification, signing, immutable
+  upload, or public-channel verification steps.
+- After publishing, verify the live stable channel and installer hash before installing.
+- For installed-app validation, verify the active lifecycle pointer, signed manifest, installed binary
+  hashes, stable/versioned launcher byte equality, and that the running desktop/engine paths point at the
+  intended immutable generation.
+- Never claim live provider, account, or visual behavior was tested unless that exact path was exercised.
 
-- Windows lane: runner `axiusflow-windows` in `C:\actions-runner`, labels `axiusflow,windows`,
-  run interactively via `run.cmd` (never as a service; vault parity). Requires PowerShell 7
-  (`shell: pwsh` steps fail without it). Relaunch after every reboot or logoff.
-- Linux lane: Hyper-V VM `axiusflow-linux` (Ubuntu 24.04, static 16 GB RAM, 8 GB swap,
-  `jobs = 4` in the runner user's `~/.cargo/config.toml`), labels `axiusflow,linux`, running as
-  a systemd service that auto-starts with the VM. Key-only SSH with `~/.ssh/axiusflow_linux`;
-  the IP is DHCP-assigned, so resolve it per session (ARP scan for the `00-15-5d` NIC).
-  Hyper-V automatic checkpoints stay off. The VM consumes 16 GB of the maintainer's workstation:
-  keep it shut down during development, start it only for an intentional Linux qualification run,
-  and shut it down gracefully immediately afterward.
-- macOS native qualification is explicitly deferred because no Apple hardware exists. Keep
-  macOS-specific code guarded, warning-clean where cross-target tooling permits, and free of known
-  source defects, but do not add an unserviceable required CI lane or claim native support until an
-  Apple runner completes the same release gates.
-- Runner registration tokens expire after one hour and registration is case-sensitive on the
-  repo path; the maintainer issues them from Settings, Actions, Runners.
-- Validate workflow YAML with a real parser before push: a run with zero jobs is a parse
-  failure. Never `git config --global` in a workflow; scope credentials per job.
-- Never change CI or live gates back to automatic `push`, `pull_request`, or `schedule` triggers
-  without the maintainer's explicit request. Do not start runners, enable workflows, or dispatch a
-  run while implementation is still changing.
-- Finish focused checks, the local workspace gates, release-binary verification, and the real
-  behavior path first. Then batch the completed commits, push once, start only the required runners,
-  enable and dispatch one CI run, wait for it to finish, and shut the runners down. Run live-market
-  gates separately only when their deterministic prerequisites pass and live evidence is required.
-- Do not push while lanes run: same-ref concurrency cancels them. Avoid repeated pushes; a complete
-  two-runner qualification costs roughly 40 minutes of full-machine load.
-- Rithmic Test allows one concurrent session: drive the engine path or the smoke binary,
-  never both at once. The test feed publishes no prints, so tick bars cannot form there;
-  do not chase that absence as an adapter defect.
-- Secrets travel by environment only, never enter the repo, logs, or binaries; delete
-  throwaway provisioning helpers immediately after use.
+## Rust and documentation conventions
 
-## Rust conventions
+- Rust edition/toolchain is repository-pinned; dependencies stay pinned to intentional versions.
+- Avoid `unwrap`/`expect` outside tests and unavoidable startup invariants.
+- Propagate errors intentionally; do not silently discard failures.
+- Keep file/directory names snake_case.
+- Fix Clippy findings rather than adding broad lint suppression.
+- Do not create planning documents, architecture diaries, nested agent files, or duplicate README files.
+  Durable architecture rules belong in code/tests/`tools/naming_check`; implementation notes belong near
+  the code they describe.
 
-- Rust edition 2024; toolchain is pinned in `rust-toolchain.toml`.
-- Keep dependencies pinned to exact versions.
-- Fix clippy findings instead of adding broad `allow` attributes.
-- Avoid `unwrap` and `expect` outside tests and unavoidable startup invariants.
-- Propagate errors intentionally; do not discard failures.
-- Keep file and directory names snake_case.
-- Measure release builds before making performance claims.
+## Delivery
 
-## Documentation
-
-Root Markdown files are limited to the existing Readme and `AGENTS.md`. Do not create architecture
-reports, plans, design diaries, per-crate READMEs, or nested agent files. Explain implementation
-details beside the code. Enforce durable architecture rules in `tools/naming_check`, not in a
-document that can drift.
-
-## Git and delivery
-
-- Never use destructive Git commands, force-push, or broad path deletion.
-- Commit one completed batch using the existing `type(scope): outcome` style.
-- Push a locally verified completed batch directly to `main` once, without force; do not use pushes as CI
-  probes or push after every intermediate commit.
-- Report the outcome, verification performed, running binary state when relevant, and any remaining
-  maintainer validation.
-
-## Working with the maintainer
-
-The maintainer owns product decisions. Make reasonable implementation assumptions when they do not
-change behavior or scope materially. Ask only when alternatives materially change behavior, risk,
-or authority.
-
-If a requested mechanism would damage correctness, security, performance, or maintainability,
-explain the concrete failure briefly and implement the safer approach when it preserves the desired
-outcome. If the maintainer reaffirms the requirement, build that decision without reopening it.
+Report exactly what changed, what was verified, what was deployed/published/installed if applicable,
+and what still requires maintainer-only credentials or visual/manual confirmation. Do not present an
+untested assumption as a completed result.
