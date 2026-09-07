@@ -66,6 +66,47 @@ Filename: "{app}\axiusflow_launcher.exe"; Description: "Launch Axiusflow"; Flags
 Filename: "{app}\axiusflow_launcher.exe"; Parameters: "--remove-all-local-data"; Flags: runhidden waituntilterminated skipifdoesntexist
 
 [Code]
+procedure RegisterCloseResource(const Filename: String);
+begin
+#if Ver >= EncodeVer(7, 0)
+  RegisterExtraCloseApplicationsResource(Filename);
+#else
+  RegisterExtraCloseApplicationsResource(False, Filename);
+#endif
+end;
+
+procedure RegisterExtraCloseApplicationsResources;
+var
+  FindRec: TFindRec;
+  VersionsRoot: String;
+  DesktopPath: String;
+begin
+  { Desktop binaries live in immutable version directories rather than in the
+    installer's direct file list. Register them with Restart Manager so Setup closes the running
+    desktop before the launcher's transactional activation. The launcher still
+    owns graceful resident-engine shutdown. }
+  VersionsRoot := ExpandConstant('{app}\versions');
+  if not DirExists(VersionsRoot) then
+    exit;
+
+  if FindFirst(VersionsRoot + '\*', FindRec) then
+  begin
+    try
+      repeat
+        if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+           (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+        begin
+          DesktopPath := VersionsRoot + '\' + FindRec.Name + '\axiusflow_desktop.exe';
+          if FileExists(DesktopPath) then
+            RegisterCloseResource(DesktopPath);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;

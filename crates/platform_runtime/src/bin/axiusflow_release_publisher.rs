@@ -1138,6 +1138,8 @@ mod tests {
             "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
             "[Icons]",
             "[UninstallRun]",
+            "procedure RegisterExtraCloseApplicationsResources;",
+            "RegisterExtraCloseApplicationsResource",
             "--remove-all-local-data",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
         ] {

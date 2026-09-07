@@ -1410,6 +1410,8 @@ mod tests {
             "SetupIconFile={#IconPath}",
             "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
             "AppUserModelID: \"com.axiusflow.desktop\"",
+            "procedure RegisterExtraCloseApplicationsResources;",
+            "RegisterExtraCloseApplicationsResource",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
             "--remove-all-local-data",
         ] {

@@ -949,8 +949,13 @@ impl LifecycleHooks for NativeHooks {
                     .request_shutdown(SHUTDOWN_TIMEOUT)
                     .map_err(redacted)?;
             }
-            if process_is_running(&self.desktop(previous)) || service.is_running() {
-                return Err("active Axiusflow processes must close before update".to_string());
+            let desktop = self.desktop(previous);
+            let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+            while process_is_running(&desktop) || service.is_running() {
+                if Instant::now() >= deadline {
+                    return Err("active Axiusflow processes must close before update".to_string());
+                }
+                thread::sleep(Duration::from_millis(20));
             }
         }
         Ok(())
