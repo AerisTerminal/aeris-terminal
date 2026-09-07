@@ -24,7 +24,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
 use sysinfo::{ProcessesToUpdate, System};
 
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+// A cold candidate can legitimately spend up to the account request timeout
+// restoring authenticated state before the bounded IPC/readiness checks run.
+// Keep the installer finite while allowing one complete cold-start attempt.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
