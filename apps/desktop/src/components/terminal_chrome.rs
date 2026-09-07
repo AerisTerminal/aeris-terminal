@@ -532,15 +532,11 @@ pub(super) fn header_controls(
         state.delayed,
     );
     div()
+        .w_full()
         .h_full()
         .flex()
         .items_center()
         .gap_2()
-        .child(account_avatar_button(
-            terminal,
-            &state.account,
-            &state.theme,
-        ))
         .child(connection_status_indicator(
             connection_label,
             connection_color(&state.theme),
@@ -603,7 +599,13 @@ pub(super) fn header_controls(
             &state.theme,
         ))
         .child(order_book_toggle)
+        .child(div().flex_1().min_w(px(8.0)))
         .child(theme_toggle(terminal.clone(), &state.theme))
+        .child(account_avatar_button(
+            terminal,
+            &state.account,
+            &state.theme,
+        ))
 }
 
 pub(super) fn side_panel_toggle(

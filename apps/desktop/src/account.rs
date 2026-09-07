@@ -22,6 +22,28 @@ use std::{
 use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthorization};
 use axiusflow_local_engine_client::EngineClient;
 
+/// Production account hub used by the native Manage Profile action.
+pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section=profile";
+
+/// Opens the production account hub on a background thread. The GPUI thread
+/// never performs browser/process work.
+///
+/// # Errors
+///
+/// Returns an error when the background browser worker cannot be started.
+pub fn open_manage_profile() -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("axiusflow-open-profile".to_string())
+        .spawn(|| {
+            if let Err(error) = axiusflow_platform_runtime::open_system_browser(MANAGE_PROFILE_URL)
+            {
+                eprintln!("Axiusflow profile browser open degraded: {error}");
+            }
+        })
+        .map(|_| ())
+        .map_err(|_| "profile page could not be opened".to_string())
+}
+
 /// Starts one engine-owned login transaction and opens the returned
 /// authorization URL in the system browser on a background thread.
 ///
@@ -191,10 +213,10 @@ impl AccountMenuState {
             && self.presentation.state == account_state_label(AccountSessionState::OfflineLease)
     }
 
-    /// Returns whether the panel hides identity metadata. A plain
-    /// signed-out session shows only the Sign in action (plus any error):
-    /// signed-out status and plan metadata stay hidden. Every other state
-    /// names itself so the trader knows what happened.
+    /// Returns whether the panel hides identity metadata. A plain signed-out
+    /// session keeps signed-out status and plan metadata hidden; global menu
+    /// actions may still render. Every other state names itself so the trader
+    /// knows what happened.
     #[must_use]
     pub fn hides_identity(&self) -> bool {
         !self.signed_in()
@@ -879,8 +901,8 @@ pub fn sign_out(client: &mut EngineClient) -> Result<AccountView, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountRequest, AccountResponse, DesktopAccount, account_action_label, account_state_label,
-        sanitized_plan_label, unavailable_menu_state,
+        AccountRequest, AccountResponse, DesktopAccount, MANAGE_PROFILE_URL, account_action_label,
+        account_state_label, sanitized_plan_label, unavailable_menu_state,
     };
     use axiusflow_engine_protocol::{AccountSessionState, AccountView};
     use std::sync::{Arc, Mutex};
@@ -1190,6 +1212,14 @@ mod tests {
             "https://auth.axiusflow.com/{}",
             "a".repeat(2048)
         )));
+    }
+
+    #[test]
+    fn manage_profile_targets_the_production_account_hub() {
+        assert_eq!(
+            MANAGE_PROFILE_URL,
+            "https://auth.axiusflow.com/account?section=profile"
+        );
     }
 
     #[test]

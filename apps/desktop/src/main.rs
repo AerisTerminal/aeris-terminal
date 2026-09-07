@@ -5,6 +5,8 @@
 
 //! Axiusflow's native GPUI terminal entry point.
 
+#[path = "components/about_dialog.rs"]
+mod about_dialog;
 mod assets;
 mod chart_chrome;
 #[path = "components/chart_context_menus.rs"]
@@ -39,9 +41,11 @@ mod terminal_view;
 #[cfg(any(test, feature = "diagnostics"))]
 #[cfg_attr(all(test, not(feature = "diagnostics")), allow(dead_code))]
 mod transition_capture;
+mod update;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
 
+use about_dialog::about_dialog_layer;
 use assets::UiIcon as HugeIcon;
 #[cfg(feature = "diagnostics")]
 use axiusflow_application::ReplayStreamUpdate;
@@ -151,6 +155,7 @@ use terminal_chrome::{
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
 };
+use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use workspace_layout::workspace_market_area;
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
@@ -4490,6 +4495,8 @@ struct TerminalApp {
     chart_settings_menu: Option<ChartContextMenu>,
     account_menu_open: bool,
     account_menu_anchor: Option<gpui::Point<Pixels>>,
+    about_dialog_open: bool,
+    updater: Option<DesktopUpdater>,
     chart_chrome: chart_chrome::ChartChromePreferences,
     window_move_pending: bool,
     closing: bool,
@@ -4803,6 +4810,10 @@ impl TerminalApp {
             chart_settings_menu: None,
             account_menu_open: false,
             account_menu_anchor: None,
+            about_dialog_open: false,
+            updater: DesktopUpdater::new()
+                .map_err(|error| eprintln!("Axiusflow update UI degraded: {error}"))
+                .ok(),
             chart_chrome: init.chart_chrome,
             window_move_pending: false,
             closing: false,
@@ -4959,8 +4970,50 @@ impl TerminalApp {
     fn close_account_menu(&mut self, cx: &mut Context<Self>) {
         if self.account_menu_open {
             self.account_menu_open = false;
+            self.account_menu_anchor = None;
             cx.notify();
         }
+    }
+
+    fn open_about_dialog(&mut self, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        self.account_menu_anchor = None;
+        self.about_dialog_open = true;
+        if let Some(updater) = self.updater.as_mut()
+            && let Err(error) = updater.request_check()
+        {
+            eprintln!("Axiusflow update check degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    fn close_about_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.about_dialog_open {
+            self.about_dialog_open = false;
+            cx.notify();
+        }
+    }
+
+    fn retry_update_check(&mut self, cx: &mut Context<Self>) {
+        if let Some(updater) = self.updater.as_mut()
+            && let Err(error) = updater.request_check()
+        {
+            eprintln!("Axiusflow update check degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    fn update_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(updater) = self.updater.as_mut()
+            && let Err(error) = updater.request_restart()
+        {
+            eprintln!("Axiusflow update restart degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    fn update_presentation(&self) -> Option<&UpdatePresentation> {
+        self.updater.as_ref().map(DesktopUpdater::presentation)
     }
 
     fn account_menu_overlay(
@@ -5820,6 +5873,11 @@ impl TerminalApp {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.about_dialog_open {
+            self.close_about_dialog(cx);
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key.as_str() == "tab" {
             if event.keystroke.modifiers.shift {
                 window.focus_prev(cx);
@@ -5966,6 +6024,17 @@ impl TerminalApp {
                     .await;
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
+                        if let Some(updater) = terminal.updater.as_mut() {
+                            let update = updater.poll();
+                            if update.changed {
+                                terminal_cx.notify();
+                            }
+                            if update.restart_prepared {
+                                terminal.about_dialog_open = false;
+                                terminal.lifecycle.quit_after_shutdown(terminal_cx);
+                                return;
+                            }
+                        }
                         if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
                             && account.poll()
                         {

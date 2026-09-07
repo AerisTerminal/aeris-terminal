@@ -29,6 +29,7 @@ use sysinfo::{ProcessesToUpdate, System};
 // Keep the installer finite while allowing one complete cold-start attempt.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const RESTART_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
 const RELEASE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -147,6 +148,14 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             installer.recover(&hooks).map_err(|error| error.to_string())?;
             install_remote_update(&installer, &verifying_key, &hooks, &install_root)
         }
+        Some("--update-and-restart") => {
+            require_no_more(arguments)?;
+            update_and_restart(&installer, &verifying_key, &hooks, &install_root)
+        }
+        Some("--check-update") => {
+            require_no_more(arguments)?;
+            check_remote_update(&installer, &verifying_key)
+        }
         Some("--recover") => {
             require_no_more(arguments)?;
             installer.recover(&hooks).map_err(|error| error.to_string())
@@ -167,7 +176,7 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             remove_relocated_binary(&staged);
             result
         }
-        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--update|--recover|--remove-all-local-data|--promote-stable-launcher>".to_string()),
+        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher>".to_string()),
     }
 }
 
@@ -365,6 +374,94 @@ fn install_remote_update(
     hooks: &NativeHooks,
     install_root: &Path,
 ) -> Result<(), String> {
+    let (active, channel) = checked_release_channel(installer, verifying_key)?;
+    let signed = &channel.signed_release;
+    if active
+        .as_ref()
+        .is_some_and(|active| signed.manifest.install_generation == active.install_generation)
+    {
+        return Ok(());
+    }
+
+    let downloads_root = install_root.join(".release-downloads");
+    prepare_secure_directory(&downloads_root)?;
+    let bundle_root = downloads_root.join(format!(
+        "{:020}-{}",
+        signed.manifest.install_generation, signed.manifest.release_identity
+    ));
+    prepare_secure_directory(&bundle_root)?;
+    let download_agent = release_http_agent(RELEASE_HTTP_TIMEOUT);
+    for file in &signed.manifest.files {
+        download_release_file(&download_agent, &bundle_root, file)?;
+    }
+    installer
+        .install(signed, &bundle_root, hooks)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = spawn_active_launcher_promotion(installer) {
+        eprintln!("Axiusflow launcher promotion deferred: {error}");
+    }
+    fs::remove_dir_all(&bundle_root)
+        .map_err(|_| "release installed but its download cache could not be removed".to_string())?;
+    if fs::read_dir(&downloads_root).is_ok_and(|mut entries| entries.next().is_none()) {
+        let _ = fs::remove_dir(downloads_root);
+    }
+    Ok(())
+}
+
+fn update_and_restart(
+    installer: &ReleaseInstaller,
+    verifying_key: &VerifyingKey,
+    hooks: &NativeHooks,
+    install_root: &Path,
+) -> Result<(), String> {
+    installer
+        .recover(hooks)
+        .map_err(|error| error.to_string())?;
+    let had_active_release = installer
+        .audit_active_release()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    // The desktop requests this command, then performs its normal bounded
+    // shutdown. Wait for that process to disappear before starting the
+    // transactional install so activation never races the caller that asked
+    // for the restart.
+    wait_for_active_desktop_stop(installer)?;
+    if let Err(update_error) = install_remote_update(installer, verifying_key, hooks, install_root)
+    {
+        if !had_active_release {
+            return Err(update_error);
+        }
+        installer
+            .recover(hooks)
+            .map_err(|error| error.to_string())?;
+        eprintln!("Axiusflow update deferred: {update_error}");
+    }
+    launch_active(installer, "axiusflow_desktop")
+}
+
+fn wait_for_active_desktop_stop(installer: &ReleaseInstaller) -> Result<(), String> {
+    let active = installer
+        .audit_active_release()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+    let desktop = installer
+        .release_directory(&active)
+        .map_err(|error| error.to_string())?
+        .join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX));
+    let deadline = Instant::now() + RESTART_WAIT_TIMEOUT;
+    while process_is_running(&desktop) {
+        if Instant::now() >= deadline {
+            return Err("active Axiusflow desktop did not close for restart".to_string());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+fn checked_release_channel(
+    installer: &ReleaseInstaller,
+    verifying_key: &VerifyingKey,
+) -> Result<(Option<ActiveRelease>, ReleaseChannelPointer), String> {
     let active = installer
         .audit_active_release()
         .map_err(|error| error.to_string())?;
@@ -398,39 +495,43 @@ fn install_remote_update(
     if signed.manifest.rollout.cohort != "all" || signed.manifest.rollout.percentage != 100 {
         return Err("stable release manifest uses an unsupported partial rollout".to_string());
     }
-    if let Some(active) = &active {
-        if signed.manifest.install_generation < active.install_generation {
-            return Err(
-                "release channel generation regressed below the active release".to_string(),
-            );
-        }
-        if signed.manifest.install_generation == active.install_generation {
-            return Ok(());
-        }
+    if let Some(active) = &active
+        && signed.manifest.install_generation < active.install_generation
+    {
+        return Err("release channel generation regressed below the active release".to_string());
     }
+    Ok((active, channel))
+}
 
-    let downloads_root = install_root.join(".release-downloads");
-    prepare_secure_directory(&downloads_root)?;
-    let bundle_root = downloads_root.join(format!(
-        "{:020}-{}",
-        signed.manifest.install_generation, signed.manifest.release_identity
-    ));
-    prepare_secure_directory(&bundle_root)?;
-    let download_agent = release_http_agent(RELEASE_HTTP_TIMEOUT);
-    for file in &signed.manifest.files {
-        download_release_file(&download_agent, &bundle_root, file)?;
+#[derive(serde::Serialize)]
+struct UpdateCheckReport {
+    schema_version: u32,
+    current_generation: u64,
+    latest_generation: u64,
+    update_available: bool,
+}
+
+fn update_check_report(current_generation: u64, latest_generation: u64) -> UpdateCheckReport {
+    UpdateCheckReport {
+        schema_version: 1,
+        current_generation,
+        latest_generation,
+        update_available: latest_generation > current_generation,
     }
-    installer
-        .install(signed, &bundle_root, hooks)
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = spawn_active_launcher_promotion(installer) {
-        eprintln!("Axiusflow launcher promotion deferred: {error}");
-    }
-    fs::remove_dir_all(&bundle_root)
-        .map_err(|_| "release installed but its download cache could not be removed".to_string())?;
-    if fs::read_dir(&downloads_root).is_ok_and(|mut entries| entries.next().is_none()) {
-        let _ = fs::remove_dir(downloads_root);
-    }
+}
+
+fn check_remote_update(
+    installer: &ReleaseInstaller,
+    verifying_key: &VerifyingKey,
+) -> Result<(), String> {
+    let (active, channel) = checked_release_channel(installer, verifying_key)?;
+    let current_generation = active
+        .as_ref()
+        .map_or(0, |release| release.install_generation);
+    let report = update_check_report(current_generation, channel.install_generation);
+    let encoded = serde_json::to_string(&report)
+        .map_err(|_| "update status could not be encoded".to_string())?;
+    println!("{encoded}");
     Ok(())
 }
 
@@ -1359,6 +1460,17 @@ mod tests {
             write_bounded_download(std::io::Cursor::new(b"toolong"), &partial, 3, 6, true).is_err()
         );
         fs::remove_dir_all(base).expect("remove download fixture");
+    }
+
+    #[test]
+    fn update_check_report_uses_generation_not_semver() {
+        let available = update_check_report(7, 8);
+        assert_eq!(available.current_generation, 7);
+        assert_eq!(available.latest_generation, 8);
+        assert!(available.update_available);
+
+        let current = update_check_report(8, 8);
+        assert!(!current.update_available);
     }
 
     #[test]

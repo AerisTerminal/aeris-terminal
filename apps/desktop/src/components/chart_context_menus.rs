@@ -827,13 +827,6 @@ pub(super) fn account_avatar_button(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let presentation = &account.presentation;
-    let presence = if account.signed_in() {
-        colors.bullish
-    } else if account.authorizing() {
-        colors.bearish
-    } else {
-        colors.text_muted
-    };
     let tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
         format!("Account — {}", presentation.display_name)
     } else if account.signed_in() {
@@ -866,18 +859,7 @@ pub(super) fn account_avatar_button(
                 });
                 cx.stop_propagation();
             })
-            .child(account_avatar_face(account, theme))
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(-1.0))
-                    .right(px(-1.0))
-                    .size(px(8.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(gpui_color(colors.surface))
-                    .bg(gpui_color(presence)),
-            ),
+            .child(account_avatar_face(account, theme)),
         theme,
     )
 }
@@ -938,9 +920,9 @@ fn account_avatar_face(
 /// Account dropdown anchored under the header avatar. The panel opens below
 /// the avatar's actual click point with a small gap and clamps into the
 /// viewport, so resize, scaling, and fullscreen never push it off-screen.
-/// A plain signed-out session shows only the Sign in action (plus any
-/// error): signed-out status and plan metadata stay hidden. Authorizing
-/// keeps both recovery exits; authenticated sessions name status and plan.
+/// Signed-out status and plan metadata stay hidden. Authorizing keeps both
+/// recovery exits; authenticated sessions name status and plan. Global
+/// profile/About actions use the same compact menu primitives as chart menus.
 pub(super) fn account_menu_layer(
     terminal: &Entity<TerminalApp>,
     account: &axiusflow_desktop::account::AccountMenuState,
@@ -951,16 +933,29 @@ pub(super) fn account_menu_layer(
     let colors = theme.colors;
     let dismiss = terminal.clone();
     let action_terminal = terminal.clone();
+    let header = account_menu_header(account, theme);
+    let has_header = header.is_some();
     let header_bottom = theme.dimensions.app_header_height.logical_pixels + ACCOUNT_MENU_GAP;
     let anchor = anchor.unwrap_or(point(px(OVERLAY_EDGE_MARGIN), px(header_bottom)));
-    // Signed-in sessions show name, email, and plan: three header rows.
-    let header_rows = if account.signed_in() { 3.0 } else { 2.0 };
+    let header_rows = if account.signed_in() {
+        3.0
+    } else if has_header {
+        2.0
+    } else {
+        0.0
+    };
+    let action_rows = if account.signed_in() || account.authorizing() {
+        3.0
+    } else {
+        2.0
+    };
+    let separators = 1.0 + if has_header { 1.0 } else { 0.0 };
     let origin = clamp_overlay_origin(
         point(anchor.x, px(header_bottom)),
         viewport,
         CHART_SETTINGS_MENU_WIDTH,
-        3.0 + header_rows,
-        2.0,
+        action_rows + header_rows,
+        separators,
     );
     div()
         .id("account_menu_scrim")
@@ -978,7 +973,8 @@ pub(super) fn account_menu_layer(
         })
         .child(
             compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
-                .children(account_menu_header(account, theme))
+                .children(header)
+                .children(has_header.then(|| menu_separator(theme)))
                 .children(account_menu_actions(&action_terminal, account, theme))
                 .children(account.error.as_deref().map(|error| {
                     div()
@@ -995,7 +991,7 @@ pub(super) fn account_menu_layer(
 /// Dropdown header for the account panel. Signed-in sessions show the
 /// verified name, email, and plan (with an offline marker on a cached
 /// lease); other visible states name themselves with their detail. A plain
-/// signed-out session shows no header: only the Sign in action renders.
+/// signed-out session shows no identity header.
 fn account_menu_header(
     account: &axiusflow_desktop::account::AccountMenuState,
     theme: &AxiusflowTheme,
@@ -1083,6 +1079,24 @@ enum AccountMenuClick {
     Cancel,
     SignOut,
     Reopen,
+    ManageProfile,
+    About,
+}
+
+#[derive(Clone, Copy)]
+struct AccountMenuRowSpec {
+    id: &'static str,
+    label: &'static str,
+    destructive: bool,
+    enabled: bool,
+    click: AccountMenuClick,
+    edges: AccountMenuRowEdges,
+}
+
+#[derive(Clone, Copy)]
+struct AccountMenuRowEdges {
+    first: bool,
+    last: bool,
 }
 
 fn account_menu_actions(
@@ -1090,49 +1104,99 @@ fn account_menu_actions(
     account: &axiusflow_desktop::account::AccountMenuState,
     theme: &AxiusflowTheme,
 ) -> Vec<AnyElement> {
-    // While the browser holds the transaction there are two exits: reopen
-    // the lost page, or cancel the transaction outright. Every other state
-    // has exactly one action, so the panel can never strand the trader.
-    let rows: Vec<(&str, &str, bool, AccountMenuClick)> = if account.authorizing() {
+    // While the browser holds the transaction there are two recovery exits.
+    // Global profile/About actions share the same compact row geometry, while
+    // authentication actions alone respect the account request pending flag.
+    let rows: Vec<Option<(&str, &str, bool, AccountMenuClick)>> = if account.authorizing() {
         vec![
-            (
+            Some((
                 "account_menu_reopen",
                 "Open browser page again",
                 false,
                 AccountMenuClick::Reopen,
-            ),
-            (
+            )),
+            Some((
                 "account_menu_cancel",
                 "Cancel sign-in",
                 false,
                 AccountMenuClick::Cancel,
-            ),
+            )),
+            None,
+            Some((
+                "account_menu_about",
+                "About Axiusflow",
+                false,
+                AccountMenuClick::About,
+            )),
         ]
     } else if account.signed_in() {
-        vec![(
-            "account_menu_sign_out",
-            "Sign out",
-            true,
-            AccountMenuClick::SignOut,
-        )]
+        vec![
+            Some((
+                "account_menu_manage_profile",
+                "Manage Profile",
+                false,
+                AccountMenuClick::ManageProfile,
+            )),
+            Some((
+                "account_menu_about",
+                "About Axiusflow",
+                false,
+                AccountMenuClick::About,
+            )),
+            None,
+            Some((
+                "account_menu_sign_out",
+                "Sign out",
+                true,
+                AccountMenuClick::SignOut,
+            )),
+        ]
     } else {
-        vec![(
-            "account_menu_sign_in",
-            "Sign in",
-            false,
-            AccountMenuClick::SignIn,
-        )]
+        vec![
+            Some((
+                "account_menu_sign_in",
+                "Sign in",
+                false,
+                AccountMenuClick::SignIn,
+            )),
+            None,
+            Some((
+                "account_menu_about",
+                "About Axiusflow",
+                false,
+                AccountMenuClick::About,
+            )),
+        ]
     };
-    let enabled = !account.presentation.pending;
+    let authentication_enabled = !account.presentation.pending;
+    let first_row = rows.iter().position(Option::is_some);
+    let last_row = rows.iter().rposition(Option::is_some);
     rows.into_iter()
-        .map(|(id, label, danger, click)| {
+        .enumerate()
+        .map(|(index, row)| {
+            let Some((id, label, danger, click)) = row else {
+                return menu_separator(theme).into_any_element();
+            };
+            let enabled = match click {
+                AccountMenuClick::ManageProfile | AccountMenuClick::About => true,
+                AccountMenuClick::SignIn
+                | AccountMenuClick::Cancel
+                | AccountMenuClick::SignOut
+                | AccountMenuClick::Reopen => authentication_enabled,
+            };
             account_menu_row(
                 action_terminal.clone(),
-                id,
-                label,
-                danger,
-                enabled,
-                click,
+                AccountMenuRowSpec {
+                    id,
+                    label,
+                    destructive: danger,
+                    enabled,
+                    click,
+                    edges: AccountMenuRowEdges {
+                        first: account.hides_identity() && first_row == Some(index),
+                        last: last_row == Some(index),
+                    },
+                },
                 theme,
             )
         })
@@ -1141,50 +1205,42 @@ fn account_menu_actions(
 
 fn account_menu_row(
     action_terminal: Entity<TerminalApp>,
-    id: &'static str,
-    label: &'static str,
-    danger: bool,
-    enabled: bool,
-    click: AccountMenuClick,
+    spec: AccountMenuRowSpec,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .occlude()
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .px_3()
-        .text_sm()
-        .text_color(gpui_color(if danger {
-            colors.danger
-        } else {
-            colors.text_primary
-        }))
-        .when(enabled, |row| {
-            row.cursor_pointer()
-                .hover(|row| row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
-        })
-        .when(!enabled, |row| {
-            row.text_color(gpui_color(colors.text_muted))
-                .cursor_not_allowed()
-        })
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            if enabled {
-                action_terminal.update(cx, |terminal, terminal_cx| {
-                    match click {
-                        AccountMenuClick::SignIn => TerminalApp::request_sign_in(terminal_cx),
-                        AccountMenuClick::Cancel => TerminalApp::cancel_sign_in(terminal_cx),
-                        AccountMenuClick::SignOut => TerminalApp::sign_out(terminal_cx),
-                        AccountMenuClick::Reopen => TerminalApp::reopen_browser_page(terminal_cx),
+    MenuRow::compact(spec.id, spec.label, theme)
+        .disabled(!spec.enabled)
+        .destructive(spec.destructive)
+        .flush_in_panel(spec.edges.first, spec.edges.last)
+        .on_click(move |_, _, cx| {
+            if spec.enabled {
+                action_terminal.update(cx, |terminal, terminal_cx| match spec.click {
+                    AccountMenuClick::SignIn => {
+                        TerminalApp::request_sign_in(terminal_cx);
+                        terminal.close_account_menu(terminal_cx);
                     }
-                    terminal.close_account_menu(terminal_cx);
+                    AccountMenuClick::Cancel => {
+                        TerminalApp::cancel_sign_in(terminal_cx);
+                        terminal.close_account_menu(terminal_cx);
+                    }
+                    AccountMenuClick::SignOut => {
+                        TerminalApp::sign_out(terminal_cx);
+                        terminal.close_account_menu(terminal_cx);
+                    }
+                    AccountMenuClick::Reopen => {
+                        TerminalApp::reopen_browser_page(terminal_cx);
+                        terminal.close_account_menu(terminal_cx);
+                    }
+                    AccountMenuClick::ManageProfile => {
+                        if let Err(error) = axiusflow_desktop::account::open_manage_profile() {
+                            eprintln!("Axiusflow profile browser open degraded: {error}");
+                        }
+                        terminal.close_account_menu(terminal_cx);
+                    }
+                    AccountMenuClick::About => terminal.open_about_dialog(terminal_cx),
                 });
             }
-            cx.stop_propagation();
         })
-        .child(label)
         .into_any_element()
 }
 

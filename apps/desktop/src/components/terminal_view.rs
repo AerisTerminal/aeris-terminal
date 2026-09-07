@@ -69,6 +69,11 @@ impl TerminalApp {
             )
         })
     }
+
+    fn rendered_about_dialog(&self, terminal: &Entity<Self>) -> Option<AnyElement> {
+        self.about_dialog_open
+            .then(|| about_dialog_layer(terminal, self.update_presentation(), &self.theme))
+    }
 }
 
 impl Render for TerminalApp {
@@ -116,6 +121,7 @@ impl Render for TerminalApp {
             cx,
         );
         let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
+        let about_dialog = self.rendered_about_dialog(&terminal);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
         let header = terminal_header(
             &terminal,
@@ -171,6 +177,7 @@ impl Render for TerminalApp {
             .children(context_menu)
             .children(settings_menu)
             .children(account_menu)
+            .children(about_dialog)
     }
 }
 

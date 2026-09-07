@@ -1349,6 +1349,8 @@ mod tests {
             "audit_active_release()",
             "--remove-all-local-data",
             "--promote-stable-launcher",
+            "--check-update",
+            "--update-and-restart",
             "spawn_active_launcher_promotion",
             "--desktop-readiness",
             "DesktopReadinessReport",
@@ -1373,6 +1375,15 @@ mod tests {
                 "candidate desktop readiness lost {contract}"
             );
         }
+        let desktop_update = manifest("apps/desktop/src/update.rs");
+        assert!(
+            desktop_update.contains("--check-update")
+                && desktop_update.contains("--update-and-restart")
+                && desktop_update.contains("axiusflow-update-client")
+                && !desktop_update.contains("ureq")
+                && !desktop_update.contains("ReleaseInstaller"),
+            "desktop update UI must delegate signed discovery and installation to the stable launcher"
+        );
         let background = manifest("crates/platform_runtime/src/background_service.rs");
         assert!(
             background.contains("axiusflow_launcher")
