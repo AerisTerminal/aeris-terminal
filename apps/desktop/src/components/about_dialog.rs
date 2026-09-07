@@ -21,7 +21,9 @@ fn about_update_view(
         Some(UpdateState::Idle | UpdateState::Checking) => {
             ("Checking for updates…".to_string(), colors.text_muted, None)
         }
-        Some(UpdateState::Current) => ("Axiusflow is up to date.".to_string(), colors.bullish, None),
+        Some(UpdateState::Current) => {
+            ("Axiusflow is up to date.".to_string(), colors.bullish, None)
+        }
         Some(UpdateState::Available { latest_generation }) => (
             format!("An Axiusflow update is available (build {latest_generation})."),
             colors.bullish,

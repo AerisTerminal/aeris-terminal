@@ -1260,12 +1260,12 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 19"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 20"),
             "incompatible IPC revisions require a deliberate protocol-version change"
         );
         assert!(
-            protocol.contains("Revision 19 adds the selection-command generation"),
-            "protocol version 19 must document symbol-selection correlation"
+            protocol.contains("Revision 20 adds `RefreshAccountProfile`"),
+            "protocol version 20 must document engine-owned account-profile refresh"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");
         assert!(

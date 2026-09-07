@@ -254,6 +254,7 @@ enum AccountRequest {
     BeginLogin { client_id: u64, generation: u64 },
     CancelLogin { generation: u64 },
     RefreshStatus { seq: u64, epoch: u64 },
+    RefreshProfile { epoch: u64 },
     SignOut,
 }
 
@@ -270,6 +271,14 @@ enum AccountResponse {
     },
     StatusFailed {
         seq: u64,
+        epoch: u64,
+        error: String,
+    },
+    ProfileRefreshQueued {
+        view: AccountView,
+        epoch: u64,
+    },
+    ProfileRefreshFailed {
         epoch: u64,
         error: String,
     },
@@ -307,6 +316,7 @@ struct AccountShared {
     view: Mutex<AccountView>,
     error: Mutex<Option<String>>,
     last_status_poll: Mutex<Instant>,
+    profile_refresh_until: Mutex<Option<Instant>>,
     last_seen_version: Mutex<u64>,
     request_at: Mutex<Instant>,
     authorization_url: Mutex<Option<String>>,
@@ -364,6 +374,10 @@ static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 /// budget, slow enough to keep one bounded IPC fetch in flight. Idle
 /// sessions poll slowly for restore and expiry.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Briefly poll the engine faster after returning from Manage Profile so a
+/// completed engine-owned refresh reaches presentation promptly.
+const PROFILE_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const PROFILE_REFRESH_POLL_WINDOW: Duration = Duration::from_secs(10);
 /// Idle refresh so restored sessions and engine-side expiry reach the UI.
 const IDLE_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -442,6 +456,7 @@ impl DesktopAccount {
             view: Mutex::new(signed_out_view()),
             error: Mutex::new(None),
             last_status_poll: Mutex::new(now),
+            profile_refresh_until: Mutex::new(None),
             last_seen_version: Mutex::new(0),
             request_at: Mutex::new(now),
             authorization_url: Mutex::new(None),
@@ -667,6 +682,37 @@ impl DesktopAccount {
         )
     }
 
+    /// Asks the resident engine to refresh the current verified profile on its
+    /// background account worker. The IPC reply is immediate and carries no
+    /// secret/provider identity from the desktop.
+    ///
+    /// # Errors
+    /// Returns an error when no verified account is active or the bounded
+    /// desktop worker queue is unavailable.
+    pub fn request_profile_refresh(&self) -> Result<(), String> {
+        let refreshable = self.shared.view.lock().is_ok_and(|view| {
+            matches!(
+                AccountSessionState::try_from(view.state),
+                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+            )
+        });
+        if !refreshable {
+            return Err("account profile refresh requires a signed-in account".to_string());
+        }
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
+        self.shared
+            .requests
+            .try_send(AccountRequest::RefreshProfile { epoch })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => {
+                    "account profile refresh is already queued".to_string()
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    "account profile refresh is unavailable".to_string()
+                }
+            })
+    }
+
     /// Applies worker results and keeps the engine view fresh. Status
     /// polling runs fast while a browser transaction is open and slowly
     /// when idle, so restored sessions and engine-side expiry reach the UI
@@ -705,8 +751,22 @@ impl DesktopAccount {
                     .view
                     .lock()
                     .is_ok_and(|view| is_authorizing(&view));
+            let profile_refresh_active =
+                self.shared
+                    .profile_refresh_until
+                    .lock()
+                    .is_ok_and(|mut until| {
+                        if until.is_some_and(|deadline| Instant::now() < deadline) {
+                            true
+                        } else {
+                            *until = None;
+                            false
+                        }
+                    });
             let interval = if transactional {
                 STATUS_POLL_INTERVAL
+            } else if profile_refresh_active {
+                PROFILE_REFRESH_POLL_INTERVAL
             } else {
                 IDLE_STATUS_POLL_INTERVAL
             };
@@ -777,6 +837,28 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             // The transaction stays open: polling continues as the automatic
             // retry while Reopen and Cancel stay enabled. The error is
             // actionable and clears on the next good fetch.
+            if let Ok(mut slot) = shared.error.lock() {
+                *slot = Some(error);
+            }
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::ProfileRefreshQueued { view, epoch } => {
+            if epoch != shared.epoch.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(mut current) = shared.view.lock() {
+                *current = view;
+            }
+            if let Ok(mut until) = shared.profile_refresh_until.lock() {
+                *until = Instant::now().checked_add(PROFILE_REFRESH_POLL_WINDOW);
+            }
+            rewind_status_poll(shared);
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::ProfileRefreshFailed { epoch, error } => {
+            if epoch != shared.epoch.load(Ordering::Acquire) {
+                return;
+            }
             if let Ok(mut slot) = shared.error.lock() {
                 *slot = Some(error);
             }
@@ -869,6 +951,16 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
             match fetch_account_status(&mut client) {
                 Ok(view) => AccountResponse::Status { view, seq, epoch },
                 Err(error) => AccountResponse::StatusFailed { seq, epoch, error },
+            }
+        }
+        AccountRequest::RefreshProfile { epoch } => {
+            let mut client = match connect_engine() {
+                Ok(client) => client,
+                Err(error) => return AccountResponse::ProfileRefreshFailed { epoch, error },
+            };
+            match client.refresh_account_profile() {
+                Ok(view) => AccountResponse::ProfileRefreshQueued { view, epoch },
+                Err(error) => AccountResponse::ProfileRefreshFailed { epoch, error },
             }
         }
         AccountRequest::SignOut => {
@@ -975,6 +1067,10 @@ mod tests {
                         epoch,
                     }
                 }
+                AccountRequest::RefreshProfile { epoch } => AccountResponse::ProfileRefreshQueued {
+                    view: self.view.clone(),
+                    epoch,
+                },
                 AccountRequest::CancelLogin { .. } => {
                     self.view = self.signed_out.clone();
                     AccountResponse::Cancelled(self.view.clone())

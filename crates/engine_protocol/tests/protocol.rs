@@ -9,8 +9,8 @@ use axiusflow_engine_protocol::{
     OrderBookState, OrderFlowAggressor, OrderFlowLevel, OrderFlowSnapshot, OrderFlowTrade,
     OrderFlowUpdate, PROTOCOL_VERSION, PersistenceState, ProtocolError, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
-    ProviderInstrumentSelection, ProviderInstrumentSummary, ProviderState, RegisterConsumer,
-    RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
+    ProviderInstrumentSelection, ProviderInstrumentSummary, ProviderState, RefreshAccountProfile,
+    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey, SeriesLoadState,
     SeriesSnapshot, SeriesState, SeriesUpdate, SetEngineLifecycle, SetEngineResourceMode,
     SetSelection, SetViewport, SetWatchlist, SetWorkspaceLayout, ShutdownEngine, SignOut,
@@ -35,7 +35,7 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 19);
+    assert_eq!(PROTOCOL_VERSION, 20);
 }
 
 fn account_payloads() -> Vec<envelope::Payload> {
@@ -64,6 +64,7 @@ fn account_payloads() -> Vec<envelope::Payload> {
             photo_url: "https://auth.axiusflow.com/photo/ada.png".into(),
         }),
         envelope::Payload::SignOut(SignOut {}),
+        envelope::Payload::RefreshAccountProfile(RefreshAccountProfile { request_id: 1 }),
     ]
 }
 

@@ -4495,6 +4495,7 @@ struct TerminalApp {
     chart_settings_menu: Option<ChartContextMenu>,
     account_menu_open: bool,
     account_menu_anchor: Option<gpui::Point<Pixels>>,
+    profile_refresh_on_activation: bool,
     about_dialog_open: bool,
     updater: Option<DesktopUpdater>,
     chart_chrome: chart_chrome::ChartChromePreferences,
@@ -4810,6 +4811,7 @@ impl TerminalApp {
             chart_settings_menu: None,
             account_menu_open: false,
             account_menu_anchor: None,
+            profile_refresh_on_activation: false,
             about_dialog_open: false,
             updater: DesktopUpdater::new()
                 .map_err(|error| eprintln!("Axiusflow update UI degraded: {error}"))
@@ -4973,6 +4975,10 @@ impl TerminalApp {
             self.account_menu_anchor = None;
             cx.notify();
         }
+    }
+
+    fn arm_profile_refresh_after_browser(&mut self) {
+        self.profile_refresh_on_activation = true;
     }
 
     fn open_about_dialog(&mut self, cx: &mut Context<Self>) {
@@ -5931,6 +5937,14 @@ impl TerminalApp {
             }
         }
         if became_active {
+            if self.profile_refresh_on_activation {
+                self.profile_refresh_on_activation = false;
+                if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                    && let Err(error) = account.request_profile_refresh()
+                {
+                    eprintln!("Axiusflow profile refresh degraded: {error}");
+                }
+            }
             self.schedule_market_frame(window, cx);
         }
     }
@@ -6030,8 +6044,12 @@ impl TerminalApp {
                                 terminal_cx.notify();
                             }
                             if update.restart_prepared {
-                                terminal.about_dialog_open = false;
-                                terminal.lifecycle.quit_after_shutdown(terminal_cx);
+                                if updater.commit_restart().is_ok() {
+                                    terminal.about_dialog_open = false;
+                                    terminal.lifecycle.quit_after_shutdown(terminal_cx);
+                                } else {
+                                    terminal_cx.notify();
+                                }
                                 return;
                             }
                         }

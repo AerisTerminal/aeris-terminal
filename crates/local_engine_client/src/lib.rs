@@ -22,10 +22,11 @@ use axiusflow_engine_protocol::{
     ConsumerResourceClass, DetachClient, EngineLifetimeMode, EngineReady, EngineStatus, Envelope,
     EnvelopeDecoder, GetAccountStatus, GetEngineStatus, InstallProviderInstrument,
     LIFECYCLE_CONTRACT_REVISION, LoginAuthorization, PROTOCOL_VERSION, ProviderInstrumentInstalled,
-    RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesDemand, SeriesKey, SetEngineLifecycle, SetEngineResourceMode,
-    SetSelection, SetViewport, SetWorkspaceLayout, ShutdownEngine, SignOut, StreamRole,
-    ViewportDemand, VisibilityDemand, WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+    RefreshAccountProfile, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesDemand, SeriesKey,
+    SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWorkspaceLayout,
+    ShutdownEngine, SignOut, StreamRole, ViewportDemand, VisibilityDemand, WorkspaceState,
+    WorkspaceTabState, encode_envelope, envelope,
 };
 use axiusflow_platform_runtime::{
     BackgroundService, CredentialVault, NativeCredentialVault, current_release_identity,
@@ -878,6 +879,20 @@ impl EngineClient {
         let deadline = session_reply_deadline()?;
         self.send_account_request_until(
             envelope::Payload::GetAccountStatus(GetAccountStatus {}),
+            deadline,
+        )
+    }
+
+    /// Enqueues one engine-owned profile refresh and returns the current
+    /// sanitized view immediately. Control-plane networking never runs on the
+    /// IPC request path.
+    ///
+    /// # Errors
+    /// Returns an error when the request fails or the reply is invalid.
+    pub fn refresh_account_profile(&mut self) -> Result<AccountView, String> {
+        let deadline = session_reply_deadline()?;
+        self.send_account_request_until(
+            envelope::Payload::RefreshAccountProfile(RefreshAccountProfile { request_id: 1 }),
             deadline,
         )
     }

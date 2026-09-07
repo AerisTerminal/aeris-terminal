@@ -42,6 +42,17 @@ pub struct CancelLogin {
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct GetAccountStatus {}
 
+/// Requests one engine-owned background refresh of the current account
+/// profile. The command carries no account or provider identity; the engine
+/// derives and generation-fences all identity from its verified session.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct RefreshAccountProfile {
+    /// Non-secret request marker. A non-zero field keeps the command explicit
+    /// on the wire while carrying no user/provider identity.
+    #[prost(uint64, tag = "1")]
+    pub request_id: u64,
+}
+
 /// Signs out one engine-owned account session.
 ///
 /// Clears the session state and deletes vault refresh and lease material on

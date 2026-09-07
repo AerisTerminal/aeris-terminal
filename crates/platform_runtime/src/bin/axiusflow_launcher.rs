@@ -30,6 +30,7 @@ use sysinfo::{ProcessesToUpdate, System};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const UPDATE_RESTART_READY: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_READY_V1\n";
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
 const RELEASE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -376,10 +377,11 @@ fn install_remote_update(
 ) -> Result<(), String> {
     let (active, channel) = checked_release_channel(installer, verifying_key)?;
     let signed = &channel.signed_release;
-    if active
-        .as_ref()
-        .is_some_and(|active| signed.manifest.install_generation == active.install_generation)
-    {
+    if reconcile_same_generation_launcher(
+        active.as_ref(),
+        signed.manifest.install_generation,
+        || spawn_active_launcher_promotion(installer),
+    ) {
         return Ok(());
     }
 
@@ -408,48 +410,107 @@ fn install_remote_update(
     Ok(())
 }
 
+fn reconcile_same_generation_launcher<F>(
+    active: Option<&ActiveRelease>,
+    target_generation: u64,
+    promote: F,
+) -> bool
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    if active.is_none_or(|active| active.install_generation != target_generation) {
+        return false;
+    }
+    // Promotion is best-effort after a new install because the prior stable
+    // launcher may still be the process performing that install. Retry it on
+    // every same-generation launch so one transient failure cannot strand an
+    // old launcher that lacks newer lifecycle commands.
+    if let Err(error) = promote() {
+        eprintln!("Axiusflow launcher promotion deferred: {error}");
+    }
+    true
+}
+
 fn update_and_restart(
     installer: &ReleaseInstaller,
     verifying_key: &VerifyingKey,
     hooks: &NativeHooks,
     install_root: &Path,
 ) -> Result<(), String> {
-    installer
-        .recover(hooks)
-        .map_err(|error| error.to_string())?;
-    let had_active_release = installer
-        .audit_active_release()
-        .map_err(|error| error.to_string())?
-        .is_some();
-    // The desktop requests this command, then performs its normal bounded
-    // shutdown. Wait for that process to disappear before starting the
-    // transactional install so activation never races the caller that asked
-    // for the restart.
-    wait_for_active_desktop_stop(installer)?;
-    if let Err(update_error) = install_remote_update(installer, verifying_key, hooks, install_root)
-    {
-        if !had_active_release {
-            return Err(update_error);
-        }
+    let desktop = preflight_update_restart(installer, verifying_key)?;
+    announce_update_restart_ready()?;
+    wait_for_desktop_stop(&desktop)?;
+
+    let update_result = (|| {
+        // Recovery may run candidate health checks, so it must happen only
+        // after the interactive desktop that requested the handoff is gone.
         installer
             .recover(hooks)
             .map_err(|error| error.to_string())?;
+        install_remote_update(installer, verifying_key, hooks, install_root)
+    })();
+    if let Err(update_error) = update_result {
         eprintln!("Axiusflow update deferred: {update_error}");
+        // The desktop has already yielded ownership to this launcher. Recover
+        // whatever transaction state is safely recoverable, then relaunch the
+        // verified active release so a transient update failure does not make
+        // the application disappear.
+        let recovery_error = installer.recover(hooks).err();
+        match installer.audit_active_release() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(format!(
+                    "{update_error}; no verified Axiusflow release is active{}",
+                    recovery_error.map_or_else(String::new, |error| {
+                        format!("; update recovery failed: {error}")
+                    })
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{update_error}; active release audit failed: {error}{}",
+                    recovery_error.map_or_else(String::new, |error| {
+                        format!("; update recovery failed: {error}")
+                    })
+                ));
+            }
+        }
     }
     launch_active(installer, "axiusflow_desktop")
 }
 
-fn wait_for_active_desktop_stop(installer: &ReleaseInstaller) -> Result<(), String> {
-    let active = installer
-        .audit_active_release()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+fn preflight_update_restart(
+    installer: &ReleaseInstaller,
+    verifying_key: &VerifyingKey,
+) -> Result<PathBuf, String> {
+    let (active, channel) = checked_release_channel(installer, verifying_key)?;
+    let active = active.ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+    if channel.install_generation == active.install_generation {
+        return Err("no newer Axiusflow update is available".to_string());
+    }
     let desktop = installer
         .release_directory(&active)
         .map_err(|error| error.to_string())?
         .join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX));
+    let metadata = fs::symlink_metadata(&desktop)
+        .map_err(|_| "active Axiusflow desktop is unavailable".to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("active Axiusflow desktop is invalid".to_string());
+    }
+    Ok(desktop)
+}
+
+fn announce_update_restart_ready() -> Result<(), String> {
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(UPDATE_RESTART_READY)
+        .and_then(|()| stdout.flush())
+        .map_err(|_| "update restart acknowledgement could not be written".to_string())
+}
+
+fn wait_for_desktop_stop(desktop: &Path) -> Result<(), String> {
     let deadline = Instant::now() + RESTART_WAIT_TIMEOUT;
-    while process_is_running(&desktop) {
+    while process_is_running(desktop) {
         if Instant::now() >= deadline {
             return Err("active Axiusflow desktop did not close for restart".to_string());
         }
@@ -1372,6 +1433,31 @@ mod tests {
         fs::write(&right, b"diff").expect("replace right fixture");
         assert!(!files_match(&left, &right).expect("different files"));
         fs::remove_dir_all(base).expect("remove temporary base");
+    }
+
+    #[test]
+    fn same_generation_update_retries_launcher_promotion_once() {
+        let active = ActiveRelease {
+            release_identity: "current".to_string(),
+            install_generation: 7,
+            directory_name: "00000000000000000007-current".to_string(),
+        };
+        let promotions = std::cell::Cell::new(0_u32);
+        assert!(reconcile_same_generation_launcher(Some(&active), 7, || {
+            promotions.set(promotions.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(promotions.get(), 1);
+
+        assert!(!reconcile_same_generation_launcher(
+            Some(&active),
+            8,
+            || {
+                promotions.set(promotions.get() + 1);
+                Ok(())
+            }
+        ));
+        assert_eq!(promotions.get(), 1);
     }
 
     #[test]

@@ -2025,6 +2025,7 @@ fn serve_authenticated_messages(
             payload @ (envelope::Payload::BeginLogin(_)
             | envelope::Payload::CancelLogin(_)
             | envelope::Payload::GetAccountStatus(_)
+            | envelope::Payload::RefreshAccountProfile(_)
             | envelope::Payload::SignOut(_)) => {
                 handle_account_message(connection, state, market, &payload)?;
             }
@@ -2167,6 +2168,9 @@ fn handle_account_message(
         envelope::Payload::GetAccountStatus(_) => connection.send(envelope::Payload::AccountView(
             state.account().account_status(),
         )),
+        envelope::Payload::RefreshAccountProfile(_) => connection.send(
+            envelope::Payload::AccountView(state.account().request_profile_refresh()),
+        ),
         envelope::Payload::SignOut(_) => {
             if let Some(market) = market {
                 market.set_resource_mode(ResourceMode::OfflineSuspended)?;
@@ -2183,6 +2187,7 @@ fn platform_access_requires_account(payload: &envelope::Payload) -> bool {
         envelope::Payload::BeginLogin(_)
             | envelope::Payload::CancelLogin(_)
             | envelope::Payload::GetAccountStatus(_)
+            | envelope::Payload::RefreshAccountProfile(_)
             | envelope::Payload::SignOut(_)
             | envelope::Payload::GetEngineStatus(_)
             | envelope::Payload::ShutdownEngine(_)

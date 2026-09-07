@@ -12,7 +12,10 @@ pub mod oidc;
 pub mod pkce;
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -112,6 +115,8 @@ pub struct AccountService {
     state: Arc<Mutex<ServiceState>>,
     endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
     lease_keys: Arc<Mutex<Vec<LeaseKey>>>,
+    refresh_gate: Arc<Mutex<()>>,
+    profile_refresh_in_flight: Arc<AtomicBool>,
 }
 
 impl AccountService {
@@ -128,6 +133,8 @@ impl AccountService {
             })),
             endpoints: Arc::new(Mutex::new(None)),
             lease_keys: Arc::new(Mutex::new(Vec::new())),
+            refresh_gate: Arc::new(Mutex::new(())),
+            profile_refresh_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -418,6 +425,33 @@ impl AccountService {
             );
         }
         state.view.clone()
+    }
+
+    /// Enqueues one best-effort refresh for the currently verified profile
+    /// and immediately returns the cached sanitized view. Duplicate requests
+    /// collapse while one worker is running.
+    #[must_use]
+    pub fn request_profile_refresh(&self) -> AccountView {
+        let view = self.account_status();
+        let Some(generation) = claim_profile_refresh(&view, &self.profile_refresh_in_flight) else {
+            return view;
+        };
+
+        let service = self.clone();
+        if std::thread::Builder::new()
+            .name("axiusflow-account-profile-refresh".to_string())
+            .spawn(move || {
+                service.run_profile_refresh(generation);
+                service
+                    .profile_refresh_in_flight
+                    .store(false, Ordering::Release);
+            })
+            .is_err()
+        {
+            self.profile_refresh_in_flight
+                .store(false, Ordering::Release);
+        }
+        view
     }
 
     /// Signs out the shared session, deleting vault refresh and lease material.
@@ -738,6 +772,10 @@ impl AccountService {
     }
 
     fn lease_round(&self, generation: u64) {
+        let Ok(_refresh_guard) = self.refresh_gate.lock() else {
+            note_lease("refresh-gate-unavailable");
+            return;
+        };
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
             note_lease("vault-unavailable");
             return;
@@ -758,11 +796,61 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
+        let Ok(_refresh_guard) = self.refresh_gate.lock() else {
+            return;
+        };
         if ensure_device_key(vault).is_err() {
             return;
         }
         let outcome = initial_lease_round(self, generation, tokens, account_id, agent, vault);
         self.apply_lease_outcome(generation, outcome);
+    }
+
+    fn run_profile_refresh(&self, generation: u64) {
+        let Ok(_refresh_guard) = self.refresh_gate.lock() else {
+            return;
+        };
+        if !self.is_current(generation) {
+            return;
+        }
+        let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+            return;
+        };
+        // Reuse the same verified refresh/link path as the scheduled lease
+        // worker. Its profile assignment is already generation/account fenced.
+        // Ignore the lease outcome here so a cosmetic refresh cannot downgrade
+        // a healthy session because of a transient network failure.
+        let _ = refresh_lease_round(self, generation, &vault);
+    }
+
+    fn apply_linked_profile(
+        &self,
+        generation: u64,
+        expected_account: &AccountId,
+        linked_account: &AccountId,
+        plan: PlanId,
+        profile: AccountProfile,
+    ) -> bool {
+        if linked_account != expected_account {
+            return false;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.last_generation != generation
+            || state.view.account_id != expected_account.as_str()
+            || !matches!(
+                AccountSessionState::try_from(state.view.state),
+                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+            )
+        {
+            return false;
+        }
+        state.view.plan_id = plan.as_str().to_string();
+        state.view.display_name = profile.display_name;
+        state.view.email = profile.email;
+        state.view.photo_url = profile.photo_url;
+        true
     }
 
     fn apply_lease_outcome(&self, generation: u64, outcome: lease::RefreshOutcome) {
@@ -843,6 +931,19 @@ impl AccountService {
         view.plan_id = plan.map(PlanId::as_str).unwrap_or_default().to_string();
         state.view = view;
     }
+}
+
+fn claim_profile_refresh(view: &AccountView, in_flight: &AtomicBool) -> Option<u64> {
+    if !matches!(
+        AccountSessionState::try_from(view.state),
+        Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+    ) {
+        return None;
+    }
+    in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| view.request_generation)
 }
 
 /// One sanitized view with identity, plan, and profile cleared. Every
@@ -1089,16 +1190,14 @@ where
         &agent,
         &tokens.id_token,
         &tokens.subject,
-    ) && account_id == session.account_id
-        && let Ok(mut state) = service.state.lock()
-        && state.last_generation == generation
-        && (state.view.state == AccountSessionState::Active as i32
-            || state.view.state == AccountSessionState::OfflineLease as i32)
-    {
-        state.view.plan_id = plan.as_str().to_string();
-        state.view.display_name = profile.display_name;
-        state.view.email = profile.email;
-        state.view.photo_url = profile.photo_url;
+    ) {
+        let _ = service.apply_linked_profile(
+            generation,
+            &session.account_id,
+            &account_id,
+            plan,
+            profile,
+        );
     }
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
@@ -1236,12 +1335,19 @@ fn unix_now() -> u64 {
 mod tests {
     use super::{
         AccountService, AccountServiceConfig, LOGIN_TIMEOUT, REFRESH_VAULT_KEY, UnavailableVault,
+        claim_profile_refresh,
         oidc::{AccountProfile, VerifiedTokens},
     };
     use axiusflow_account::{AccountId, PlanId};
-    use axiusflow_engine_protocol::AccountSessionState;
+    use axiusflow_engine_protocol::{AccountSessionState, AccountView};
     use axiusflow_platform_runtime::CredentialVault;
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     #[derive(Default)]
     struct MemoryVault {
@@ -1322,6 +1428,95 @@ mod tests {
             .view
             .state = AccountSessionState::Active as i32;
         assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn profile_refresh_claims_only_one_current_signed_in_request() {
+        let in_flight = AtomicBool::new(false);
+        let signed_out = AccountView {
+            state: AccountSessionState::SignedOut as i32,
+            account_id: String::new(),
+            plan_id: String::new(),
+            detail: String::new(),
+            request_generation: 4,
+            display_name: String::new(),
+            email: String::new(),
+            photo_url: String::new(),
+        };
+        assert_eq!(claim_profile_refresh(&signed_out, &in_flight), None);
+        assert!(!in_flight.load(Ordering::Acquire));
+
+        let active = AccountView {
+            state: AccountSessionState::Active as i32,
+            account_id: "acct_01".to_string(),
+            request_generation: 7,
+            ..signed_out
+        };
+        assert_eq!(claim_profile_refresh(&active, &in_flight), Some(7));
+        assert_eq!(claim_profile_refresh(&active, &in_flight), None);
+        in_flight.store(false, Ordering::Release);
+        assert_eq!(claim_profile_refresh(&active, &in_flight), Some(7));
+    }
+
+    #[test]
+    fn linked_profile_refresh_is_account_and_generation_fenced() {
+        let service = service();
+        let account = AccountId::try_new("acct_01").expect("account builds");
+        {
+            let mut state = service.state.lock().expect("state locks");
+            state.last_generation = 9;
+            state.restore_allowed = false;
+            state.view = AccountView {
+                state: AccountSessionState::Active as i32,
+                account_id: account.as_str().to_string(),
+                plan_id: "starter".to_string(),
+                detail: "signed in".to_string(),
+                request_generation: 9,
+                display_name: "Old Name".to_string(),
+                email: "old@example.test".to_string(),
+                photo_url: "https://example.test/old.png".to_string(),
+            };
+        }
+
+        assert!(service.apply_linked_profile(
+            9,
+            &account,
+            &account,
+            PlanId::Pro,
+            profile("new", "new@example.test"),
+        ));
+        let refreshed = service.account_status();
+        assert_eq!(refreshed.plan_id, "pro");
+        assert_eq!(refreshed.display_name, "new");
+
+        let other = AccountId::try_new("acct_02").expect("other account builds");
+        assert!(!service.apply_linked_profile(
+            9,
+            &account,
+            &other,
+            PlanId::Elite,
+            profile("wrong", "wrong@example.test"),
+        ));
+        assert!(!service.apply_linked_profile(
+            8,
+            &account,
+            &account,
+            PlanId::Elite,
+            profile("stale", "stale@example.test"),
+        ));
+        let still_current = service.account_status();
+        assert_eq!(still_current.plan_id, "pro");
+        assert_eq!(still_current.display_name, "new");
+
+        service.state.lock().expect("state locks").view.state =
+            AccountSessionState::SignedOut as i32;
+        assert!(!service.apply_linked_profile(
+            9,
+            &account,
+            &account,
+            PlanId::Elite,
+            profile("late", "late@example.test"),
+        ));
     }
 
     fn verified_restore(

@@ -11,7 +11,7 @@ mod messages;
 
 pub use account::{
     AccountSessionState, AccountView, BeginLogin, CancelLogin, GetAccountStatus,
-    LoginAuthorization, SignOut,
+    LoginAuthorization, RefreshAccountProfile, SignOut,
 };
 pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
@@ -58,7 +58,11 @@ pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 /// `ProviderInstrumentSelection`. Provider-wide instrument generations remain
 /// independent fencing identities, while the echoed command generation lets a
 /// desktop correlate a completion to the exact symbol-picker request.
-pub const PROTOCOL_VERSION: u32 = 19;
+///
+/// Revision 20 adds `RefreshAccountProfile` (tag 61). It is only a bounded
+/// enqueue request: the resident engine owns all refresh-token and control-plane
+/// work and returns the current sanitized `AccountView` immediately.
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Maximum prost payload accepted in one frame (3 MiB).
 pub const MAX_FRAME_BYTES: usize = 3 * 1_048_576;

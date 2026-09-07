@@ -1234,6 +1234,8 @@ fn account_menu_row(
                     AccountMenuClick::ManageProfile => {
                         if let Err(error) = axiusflow_desktop::account::open_manage_profile() {
                             eprintln!("Axiusflow profile browser open degraded: {error}");
+                        } else {
+                            terminal.arm_profile_refresh_after_browser();
                         }
                         terminal.close_account_menu(terminal_cx);
                     }
