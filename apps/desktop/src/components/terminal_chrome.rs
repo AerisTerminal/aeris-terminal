@@ -531,12 +531,14 @@ pub(super) fn header_controls(
         state.chart_state,
         state.delayed,
     );
-    div()
-        .w_full()
+    let market_controls = div()
         .h_full()
+        .min_w_0()
+        .flex_1()
         .flex()
         .items_center()
         .gap_2()
+        .overflow_x_hidden()
         .child(connection_status_indicator(
             connection_label,
             connection_color(&state.theme),
@@ -598,14 +600,34 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(order_book_toggle)
-        .child(div().flex_1().min_w(px(8.0)))
-        .child(theme_toggle(terminal.clone(), &state.theme))
-        .child(account_avatar_button(
-            terminal,
-            &state.account,
-            &state.theme,
-        ))
+        .child(order_book_toggle);
+    let global_controls = header_global_controls(terminal, &state.account, &state.theme);
+
+    div()
+        .w_full()
+        .h_full()
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .items_center()
+        .child(market_controls)
+        .child(global_controls)
+}
+
+fn header_global_controls(
+    terminal: &Entity<TerminalApp>,
+    account: &axiusflow_desktop::account::AccountMenuState,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    div()
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .pl_2()
+        .child(theme_toggle(terminal.clone(), theme))
+        .child(account_avatar_button(terminal, account, theme))
 }
 
 pub(super) fn side_panel_toggle(
