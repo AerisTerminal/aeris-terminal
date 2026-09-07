@@ -752,6 +752,7 @@ fn send_connection(messages: &MarketWorkerSender, state: FeedConnectionState, me
     let _ = messages.send(MarketWorkerMessage::Connection {
         state,
         message: message.to_string(),
+        transport_rtt_nanos: None,
     });
 }
 
@@ -854,6 +855,7 @@ mod tests {
             Some(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Stopped,
                 message,
+                transport_rtt_nanos: None,
             }) if message == "resident Rithmic engine is unavailable after bounded startup retries"
         ));
     }

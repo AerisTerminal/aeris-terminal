@@ -33,13 +33,18 @@ use axiusflow_hyperliquid_market_adapter::{
 };
 use axiusflow_market_data::{DepthSnapshot, MarketTrade};
 
+use crate::market_service::ProviderCoordinatorWake;
+
 /// Public account and entitlement identity for credential-free market data.
 pub(crate) const HYPERLIQUID_PUBLIC_ACCOUNT_ID: &str = "hyperliquid-public";
 /// Entitlement revision pinned to the unauthenticated public feed.
 pub(crate) const HYPERLIQUID_PUBLIC_ENTITLEMENT_ID: &str = "hyperliquid-public";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const READ_TIMEOUT: Duration = Duration::from_secs(1);
+/// Quiet-socket control responsiveness bound. A demanded symbol change is
+/// reconciled between reads, so keeping this short prevents a healthy but
+/// temporarily quiet socket from adding human-visible subscription latency.
+const READ_TIMEOUT: Duration = Duration::from_millis(2);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const MESSAGE_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
 const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_mins(5);
@@ -119,7 +124,7 @@ pub(crate) enum HyperliquidRealtimeEvent {
     Candle(u64, String, String, HyperliquidLiveCandle),
     Trades(u64, Vec<MarketTrade>),
     Depth(u64, DepthSnapshot),
-    Heartbeat(u64),
+    Heartbeat(u64, Option<u64>),
     Recovering(u64),
     Disconnected(u64),
 }
@@ -138,6 +143,7 @@ pub(crate) fn run_catalog(
     events: &SyncSender<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
+    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) {
     let mut catalog = CatalogState::default();
@@ -155,6 +161,7 @@ pub(crate) fn run_catalog(
                     events,
                     ws_generation,
                     stop,
+                    wake,
                     http_config,
                 ) {
                     return;
@@ -180,6 +187,7 @@ pub(crate) fn run_catalog(
                         events,
                         HyperliquidCatalogEvent::RefreshFailed { detail: error },
                         stop,
+                        Some(wake),
                     ) {
                         return;
                     }
@@ -226,15 +234,28 @@ fn handle_catalog_control(
     events: &SyncSender<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
+    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
     match control {
-        HyperliquidCatalogControl::Search(search) => {
-            handle_catalog_search(search, catalog, events, ws_generation, stop, http_config)
-        }
-        HyperliquidCatalogControl::Select(selection) => {
-            handle_catalog_select(selection, catalog, events, ws_generation, stop, http_config)
-        }
+        HyperliquidCatalogControl::Search(search) => handle_catalog_search(
+            search,
+            catalog,
+            events,
+            ws_generation,
+            stop,
+            wake,
+            http_config,
+        ),
+        HyperliquidCatalogControl::Select(selection) => handle_catalog_select(
+            selection,
+            catalog,
+            events,
+            ws_generation,
+            stop,
+            wake,
+            http_config,
+        ),
     }
 }
 
@@ -257,6 +278,7 @@ fn reject_catalog_command(
     command_generation: u64,
     selection: bool,
     stop: &AtomicBool,
+    wake: &ProviderCoordinatorWake,
 ) {
     let _ = send_cancellable(
         events,
@@ -271,6 +293,7 @@ fn reject_catalog_command(
             selection,
         },
         stop,
+        Some(wake),
     );
 }
 
@@ -280,6 +303,7 @@ fn handle_catalog_search(
     events: &SyncSender<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
+    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
     // No catalog yet: fetch on demand so a cold start with no background
@@ -292,6 +316,7 @@ fn handle_catalog_search(
                 events,
                 ws_generation,
                 stop,
+                wake,
                 http_config,
             );
         }
@@ -305,6 +330,7 @@ fn handle_catalog_search(
             search.search_generation,
             false,
             stop,
+            wake,
         );
         return false;
     }
@@ -346,6 +372,7 @@ fn handle_catalog_search(
             instruments,
         }),
         stop,
+        Some(wake),
     );
     false
 }
@@ -356,6 +383,7 @@ fn handle_catalog_select(
     events: &SyncSender<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
+    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
     let command_generation = selection.selection_generation;
@@ -369,6 +397,7 @@ fn handle_catalog_select(
                 events,
                 ws_generation,
                 stop,
+                wake,
                 http_config,
             );
         }
@@ -382,6 +411,7 @@ fn handle_catalog_select(
             selection.selection_generation,
             true,
             stop,
+            wake,
         );
         return false;
     }
@@ -410,6 +440,7 @@ fn handle_catalog_select(
                 selection: true,
             },
             stop,
+            Some(wake),
         );
         return false;
     };
@@ -433,6 +464,7 @@ fn handle_catalog_select(
             },
         },
         stop,
+        Some(wake),
     );
     false
 }
@@ -452,6 +484,7 @@ pub(crate) fn run(
     events: &SyncSender<HyperliquidRealtimeEvent>,
     stop: &Arc<AtomicBool>,
     ws_generation: &Arc<AtomicU64>,
+    wake: &ProviderCoordinatorWake,
     reconnect_delay: Duration,
 ) {
     let mut generation = ws_generation.load(Ordering::Acquire).max(1);
@@ -488,13 +521,22 @@ pub(crate) fn run(
             events,
             HyperliquidRealtimeEvent::Connecting(generation),
             stop,
+            wake,
         ) {
             return;
         }
         if let Ok((mut socket, _shutdown)) =
             HyperliquidSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
         {
-            match run_session(&mut socket, generation, &mut demand, controls, events, stop) {
+            match run_session(
+                &mut socket,
+                generation,
+                &mut demand,
+                controls,
+                events,
+                stop,
+                wake,
+            ) {
                 SessionExit::Closed => return,
                 SessionExit::Parked => stopped = true,
                 SessionExit::Reconnect => {}
@@ -507,6 +549,7 @@ pub(crate) fn run(
                 events,
                 HyperliquidRealtimeEvent::Recovering(generation),
                 stop,
+                wake,
             ) {
                 return;
             }
@@ -518,6 +561,7 @@ pub(crate) fn run(
             events,
             HyperliquidRealtimeEvent::Disconnected(generation),
             stop,
+            wake,
         ) {
             return;
         }
@@ -548,13 +592,23 @@ fn thread_sleep(delay: Duration, stop: &Arc<AtomicBool>) {
 }
 
 /// Preserves bounded backpressure while allowing shutdown to cancel a full queue.
-fn send_cancellable<T>(events: &SyncSender<T>, mut event: T, stop: &AtomicBool) -> bool {
+fn send_cancellable<T>(
+    events: &SyncSender<T>,
+    mut event: T,
+    stop: &AtomicBool,
+    wake: Option<&ProviderCoordinatorWake>,
+) -> bool {
     loop {
         if stop.load(Ordering::Acquire) {
             return true;
         }
         match events.try_send(event) {
-            Ok(()) => return false,
+            Ok(()) => {
+                if let Some(wake) = wake {
+                    wake.notify();
+                }
+                return false;
+            }
             Err(TrySendError::Disconnected(_)) => return true,
             Err(TrySendError::Full(returned)) => {
                 event = returned;
@@ -569,29 +623,32 @@ fn emit(
     events: &SyncSender<HyperliquidRealtimeEvent>,
     event: HyperliquidRealtimeEvent,
     stop: &AtomicBool,
+    wake: &ProviderCoordinatorWake,
 ) -> bool {
-    send_cancellable(events, event, stop)
+    send_cancellable(events, event, stop, Some(wake))
 }
 
 struct RealtimeEventSink<'a> {
     events: &'a SyncSender<HyperliquidRealtimeEvent>,
     stop: &'a AtomicBool,
+    wake: &'a ProviderCoordinatorWake,
 }
 
 impl RealtimeEventSink<'_> {
     fn send(&self, event: HyperliquidRealtimeEvent) -> bool {
-        emit(self.events, event, self.stop)
+        emit(self.events, event, self.stop, self.wake)
     }
 }
 
 struct SessionState {
     active: BTreeMap<SubscriptionKey, String>,
     instruments: BTreeMap<String, HyperliquidInstrumentDemand>,
-    trade_sequences: BTreeMap<String, u64>,
+    next_trade_sequence: u64,
     book_sequences: BTreeMap<String, u64>,
     decode_failures: u32,
     last_inbound: Instant,
     last_ping: Instant,
+    pending_ping: Option<Instant>,
 }
 
 fn run_session(
@@ -601,16 +658,18 @@ fn run_session(
     controls: &Receiver<HyperliquidRealtimeControl>,
     events: &SyncSender<HyperliquidRealtimeEvent>,
     stop: &Arc<AtomicBool>,
+    wake: &ProviderCoordinatorWake,
 ) -> SessionExit {
-    let sink = RealtimeEventSink { events, stop };
+    let sink = RealtimeEventSink { events, stop, wake };
     let mut state = SessionState {
         active: BTreeMap::new(),
         instruments: BTreeMap::new(),
-        trade_sequences: BTreeMap::new(),
+        next_trade_sequence: 1,
         book_sequences: BTreeMap::new(),
         decode_failures: 0,
         last_inbound: Instant::now(),
         last_ping: Instant::now(),
+        pending_ping: None,
     };
     if reconcile_subscriptions(socket, demand, &mut state).is_err() {
         return SessionExit::Reconnect;
@@ -632,34 +691,44 @@ fn run_session(
         if changed && reconcile_subscriptions(socket, demand, &mut state).is_err() {
             return SessionExit::Reconnect;
         }
-        match socket.read_event(Instant::now() + READ_TIMEOUT) {
+        let now = Instant::now();
+        if heartbeat(socket, &mut state, now) {
+            return SessionExit::Reconnect;
+        }
+        match socket.read_event(now + READ_TIMEOUT) {
             Ok(SocketEvent::Text(text)) => {
-                state.last_inbound = Instant::now();
+                let received_at = Instant::now();
+                state.last_inbound = received_at;
                 match handle_frame(
                     &text,
                     generation,
                     &state.instruments,
                     &mut state.decode_failures,
-                    &mut state.trade_sequences,
+                    &mut state.next_trade_sequence,
                     &mut state.book_sequences,
                     &sink,
                 ) {
-                    Ok(()) => {}
+                    Ok(application_pong) => {
+                        if application_pong
+                            && sink.send(HyperliquidRealtimeEvent::Heartbeat(
+                                generation,
+                                application_ping_rtt_nanos(&mut state, received_at),
+                            ))
+                        {
+                            return SessionExit::Closed;
+                        }
+                    }
                     Err(FrameOutcome::Closed) => return SessionExit::Closed,
                     Err(FrameOutcome::Reconnect) => return SessionExit::Reconnect,
                 }
             }
             Ok(SocketEvent::Pong) => {
                 state.last_inbound = Instant::now();
-                if sink.send(HyperliquidRealtimeEvent::Heartbeat(generation)) {
+                if sink.send(HyperliquidRealtimeEvent::Heartbeat(generation, None)) {
                     return SessionExit::Closed;
                 }
             }
-            Err(error) if is_read_timeout(&error) => {
-                if heartbeat(socket, &mut state) {
-                    return SessionExit::Reconnect;
-                }
-            }
+            Err(error) if is_read_timeout(&error) => {}
             Err(_) => return SessionExit::Reconnect,
         }
     }
@@ -692,14 +761,11 @@ enum FrameOutcome {
 
 /// Sends a heartbeat ping when the feed has been quiet, and reports a dead
 /// socket after sustained silence. Returns true when the session must end.
-fn heartbeat(socket: &mut HyperliquidSocket, state: &mut SessionState) -> bool {
-    let now = Instant::now();
+fn heartbeat(socket: &mut HyperliquidSocket, state: &mut SessionState, now: Instant) -> bool {
     if now.saturating_duration_since(state.last_inbound) >= MESSAGE_SILENCE_TIMEOUT {
         return true;
     }
-    if now.saturating_duration_since(state.last_ping) >= PING_INTERVAL
-        && now.saturating_duration_since(state.last_inbound) >= PING_INTERVAL
-    {
+    if application_ping_due(state, now) {
         if socket
             .send_text(&axiusflow_hyperliquid_market_adapter::build_ping())
             .is_err()
@@ -707,8 +773,19 @@ fn heartbeat(socket: &mut HyperliquidSocket, state: &mut SessionState) -> bool {
             return true;
         }
         state.last_ping = now;
+        state.pending_ping = Some(now);
     }
     false
+}
+
+fn application_ping_due(state: &SessionState, now: Instant) -> bool {
+    now.saturating_duration_since(state.last_ping) >= PING_INTERVAL && state.pending_ping.is_none()
+}
+
+fn application_ping_rtt_nanos(state: &mut SessionState, received_at: Instant) -> Option<u64> {
+    let sent_at = state.pending_ping.take()?;
+    let nanos = received_at.saturating_duration_since(sent_at).as_nanos();
+    Some(u64::try_from(nanos).unwrap_or(u64::MAX).max(1))
 }
 
 /// Records one desired subscription frame, keeping the first coin mapping.
@@ -800,15 +877,6 @@ fn reconcile_subscriptions(
             ))?;
         }
     }
-    // Retire per-coin counters with their last subscription so a
-    // resubscribe restarts continuity explicitly rather than continuing a
-    // retired sequence.
-    state.trade_sequences.retain(|coin, _| {
-        desired.keys().any(|key| match key {
-            SubscriptionKey::Trades { coin: active } => active == coin,
-            _ => false,
-        })
-    });
     state.book_sequences.retain(|coin, _| {
         desired.keys().any(|key| match key {
             SubscriptionKey::Book { coin: active } => active == coin,
@@ -830,17 +898,20 @@ fn handle_frame(
     generation: u64,
     instruments: &BTreeMap<String, HyperliquidInstrumentDemand>,
     decode_failures: &mut u32,
-    trade_sequences: &mut BTreeMap<String, u64>,
+    next_trade_sequence: &mut u64,
     book_sequences: &mut BTreeMap<String, u64>,
     sink: &RealtimeEventSink<'_>,
-) -> Result<(), FrameOutcome> {
+) -> Result<bool, FrameOutcome> {
     let Ok(event) = parse_ws_frame(text) else {
-        return record_frame_failure(decode_failures);
+        return record_frame_failure(decode_failures).map(|()| false);
     };
+    if matches!(&event, WsClientEvent::Pong) {
+        return Ok(true);
+    }
     let mut frame = FrameDecoder {
         generation,
         instruments,
-        trade_sequences,
+        next_trade_sequence,
         book_sequences,
         sink,
     };
@@ -857,10 +928,10 @@ fn handle_frame(
         // already carry top-of-book. They are dropped here rather than
         // misrouted into another feed.
         WsClientEvent::Subscribed { .. }
-        | WsClientEvent::Pong
         | WsClientEvent::Bbo { .. }
         | WsClientEvent::Context { .. }
         | WsClientEvent::AllMids { .. } => Ok(()),
+        WsClientEvent::Pong => unreachable!("application pong handled above"),
     };
     match outcome {
         // The failure budget is per connection, never per streak: every
@@ -868,9 +939,9 @@ fn handle_frame(
         // or a partially wedged feed (one corrupt channel beside healthy
         // ones) would never trip the reconnect threshold. Benign control
         // traffic neither counts nor forgives; only a new connection resets.
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(false),
         Err(FrameError::Abort(outcome)) => Err(outcome),
-        Err(FrameError::Malformed) => record_frame_failure(decode_failures),
+        Err(FrameError::Malformed) => record_frame_failure(decode_failures).map(|()| false),
     }
 }
 
@@ -887,7 +958,7 @@ fn record_frame_failure(decode_failures: &mut u32) -> Result<(), FrameOutcome> {
 struct FrameDecoder<'a> {
     generation: u64,
     instruments: &'a BTreeMap<String, HyperliquidInstrumentDemand>,
-    trade_sequences: &'a mut BTreeMap<String, u64>,
+    next_trade_sequence: &'a mut u64,
     book_sequences: &'a mut BTreeMap<String, u64>,
     sink: &'a RealtimeEventSink<'a>,
 }
@@ -939,7 +1010,7 @@ impl FrameDecoder<'_> {
             // never enter another instrument's continuity.
             return Err(FrameError::Malformed);
         };
-        let first = self.trade_sequences.get(coin).copied().unwrap_or(1);
+        let first = *self.next_trade_sequence;
         let Ok(batch) = decode_trades_batch(
             trades,
             coin,
@@ -953,9 +1024,7 @@ impl FrameDecoder<'_> {
         };
         let advance = u64::try_from(batch.trades.len()).unwrap_or(u64::MAX);
         match first.checked_add(advance) {
-            Some(next) => {
-                self.trade_sequences.insert(coin.to_string(), next.max(1));
-            }
+            Some(next) => *self.next_trade_sequence = next.max(1),
             None => return Err(FrameError::Abort(FrameOutcome::Reconnect)),
         }
         if !batch.trades.is_empty()
@@ -1037,7 +1106,7 @@ mod tests {
     type FrameHarness = (
         BTreeMap<String, HyperliquidInstrumentDemand>,
         u32,
-        BTreeMap<String, u64>,
+        u64,
         BTreeMap<String, u64>,
         SyncSender<HyperliquidRealtimeEvent>,
     );
@@ -1057,7 +1126,7 @@ mod tests {
 
     fn harness() -> FrameHarness {
         let (events, _dropped) = std::sync::mpsc::sync_channel(1_024);
-        (demand(), 0, BTreeMap::new(), BTreeMap::new(), events)
+        (demand(), 0, 1, BTreeMap::new(), events)
     }
 
     /// One healthy live candle for the demanded coin.
@@ -1081,23 +1150,32 @@ mod tests {
         text: &str,
         instruments: &BTreeMap<String, HyperliquidInstrumentDemand>,
         decode_failures: &mut u32,
-        trade_sequences: &mut BTreeMap<String, u64>,
+        next_trade_sequence: &mut u64,
         book_sequences: &mut BTreeMap<String, u64>,
         events: &SyncSender<HyperliquidRealtimeEvent>,
     ) -> Result<(), FrameOutcome> {
         let stop = AtomicBool::new(false);
+        let wake = ProviderCoordinatorWake::for_tests();
         let sink = RealtimeEventSink {
             events,
             stop: &stop,
+            wake: &wake,
         };
         handle_frame(
             text,
             1,
             instruments,
             decode_failures,
-            trade_sequences,
+            next_trade_sequence,
             book_sequences,
             &sink,
+        )
+        .map(|_| ())
+    }
+
+    fn one_trade(coin: &str, time: i64, tid: u64) -> String {
+        format!(
+            r#"{{"channel":"trades","data":[{{"coin":"{coin}","px":"10","sz":"1","side":"B","time":{time},"tid":{tid}}}]}}"#
         )
     }
 
@@ -1161,6 +1239,78 @@ mod tests {
     }
 
     #[test]
+    fn application_ping_rtt_is_monotonic_one_shot_and_not_feed_age() {
+        let started = Instant::now();
+        let mut state = SessionState {
+            active: BTreeMap::new(),
+            instruments: BTreeMap::new(),
+            next_trade_sequence: 1,
+            book_sequences: BTreeMap::new(),
+            decode_failures: 0,
+            last_inbound: started + Duration::from_secs(19),
+            last_ping: started,
+            pending_ping: None,
+        };
+        let due = started + PING_INTERVAL;
+        assert!(application_ping_due(&state, due));
+        state.pending_ping = Some(due);
+        assert!(!application_ping_due(&state, due + PING_INTERVAL));
+        assert_eq!(
+            application_ping_rtt_nanos(&mut state, due + Duration::from_millis(12)),
+            Some(12_000_000)
+        );
+        assert_eq!(application_ping_rtt_nanos(&mut state, due), None);
+    }
+
+    #[test]
+    fn trade_source_ordinal_does_not_regress_across_symbol_switch_back() {
+        let instrument = |coin: &str| {
+            BTreeMap::from([(
+                coin.to_string(),
+                HyperliquidInstrumentDemand {
+                    wire_coin: coin.to_string(),
+                    instrument_id: format!("instrument:hyperliquid:{coin}"),
+                    entitlement_id: "hyperliquid-public".to_string(),
+                    price_scale: 8,
+                    quantity_scale: 8,
+                },
+            )])
+        };
+        let (events, received) = std::sync::mpsc::sync_channel(8);
+        let mut failures = 0;
+        let mut next_trade_sequence = 1;
+        let mut books = BTreeMap::new();
+
+        for (coin, time, tid) in [
+            ("BTC", 1_700_000_000_000_i64, 1_u64),
+            ("ETH", 1_700_000_000_001_i64, 2_u64),
+            ("BTC", 1_700_000_000_002_i64, 3_u64),
+        ] {
+            handle(
+                &one_trade(coin, time, tid),
+                &instrument(coin),
+                &mut failures,
+                &mut next_trade_sequence,
+                &mut books,
+                &events,
+            )
+            .expect("trade frame accepted");
+        }
+
+        let sequences = received
+            .try_iter()
+            .filter_map(|event| match event {
+                HyperliquidRealtimeEvent::Trades(_, trades) => Some(trades),
+                _ => None,
+            })
+            .flatten()
+            .map(|trade| trade.metadata.source_sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![1, 2, 3]);
+        assert_eq!(next_trade_sequence, 4);
+    }
+
+    #[test]
     fn subscriptions_only_change_on_new_demand_and_last_control_wins() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         let mut demand = HyperliquidDemand::default();
@@ -1200,7 +1350,7 @@ mod tests {
         let (events, _received) = std::sync::mpsc::sync_channel(1);
         events.send(1).expect("fill queue");
         let stop = AtomicBool::new(true);
-        assert!(send_cancellable(&events, 2, &stop));
+        assert!(send_cancellable(&events, 2, &stop, None));
     }
 
     #[test]
@@ -1213,11 +1363,13 @@ mod tests {
         let worker_stop = Arc::clone(&stop);
         let worker_generation = Arc::clone(&generation);
         let worker = std::thread::spawn(move || {
+            let wake = ProviderCoordinatorWake::for_tests();
             run(
                 &control_rx,
                 &events,
                 &worker_stop,
                 &worker_generation,
+                &wake,
                 Duration::from_millis(10),
             );
         });

@@ -1260,12 +1260,18 @@ mod tests {
 
         let protocol = manifest("crates/engine_protocol/src/lib.rs");
         assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 20"),
+            protocol.contains("pub const PROTOCOL_VERSION: u32 = 21"),
             "incompatible IPC revisions require a deliberate protocol-version change"
         );
         assert!(
             protocol.contains("Revision 20 adds `RefreshAccountProfile`"),
             "protocol version 20 must document engine-owned account-profile refresh"
+        );
+        assert!(
+            protocol.contains(
+                "Revision 21 adds optional provider heartbeat/application-ping RTT telemetry"
+            ),
+            "protocol version 21 must document provider transport RTT telemetry"
         );
         let codec = manifest("crates/engine_protocol/src/codec.rs");
         assert!(

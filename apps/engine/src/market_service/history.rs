@@ -5,13 +5,12 @@ use super::{
     HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest, HistorySnapshot, HistorySource, HotSeries,
     HotSetManager, HotSetTier, HyperliquidHandoffSeed, InstallProviderInstrument, Instant,
     MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering,
-    PersistenceState, ProviderCatalogCommand, ProviderConnectionState, ProviderGeneration,
-    ProviderRequest, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RithmicHandoffSeed,
-    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
-    StorageRequest, SyncSender, TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries,
-    WorkspaceId, WorkspaceState, engine_install_failure_stage, fail_waiters,
-    hyperliquid_interval_for_period, ipc_series, publish_state, series_state, thread,
-    try_enqueue_history,
+    PersistenceState, ProviderCatalogCommand, ProviderGeneration, ProviderRequest,
+    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, RithmicHandoffSeed, SearchProviderInstruments,
+    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot, StorageRequest, SyncSender,
+    TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries, WorkspaceId, WorkspaceState,
+    engine_install_failure_stage, fail_waiters, hyperliquid_interval_for_period, ipc_series,
+    publish_state, series_state, thread, try_enqueue_history,
 };
 use crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID;
 
@@ -465,15 +464,13 @@ impl Coordinator<'_> {
         }
         self.history_retries
             .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts, range));
-        self.broadcast_provider_for(
-            &series.provider_id,
-            ProviderConnectionState::Recovering,
-            generation,
-            Some(if series.provider_id == "hyperliquid" {
+        self.broadcast_series_recovery_for(
+            series,
+            if series.provider_id == "hyperliquid" {
                 "Hyperliquid current history is retrying"
             } else {
                 "Rithmic current history is retrying"
-            }),
+            },
         );
         true
     }
@@ -1199,7 +1196,7 @@ impl Coordinator<'_> {
     pub(super) fn seed_hyperliquid_history(
         &mut self,
         series: &BarSeriesKey,
-        generation: ProviderGeneration,
+        _generation: ProviderGeneration,
         seed: HyperliquidHandoffSeed<'_>,
     ) -> bool {
         let Some(live) = self.hyperliquid_live.get_mut(series) else {
@@ -1219,19 +1216,14 @@ impl Coordinator<'_> {
         }
         live.history_ready = false;
         live.dirty = false;
-        self.broadcast_provider_for(
-            "hyperliquid",
-            ProviderConnectionState::Recovering,
-            generation,
-            Some("Hyperliquid history/live handoff failed"),
-        );
+        self.broadcast_series_recovery_for(series, "Hyperliquid history/live handoff failed");
         false
     }
 
     pub(super) fn seed_rithmic_history(
         &mut self,
         series: &BarSeriesKey,
-        generation: ProviderGeneration,
+        _generation: ProviderGeneration,
         seed: RithmicHandoffSeed<'_>,
     ) -> bool {
         let Some(live) = self.rithmic_live.get_mut(series) else {
@@ -1258,12 +1250,7 @@ impl Coordinator<'_> {
         }
         live.history_ready = false;
         live.dirty = false;
-        self.broadcast_provider_for(
-            "rithmic",
-            ProviderConnectionState::Recovering,
-            generation,
-            Some("Rithmic history/live handoff failed"),
-        );
+        self.broadcast_series_recovery_for(series, "Rithmic history/live handoff failed");
         false
     }
 

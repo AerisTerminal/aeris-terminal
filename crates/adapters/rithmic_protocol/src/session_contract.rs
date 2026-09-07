@@ -128,6 +128,7 @@ pub enum ProviderSessionEvent {
     Heartbeat {
         generation: SessionGeneration,
         received_unix_nanos: i64,
+        transport_rtt_nanos: Option<u64>,
     },
     Invalidated {
         generation: Option<SessionGeneration>,
@@ -162,10 +163,12 @@ impl fmt::Debug for ProviderSessionEvent {
             Self::Heartbeat {
                 generation,
                 received_unix_nanos,
+                transport_rtt_nanos,
             } => formatter
                 .debug_struct("Heartbeat")
                 .field("generation", generation)
                 .field("received_unix_nanos", received_unix_nanos)
+                .field("transport_rtt_nanos", transport_rtt_nanos)
                 .finish(),
             Self::Invalidated { generation, reason } => formatter
                 .debug_struct("Invalidated")

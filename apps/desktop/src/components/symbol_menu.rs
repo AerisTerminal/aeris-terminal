@@ -199,7 +199,6 @@ pub(super) fn instrument_dialog_row(
         state.menu.keyboard_selection,
         state.menu.keyboard_active,
     ))
-    .disabled(state.availability.selection_pending)
     .on_click(move |_, window, cx| {
         if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
             app.update(cx, |app, app_cx| {

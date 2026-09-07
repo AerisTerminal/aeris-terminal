@@ -530,11 +530,10 @@ pub(super) fn header_controls(
         state.controls.enabled(HeaderControls::ORDER_BOOK),
         state.order_book_visible,
     );
-    let (connection_label, connection_color) = connection_presentation(
+    let connection = connection_presentation(
         state.provider,
         state.connection_state,
-        state.chart_state,
-        state.delayed,
+        state.transport_rtt_nanos,
     );
     let market_controls = div()
         .h_full()
@@ -544,11 +543,7 @@ pub(super) fn header_controls(
         .items_center()
         .gap_2()
         .overflow_x_hidden()
-        .child(connection_status_indicator(
-            connection_label,
-            connection_color(&state.theme),
-            &state.theme,
-        ))
+        .child(connection_status_indicator(connection, &state.theme))
         .child(instrument_selector(
             app.clone(),
             &InstrumentSelectorState {
@@ -669,21 +664,100 @@ pub(super) fn side_panel_toggle(
 }
 
 pub(super) fn connection_status_indicator(
-    label: String,
-    color: ThemeColor,
+    presentation: ConnectionPresentation,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
-    chrome_tooltip(
-        "connection_status",
-        label,
-        div()
-            .id("connection_status_dot")
-            .size(px(7.0))
-            .flex_none()
-            .rounded_full()
-            .bg(gpui_color(color)),
-        theme,
-    )
+    let color = (presentation.color)(theme);
+    let provider = SharedString::from(presentation.provider);
+    let status = SharedString::from(presentation.status);
+    let latency = SharedString::from(presentation.latency);
+    let tooltip_theme = *theme;
+    div()
+        .id(("connection_status", usize::MAX))
+        .flex()
+        .child(
+            div()
+                .id("connection_status_dot")
+                .size(px(7.0))
+                .flex_none()
+                .rounded_full()
+                .bg(gpui_color(color)),
+        )
+        .tooltip(move |_, cx| {
+            cx.new(|_| ConnectionStatusTooltip {
+                provider: provider.clone(),
+                status: status.clone(),
+                latency: latency.clone(),
+                theme: tooltip_theme,
+            })
+            .into()
+        })
+        .tooltip_show_delay(TOOLTIP_OPEN_DELAY)
+}
+
+struct ConnectionStatusTooltip {
+    provider: SharedString,
+    status: SharedString,
+    latency: SharedString,
+    theme: AxiusflowTheme,
+}
+
+impl Render for ConnectionStatusTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = self.theme.colors;
+        div().pl_2().pt_2().child(
+            div()
+                .min_w(px(190.0))
+                .px_3()
+                .py_2()
+                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                .border_1()
+                .border_color(gpui_color(colors.border))
+                .bg(gpui_color(colors.surface))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(connection_tooltip_row(
+                    "Provider",
+                    self.provider.clone(),
+                    &self.theme,
+                ))
+                .child(connection_tooltip_row(
+                    "Status",
+                    self.status.clone(),
+                    &self.theme,
+                ))
+                .child(connection_tooltip_row(
+                    "Latency",
+                    self.latency.clone(),
+                    &self.theme,
+                )),
+        )
+    }
+}
+
+fn connection_tooltip_row(
+    label: &'static str,
+    value: SharedString,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_muted))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child(value),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -1133,87 +1207,50 @@ pub(super) fn button_activation(
 
 type ConnectionColor = fn(&AxiusflowTheme) -> ThemeColor;
 
+pub(super) struct ConnectionPresentation {
+    pub(super) provider: &'static str,
+    pub(super) status: &'static str,
+    pub(super) latency: String,
+    color: ConnectionColor,
+}
+
 pub(super) fn connection_presentation(
     provider: TerminalProvider,
     state: FeedConnectionState,
-    chart_state: ChartState,
-    delayed: bool,
-) -> (String, ConnectionColor) {
-    let provider = match provider {
-        TerminalProvider::Rithmic => "Test",
-        TerminalProvider::Hyperliquid => "Public",
+    transport_rtt_nanos: Option<u64>,
+) -> ConnectionPresentation {
+    let (status, color): (&'static str, ConnectionColor) = match state {
+        FeedConnectionState::Disconnected => ("Offline", |theme| theme.colors.danger),
+        FeedConnectionState::Discovering => ("Connecting", |theme| theme.colors.primary),
+        FeedConnectionState::Authenticating => ("Authenticating", |theme| theme.colors.primary),
+        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.bullish),
+        FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.bearish),
+        FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.danger),
     };
-    // Provider connectivity outranks chart readiness. Buffered publications and
-    // history transitions can continue while the transport is offline; letting
-    // those states choose the label makes the status oscillate and can paint an
-    // offline feed green.
-    match state {
-        FeedConnectionState::Disconnected => {
-            return ("Offline".to_string(), |theme| theme.colors.danger);
-        }
-        FeedConnectionState::Recovering => {
-            return (format!("{provider} · Reconnecting"), |theme| {
-                theme.colors.bearish
-            });
-        }
-        FeedConnectionState::Stopped => {
-            return ("Stopped".to_string(), |theme| theme.colors.danger);
-        }
-        FeedConnectionState::Discovering
-        | FeedConnectionState::Authenticating
-        | FeedConnectionState::Streaming => {}
+    ConnectionPresentation {
+        provider: terminal_provider_display(provider),
+        status,
+        latency: if state == FeedConnectionState::Streaming {
+            format_transport_rtt(transport_rtt_nanos)
+        } else {
+            "Measuring…".to_string()
+        },
+        color,
     }
-    if chart_state == ChartState::Stale {
-        return (format!("{provider} · Stale"), |theme| theme.colors.bearish);
-    }
-    if chart_state == ChartState::Recovering {
-        return (format!("{provider} · Reconnecting"), |theme| {
-            theme.colors.bearish
-        });
-    }
-    // A switch or a first load is in flight. The trader is waiting on this
-    // chart, not watching a feed fail, and calling that "Reconnecting" is what
-    // made an ordinary switch look like an outage. A real outage still outranks
-    // it, because then the load is not going to finish.
-    if chart_state == ChartState::Loading
-        && !matches!(
-            state,
-            FeedConnectionState::Disconnected | FeedConnectionState::Stopped
-        )
-    {
-        if state == FeedConnectionState::Recovering {
-            return (format!("{provider} · Reconnecting"), |theme| {
-                theme.colors.bearish
-            });
-        }
-        return (format!("{provider} · Loading"), |theme| {
-            theme.colors.primary
-        });
-    }
-    if chart_state == ChartState::Error && state == FeedConnectionState::Streaming {
-        return (format!("{provider} · Data error"), |theme| {
-            theme.colors.danger
-        });
-    }
-    if state == FeedConnectionState::Streaming && delayed {
-        return (format!("{provider} · Delayed"), |theme| {
-            theme.colors.bearish
-        });
-    }
-    match state {
-        FeedConnectionState::Disconnected
-        | FeedConnectionState::Recovering
-        | FeedConnectionState::Stopped => unreachable!("terminal connectivity handled above"),
-        FeedConnectionState::Discovering => (format!("{provider} · Discovering"), |theme| {
-            theme.colors.primary
-        }),
-        FeedConnectionState::Authenticating => (format!("{provider} · Authenticating"), |theme| {
-            theme.colors.primary
-        }),
-        FeedConnectionState::Streaming => {
-            (format!("{provider} · Live"), |theme| theme.colors.bullish)
-        }
-    }
+}
+
+fn format_transport_rtt(transport_rtt_nanos: Option<u64>) -> String {
+    transport_rtt_nanos.map_or_else(
+        || "Measuring…".to_string(),
+        |nanos| {
+            let tenths_of_a_millisecond = nanos / 100_000;
+            format!(
+                "{}.{:01} ms RTT",
+                tenths_of_a_millisecond / 10,
+                tenths_of_a_millisecond % 10
+            )
+        },
+    )
 }
 
 pub(super) const fn nucleus_chart_theme(mode: ThemeMode) -> NucleusChartTheme {

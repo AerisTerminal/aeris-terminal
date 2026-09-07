@@ -873,6 +873,17 @@ impl MarketEngine {
             .collect()
     }
 
+    /// Drops only the bounded order-flow accumulator for one series.
+    ///
+    /// This is intentionally narrower than [`Self::invalidate_series`]: a
+    /// provider-local trade ordinal can restart after a trade subscription is
+    /// retired and later resumed while the canonical bar series remains valid.
+    /// Resetting that ancillary accumulator must not discard price history or
+    /// force the chart through a covering-history recovery.
+    pub fn reset_order_flow(&mut self, series: &BarSeriesKey) {
+        self.order_flow.invalidate(series);
+    }
+
     #[must_use]
     pub fn current_demand(&self, consumer_id: ConsumerId) -> Option<&ConsumerDemand> {
         self.demands.current(consumer_id)
@@ -1838,6 +1849,61 @@ mod tests {
             detached
                 .iter()
                 .all(|publication| publication.consumer_id != id(2))
+        );
+    }
+
+    #[test]
+    fn resetting_order_flow_accepts_a_restarted_trade_ordinal_without_invalidating_bars() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand_with_streams(
+                id(1),
+                generation(1),
+                &btc,
+                StreamRequirements::BARS.with(MarketStream::Trades),
+            )
+            .expect("trade demand installs");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("covering bars install");
+        engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 9, 10_000, AggressorSide::Buy),
+            )
+            .expect("old trade ordinal applies");
+        assert!(matches!(
+            engine.install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 1, 10_100, AggressorSide::Sell),
+            ),
+            Err(EngineError::NonIncreasingOrderFlowSequence)
+        ));
+
+        engine.reset_order_flow(&btc);
+        let publications = engine
+            .install_order_flow_trade(
+                provider_generation(1),
+                &btc,
+                &trade(&btc, 1, 10_100, AggressorSide::Sell),
+            )
+            .expect("fresh subscription ordinal seeds a new order-flow image");
+        assert!(matches!(
+            &publications[0].kind,
+            OrderFlowPublicationKind::Snapshot(snapshot)
+                if snapshot.source_watermark == 1 && snapshot.tape.len() == 1
+        ));
+        assert_eq!(
+            engine
+                .series_snapshot(&btc)
+                .expect("canonical bars remain installed")
+                .bars
+                .len(),
+            2
         );
     }
 

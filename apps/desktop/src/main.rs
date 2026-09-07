@@ -987,6 +987,7 @@ struct WorkspaceSurface {
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
+    provider_transport_rtt_nanos: Option<u64>,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
     market_state: WorkspaceMarketState,
@@ -1431,8 +1432,7 @@ struct HeaderState {
     controls: HeaderControls,
     order_book_visible: bool,
     connection_state: FeedConnectionState,
-    chart_state: ChartState,
-    delayed: bool,
+    transport_rtt_nanos: Option<u64>,
     instrument_scroll: ScrollHandle,
     account: axiusflow_desktop::account::AccountMenuState,
 }
@@ -1797,6 +1797,7 @@ impl WorkspaceSurface {
             pending_ui_diagnostics: None,
             connection_state,
             connection_message,
+            provider_transport_rtt_nanos: None,
             // Both resident-engine providers support the empty catalog query
             // used to populate the instrument menu. A successful selection
             // consumes its one-shot search authorization, so reopening the
@@ -2138,12 +2139,6 @@ impl WorkspaceSurface {
                     TerminalProvider::Hyperliquid => HYPERLIQUID_ENTITLEMENT_ID,
                 };
                 let display = terminal_provider_display(self.provider);
-                if self.market_state.symbol_selection_pending {
-                    self.symbol_message =
-                        format!("A {display} market selection is already in progress");
-                    cx.notify();
-                    return false;
-                }
                 let Some(selection) = self.symbol_browser.select(index) else {
                     return false;
                 };
@@ -2811,53 +2806,17 @@ impl WorkspaceSurface {
                 self.apply_recovery(request_id, result, cx);
             }
             MarketWorkerMessage::State { state, message } => {
-                // The pending-switch tracker is provider-neutral: both engine
-                // providers resolve selections through the same marker flow.
-                let engine_provider = matches!(
-                    self.provider,
-                    TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
-                );
-                if self.stale_ready_during_engine_switch(state, engine_provider) {
-                    return;
-                }
-                if state == ChartState::Error && engine_provider {
-                    let swapping = self.rithmic_switch.is_swapping();
-                    self.rithmic_switch = RithmicSwitchState::Idle;
-                    self.rithmic_pending_interval = None;
-                    self.rithmic_pending_product = None;
-                    self.rithmic_pending_sequence = None;
-                    self.market_state.symbol_selection_pending = false;
-                    if swapping {
-                        self.restore_rithmic_selection_after_failure(&message, cx);
-                    } else {
-                        self.rithmic_previous_selection = None;
-                    }
-                } else if self.provider == TerminalProvider::Rithmic && state == ChartState::Ready {
-                    self.rithmic_switch = RithmicSwitchState::Idle;
-                    self.rithmic_previous_selection = None;
-                    self.market_state.symbol_selection_pending = false;
-                    self.symbol_message = self.product.as_ref().map_or_else(
-                        || "Rithmic market ready".to_string(),
-                        |product| format!("{} · Rithmic spot", product.provider_symbol),
-                    );
-                } else if self.provider == TerminalProvider::Hyperliquid
-                    && state == ChartState::Ready
-                {
-                    self.rithmic_switch = RithmicSwitchState::Idle;
-                    self.rithmic_previous_selection = None;
-                    self.market_state.symbol_selection_pending = false;
-                    self.symbol_message = self.product.as_ref().map_or_else(
-                        || "Hyperliquid market ready".to_string(),
-                        |product| format!("{} · Hyperliquid", product.display_symbol),
-                    );
-                }
-                self.set_chart_state(state, message, cx);
+                self.apply_market_state_message(state, message, cx);
             }
             MarketWorkerMessage::EngineSwitchMarker { sequence } => {
                 self.apply_rithmic_switch_marker(sequence, cx);
             }
-            MarketWorkerMessage::Connection { state, message } => {
-                self.apply_connection_state(state, message, cx);
+            MarketWorkerMessage::Connection {
+                state,
+                message,
+                transport_rtt_nanos,
+            } => {
+                self.apply_market_connection_message(state, message, transport_rtt_nanos, cx);
             }
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
@@ -2898,6 +2857,68 @@ impl WorkspaceSurface {
                 }
             }
         }
+    }
+
+    fn apply_market_state_message(
+        &mut self,
+        state: ChartState,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        // The pending-switch tracker is provider-neutral: both engine
+        // providers resolve selections through the same marker flow.
+        let engine_provider = matches!(
+            self.provider,
+            TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
+        );
+        if self.stale_ready_during_engine_switch(state, engine_provider) {
+            return;
+        }
+        if state == ChartState::Error && engine_provider {
+            let swapping = self.rithmic_switch.is_swapping();
+            self.rithmic_switch = RithmicSwitchState::Idle;
+            self.rithmic_pending_interval = None;
+            self.rithmic_pending_product = None;
+            self.rithmic_pending_sequence = None;
+            self.market_state.symbol_selection_pending = false;
+            if swapping {
+                self.restore_rithmic_selection_after_failure(&message, cx);
+            } else {
+                self.rithmic_previous_selection = None;
+            }
+        } else if self.provider == TerminalProvider::Rithmic && state == ChartState::Ready {
+            self.rithmic_switch = RithmicSwitchState::Idle;
+            self.rithmic_previous_selection = None;
+            self.market_state.symbol_selection_pending = false;
+            self.symbol_message = self.product.as_ref().map_or_else(
+                || "Rithmic market ready".to_string(),
+                |product| format!("{} · Rithmic spot", product.provider_symbol),
+            );
+        } else if self.provider == TerminalProvider::Hyperliquid && state == ChartState::Ready {
+            self.rithmic_switch = RithmicSwitchState::Idle;
+            self.rithmic_previous_selection = None;
+            self.market_state.symbol_selection_pending = false;
+            self.symbol_message = self.product.as_ref().map_or_else(
+                || "Hyperliquid market ready".to_string(),
+                |product| format!("{} · Hyperliquid", product.display_symbol),
+            );
+        }
+        self.set_chart_state(state, message, cx);
+    }
+
+    fn apply_market_connection_message(
+        &mut self,
+        state: FeedConnectionState,
+        message: String,
+        transport_rtt_nanos: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.provider_transport_rtt_nanos = if state == FeedConnectionState::Streaming {
+            transport_rtt_nanos
+        } else {
+            None
+        };
+        self.apply_connection_state(state, message, cx);
     }
 
     fn stale_ready_during_engine_switch(&self, state: ChartState, engine_provider: bool) -> bool {
@@ -3100,6 +3121,9 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         let state = stabilized_connection_state(self.connection_state, state);
+        if state != FeedConnectionState::Streaming {
+            self.provider_transport_rtt_nanos = None;
+        }
         let retirement = RithmicSessionRetirement::from_connection(state);
         let retained_market_data = self
             .chart
@@ -3310,7 +3334,7 @@ impl WorkspaceSurface {
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
-        if self.symbol_browser.search_pending() || self.market_state.symbol_selection_pending {
+        if self.symbol_browser.search_pending() {
             match self.symbol_browser.retain_latest_search(query) {
                 Ok(already_dispatched) => {
                     if !already_dispatched {
@@ -3372,9 +3396,6 @@ impl WorkspaceSurface {
     }
 
     fn dispatch_retained_symbol_search(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.market_state.symbol_selection_pending {
-            return false;
-        }
         if let Some(request) = self.symbol_browser.begin_retained_search() {
             return self.dispatch_symbol_search(request, cx);
         }
@@ -3439,11 +3460,6 @@ impl WorkspaceSurface {
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        if self.market_state.symbol_selection_pending {
-            self.symbol_message = "A contract selection is already in progress".to_string();
-            cx.notify();
-            return false;
-        }
         let Some(selection) = self.symbol_browser.select(index) else {
             return false;
         };
@@ -7750,74 +7766,32 @@ mod tests {
         );
     }
 
-    /// A load in flight is not an outage, and labelling it as one is what made
-    /// an ordinary switch look like the feed had dropped.
     #[test]
-    fn a_load_in_flight_reads_as_loading_unless_the_feed_is_actually_down() {
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Streaming,
-                ChartState::Loading,
-                false,
-            )
-            .0,
-            "Test · Loading"
+    fn connection_indicator_is_transport_only() {
+        let live = connection_presentation(
+            TerminalProvider::Rithmic,
+            FeedConnectionState::Streaming,
+            None,
         );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Hyperliquid,
-                FeedConnectionState::Streaming,
-                ChartState::Loading,
-                false,
-            )
-            .0,
-            "Public · Loading"
+        assert_eq!(live.provider, "Rithmic");
+        assert_eq!(live.status, "Live");
+        assert_eq!(live.latency, "Measuring…");
+
+        let recovering = connection_presentation(
+            TerminalProvider::Rithmic,
+            FeedConnectionState::Recovering,
+            Some(18_000_000),
         );
-        // A recovery in flight stays explicitly reconnecting and uses the
-        // positive progress treatment instead of looking like a red failure.
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Recovering,
-                ChartState::Loading,
-                false,
-            )
-            .0,
-            "Test · Reconnecting"
+        assert_eq!(recovering.status, "Reconnecting");
+        assert_eq!(recovering.latency, "Measuring…");
+
+        let offline = connection_presentation(
+            TerminalProvider::Rithmic,
+            FeedConnectionState::Disconnected,
+            Some(18_000_000),
         );
-        // It never outranks a feed that is down, because then the load is not
-        // going to finish.
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Disconnected,
-                ChartState::Recovering,
-                false,
-            )
-            .0,
-            "Offline"
-        );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Recovering,
-                ChartState::Recovering,
-                false,
-            )
-            .0,
-            "Test · Reconnecting"
-        );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Recovering,
-                ChartState::Stale,
-                false,
-            )
-            .0,
-            "Test · Reconnecting"
-        );
+        assert_eq!(offline.status, "Offline");
+        assert_eq!(offline.latency, "Measuring…");
     }
 
     #[test]
@@ -7869,66 +7843,23 @@ mod tests {
 
     #[test]
     fn header_lifecycle_values_are_truthfully_labeled() {
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Disconnected,
-                ChartState::Loading,
-                false,
-            )
-            .0,
-            "Offline"
+        let rithmic = connection_presentation(
+            TerminalProvider::Rithmic,
+            FeedConnectionState::Streaming,
+            Some(18_400_000),
         );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Streaming,
-                ChartState::Ready,
-                false,
-            )
-            .0,
-            "Test · Live"
+        assert_eq!(rithmic.provider, "Rithmic");
+        assert_eq!(rithmic.status, "Live");
+        assert_eq!(rithmic.latency, "18.4 ms RTT");
+
+        let hyperliquid = connection_presentation(
+            TerminalProvider::Hyperliquid,
+            FeedConnectionState::Streaming,
+            Some(900_000),
         );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Streaming,
-                ChartState::Stale,
-                false,
-            )
-            .0,
-            "Test · Stale"
-        );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Streaming,
-                ChartState::Ready,
-                true,
-            )
-            .0,
-            "Test · Delayed"
-        );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Rithmic,
-                FeedConnectionState::Streaming,
-                ChartState::Ready,
-                false,
-            )
-            .0,
-            "Test · Live"
-        );
-        assert_eq!(
-            connection_presentation(
-                TerminalProvider::Hyperliquid,
-                FeedConnectionState::Streaming,
-                ChartState::Ready,
-                false,
-            )
-            .0,
-            "Public · Live"
-        );
+        assert_eq!(hyperliquid.provider, "Hyperliquid");
+        assert_eq!(hyperliquid.status, "Live");
+        assert_eq!(hyperliquid.latency, "0.9 ms RTT");
         let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
         assert!(controls.enabled(HeaderControls::INSTRUMENT));
         assert!(controls.enabled(HeaderControls::SERIES));

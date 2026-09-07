@@ -989,6 +989,10 @@ pub struct ProviderState {
     /// Optional redacted state detail.
     #[prost(string, optional, tag = "4")]
     pub detail: Option<String>,
+    /// Most recent locally measured provider heartbeat/application-ping RTT.
+    /// Absent until a generation has produced a qualified round trip.
+    #[prost(uint64, optional, tag = "5")]
+    pub transport_rtt_nanos: Option<u64>,
 }
 
 /// Recoverability state of one engine-owned order book.

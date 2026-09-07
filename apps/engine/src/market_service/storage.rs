@@ -3,7 +3,7 @@ use super::{
     Instant, LOCAL_HISTORY_READ_TIMEOUT, LocalHistoryError, LocalHistoryStore, MarketBar, Ordering,
     PersistenceState, ProviderGeneration, RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver,
     RetainedRange, SeriesLoadState, StorageRequest, StoredHistory, SyncSender, TrySendError,
-    fail_waiters, local_history_failure_stage, publish_state, thread,
+    fail_waiters, publish_state, thread,
 };
 use crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID;
 
@@ -161,11 +161,9 @@ impl Coordinator<'_> {
             .is_err()
         {
             self.broadcast_persistence_for(series, PersistenceState::Degraded, Some(unavailable));
-            self.broadcast_demand_error_for(
-                series,
-                FailureStage::FilesystemWrite,
-                unavailable,
-                Some(0),
+            eprintln!(
+                "Axiusflow engine local history persistence queue unavailable for {}: {unavailable}",
+                series.instrument_id
             );
         }
     }
@@ -336,11 +334,9 @@ impl Coordinator<'_> {
         };
         self.broadcast_persistence_for(series, state, detail);
         if let Err(error) = result {
-            self.broadcast_demand_error_for(
-                series,
-                local_history_failure_stage(error),
-                &error.to_string(),
-                Some(elapsed_millis),
+            eprintln!(
+                "Axiusflow engine local history persistence degraded for {} after {elapsed_millis} ms: {error}",
+                series.instrument_id
             );
         }
     }

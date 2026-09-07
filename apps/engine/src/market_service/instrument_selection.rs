@@ -2,8 +2,8 @@ use super::{
     BarSeriesKey, ClientId, ConsumerId, Coordinator, InstallProviderInstrument,
     MAXIMUM_CATALOG_FIELD_BYTES, MAXIMUM_CATALOG_INSTRUMENTS, MarketStream, NonZeroU64, Ordering,
     ProviderCatalogCommand, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderConnectionState, ProviderGeneration, ProviderHealth, ProviderInstrumentSelection,
-    Reply, ResourceMode, RithmicCatalogControl, RithmicCatalogEvent, SearchProviderInstruments,
+    ProviderGeneration, ProviderHealth, ProviderInstrumentSelection, Reply, ResourceMode,
+    RithmicCatalogControl, RithmicCatalogEvent, SearchProviderInstruments,
     SelectProviderInstrument, StreamRequirements, SyncSender, TrySendError, authorize_consumer,
     envelope,
 };
@@ -332,11 +332,9 @@ impl Coordinator<'_> {
         }
     }
 
-    /// Downgrades provider state when a background catalog refresh fails.
-    ///
-    /// The retained catalog keeps serving, so this only fires when the
-    /// worker-driven session is Online: worker states (connecting,
-    /// recovering, failed) always win over catalog staleness.
+    /// Records a background catalog refresh failure without changing realtime
+    /// transport health. The retained catalog remains usable, so a catalog
+    /// problem must never paint an online WebSocket as reconnecting.
     pub(super) fn degrade_hyperliquid_catalog_health(&mut self, detail: &str) {
         let current = self
             .engine
@@ -353,18 +351,12 @@ impl Coordinator<'_> {
             return;
         }
         self.hyperliquid_catalog_degraded = Some(generation);
-        self.broadcast_provider_for(
-            "hyperliquid",
-            ProviderConnectionState::Recovering,
-            generation,
-            Some(detail),
-        );
+        eprintln!("Axiusflow engine Hyperliquid catalog refresh degraded: {detail}");
     }
 
-    /// Restores Online after a catalog success that postdates the downgrade.
-    ///
-    /// The session-generation check keeps a stale success from overriding a
-    /// worker-driven reconnect that moved the session on meanwhile.
+    /// Clears catalog degradation after a success from the same provider
+    /// generation. This intentionally publishes no provider state: only the
+    /// realtime worker owns transport Online/Recovering transitions.
     pub(super) fn restore_hyperliquid_catalog_health(&mut self, provider: &str) {
         if provider != "hyperliquid" {
             return;
@@ -381,12 +373,6 @@ impl Coordinator<'_> {
             return;
         }
         self.hyperliquid_catalog_degraded = None;
-        self.broadcast_provider_for(
-            "hyperliquid",
-            ProviderConnectionState::Online,
-            degraded,
-            None,
-        );
     }
 
     pub(super) fn handle_catalog_search(

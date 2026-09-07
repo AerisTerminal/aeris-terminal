@@ -3,12 +3,11 @@ use super::{
     ClientId, ConsumerEvents, ConsumerId, Coordinator, DemandError, DemandWaiter, DepthLevel,
     EngineError, EngineFaultCode, FailureStage, GenerationId, IpcOrderBookLevel,
     IpcOrderBookSnapshot, IpcOrderBookState, IpcOrderFlowLevel, IpcOrderFlowSnapshot,
-    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, LocalHistoryError, NonZeroU64,
-    OrderBookRecoveryReason, OrderFlowAggressor, OrderFlowPublicationKind, PersistenceState,
-    ProviderConnectionState, ProviderGeneration, ProviderOrderBook, ProviderState,
-    REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState, SeriesState, SeriesTailOperation,
-    SeriesUpdateOperation, SyncSender, TrySendError, authorize_consumer, envelope, ipc_bar,
-    ipc_series,
+    IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, NonZeroU64, OrderBookRecoveryReason,
+    OrderFlowAggressor, OrderFlowPublicationKind, PersistenceState, ProviderConnectionState,
+    ProviderGeneration, ProviderOrderBook, ProviderState, REALTIME_DRAIN_BUDGET, Reply, SeriesKey,
+    SeriesLoadState, SeriesState, SeriesTailOperation, SeriesUpdateOperation, SyncSender,
+    TrySendError, authorize_consumer, envelope, ipc_bar, ipc_series,
 };
 
 pub(super) fn fail_waiters(
@@ -90,23 +89,6 @@ pub(super) const fn engine_install_failure_stage(error: &EngineError) -> Failure
         | EngineError::ConflictingSeriesGeneration(_)
         | EngineError::InvalidMarketData(_) => FailureStage::CanonicalValidation,
         _ => FailureStage::MemoryInstall,
-    }
-}
-
-pub(super) const fn local_history_failure_stage(error: LocalHistoryError) -> FailureStage {
-    match error {
-        LocalHistoryError::SegmentEncode
-        | LocalHistoryError::InvalidSeries
-        | LocalHistoryError::EmptySeries
-        | LocalHistoryError::InvalidRange
-        | LocalHistoryError::InvalidSegment => FailureStage::SegmentEncode,
-        LocalHistoryError::Encryption | LocalHistoryError::InvalidVaultKey => {
-            FailureStage::Encryption
-        }
-        LocalHistoryError::FilesystemWrite
-        | LocalHistoryError::InvalidRoot
-        | LocalHistoryError::Unavailable => FailureStage::FilesystemWrite,
-        LocalHistoryError::CatalogCommit => FailureStage::CatalogCommit,
     }
 }
 
@@ -834,11 +816,13 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         detail: Option<&str>,
     ) {
+        let transport_rtt_nanos = self.providers.transport_rtt_nanos(provider);
         let payload = envelope::Payload::ProviderState(ProviderState {
             provider: provider.to_string(),
             state: state as i32,
             generation: generation.0.get(),
             detail: detail.map(str::to_string),
+            transport_rtt_nanos,
         });
         for (consumer_id, events) in &mut self.events {
             if self

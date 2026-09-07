@@ -269,6 +269,7 @@ pub enum MarketWorkerMessage {
     Connection {
         state: FeedConnectionState,
         message: String,
+        transport_rtt_nanos: Option<u64>,
     },
     ProviderCatalog(ProviderCatalogEvent),
     RithmicHistory {
@@ -3245,6 +3246,14 @@ mod tests {
         worker
             .try_select_provider(selection.clone())
             .expect("provider selection uses the foreground slot");
+        let replacement = SelectProviderInstrument {
+            selection_generation: 4,
+            symbol: "SOL".to_string(),
+            ..selection.clone()
+        };
+        worker
+            .try_select_provider(replacement.clone())
+            .expect("newer provider selection replaces the pending foreground selection");
         let next = worker
             .try_select_engine(
                 InstallProviderInstrument {
@@ -3264,7 +3273,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref(),
-            Some(&selection)
+            Some(&replacement)
         );
         let pending_engine = engine_selection
             .lock()

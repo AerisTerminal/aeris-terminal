@@ -78,6 +78,65 @@ fn market_trade(sequence: u64, timestamp: i64, price: i64, quantity: i64) -> Mar
     }
 }
 
+fn hyperliquid_trade(sequence: u64, timestamp: i64, price: i64, quantity: i64) -> MarketTrade {
+    MarketTrade {
+        metadata: axiusflow_market_data::EventMetadata {
+            provider_id: "hyperliquid".to_string(),
+            instrument_id: hyperliquid_series().instrument_id,
+            entitlement_id: hyperliquid_series().entitlement_id,
+            session_generation: 1,
+            source_sequence: sequence,
+            timestamps: axiusflow_market_data::QualifiedTimestamp {
+                exchange_unix_nanos: Some(timestamp),
+                provider_unix_nanos: Some(timestamp),
+                received_unix_nanos: timestamp,
+            },
+        },
+        trade_id: format!("hl-trade-{sequence}"),
+        price,
+        quantity,
+        aggressor: axiusflow_market_data::AggressorSide::Unknown,
+    }
+}
+
+#[test]
+fn provider_event_wake_uses_the_coordinator_command_lane_without_polling() {
+    let (commands, receiver) = mpsc::sync_channel(1);
+    let wake = ProviderCoordinatorWake::new(commands);
+    wake.notify();
+    assert!(matches!(receiver.try_recv(), Ok(Command::ProviderWake)));
+
+    // If the command lane is already full, dropping the redundant wake is
+    // safe because the queued command itself will interrupt recv_timeout.
+    let (commands, receiver) = mpsc::sync_channel(1);
+    let wake = ProviderCoordinatorWake::new(commands.clone());
+    commands
+        .try_send(Command::ProviderWake)
+        .expect("fixture fills command lane");
+    wake.notify();
+    assert!(matches!(receiver.try_recv(), Ok(Command::ProviderWake)));
+}
+
+#[test]
+fn provider_transport_rtt_is_generation_fenced_and_cleared_on_recovery() {
+    let lifecycle = ProviderRuntimeLifecycle::default();
+    lifecycle.observe_generation(7, false);
+    assert_eq!(lifecycle.transport_rtt_nanos(), None);
+    lifecycle.observe_transport_rtt(7, 18_400_000);
+    assert_eq!(lifecycle.transport_rtt_nanos(), Some(18_400_000));
+
+    lifecycle.observe_generation(7, true);
+    assert_eq!(lifecycle.transport_rtt_nanos(), None);
+    lifecycle.observe_transport_rtt(7, 19_000_000);
+    assert_eq!(lifecycle.transport_rtt_nanos(), None);
+
+    lifecycle.observe_generation(7, false);
+    lifecycle.observe_transport_rtt(7, 20_000_000);
+    assert_eq!(lifecycle.transport_rtt_nanos(), Some(20_000_000));
+    lifecycle.observe_generation(8, false);
+    assert_eq!(lifecycle.transport_rtt_nanos(), None);
+}
+
 #[test]
 fn rithmic_fixed_period_updates_and_rolls_the_forming_bar() {
     use super::realtime::{started_rithmic_bar, updated_rithmic_bar};
@@ -488,6 +547,244 @@ fn resume_test_identity() -> (ClientId, ConsumerId, GenerationId, ConsumerIdenti
         consumer_id,
     };
     (client_id, consumer_id, generation, identity)
+}
+
+#[test]
+fn history_retry_is_series_scoped_and_does_not_fake_provider_recovery() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let provider_generation = ProviderGeneration(NonZeroU64::new(1).expect("provider generation"));
+    let mut engine = configured_engine().expect("test engine configures");
+    engine
+        .begin_provider_session("hyperliquid", provider_generation)
+        .expect("provider session begins");
+    engine
+        .set_provider_health("hyperliquid", provider_generation, ProviderHealth::Online)
+        .expect("provider is online");
+    engine
+        .register_consumer(identity, true)
+        .expect("consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("demand installs");
+
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+
+    assert!(coordinator.schedule_history_retry(
+        &series,
+        provider_generation,
+        None,
+        "fixture history failure"
+    ));
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| status.health),
+        Some(ProviderHealth::Online),
+        "history repair must not mutate transport health"
+    );
+    let events = coordinator
+        .events
+        .get(&consumer_id)
+        .expect("consumer events");
+    assert!(
+        events.provider.is_none(),
+        "history repair must not emit provider recovery"
+    );
+    assert!(matches!(
+        events.series_state.as_ref(),
+        Some(envelope::Payload::SeriesState(state))
+            if SeriesLoadState::try_from(state.state) == Ok(SeriesLoadState::Resolving)
+    ));
+}
+
+#[test]
+fn persistence_degradation_never_becomes_a_market_demand_failure() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let provider_generation = ProviderGeneration(NonZeroU64::new(1).expect("provider generation"));
+    let mut engine = configured_engine().expect("test engine configures");
+    engine
+        .begin_provider_session("hyperliquid", provider_generation)
+        .expect("provider session begins");
+    engine
+        .set_provider_health("hyperliquid", provider_generation, ProviderHealth::Online)
+        .expect("provider is online");
+    engine
+        .register_consumer(identity, true)
+        .expect("consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("demand installs");
+
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.persistence_completed(
+        &series,
+        provider_generation,
+        Err(LocalHistoryError::Unavailable),
+        7,
+    );
+
+    let events = coordinator
+        .events
+        .get(&consumer_id)
+        .expect("consumer events");
+    assert!(
+        events.demand_error.is_none(),
+        "disk durability is independent from usable live market data"
+    );
+    assert!(matches!(
+        events.series_state.as_ref(),
+        Some(envelope::Payload::SeriesState(state))
+            if PersistenceState::try_from(state.persistence) == Ok(PersistenceState::Degraded)
+    ));
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| status.health),
+        Some(ProviderHealth::Online)
+    );
+}
+
+#[test]
+fn catalog_refresh_failure_cannot_override_realtime_transport_health() {
+    let (_, consumer_id, _, _) = resume_test_identity();
+    let provider_generation = ProviderGeneration(NonZeroU64::new(1).expect("provider generation"));
+    let mut engine = configured_engine().expect("test engine configures");
+    engine
+        .begin_provider_session("hyperliquid", provider_generation)
+        .expect("provider session begins");
+    engine
+        .set_provider_health("hyperliquid", provider_generation, ProviderHealth::Online)
+        .expect("provider is online");
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+
+    coordinator.degrade_hyperliquid_catalog_health("fixture catalog failure");
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| status.health),
+        Some(ProviderHealth::Online)
+    );
+    assert!(
+        coordinator
+            .events
+            .get(&consumer_id)
+            .is_some_and(|events| events.provider.is_none()),
+        "catalog degradation must not masquerade as transport recovery"
+    );
+
+    coordinator
+        .engine
+        .set_provider_health(
+            "hyperliquid",
+            provider_generation,
+            ProviderHealth::Recovering,
+        )
+        .expect("transport enters genuine recovery");
+    coordinator.restore_hyperliquid_catalog_health("hyperliquid");
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| status.health),
+        Some(ProviderHealth::Recovering),
+        "catalog success must never paint a recovering transport online"
+    );
+}
+
+#[test]
+fn restarted_hyperliquid_trade_ordinal_resets_only_order_flow() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let provider_generation = ProviderGeneration(NonZeroU64::new(1).expect("provider generation"));
+    let mut engine = configured_engine().expect("test engine configures");
+    engine
+        .begin_provider_session("hyperliquid", provider_generation)
+        .expect("provider session begins");
+    engine
+        .set_provider_health("hyperliquid", provider_generation, ProviderHealth::Online)
+        .expect("provider is online");
+    engine
+        .register_consumer(identity, true)
+        .expect("consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            consumer_id,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("demand installs");
+
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator
+        .hyperliquid_live
+        .insert(series.clone(), hyperliquid_handoff());
+
+    coordinator.hyperliquid_trade(
+        provider_generation.0.get(),
+        &hyperliquid_trade(9, 1_800_000_000_000_000_000, 10_000, 2),
+    );
+    coordinator.hyperliquid_trade(
+        provider_generation.0.get(),
+        &hyperliquid_trade(1, 1_800_000_000_100_000_000, 10_100, 3),
+    );
+
+    let events = coordinator
+        .events
+        .get(&consumer_id)
+        .expect("consumer events");
+    assert!(matches!(
+        events.order_flow.as_ref(),
+        Some(envelope::Payload::OrderFlowSnapshot(snapshot))
+            if snapshot.source_watermark == 1 && snapshot.tape.len() == 1
+    ));
+    assert!(
+        events.series_state.is_none(),
+        "order-flow reset must not recover the chart"
+    );
+    assert!(
+        events.provider.is_none(),
+        "order-flow reset must not change provider status"
+    );
+    assert!(coordinator.history_inflight.is_empty());
+    assert_eq!(
+        coordinator
+            .engine
+            .provider_status("hyperliquid")
+            .map(|status| status.health),
+        Some(ProviderHealth::Online)
+    );
 }
 
 #[test]

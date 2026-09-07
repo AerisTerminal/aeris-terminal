@@ -49,7 +49,10 @@ const MAXIMUM_INSTRUMENTS: usize = 128;
 const MAXIMUM_IDENTITY_BYTES: usize = 256;
 const SESSION_COMMAND_CAPACITY: usize = 8;
 const SESSION_COMMAND_BATCH: usize = 4;
-const SESSION_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Maximum time a quiet provider socket may defer a newly queued read-only
+/// market command. This is deliberately much smaller than a UI frame so warm
+/// symbol changes reach the live session without a human-visible pause.
+const SESSION_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES: usize = 256;
 const MAXIMUM_INITIAL_DBO_SNAPSHOT_MESSAGES: usize = 8_192;
 const MAXIMUM_CALLBACK_EVENTS: usize = 4_096;
@@ -2171,6 +2174,13 @@ fn silence_invalidation(
         })
 }
 
+fn heartbeat_transport_rtt_nanos(state: &DirectSessionState, received_at: Instant) -> Option<u64> {
+    let deadline = state.heartbeat_deadline?;
+    let sent_at = deadline.checked_sub(state.response_timeout)?;
+    let nanos = received_at.saturating_duration_since(sent_at).as_nanos();
+    Some(u64::try_from(nanos).unwrap_or(u64::MAX).max(1))
+}
+
 #[allow(clippy::too_many_lines)]
 fn handle_session_message(
     connection: &mut crate::RithmicTickerConnection,
@@ -2274,10 +2284,13 @@ fn handle_session_message(
         RithmicSessionMessage::Control(DecodedControlMessage::Heartbeat {
             accepted: true, ..
         }) => {
+            let received_at = Instant::now();
+            let transport_rtt_nanos = heartbeat_transport_rtt_nanos(state, received_at);
             state.heartbeat_deadline = None;
             if !emitter.send(ProviderSessionEvent::Heartbeat {
                 generation,
                 received_unix_nanos: unix_nanos_now()?,
+                transport_rtt_nanos,
             }) {
                 stop.store(true, Ordering::Release);
                 return Ok(false);
@@ -3908,6 +3921,29 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_rtt_uses_only_local_monotonic_send_and_receive_instants() {
+        let started = Instant::now();
+        let state = DirectSessionState {
+            last_message: started,
+            next_heartbeat: started + Duration::from_secs(10),
+            heartbeat_deadline: Some(started + Duration::from_secs(5)),
+            response_timeout: Duration::from_secs(5),
+            source_ordinal: 0,
+            catalog: CatalogCommandState::default(),
+        };
+        assert_eq!(
+            heartbeat_transport_rtt_nanos(&state, started + Duration::from_millis(18)),
+            Some(18_000_000)
+        );
+
+        let no_pending = DirectSessionState {
+            heartbeat_deadline: None,
+            ..state
+        };
+        assert_eq!(heartbeat_transport_rtt_nanos(&no_pending, started), None);
+    }
+
+    #[test]
     fn catalog_commands_expire_at_the_provider_response_deadline() {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(15);
@@ -4100,6 +4136,7 @@ mod tests {
                 || !emitter.send(ProviderSessionEvent::Heartbeat {
                     generation,
                     received_unix_nanos: 1,
+                    transport_rtt_nanos: None,
                 })
             {
                 return;

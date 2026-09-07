@@ -62,7 +62,11 @@ pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
 /// Revision 20 adds `RefreshAccountProfile` (tag 61). It is only a bounded
 /// enqueue request: the resident engine owns all refresh-token and control-plane
 /// work and returns the current sanitized `AccountView` immediately.
-pub const PROTOCOL_VERSION: u32 = 20;
+///
+/// Revision 21 adds optional provider heartbeat/application-ping RTT telemetry
+/// to `ProviderState`. The value is locally measured monotonic round-trip time;
+/// provider/exchange clock timestamps are deliberately not used as latency.
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Maximum prost payload accepted in one frame (3 MiB).
 pub const MAX_FRAME_BYTES: usize = 3 * 1_048_576;

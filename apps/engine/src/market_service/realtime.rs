@@ -1,7 +1,7 @@
 use super::{
     BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CanonicalOrderBookState, ConsumerId, Coordinator,
-    DepthSnapshot, FailureStage, FormingBar, HyperliquidCandleDemand, HyperliquidDemand,
-    HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
+    DepthSnapshot, EngineError, FailureStage, FormingBar, HyperliquidCandleDemand,
+    HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication,
     MAXIMUM_PUBLISHED_DEPTH_LEVELS, MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream,
@@ -532,6 +532,30 @@ impl HyperliquidLiveHandoff {
 }
 
 impl Coordinator<'_> {
+    fn install_order_flow_trade_resilient(
+        &mut self,
+        generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        trade: &MarketTrade,
+    ) -> Result<Vec<axiusflow_market_engine::ConsumerOrderFlowPublication>, EngineError> {
+        match self
+            .engine
+            .install_order_flow_trade(generation, series, trade)
+        {
+            Ok(publications) => Ok(publications),
+            Err(EngineError::NonIncreasingOrderFlowSequence) => {
+                // Trade source ordinals are local continuity evidence. A
+                // subscription can retire and later resume inside the same
+                // provider session, so an ordinal restart invalidates only
+                // order-flow accumulation, not canonical price history.
+                self.engine.reset_order_flow(series);
+                self.engine
+                    .install_order_flow_trade(generation, series, trade)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) fn ensure_realtime(&mut self, series: &BarSeriesKey) -> Result<(), String> {
         let streams = self
             .engine
@@ -637,12 +661,12 @@ impl Coordinator<'_> {
         let event_generation = match &event {
             RithmicRealtimeEvent::Connecting(generation)
             | RithmicRealtimeEvent::Connected(generation)
-            | RithmicRealtimeEvent::Heartbeat(generation)
             | RithmicRealtimeEvent::Trade(generation, _)
             | RithmicRealtimeEvent::Quote(generation, _)
             | RithmicRealtimeEvent::Depth(generation, _)
             | RithmicRealtimeEvent::Recovering(generation, _)
-            | RithmicRealtimeEvent::Disconnected(generation, _) => *generation,
+            | RithmicRealtimeEvent::Disconnected(generation, _)
+            | RithmicRealtimeEvent::Heartbeat(generation, _) => *generation,
         };
         if self
             .rithmic_stop_pending
@@ -654,7 +678,7 @@ impl Coordinator<'_> {
         match event {
             RithmicRealtimeEvent::Connecting(generation) => self.rithmic_connecting(generation),
             RithmicRealtimeEvent::Connected(generation)
-            | RithmicRealtimeEvent::Heartbeat(generation) => self.rithmic_online(generation),
+            | RithmicRealtimeEvent::Heartbeat(generation, _) => self.rithmic_online(generation),
             RithmicRealtimeEvent::Trade(generation, trade) => {
                 self.rithmic_trade(generation, &trade);
             }
@@ -714,12 +738,12 @@ impl Coordinator<'_> {
         let event_generation = match &event {
             HyperliquidRealtimeEvent::Connecting(generation)
             | HyperliquidRealtimeEvent::Connected(generation)
-            | HyperliquidRealtimeEvent::Heartbeat(generation)
             | HyperliquidRealtimeEvent::Candle(generation, ..)
             | HyperliquidRealtimeEvent::Trades(generation, _)
             | HyperliquidRealtimeEvent::Depth(generation, _)
             | HyperliquidRealtimeEvent::Recovering(generation)
-            | HyperliquidRealtimeEvent::Disconnected(generation) => *generation,
+            | HyperliquidRealtimeEvent::Disconnected(generation)
+            | HyperliquidRealtimeEvent::Heartbeat(generation, _) => *generation,
         };
         if self
             .hyperliquid_stop_pending
@@ -732,8 +756,8 @@ impl Coordinator<'_> {
             HyperliquidRealtimeEvent::Connecting(generation) => {
                 self.hyperliquid_connecting(generation);
             }
-            HyperliquidRealtimeEvent::Connected(generation)
-            | HyperliquidRealtimeEvent::Heartbeat(generation) => {
+            HyperliquidRealtimeEvent::Connected(generation) => self.hyperliquid_online(generation),
+            HyperliquidRealtimeEvent::Heartbeat(generation, _) => {
                 self.hyperliquid_online(generation);
             }
             HyperliquidRealtimeEvent::Candle(generation, wire_coin, interval, candle) => {
@@ -966,12 +990,8 @@ impl Coordinator<'_> {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut order_flow_failed = BTreeSet::new();
         for series in order_flow_series {
-            match self
-                .engine
-                .install_order_flow_trade(generation, &series, trade)
-            {
+            match self.install_order_flow_trade_resilient(generation, &series, trade) {
                 Ok(publications) => {
                     for publication in publications {
                         if let Some(events) = self.events.get_mut(&publication.consumer_id) {
@@ -979,18 +999,13 @@ impl Coordinator<'_> {
                         }
                     }
                 }
-                Err(_) => {
-                    order_flow_failed.insert(series);
+                Err(error) => {
+                    eprintln!(
+                        "Axiusflow engine Hyperliquid order-flow update dropped for {}: {error}",
+                        series.instrument_id
+                    );
                 }
             }
-        }
-        for series in &order_flow_failed {
-            self.hyperliquid_series_recovering(
-                series,
-                generation,
-                FailureStage::CanonicalValidation,
-                "Hyperliquid order-flow reconstruction requires covering history",
-            );
         }
     }
 
@@ -998,7 +1013,7 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        stage: FailureStage,
+        _stage: FailureStage,
         detail: &str,
     ) {
         if let Some(live) = self.hyperliquid_live.get_mut(series) {
@@ -1006,7 +1021,6 @@ impl Coordinator<'_> {
             live.dirty = false;
             live.buffered.clear();
         }
-        self.broadcast_demand_error_for(series, stage, detail, None);
         self.broadcast_series_recovery_for(series, detail);
         if !self
             .history_inflight
@@ -1195,12 +1209,8 @@ impl Coordinator<'_> {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut order_flow_failed = BTreeSet::new();
         for series in order_flow_series {
-            match self
-                .engine
-                .install_order_flow_trade(generation, &series, trade)
-            {
+            match self.install_order_flow_trade_resilient(generation, &series, trade) {
                 Ok(publications) => {
                     for publication in publications {
                         if let Some(events) = self.events.get_mut(&publication.consumer_id) {
@@ -1208,18 +1218,13 @@ impl Coordinator<'_> {
                         }
                     }
                 }
-                Err(_) => {
-                    order_flow_failed.insert(series);
+                Err(error) => {
+                    eprintln!(
+                        "Axiusflow engine Rithmic order-flow update dropped for {}: {error}",
+                        series.instrument_id
+                    );
                 }
             }
-        }
-        for series in &order_flow_failed {
-            self.rithmic_series_recovering(
-                series,
-                generation,
-                FailureStage::CanonicalValidation,
-                "Rithmic order-flow reconstruction requires covering history",
-            );
         }
         let failed = self
             .rithmic_live
@@ -1229,7 +1234,6 @@ impl Coordinator<'_> {
                     && live.connected
                     && live.series.instrument_id == trade.metadata.instrument_id
                     && live.series.entitlement_id == trade.metadata.entitlement_id
-                    && !order_flow_failed.contains(&live.series)
             })
             .filter_map(|(series, live)| live.accept_trade(trade).is_err().then(|| series.clone()))
             .collect::<Vec<_>>();
@@ -1247,7 +1251,7 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        stage: FailureStage,
+        _stage: FailureStage,
         detail: &str,
     ) {
         if let Some(live) = self.rithmic_live.get_mut(series) {
@@ -1255,7 +1259,6 @@ impl Coordinator<'_> {
             live.dirty = false;
             live.buffered.clear();
         }
-        self.broadcast_demand_error_for(series, stage, detail, None);
         self.broadcast_series_recovery_for(series, detail);
         if !self
             .history_inflight
@@ -1479,21 +1482,12 @@ impl Coordinator<'_> {
                 }),
             };
             if let Err(error) = published {
-                if let Some(live) = self.rithmic_live.get_mut(&series) {
-                    live.history_ready = false;
-                }
                 eprintln!("Axiusflow engine Rithmic live publication failed: {error}");
-                self.broadcast_provider_for(
-                    "rithmic",
-                    ProviderConnectionState::Recovering,
-                    generation,
-                    Some("Rithmic live publication requires covering history"),
-                );
-                self.broadcast_demand_error_for(
+                self.rithmic_series_recovering(
                     &series,
+                    generation,
                     FailureStage::Publication,
                     "Rithmic live publication requires covering history",
-                    None,
                 );
             }
         }
@@ -1646,21 +1640,12 @@ impl Coordinator<'_> {
                 }),
             };
             if let Err(error) = published {
-                if let Some(live) = self.hyperliquid_live.get_mut(&series) {
-                    live.history_ready = false;
-                }
                 eprintln!("Axiusflow engine Hyperliquid live publication failed: {error}");
-                self.broadcast_provider_for(
-                    "hyperliquid",
-                    ProviderConnectionState::Recovering,
-                    generation,
-                    Some("Hyperliquid live publication requires covering history"),
-                );
-                self.broadcast_demand_error_for(
+                self.hyperliquid_series_recovering(
                     &series,
+                    generation,
                     FailureStage::Publication,
                     "Hyperliquid live publication requires covering history",
-                    None,
                 );
             }
         }

@@ -5,15 +5,16 @@ use super::{
     InstallProviderInstrument, Instant, LiveHyperliquidHistory, LiveRithmicHistory,
     LocalHistoryStore, MarketEngine, MarketRuntime, MarketService, MarketServiceStatus, Mutex,
     Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelSet, ProviderCatalogChannels,
-    ProviderCatalogCommand, ProviderCatalogDispatch, ProviderDispatch, ProviderDispatchRecord,
-    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRealtimeDispatch,
-    ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry,
-    ProviderRuntimeSpec, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, ResourceMode,
-    RithmicCatalogControl, RithmicRealtimeControl, RithmicRealtimeEvent, STORAGE_CAPACITY,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesKey, StartedProviderRuntime,
-    SyncSender, TrySendError, Viewport, WorkspaceId, WorkspaceState, available_memory_bytes,
-    configured_engine, configured_reconnect_delay, envelope, id, internal_series, mpsc,
-    retained_hot_series, spawn_coordinator, spawn_history_worker, spawn_storage_worker, thread,
+    ProviderCatalogCommand, ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch,
+    ProviderDispatchRecord, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
+    ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
+    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, ResourceMode, RithmicCatalogControl,
+    RithmicRealtimeControl, RithmicRealtimeEvent, STORAGE_CAPACITY, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesKey, StartedProviderRuntime, SyncSender, TrySendError,
+    Viewport, WorkspaceId, WorkspaceState, available_memory_bytes, configured_engine,
+    configured_reconnect_delay, envelope, id, internal_series, mpsc, retained_hot_series,
+    spawn_coordinator, spawn_history_worker, spawn_storage_worker, thread,
     try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
     validate_provider_search, validate_provider_selection, warm_series,
 };
@@ -84,6 +85,7 @@ impl ProviderRuntimeRegistry {
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
     ) -> Result<Self, String> {
+        let wake = ProviderCoordinatorWake::new(completions.clone());
         let mut registry = Self {
             records: BTreeMap::new(),
         };
@@ -96,13 +98,14 @@ impl ProviderRuntimeRegistry {
                 ));
             }
             let provider_id = spec.provider_id;
-            let record = match Self::start_record(spec, completions, engine, active_workers) {
-                Ok(record) => record,
-                Err(error) => {
-                    registry.cancel_and_join();
-                    return Err(error);
-                }
-            };
+            let record =
+                match Self::start_record(spec, completions, wake.clone(), engine, active_workers) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        registry.cancel_and_join();
+                        return Err(error);
+                    }
+                };
             registry.records.insert(provider_id, record);
         }
         Ok(registry)
@@ -111,6 +114,7 @@ impl ProviderRuntimeRegistry {
     fn start_record(
         spec: ProviderRuntimeSpec,
         completions: &SyncSender<Command>,
+        wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
     ) -> Result<ProviderRuntimeRecord, String> {
@@ -140,12 +144,17 @@ impl ProviderRuntimeRegistry {
             "hyperliquid" => Self::start_hyperliquid_record(
                 started,
                 spec.realtime.enabled,
+                wake,
                 engine,
                 active_workers,
             ),
-            "rithmic" => {
-                Self::start_rithmic_record(started, spec.realtime.enabled, engine, active_workers)
-            }
+            "rithmic" => Self::start_rithmic_record(
+                started,
+                spec.realtime.enabled,
+                wake,
+                engine,
+                active_workers,
+            ),
             provider => {
                 started.cancel_and_join();
                 Err(format!(
@@ -158,6 +167,7 @@ impl ProviderRuntimeRegistry {
     fn start_rithmic_record(
         mut started: StartedProviderRuntime,
         enabled: bool,
+        wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
     ) -> Result<ProviderRuntimeRecord, String> {
@@ -195,6 +205,7 @@ impl ProviderRuntimeRegistry {
                         &catalog_events_tx,
                         &realtime_controls_rx,
                         &realtime_events_tx,
+                        &wake,
                         reconnect_delay,
                     );
                     if !worker_cancellation.load(Ordering::Acquire) {
@@ -236,6 +247,7 @@ impl ProviderRuntimeRegistry {
     fn start_hyperliquid_record(
         mut started: StartedProviderRuntime,
         enabled: bool,
+        wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
     ) -> Result<ProviderRuntimeRecord, String> {
@@ -270,6 +282,7 @@ impl ProviderRuntimeRegistry {
                 catalog_controls_rx,
                 catalog_events_tx,
                 Arc::clone(&ws_generation),
+                wake.clone(),
             ) {
                 started.cancel_and_join();
                 return Err(error);
@@ -280,6 +293,7 @@ impl ProviderRuntimeRegistry {
                 realtime_controls_rx,
                 realtime_events_tx,
                 ws_generation,
+                wake,
                 reconnect_delay,
             ) {
                 started.cancel_and_join();
@@ -314,6 +328,7 @@ impl ProviderRuntimeRegistry {
         controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidCatalogControl>,
         events: mpsc::SyncSender<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
         ws_generation: Arc<AtomicU64>,
+        wake: ProviderCoordinatorWake,
     ) -> Result<(), String> {
         let cancellation = Arc::clone(&started.cancellation);
         let lifecycle = Arc::clone(&started.lifecycle);
@@ -328,6 +343,7 @@ impl ProviderRuntimeRegistry {
                     &events,
                     &ws_generation,
                     &cancellation,
+                    &wake,
                     axiusflow_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
                 );
                 if !cancellation.load(Ordering::Acquire) {
@@ -346,6 +362,7 @@ impl ProviderRuntimeRegistry {
         controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidRealtimeControl>,
         events: mpsc::SyncSender<crate::hyperliquid_realtime::HyperliquidRealtimeEvent>,
         ws_generation: Arc<AtomicU64>,
+        wake: ProviderCoordinatorWake,
         reconnect_delay: Duration,
     ) -> Result<(), String> {
         let cancellation = Arc::clone(&started.cancellation);
@@ -361,6 +378,7 @@ impl ProviderRuntimeRegistry {
                     &events,
                     &cancellation,
                     &ws_generation,
+                    &wake,
                     reconnect_delay,
                 );
                 if !cancellation.load(Ordering::Acquire) {
@@ -497,6 +515,23 @@ impl ProviderDispatch<'_> {
         }
     }
 
+    pub(super) fn transport_rtt_nanos(&self, provider_id: &str) -> Option<u64> {
+        self.records
+            .get(provider_id)
+            .and_then(|record| record.lifecycle)
+            .and_then(ProviderRuntimeLifecycle::transport_rtt_nanos)
+    }
+
+    fn observe_transport_rtt(&self, provider_id: &str, generation: u64, transport_rtt_nanos: u64) {
+        if let Some(lifecycle) = self
+            .records
+            .get(provider_id)
+            .and_then(|record| record.lifecycle)
+        {
+            lifecycle.observe_transport_rtt(generation, transport_rtt_nanos);
+        }
+    }
+
     pub(super) fn take_event(&self, lane: usize) -> Option<ProviderRuntimeEvent> {
         let event = match lane {
             0 => match &self.records.get("rithmic")?.realtime {
@@ -536,30 +571,44 @@ impl ProviderDispatch<'_> {
         }?;
         match &event {
             ProviderRuntimeEvent::RithmicRealtime(event) => {
-                let (generation, reconnecting) = match event {
+                let (generation, reconnecting, transport_rtt_nanos) = match event {
                     RithmicRealtimeEvent::Connecting(generation)
                     | RithmicRealtimeEvent::Recovering(generation, _)
-                    | RithmicRealtimeEvent::Disconnected(generation, _) => (*generation, true),
+                    | RithmicRealtimeEvent::Disconnected(generation, _) => {
+                        (*generation, true, None)
+                    }
+                    RithmicRealtimeEvent::Heartbeat(generation, transport_rtt_nanos) => {
+                        (*generation, false, *transport_rtt_nanos)
+                    }
                     RithmicRealtimeEvent::Connected(generation)
-                    | RithmicRealtimeEvent::Heartbeat(generation)
                     | RithmicRealtimeEvent::Trade(generation, _)
                     | RithmicRealtimeEvent::Quote(generation, _)
-                    | RithmicRealtimeEvent::Depth(generation, _) => (*generation, false),
+                    | RithmicRealtimeEvent::Depth(generation, _) => (*generation, false, None),
                 };
                 self.observe_generation("rithmic", generation, reconnecting);
+                if let Some(transport_rtt_nanos) = transport_rtt_nanos {
+                    self.observe_transport_rtt("rithmic", generation, transport_rtt_nanos);
+                }
             }
             ProviderRuntimeEvent::HyperliquidRealtime(event) => {
-                let (generation, reconnecting) = match event {
+                let (generation, reconnecting, transport_rtt_nanos) = match event {
                     HyperliquidRealtimeEvent::Connecting(generation)
                     | HyperliquidRealtimeEvent::Recovering(generation)
-                    | HyperliquidRealtimeEvent::Disconnected(generation) => (*generation, true),
+                    | HyperliquidRealtimeEvent::Disconnected(generation) => {
+                        (*generation, true, None)
+                    }
+                    HyperliquidRealtimeEvent::Heartbeat(generation, transport_rtt_nanos) => {
+                        (*generation, false, *transport_rtt_nanos)
+                    }
                     HyperliquidRealtimeEvent::Connected(generation)
-                    | HyperliquidRealtimeEvent::Heartbeat(generation)
                     | HyperliquidRealtimeEvent::Candle(generation, ..)
                     | HyperliquidRealtimeEvent::Trades(generation, _)
-                    | HyperliquidRealtimeEvent::Depth(generation, _) => (*generation, false),
+                    | HyperliquidRealtimeEvent::Depth(generation, _) => (*generation, false, None),
                 };
                 self.observe_generation("hyperliquid", generation, reconnecting);
+                if let Some(transport_rtt_nanos) = transport_rtt_nanos {
+                    self.observe_transport_rtt("hyperliquid", generation, transport_rtt_nanos);
+                }
             }
             ProviderRuntimeEvent::RithmicCatalog(_)
             | ProviderRuntimeEvent::HyperliquidCatalog(_) => {}

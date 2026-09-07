@@ -59,7 +59,10 @@ const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid engine - history and realtim
 /// instead of holding books from a dead engine incarnation.
 pub(crate) const ENGINE_RESTARTED_MESSAGE: &str =
     "Resident engine restarted; restoring chart demand";
-const EVENT_WAIT: Duration = Duration::from_millis(8);
+/// Foreground selections live in latest-value slots outside the IPC reader.
+/// Keep the reader wait short so a symbol click cannot sit behind a half-frame
+/// polling quantum before the engine receives it.
+const EVENT_WAIT: Duration = Duration::from_millis(2);
 /// Backoff between engine-restore retries in the event loop. Each failed
 /// receive already spent up to the supervisor's restore deadline retrying,
 /// so this only spaces the recovering notices, never hot-loops reconnects.
@@ -456,6 +459,7 @@ fn run_workers(
             .send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Discovering,
                 message: "Connecting to the resident market engine".to_string(),
+                transport_rtt_nanos: None,
             });
     }
     let mut supervisor = EngineSupervisor::connect(client_id)?;
@@ -616,6 +620,7 @@ fn note_engine_restore_failure(endpoints: &[EndpointRecord], error: &str) {
             .send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message: error.to_string(),
+                transport_rtt_nanos: None,
             });
     }
     thread::sleep(RESTORE_BACKOFF);
@@ -638,6 +643,7 @@ fn receive_and_apply_event(
             let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message: ENGINE_RESTARTED_MESSAGE.to_string(),
+                transport_rtt_nanos: None,
             });
         }
         return Ok(true);
@@ -736,6 +742,7 @@ fn initialize_endpoint(
     let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
         state: FeedConnectionState::Discovering,
         message: "Connecting to the resident market engine".to_string(),
+        transport_rtt_nanos: None,
     });
     client.register_consumer(workspace_id, endpoint.consumer_id)?;
     let canonical = install_or_resolve_startup_instrument(client, endpoint.consumer_id, product)?;
@@ -1210,7 +1217,7 @@ fn apply_pushed_event(
             apply_realtime_series_state(&state, context, publication.is_some(), live, messages)
         }
         envelope::Payload::DemandError(error) => {
-            apply_realtime_demand_error(&error, consumer_id, active_generation)
+            apply_realtime_demand_error(&error, consumer_id, active_generation, messages)
         }
         envelope::Payload::OrderBookSnapshot(snapshot) => {
             if snapshot.consumer_id != consumer_id {
@@ -1331,6 +1338,7 @@ fn apply_realtime_demand_error(
     error: &DemandError,
     consumer_id: u64,
     active_generation: u64,
+    messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     if error.consumer_id != consumer_id {
         return Err("engine demand-error consumer mismatched".to_string());
@@ -1342,7 +1350,17 @@ fn apply_realtime_demand_error(
     )? {
         return Ok(());
     }
-    Err(demand_error(error))
+    let detail = demand_error(error);
+    if EngineFaultCode::try_from(error.code) == Ok(EngineFaultCode::Retryable) {
+        messages
+            .send(MarketWorkerMessage::State {
+                state: ChartState::Recovering,
+                message: detail,
+            })
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    Err(detail)
 }
 
 fn stale_generation(received: u64, current: u64, future_error: &str) -> Result<bool, String> {
@@ -1396,6 +1414,7 @@ fn apply_provider_state(
         .send(MarketWorkerMessage::Connection {
             state: connection,
             message: state.detail.clone().unwrap_or(detail),
+            transport_rtt_nanos: state.transport_rtt_nanos,
         })
         .map_err(|error| error.to_string())
 }
@@ -1427,6 +1446,7 @@ fn request_snapshot(
             let _ = messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message: ENGINE_RESTARTED_MESSAGE.to_string(),
+                transport_rtt_nanos: None,
             });
         }
         let Some(event) = poll.event else {
@@ -2833,6 +2853,7 @@ mod tests {
                 state: ProviderConnectionState::Recovering as i32,
                 generation: 2,
                 detail: None,
+                transport_rtt_nanos: None,
             },
             "rithmic",
             true,
@@ -2845,7 +2866,35 @@ mod tests {
             [MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message,
+                transport_rtt_nanos: None,
             }] if message.contains("retained history")
+        ));
+    }
+
+    #[test]
+    fn engine_online_provider_state_forwards_measured_transport_rtt() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        apply_provider_state(
+            &ProviderState {
+                provider: "hyperliquid".to_string(),
+                state: ProviderConnectionState::Online as i32,
+                generation: 4,
+                detail: None,
+                transport_rtt_nanos: Some(12_500_000),
+            },
+            "hyperliquid",
+            true,
+            &sender,
+        )
+        .expect("provider state applies");
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Streaming,
+                transport_rtt_nanos: Some(12_500_000),
+                ..
+            }]
         ));
     }
 
@@ -2871,6 +2920,7 @@ mod tests {
             [MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message,
+                transport_rtt_nanos: None,
             }] if message.contains("sign in before using the Axiusflow platform")
         ));
         // Retired endpoints never observe the failure.
@@ -2941,6 +2991,7 @@ mod tests {
                 state: ProviderConnectionState::Connecting as i32,
                 generation: 1,
                 detail: None,
+                transport_rtt_nanos: None,
             },
             "rithmic",
             true,
@@ -3116,6 +3167,46 @@ mod tests {
         assert_eq!(
             demand_error(&error),
             "history/live handoff failed (retryable) after 17 ms: history/live handoff failed"
+        );
+    }
+
+    #[test]
+    fn retryable_demand_error_recovers_without_making_the_chart_unavailable() {
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let retryable = DemandError {
+            consumer_id: 1,
+            generation: 2,
+            code: EngineFaultCode::Retryable as i32,
+            stage: "provider history".to_string(),
+            detail: "covering history is retrying".to_string(),
+            series: None,
+            stage_code: FailureStage::ProviderHistory as i32,
+            cause: "provider history was unavailable".to_string(),
+            elapsed_millis: Some(4),
+        };
+
+        assert_eq!(
+            apply_realtime_demand_error(&retryable, 1, 2, &sender),
+            Ok(())
+        );
+        assert_eq!(
+            drained_states(&receiver),
+            vec![(
+                ChartState::Recovering,
+                "provider history failed (retryable) after 4 ms: covering history is retrying"
+                    .to_string(),
+            )]
+        );
+
+        let permanent = DemandError {
+            code: EngineFaultCode::Permanent as i32,
+            detail: "permanent fixture failure".to_string(),
+            elapsed_millis: None,
+            ..retryable
+        };
+        assert!(
+            apply_realtime_demand_error(&permanent, 1, 2, &sender)
+                .is_err_and(|detail| detail.contains("permanent fixture failure"))
         );
     }
 
@@ -3366,6 +3457,7 @@ mod tests {
                     state: ProviderConnectionState::Online as i32,
                     generation: 1,
                     detail: None,
+                    transport_rtt_nanos: Some(12_000_000),
                 },
                 "rithmic",
                 true,
@@ -3381,6 +3473,7 @@ mod tests {
                     state: ProviderConnectionState::Online as i32,
                     generation: 1,
                     detail: None,
+                    transport_rtt_nanos: Some(12_000_000),
                 },
                 "hyperliquid",
                 true,

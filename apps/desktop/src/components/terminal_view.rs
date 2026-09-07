@@ -37,8 +37,7 @@ fn active_header_state(
         connection_state: workspace
             .connection_state
             .unwrap_or(FeedConnectionState::Disconnected),
-        chart_state: workspace.chart_state,
-        delayed: false,
+        transport_rtt_nanos: workspace.provider_transport_rtt_nanos,
         instrument_scroll: workspace.scrolls.instrument.clone(),
         account: axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
             axiusflow_desktop::account::unavailable_menu_state,

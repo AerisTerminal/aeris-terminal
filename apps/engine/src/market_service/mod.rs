@@ -117,6 +117,11 @@ impl Drop for MarketRuntime {
 }
 
 enum Command {
+    /// Provider workers use this zero-payload control only to interrupt the
+    /// coordinator's bounded idle wait after publishing an event. The actual
+    /// provider event remains in its dedicated bounded lane and is drained at
+    /// the top of the next coordinator iteration.
+    ProviderWake,
     RestoreHotSet(Vec<WarmSeries>, Reply<()>),
     SetResourceMode(ResourceMode, Reply<()>),
     Status(Reply<MarketServiceStatus>),
@@ -153,6 +158,33 @@ enum Command {
         Result<(), LocalHistoryError>,
         u64,
     ),
+}
+
+/// Cloneable no-payload wake edge shared with provider workers.
+///
+/// A full command queue already guarantees the coordinator is runnable, so a
+/// dropped wake in that case cannot delay provider-event draining.
+#[derive(Clone)]
+pub(crate) struct ProviderCoordinatorWake {
+    commands: SyncSender<Command>,
+}
+
+impl ProviderCoordinatorWake {
+    fn new(commands: SyncSender<Command>) -> Self {
+        Self { commands }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        let (commands, _receiver) = mpsc::sync_channel(1);
+        Self::new(commands)
+    }
+
+    pub(crate) fn notify(&self) {
+        match self.commands.try_send(Command::ProviderWake) {
+            Ok(()) | Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {}
+        }
+    }
 }
 
 struct HistoryRequest {
@@ -401,13 +433,31 @@ impl ProviderRuntimeSpec {
 struct ProviderRuntimeLifecycle {
     generation: AtomicU64,
     reconnecting: AtomicBool,
+    transport_rtt_nanos: AtomicU64,
     terminal_failure: Mutex<Option<String>>,
 }
 
 impl ProviderRuntimeLifecycle {
     fn observe_generation(&self, generation: u64, reconnecting: bool) {
-        self.generation.store(generation, Ordering::Release);
+        let previous = self.generation.swap(generation, Ordering::AcqRel);
+        if previous != generation || reconnecting {
+            self.transport_rtt_nanos.store(0, Ordering::Release);
+        }
         self.reconnecting.store(reconnecting, Ordering::Release);
+    }
+
+    fn observe_transport_rtt(&self, generation: u64, transport_rtt_nanos: u64) {
+        if self.generation.load(Ordering::Acquire) == generation
+            && !self.reconnecting.load(Ordering::Acquire)
+        {
+            self.transport_rtt_nanos
+                .store(transport_rtt_nanos.max(1), Ordering::Release);
+        }
+    }
+
+    fn transport_rtt_nanos(&self) -> Option<u64> {
+        let value = self.transport_rtt_nanos.load(Ordering::Acquire);
+        (value != 0).then_some(value)
     }
 
     fn mark_terminal_failure(&self, detail: impl Into<String>) {
@@ -681,9 +731,8 @@ fn configured_engine() -> Result<MarketEngine, String> {
 
 mod publication;
 use publication::{
-    engine_install_failure_stage, fail_waiters, local_history_failure_stage, order_flow_payload,
-    publish_ready, publish_state, series_state, series_state_with_persistence,
-    series_update_message,
+    engine_install_failure_stage, fail_waiters, order_flow_payload, publish_ready, publish_state,
+    series_state, series_state_with_persistence, series_update_message,
 };
 
 mod instrument_selection;

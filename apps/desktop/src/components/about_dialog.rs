@@ -52,29 +52,35 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
     let colors = theme.colors;
     let close_terminal = terminal.clone();
     div()
-        .h(px(52.0))
+        .h(px(64.0))
         .flex()
         .items_center()
         .justify_between()
         .px_4()
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
                 .flex()
-                .flex_col()
+                .items_center()
+                .gap_3()
+                .child(super::terminal_chrome::brand_mark_sized(px(34.0)))
                 .child(
                     div()
-                        .text_base()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(gpui_color(colors.text_primary))
-                        .child("About Axiusflow"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(gpui_color(colors.text_primary))
+                                .child("Axiusflow"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(gpui_color(colors.text_muted))
+                                .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                        ),
                 ),
         )
         .child(
@@ -93,6 +99,7 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
 }
 
 fn about_dialog_body(
+    terminal: &Entity<TerminalApp>,
     update: Option<&UpdatePresentation>,
     view: &AboutUpdateView,
     theme: &AxiusflowTheme,
@@ -106,8 +113,9 @@ fn about_dialog_body(
     div()
         .flex()
         .flex_col()
-        .gap_3()
-        .p_4()
+        .gap_2()
+        .px_4()
+        .pb_4()
         .child(about_detail_row(
             "System",
             system_version,
@@ -120,23 +128,17 @@ fn about_dialog_body(
             colors.text_primary,
             theme,
         ))
-        .child(menu_separator(theme))
-        .child(about_detail_row(
-            "Updates",
-            view.status.clone(),
-            view.status_color,
-            theme,
-        ))
+        .child(about_update_row(terminal, view, theme))
         .into_any_element()
 }
 
-fn about_dialog_footer(
+fn about_update_row(
     terminal: &Entity<TerminalApp>,
-    action: Option<AboutAction>,
+    view: &AboutUpdateView,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let action_button = action.map(|action| {
+    let action_button = view.action.map(|action| {
         let action_terminal = terminal.clone();
         let label = match action {
             AboutAction::Update => "Update now",
@@ -155,15 +157,36 @@ fn about_dialog_footer(
             })
     });
     div()
-        .min_h(px(52.0))
+        .mt_1()
+        .min_h(px(38.0))
         .flex()
         .items_center()
-        .justify_end()
-        .gap_2()
-        .px_4()
+        .justify_between()
+        .gap_3()
+        .px_3()
         .py_2()
-        .border_t_1()
-        .border_color(gpui_color(colors.border_secondary))
+        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+        .bg(gpui_color(colors.surface))
+        .child(
+            div()
+                .flex()
+                .min_w_0()
+                .flex_1()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child("Updates"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(gpui_color(view.status_color))
+                        .child(view.status.clone()),
+                ),
+        )
         .children(action_button)
         .into_any_element()
 }
@@ -197,7 +220,7 @@ pub(super) fn about_dialog_layer(
         .child(
             div()
                 .id("about_dialog")
-                .w(px(440.0))
+                .w(px(420.0))
                 .flex()
                 .flex_col()
                 .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
@@ -207,8 +230,7 @@ pub(super) fn about_dialog_layer(
                 .shadow_lg()
                 .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                 .child(about_dialog_header(terminal, theme))
-                .child(about_dialog_body(update, &view, theme))
-                .child(about_dialog_footer(terminal, view.action, theme)),
+                .child(about_dialog_body(terminal, update, &view, theme)),
         )
         .into_any_element()
 }

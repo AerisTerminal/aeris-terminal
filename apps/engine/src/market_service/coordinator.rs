@@ -268,6 +268,7 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_command(&mut self, command: Command) {
         match command {
+            Command::ProviderWake => return,
             Command::HistoryCompleted(series, generation, range, result) => {
                 self.history_completed(&series, generation, range, result);
             }
@@ -387,6 +388,7 @@ impl Coordinator<'_> {
             | Command::LocalHistoryCompleted(..)
             | Command::PersistenceCompleted(..)
             | Command::ConfirmedEmptyResolved(..)
+            | Command::ProviderWake
             | Command::RestoreHotSet(..)
             | Command::SetResourceMode(..)
             | Command::Status(..)
@@ -677,6 +679,7 @@ impl Coordinator<'_> {
             state: state as i32,
             generation: status.generation.map_or(0, |generation| generation.0.get()),
             detail: self.providers.detail(provider),
+            transport_rtt_nanos: self.providers.transport_rtt_nanos(provider),
         })
     }
 

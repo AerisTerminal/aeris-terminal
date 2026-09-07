@@ -35,7 +35,31 @@ fn markets_live_resource_mode_has_a_stable_wire_value() {
 
 #[test]
 fn protocol_version_tracks_the_three_mebibyte_frame_contract() {
-    assert_eq!(PROTOCOL_VERSION, 20);
+    assert_eq!(PROTOCOL_VERSION, 21);
+}
+
+#[test]
+fn provider_state_transport_rtt_is_optional_and_legacy_safe() {
+    use prost::Message as _;
+
+    let measured = ProviderState {
+        provider: "rithmic".into(),
+        state: ProviderConnectionState::Online as i32,
+        generation: 3,
+        detail: None,
+        transport_rtt_nanos: Some(18_400_000),
+    };
+    let decoded =
+        ProviderState::decode(measured.encode_to_vec().as_slice()).expect("state decodes");
+    assert_eq!(decoded.transport_rtt_nanos, Some(18_400_000));
+
+    let legacy = ProviderState {
+        transport_rtt_nanos: None,
+        ..measured
+    };
+    let decoded =
+        ProviderState::decode(legacy.encode_to_vec().as_slice()).expect("legacy state decodes");
+    assert_eq!(decoded.transport_rtt_nanos, None);
 }
 
 fn account_payloads() -> Vec<envelope::Payload> {
@@ -177,6 +201,7 @@ fn workspace_payloads() -> Vec<envelope::Payload> {
                 state: ProviderConnectionState::Online as i32,
                 generation: 3,
                 detail: None,
+                transport_rtt_nanos: Some(18_400_000),
             }],
             retained_series: 4,
             retained_bars: 350,
@@ -359,6 +384,7 @@ fn market_payloads() -> Vec<envelope::Payload> {
             state: ProviderConnectionState::Online as i32,
             generation: 2,
             detail: None,
+            transport_rtt_nanos: Some(18_400_000),
         }),
         envelope::Payload::DemandError(DemandError {
             consumer_id: 13,
