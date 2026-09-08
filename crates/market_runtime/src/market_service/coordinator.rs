@@ -51,6 +51,8 @@ fn run_coordinator(
         pending: BTreeMap::new(),
         history_inflight: BTreeMap::new(),
         history_deferred: BTreeMap::new(),
+        history_confirmed_empty: BTreeMap::new(),
+        detached_history: BTreeSet::new(),
         history_cancellations: BTreeMap::new(),
         history_retries: BTreeMap::new(),
         events: BTreeMap::new(),
@@ -146,6 +148,14 @@ pub(super) struct Coordinator<'a> {
     pub(super) history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
     pub(super) history_deferred:
         BTreeMap<(BarSeriesKey, ProviderGeneration), DeferredHistoryRequest>,
+    /// Provider-confirmed empty suffix for the current backwards history edge.
+    /// This is request coverage metadata only; canonical bars remain owned by
+    /// `MarketEngine::SeriesStore`.
+    pub(super) history_confirmed_empty: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
+    /// Series whose bounded canonical working window is intentionally away from
+    /// the live tail. The provider handoff remains active; live publication is
+    /// gated until current history reseeds this canonical window.
+    pub(super) detached_history: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     pub(super) history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
     pub(super) history_retries:
         BTreeMap<(BarSeriesKey, ProviderGeneration), (Instant, u8, Option<HistoryRange>)>,
@@ -452,7 +462,7 @@ impl Coordinator<'_> {
                 // Catalog selection counters describe consumers, not a new book.
                 // Keep canonical revisions monotonic across metadata refreshes;
                 // transport generations are fenced by provider_depth itself.
-                book.instrument = instrument;
+                book.update_instrument(instrument);
             } else {
                 self.order_books
                     .insert(identity, ProviderOrderBook::new(instrument));
@@ -472,6 +482,11 @@ impl Coordinator<'_> {
             retained_bars: metrics.stored_bars,
             approximate_series_bytes: metrics.approximate_series_bytes,
         }
+    }
+
+    pub(super) fn evict_unreferenced_series(&mut self) -> Vec<BarSeriesKey> {
+        let protected = self.engine.demanded_series();
+        self.engine.evict_unsubscribed_series(0, 0, &protected)
     }
 
     pub(super) fn provider_state(&self, provider: &str) -> Option<ProviderState> {
@@ -545,6 +560,7 @@ impl Coordinator<'_> {
             };
         self.prune_unused_live_series();
         self.prune_history_tracking();
+        self.evict_unreferenced_series();
         // The live handoff, and the bounded trade buffer inside it, must exist
         // before history starts. A Rithmic history fetch can take tens of
         // seconds; deferring the handoff until it returned dropped every trade
@@ -579,10 +595,25 @@ impl Coordinator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market_service::{
+        FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_SERIES_HIGH_WATERMARK,
+        HISTORY_SERIES_TARGET_BARS, HistorySnapshot, INITIAL_HISTORY_BARS, LiveHistoryState,
+        MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
+    };
     use axiusflow_engine_protocol::ProviderInstrumentSearchResult;
-    use axiusflow_market_data::BarPeriod;
-    use axiusflow_market_engine::{ConsumerResourceClass, GenerationId, WorkspaceId};
+    use axiusflow_market_data::{
+        AggressorSide, BarPeriod, EventMetadata, MarketBar, MarketTrade, QualifiedTimestamp,
+    };
+    use axiusflow_market_engine::{ConsumerResourceClass, GenerationId, Viewport, WorkspaceId};
     use std::num::NonZeroU64;
+
+    const _: () = {
+        assert!(HISTORY_SERIES_TARGET_BARS < HISTORY_SERIES_HIGH_WATERMARK);
+        assert!(MAXIMUM_STORED_BARS < usize::MAX);
+        assert!(
+            MAXIMUM_STORED_BARS == super::super::MAXIMUM_SERIES * HISTORY_SERIES_HIGH_WATERMARK
+        );
+    };
 
     fn nonzero(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).expect("test identity is nonzero")
@@ -622,6 +653,7 @@ mod tests {
             price_scale: 2,
             quantity_scale: 0,
             entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            price_increment: Some(25),
         }
     }
 
@@ -647,6 +679,7 @@ mod tests {
             price_scale: 2,
             quantity_scale: 8,
             entitlement_id: "hyperliquid-public".to_string(),
+            price_increment: None,
         }
     }
 
@@ -661,6 +694,8 @@ mod tests {
             pending: BTreeMap::new(),
             history_inflight: BTreeMap::new(),
             history_deferred: BTreeMap::new(),
+            history_confirmed_empty: BTreeMap::new(),
+            detached_history: BTreeSet::new(),
             history_cancellations: BTreeMap::new(),
             history_retries: BTreeMap::new(),
             events: BTreeMap::new(),
@@ -693,6 +728,285 @@ mod tests {
                 true,
             )
             .expect("consumer registers");
+    }
+
+    fn minute_bars(start_minute: i64, count: usize) -> Vec<MarketBar> {
+        (0..count)
+            .map(|index| {
+                let minute = start_minute + i64::try_from(index).expect("bounded minute index");
+                MarketBar {
+                    source_sequence: u64::try_from(index + 1).expect("bounded sequence"),
+                    exchange_timestamp_seconds: minute * 60,
+                    exchange_timestamp_unix_nanos: minute * 60 * 1_000_000_000,
+                    open: 100,
+                    high: 101,
+                    low: 99,
+                    close: 100,
+                    volume: 1,
+                }
+            })
+            .collect()
+    }
+
+    fn rithmic_trade_for_series(
+        series: &BarSeriesKey,
+        sequence: u64,
+        timestamp: i64,
+    ) -> MarketTrade {
+        MarketTrade {
+            metadata: EventMetadata {
+                provider_id: series.provider_id.clone(),
+                instrument_id: series.instrument_id.clone(),
+                entitlement_id: series.entitlement_id.clone(),
+                source_sequence: sequence,
+                session_generation: 1,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(timestamp),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: timestamp,
+                },
+            },
+            trade_id: format!("bounded-history-{sequence}"),
+            price: 102,
+            quantity: 1,
+            aggressor: AggressorSide::Buy,
+        }
+    }
+
+    struct DetachedRithmicFixture {
+        coordinator: Coordinator<'static>,
+        series: BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        consumer_id: ConsumerId,
+        boundary: i64,
+        live_timestamp: i64,
+        detached_snapshot: Arc<axiusflow_market_engine::SeriesSnapshot>,
+    }
+
+    fn detached_rithmic_fixture() -> DetachedRithmicFixture {
+        let mut coordinator = coordinator();
+        let series = series();
+        let provider_generation = ProviderGeneration(nonzero(1));
+        let consumer_id = consumer(1);
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", provider_generation)
+            .expect("provider session begins");
+        register(&mut coordinator, consumer_id);
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer_id,
+                generation(1),
+                &series,
+                StreamRequirements::BARS,
+            )
+            .expect("series demand installs");
+        let bars = minute_bars(0, HISTORY_SERIES_HIGH_WATERMARK);
+        coordinator
+            .engine
+            .install_history(provider_generation, &series, 2, 0, bars.clone())
+            .expect("history fills the per-series high watermark");
+        let minute = 60_i64 * 1_000_000_000;
+        coordinator
+            .engine
+            .set_viewport(
+                consumer_id,
+                generation(1),
+                Viewport::try_new(1_000 * minute, 1_100 * minute).expect("historical viewport"),
+            )
+            .expect("historical viewport installs");
+        let boundary = bars
+            .last()
+            .map(|bar| bar.exchange_timestamp_unix_nanos)
+            .expect("history boundary");
+        let mut live = RithmicLiveHandoff::new(&series, provider_generation, "CME")
+            .expect("Rithmic live handoff");
+        live.seed(2, 0, &bars, None, Some(boundary))
+            .expect("live handoff seeds from current history");
+        live.connected = true;
+        coordinator.rithmic_live.insert(series.clone(), live);
+        assert!(
+            coordinator
+                .compact_live_series_if_needed(&series, provider_generation)
+                .expect("canonical history compacts")
+        );
+        assert_eq!(
+            coordinator.engine.series_bar_count(&series),
+            Some(HISTORY_SERIES_TARGET_BARS)
+        );
+        let detached_snapshot = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("detached canonical window");
+        DetachedRithmicFixture {
+            coordinator,
+            series,
+            provider_generation,
+            consumer_id,
+            boundary,
+            live_timestamp: boundary + minute,
+            detached_snapshot,
+        }
+    }
+
+    fn current_rejoin_snapshot(live_timestamp: i64) -> HistorySnapshot {
+        let current_start = HISTORY_SERIES_HIGH_WATERMARK - INITIAL_HISTORY_BARS;
+        HistorySnapshot {
+            price_scale: 2,
+            quantity_scale: 0,
+            bars: minute_bars(
+                i64::try_from(current_start).expect("bounded current start"),
+                INITIAL_HISTORY_BARS,
+            ),
+            forming: Some(FormingBar {
+                bar: MarketBar {
+                    source_sequence: u64::try_from(INITIAL_HISTORY_BARS + 1)
+                        .expect("forming sequence"),
+                    exchange_timestamp_seconds: live_timestamp.div_euclid(1_000_000_000),
+                    exchange_timestamp_unix_nanos: live_timestamp,
+                    open: 102,
+                    high: 102,
+                    low: 102,
+                    close: 102,
+                    volume: 1,
+                },
+                trades: None,
+            }),
+            handoff_boundary_unix_nanos: Some(live_timestamp),
+        }
+    }
+
+    #[test]
+    fn stale_history_completion_cannot_rejoin_a_detached_newer_session() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let first_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", first_generation)
+            .expect("first provider session begins");
+        let current = minute_bars(0, 2);
+        coordinator
+            .engine
+            .install_history(first_generation, &selected, 2, 0, current.clone())
+            .expect("first generation history installs");
+        coordinator
+            .detached_history
+            .insert((selected.clone(), first_generation));
+        let before = coordinator
+            .engine
+            .series_snapshot(&selected)
+            .expect("cached first-generation history");
+
+        coordinator
+            .engine
+            .end_provider_session("rithmic", first_generation)
+            .expect("first provider session ends");
+        let second_generation = ProviderGeneration(nonzero(2));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", second_generation)
+            .expect("second provider session begins");
+        coordinator.history_completed(
+            &selected,
+            first_generation,
+            None,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: minute_bars(10, 2),
+                forming: None,
+                handoff_boundary_unix_nanos: Some(11 * 60 * 1_000_000_000),
+            }),
+        );
+
+        let after = coordinator
+            .engine
+            .series_snapshot(&selected)
+            .expect("stale completion cannot replace cached history");
+        assert_eq!(after.bars, before.bars);
+        assert!(
+            !coordinator
+                .detached_history
+                .contains(&(selected.clone(), second_generation))
+        );
+        coordinator.prune_history_tracking();
+        assert!(
+            !coordinator
+                .detached_history
+                .contains(&(selected, first_generation))
+        );
+    }
+
+    #[test]
+    fn historical_detach_suppresses_live_tail_and_current_rejoin_restores_it() {
+        let DetachedRithmicFixture {
+            mut coordinator,
+            series,
+            provider_generation,
+            consumer_id,
+            boundary,
+            live_timestamp,
+            detached_snapshot,
+        } = detached_rithmic_fixture();
+        let minute = 60_i64 * 1_000_000_000;
+        let detached_key = (series.clone(), provider_generation);
+        assert!(coordinator.detached_history.contains(&detached_key));
+        assert!(
+            !coordinator.series_live_if_ready(&series),
+            "a historical canonical window cannot advertise live readiness"
+        );
+        coordinator
+            .rithmic_live
+            .get_mut(&series)
+            .expect("live handoff remains allocated")
+            .accept_trade(&rithmic_trade_for_series(&series, 1, live_timestamp))
+            .expect("live handoff keeps ingesting while detached");
+        assert_eq!(
+            coordinator
+                .rithmic_live
+                .get(&series)
+                .and_then(RithmicLiveHandoff::coverage)
+                .map(|(_, end)| end),
+            Some(live_timestamp)
+        );
+        coordinator.publish_rithmic_live();
+        let after_suppressed_live = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("canonical window remains detached");
+        assert_eq!(after_suppressed_live.bars, detached_snapshot.bars);
+        coordinator
+            .engine
+            .set_viewport(
+                consumer_id,
+                generation(1),
+                Viewport::try_new(boundary - 100 * minute, live_timestamp + minute)
+                    .expect("recent viewport"),
+            )
+            .expect("recent viewport installs");
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            None,
+            Ok(current_rejoin_snapshot(live_timestamp)),
+        );
+        assert!(!coordinator.detached_history.contains(&detached_key));
+        coordinator.publish_rithmic_live();
+        let rejoined = coordinator
+            .engine
+            .series_snapshot(&series)
+            .expect("current canonical window rejoins live");
+        assert!(rejoined.forming);
+        assert_eq!(
+            rejoined
+                .bars
+                .last()
+                .map(|bar| bar.exchange_timestamp_unix_nanos),
+            Some(live_timestamp)
+        );
+        assert!(rejoined.bars.len() <= HISTORY_SERIES_HIGH_WATERMARK);
     }
 
     #[test]
@@ -870,7 +1184,7 @@ mod tests {
         let provider_generation = ProviderGeneration(nonzero(1));
         let mut live = RithmicLiveHandoff::new(&selected_series, provider_generation, "CME")
             .expect("live handoff");
-        live.history_ready = true;
+        live.history_state = LiveHistoryState::Ready;
         coordinator.rithmic_live.insert(selected_series, live);
 
         coordinator.rithmic_online(1);
@@ -914,7 +1228,7 @@ mod tests {
             "BTC".to_string(),
             "1m".to_string(),
         );
-        live.history_ready = true;
+        live.history_state = LiveHistoryState::Ready;
         coordinator.hyperliquid_live.insert(selected_series, live);
 
         coordinator.hyperliquid_online(1);
@@ -927,6 +1241,133 @@ mod tests {
             Some(MarketRuntimeEvent::SeriesState(state))
                 if state.state == super::super::SeriesLoadState::Live
         ));
+    }
+
+    #[test]
+    fn unreferenced_series_evicts_but_background_consumer_history_is_retained() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        let first = hyperliquid_series();
+        let mut second = first.clone();
+        second.instrument_id = "instrument:hyperliquid:ETH".to_string();
+
+        coordinator
+            .engine
+            .begin_provider_session("hyperliquid", ProviderGeneration(nonzero(1)))
+            .expect("provider starts");
+        coordinator
+            .engine
+            .set_provider_health(
+                "hyperliquid",
+                ProviderGeneration(nonzero(1)),
+                ProviderHealth::Online,
+            )
+            .expect("provider online");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &first,
+                StreamRequirements::BARS,
+            )
+            .expect("first demand installs");
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(1)),
+                &first,
+                2,
+                0,
+                vec![MarketBar {
+                    source_sequence: 1,
+                    exchange_timestamp_seconds: 60,
+                    exchange_timestamp_unix_nanos: 60_000_000_000,
+                    open: 100,
+                    high: 101,
+                    low: 99,
+                    close: 100,
+                    volume: 1,
+                }],
+            )
+            .expect("history installs");
+
+        coordinator
+            .engine
+            .set_resource_class(consumer, ConsumerResourceClass::Background)
+            .expect("consumer backgrounds");
+        assert!(!coordinator.engine.has_subscription(&first));
+        let empty_key = (first.clone(), ProviderGeneration(nonzero(1)));
+        coordinator.history_confirmed_empty.insert(
+            empty_key.clone(),
+            HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 60_000_000_000,
+            },
+        );
+        coordinator.prune_history_tracking();
+        assert!(coordinator.history_confirmed_empty.contains_key(&empty_key));
+        assert!(coordinator.evict_unreferenced_series().is_empty());
+        assert!(coordinator.engine.series_snapshot(&first).is_some());
+
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(2),
+                &second,
+                StreamRequirements::BARS,
+            )
+            .expect("replacement demand installs");
+        coordinator.prune_history_tracking();
+        assert!(!coordinator.history_confirmed_empty.contains_key(&empty_key));
+        assert_eq!(coordinator.evict_unreferenced_series(), vec![first.clone()]);
+        assert!(coordinator.engine.series_snapshot(&first).is_none());
+    }
+
+    #[test]
+    fn exhausted_ranged_history_retry_cools_down_exact_range_but_not_new_range() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let failed = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 60_000_000_000,
+        };
+        let key = (selected.clone(), generation);
+        coordinator.history_retries.insert(
+            key.clone(),
+            (
+                Instant::now() + HISTORY_FAILED_RETRY_COOLDOWN,
+                MAXIMUM_HISTORY_RETRIES.saturating_add(1),
+                Some(failed),
+            ),
+        );
+
+        assert!(
+            coordinator
+                .enqueue_history_request(&selected, generation, Some(failed))
+                .is_ok(),
+            "identical failed range is suppressed during cooldown"
+        );
+        assert!(coordinator.history_retries.contains_key(&key));
+
+        let older = HistoryRange {
+            start_unix_nanos: -60_000_000_000,
+            end_unix_nanos: 60_000_000_000,
+        };
+        assert!(
+            coordinator
+                .enqueue_history_request(&selected, generation, Some(older))
+                .is_err(),
+            "a genuinely different viewport range proceeds to provider dispatch"
+        );
+        assert!(!coordinator.history_retries.contains_key(&key));
     }
 
     #[test]

@@ -967,13 +967,19 @@ pub(super) fn selected_instrument(
         return Err(malformed());
     }
     let instrument_id = format!("rithmic:{}:{}", reference.exchange, reference.symbol);
+    let price_scale = reference.price_precision.unwrap_or(0);
+    let price_increment = reference
+        .minimum_price_change
+        .filter(|value| *value > 0.0)
+        .and_then(|value| fixed_reference_increment(value, price_scale));
     let descriptor = InstrumentDescriptor {
         instrument_id,
         provider_symbol: reference.symbol.clone(),
         display_symbol: reference.name.unwrap_or(reference.symbol),
         venue_id: reference.exchange,
-        price_scale: reference.price_precision.unwrap_or(0),
+        price_scale,
         quantity_scale: 0,
+        price_increment,
     };
     if descriptor.validate().is_err() {
         return Err(malformed());
@@ -985,6 +991,23 @@ pub(super) fn selected_instrument(
         quotes: selection.subscription.quotes,
         order_book: selection.subscription.order_book,
     })
+}
+
+/// Converts provider reference-data increments to the exact fixed-point price
+/// units used by canonical depth. If the provider value cannot round-trip at
+/// its declared precision, omit the presentation grid rather than guessing.
+fn fixed_reference_increment(value: f64, scale: u8) -> Option<i64> {
+    if !value.is_finite() || value <= 0.0 || scale > 18 {
+        return None;
+    }
+    let rendered = format!("{value:.precision$}", precision = usize::from(scale));
+    let round_trip = rendered.parse::<f64>().ok()?;
+    let tolerance = f64::EPSILON * value.abs().max(1.0) * 4.0;
+    if (round_trip - value).abs() > tolerance {
+        return None;
+    }
+    let increment = rendered.replace('.', "").parse::<i64>().ok()?;
+    (increment > 0).then_some(increment)
 }
 
 pub(super) fn market_data_exchange(catalog_exchange: &str) -> &str {

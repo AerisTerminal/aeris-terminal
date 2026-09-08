@@ -270,10 +270,11 @@ pub(super) fn order_book_column_menu_item(
     let id = match column {
         OrderBookColumn::ProfitLoss => "order_book_column_profit_loss",
         OrderBookColumn::Bid => "order_book_column_bid",
+        OrderBookColumn::SellTrades => "order_book_column_sell_trades",
         OrderBookColumn::Price => "order_book_column_price",
+        OrderBookColumn::BuyTrades => "order_book_column_buy_trades",
         OrderBookColumn::Ask => "order_book_column_ask",
         OrderBookColumn::Orders => "order_book_column_orders",
-        OrderBookColumn::Volume => "order_book_column_volume",
     };
     let item_order_book = order_book;
     let mut item = MenuRow::compact(id, label, theme)

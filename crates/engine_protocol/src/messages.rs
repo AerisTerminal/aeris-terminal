@@ -266,6 +266,11 @@ pub struct InstallProviderInstrument {
     /// Exact entitlement revision used for subsequent demand.
     #[prost(string, tag = "10")]
     pub entitlement_id: String,
+    /// Authoritative minimum price increment in fixed-point `price_scale`
+    /// units. Absent means the provider did not expose a safely usable tick;
+    /// consumers must not infer one from decimal precision.
+    #[prost(int64, optional, tag = "11")]
+    pub price_increment: Option<i64>,
 }
 
 /// Requests one bounded exact provider-instrument search for a market consumer.

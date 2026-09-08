@@ -658,6 +658,24 @@ fn terminal_shell_root(
     terminal
 }
 
+pub(super) struct RestoredWorkspaceShellPlan<'a> {
+    pub(super) active_workspace_id: u64,
+    pub(super) workspace_revision: u64,
+    pub(super) layout_generation: u64,
+    pub(super) workspace_tabs: &'a [WorkspaceTabState],
+}
+
+pub(super) fn restored_workspace_shell_plan(
+    restored: &WorkspaceState,
+) -> RestoredWorkspaceShellPlan<'_> {
+    RestoredWorkspaceShellPlan {
+        active_workspace_id: restored.active_workspace_id,
+        workspace_revision: restored.workspace_revision,
+        layout_generation: restored.layout_generation,
+        workspace_tabs: &restored.workspace_tabs,
+    }
+}
+
 pub(super) fn workspace_tabs_root(
     mut market_panes: Vec<engine_market_worker::WorkspaceMarketPane>,
     restored: &WorkspaceState,
@@ -667,8 +685,9 @@ pub(super) fn workspace_tabs_root(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<TerminalApp> {
-    let mut workspaces = Vec::with_capacity(restored.workspace_tabs.len());
-    for tab in &restored.workspace_tabs {
+    let plan = restored_workspace_shell_plan(restored);
+    let mut workspaces = Vec::with_capacity(plan.workspace_tabs.len());
+    for tab in plan.workspace_tabs {
         let mut panes = Vec::with_capacity(tab.panes.len());
         for persisted in &tab.panes {
             let Some(index) = market_panes.iter().position(|pane| {
@@ -724,9 +743,9 @@ pub(super) fn workspace_tabs_root(
     terminal_shell_root(
         TerminalShellInit {
             workspaces,
-            active_workspace_id: Some(restored.active_workspace_id),
-            workspace_revision: restored.workspace_revision,
-            layout_generation: restored.layout_generation,
+            active_workspace_id: Some(plan.active_workspace_id),
+            workspace_revision: plan.workspace_revision,
+            layout_generation: plan.layout_generation,
             workspace_factory: Some(workspace_factory),
             workspace_shell: WorkspaceShellKind::Tabs,
             chart_chrome,

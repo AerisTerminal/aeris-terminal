@@ -1,21 +1,54 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId, Coordinator,
     DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar, GenerationId,
-    HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED, HISTORY_RETRY_DELAY, HistoryRange,
-    HistoryRequest, HistorySnapshot, HistorySource, HyperliquidHandoffSeed, INITIAL_HISTORY_BARS,
-    InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
-    ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed, SeriesLoadState,
-    SeriesSnapshot, SyncSender, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
-    fail_waiters, hyperliquid_interval_for_period, publish_state, series_state, thread,
-    try_enqueue_history,
+    HISTORY_CAPACITY_EXHAUSTED, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
+    HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
+    HistorySnapshot, HistorySource, HyperliquidHandoffSeed, INITIAL_HISTORY_BARS,
+    InstallProviderInstrument, Instant, MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES,
+    MarketBar, Mutex, Ordering, ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed,
+    SeriesLoadState, SeriesSnapshot, SyncSender, VIEWPORT_LIVE_TAIL_RESERVE, Viewport,
+    engine_install_failure_stage, fail_waiters, hyperliquid_interval_for_period, publish_state,
+    series_state, thread, try_enqueue_history,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewportRefillPlan {
+    Current,
+    Range(HistoryRange),
+}
+
+struct CompactedHistory {
+    bars: Vec<MarketBar>,
+    dropped_newer: bool,
+}
+
+struct PreparedHistoryRepair {
+    snapshot: HistorySnapshot,
+    replace_window: bool,
+    detached_from_live: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CompletedHistoryInstall {
+    Initial,
+    Covering { reseed_live: bool },
+    Window { reseed_live: bool },
+}
+
+impl CompletedHistoryInstall {
+    const fn reseeds_live(self) -> bool {
+        match self {
+            Self::Initial => true,
+            Self::Covering { reseed_live } | Self::Window { reseed_live } => reseed_live,
+        }
+    }
+}
 
 pub(super) fn reconcile_history_repair(
     current: &SeriesSnapshot,
     repair: Vec<MarketBar>,
-    maximum_bars: usize,
 ) -> Result<Vec<MarketBar>, String> {
-    if maximum_bars == 0 || current.bars.is_empty() || repair.is_empty() {
+    if current.bars.is_empty() || repair.is_empty() {
         return Err("covering history repair is empty".to_string());
     }
     let mut by_timestamp = std::collections::BTreeMap::new();
@@ -35,8 +68,10 @@ pub(super) fn reconcile_history_repair(
     for bar in repair {
         by_timestamp.insert(bar.exchange_timestamp_unix_nanos, bar);
     }
-    let skip = by_timestamp.len().saturating_sub(maximum_bars);
-    let mut retained = by_timestamp.into_values().skip(skip).collect::<Vec<_>>();
+    // Flowsurface retains every fetched kline in its BTreeMap. Do the same at
+    // Axiusflow's canonical owner: a provider request remains page-bounded, but
+    // older successful pages must not be thrown away when the series grows.
+    let mut retained = by_timestamp.into_values().collect::<Vec<_>>();
     for (index, bar) in retained.iter_mut().enumerate() {
         bar.source_sequence = u64::try_from(index)
             .ok()
@@ -91,7 +126,7 @@ pub(super) fn history_request_bar_limit(
             })
             .unwrap_or(INITIAL_HISTORY_BARS)
             .saturating_add(64)
-            .clamp(1, HISTORY_BARS_PER_SERIES)
+            .clamp(1, MAXIMUM_HISTORY_BARS_PER_REQUEST)
     })
 }
 
@@ -104,10 +139,15 @@ fn viewport_history_range(
     if viewport.start_unix_nanos >= first.exchange_timestamp_unix_nanos {
         return None;
     }
-    let mut start_unix_nanos = viewport.start_unix_nanos;
+    // Match Flowsurface: when the visible left edge escapes retained coverage,
+    // fetch one additional visible span behind it so back-scroll has runway.
+    let visible_span = viewport
+        .end_unix_nanos
+        .saturating_sub(viewport.start_unix_nanos);
+    let mut start_unix_nanos = viewport.start_unix_nanos.saturating_sub(visible_span);
     let end_unix_nanos = first.exchange_timestamp_unix_nanos;
     if let Some(duration) = series.period.duration_nanos() {
-        let maximum = HISTORY_BARS_PER_SERIES
+        let maximum = MAXIMUM_HISTORY_BARS_PER_REQUEST
             .saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE)
             .max(1);
         if let Ok(maximum) = i64::try_from(maximum)
@@ -120,6 +160,192 @@ fn viewport_history_range(
         start_unix_nanos,
         end_unix_nanos,
     })
+}
+
+fn newer_viewport_history_range(
+    series: &BarSeriesKey,
+    snapshot: &axiusflow_market_engine::SeriesSnapshot,
+    viewport: Viewport,
+) -> Option<HistoryRange> {
+    let last = snapshot.bars.last()?;
+    let visible_span = viewport
+        .end_unix_nanos
+        .saturating_sub(viewport.start_unix_nanos);
+    let start_unix_nanos = last.exchange_timestamp_unix_nanos;
+    let mut end_unix_nanos = viewport.end_unix_nanos.saturating_add(visible_span);
+    if let Some(duration) = series.period.duration_nanos() {
+        let maximum = MAXIMUM_HISTORY_BARS_PER_REQUEST
+            .saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE)
+            .max(1);
+        if let Ok(maximum) = i64::try_from(maximum)
+            && let Some(span) = duration.checked_mul(maximum)
+        {
+            end_unix_nanos = end_unix_nanos.min(start_unix_nanos.saturating_add(span));
+        }
+    }
+    (start_unix_nanos < end_unix_nanos).then_some(HistoryRange {
+        start_unix_nanos,
+        end_unix_nanos,
+    })
+}
+
+fn viewport_refill_plan(
+    series: &BarSeriesKey,
+    snapshot: &axiusflow_market_engine::SeriesSnapshot,
+    viewport: Viewport,
+    detached_from_live: bool,
+    live_coverage: Option<(i64, i64)>,
+) -> Option<ViewportRefillPlan> {
+    if let Some(range) = viewport_history_range(series, snapshot, viewport) {
+        return Some(ViewportRefillPlan::Range(range));
+    }
+    if !detached_from_live {
+        return None;
+    }
+    if live_coverage.is_some_and(|(start, _)| viewport.end_unix_nanos >= start) {
+        return Some(ViewportRefillPlan::Current);
+    }
+    newer_viewport_history_range(series, snapshot, viewport).map(ViewportRefillPlan::Range)
+}
+
+fn compact_history_window(
+    bars: Vec<MarketBar>,
+    viewport: Option<Viewport>,
+    reserve_forming_tail: bool,
+) -> CompactedHistory {
+    let reserved = usize::from(reserve_forming_tail);
+    let high = HISTORY_SERIES_HIGH_WATERMARK
+        .saturating_sub(reserved)
+        .max(1);
+    if bars.len() < high {
+        return CompactedHistory {
+            bars,
+            dropped_newer: false,
+        };
+    }
+    let retained = HISTORY_SERIES_TARGET_BARS
+        .saturating_sub(reserved)
+        .max(1)
+        .min(bars.len());
+    let (start, end) = retained_window_bounds(&bars, viewport, retained);
+    CompactedHistory {
+        dropped_newer: end < bars.len(),
+        bars: bars[start..end].to_vec(),
+    }
+}
+
+fn retained_window_bounds(
+    bars: &[MarketBar],
+    viewport: Option<Viewport>,
+    retained: usize,
+) -> (usize, usize) {
+    if retained >= bars.len() {
+        return (0, bars.len());
+    }
+    let Some(viewport) = viewport else {
+        return (bars.len() - retained, bars.len());
+    };
+    let visible_span = viewport
+        .end_unix_nanos
+        .saturating_sub(viewport.start_unix_nanos);
+    let focus_start = viewport.start_unix_nanos.saturating_sub(visible_span);
+    let focus_end = viewport.end_unix_nanos;
+    let first = bars.partition_point(|bar| bar.exchange_timestamp_unix_nanos < focus_start);
+    let last = bars.partition_point(|bar| bar.exchange_timestamp_unix_nanos < focus_end);
+    if first >= last {
+        let anchor = bars
+            .partition_point(|bar| bar.exchange_timestamp_unix_nanos < viewport.start_unix_nanos)
+            .min(bars.len().saturating_sub(1));
+        let start = anchor
+            .saturating_sub(retained / 2)
+            .min(bars.len() - retained);
+        return (start, start + retained);
+    }
+    let focus_len = last - first;
+    if focus_len >= retained {
+        let start = first.min(bars.len() - retained);
+        return (start, start + retained);
+    }
+    let spare = retained - focus_len;
+    let mut start = first.saturating_sub(spare / 2);
+    let mut end = (last + spare.saturating_sub(first - start)).min(bars.len());
+    if end - start < retained {
+        start = end.saturating_sub(retained);
+    }
+    end = start + retained;
+    (start, end)
+}
+
+/// Removes coverage already owned by the current backwards history request.
+fn history_range_after_inflight(
+    requested: HistoryRange,
+    inflight: HistoryRange,
+) -> Option<HistoryRange> {
+    if inflight.start_unix_nanos <= requested.start_unix_nanos
+        && inflight.end_unix_nanos >= requested.end_unix_nanos
+    {
+        return None;
+    }
+    if requested.start_unix_nanos < inflight.start_unix_nanos
+        && requested.end_unix_nanos > inflight.start_unix_nanos
+        && requested.end_unix_nanos <= inflight.end_unix_nanos
+    {
+        return Some(HistoryRange {
+            start_unix_nanos: requested.start_unix_nanos,
+            end_unix_nanos: inflight.start_unix_nanos,
+        });
+    }
+    Some(requested)
+}
+
+/// Removes a provider-confirmed empty suffix from a backwards viewport fetch.
+///
+/// Historical viewport requests end at the first retained canonical bar. An
+/// empty provider result therefore describes the newest missing suffix at that
+/// edge. Repeating the same viewport is suppressed; scrolling farther left
+/// requests only the older prefix that has not yet been classified.
+fn history_range_after_confirmed_empty(
+    requested: HistoryRange,
+    confirmed_empty: HistoryRange,
+) -> Option<HistoryRange> {
+    if confirmed_empty.start_unix_nanos <= requested.start_unix_nanos
+        && confirmed_empty.end_unix_nanos >= requested.end_unix_nanos
+    {
+        return None;
+    }
+    if requested.start_unix_nanos < confirmed_empty.start_unix_nanos
+        && requested.end_unix_nanos > confirmed_empty.start_unix_nanos
+        && confirmed_empty.end_unix_nanos >= requested.end_unix_nanos
+    {
+        return Some(HistoryRange {
+            start_unix_nanos: requested.start_unix_nanos,
+            end_unix_nanos: confirmed_empty.start_unix_nanos,
+        });
+    }
+    if confirmed_empty.start_unix_nanos <= requested.start_unix_nanos
+        && confirmed_empty.end_unix_nanos > requested.start_unix_nanos
+        && requested.end_unix_nanos > confirmed_empty.end_unix_nanos
+    {
+        return Some(HistoryRange {
+            start_unix_nanos: confirmed_empty.end_unix_nanos,
+            end_unix_nanos: requested.end_unix_nanos,
+        });
+    }
+    Some(requested)
+}
+
+fn merge_confirmed_empty_range(existing: &mut HistoryRange, range: HistoryRange) {
+    if range.start_unix_nanos <= existing.end_unix_nanos
+        && existing.start_unix_nanos <= range.end_unix_nanos
+    {
+        existing.start_unix_nanos = existing.start_unix_nanos.min(range.start_unix_nanos);
+        existing.end_unix_nanos = existing.end_unix_nanos.max(range.end_unix_nanos);
+    } else {
+        // A disjoint empty range can only arise after the canonical left edge
+        // has moved. Keep the newest observation; older internal gaps no longer
+        // participate in backwards-edge request planning.
+        *existing = range;
+    }
 }
 
 pub(super) fn spawn_history_worker(
@@ -263,7 +489,18 @@ impl Coordinator<'_> {
             series.provider_id, series.instrument_id
         );
         if attempts > MAXIMUM_HISTORY_RETRIES {
-            self.history_retries.remove(&key);
+            if range.is_some() {
+                self.history_retries.insert(
+                    key,
+                    (
+                        Instant::now() + HISTORY_FAILED_RETRY_COOLDOWN,
+                        attempts,
+                        range,
+                    ),
+                );
+            } else {
+                self.history_retries.remove(&key);
+            }
             return false;
         }
         self.history_retries
@@ -284,8 +521,10 @@ impl Coordinator<'_> {
         let Some(key) = self
             .history_retries
             .iter()
-            .find(|(key, (retry_at, _, _))| {
-                now >= *retry_at && !self.history_inflight.contains_key(*key)
+            .find(|(key, (retry_at, attempts, _))| {
+                *attempts <= MAXIMUM_HISTORY_RETRIES
+                    && now >= *retry_at
+                    && !self.history_inflight.contains_key(*key)
             })
             .map(|(key, (_, _, range))| (key.clone(), *range))
         else {
@@ -389,18 +628,77 @@ impl Coordinator<'_> {
         let Some(series) = demand.series.clone() else {
             return Ok(());
         };
+        if self.engine.primary_retained_viewport(&series).is_some_and(
+            |(primary, primary_generation, _)| {
+                primary != consumer_id || primary_generation != generation
+            },
+        ) {
+            // One canonical bounded window cannot follow two disjoint visible
+            // ranges at once. Foreground ConsumerId ordering is deterministic;
+            // only the primary viewport schedules provider work.
+            return Ok(());
+        }
         let Some(snapshot) = self.engine.series_snapshot(&series) else {
             // Initial history already owns the unresolved series. Once the
             // first covering snapshot lands, later viewport movement can ask
             // for older coverage without duplicating startup work.
             return Ok(());
         };
-        let Some(range) = viewport_history_range(&series, &snapshot, viewport) else {
+        let provider_generation = self.provider_generation_for_series(&series)?;
+        let key = (series.clone(), provider_generation);
+        let detached = self.detached_history.contains(&key);
+        let Some(plan) = viewport_refill_plan(
+            &series,
+            &snapshot,
+            viewport,
+            detached,
+            self.live_history_coverage(&series),
+        ) else {
             return Ok(());
         };
-        let provider_generation = self.provider_generation_for_series(&series)?;
-        self.enqueue_history_request(&series, provider_generation, Some(range))
-            .map_err(str::to_string)
+        match plan {
+            ViewportRefillPlan::Current => {
+                self.begin_live_history_reseed(&series);
+                let result = self.enqueue_history(&series, provider_generation);
+                if result.is_err() {
+                    let _ = self.cancel_live_history_reseed(&series);
+                }
+                result
+            }
+            ViewportRefillPlan::Range(range) => {
+                self.enqueue_history_request(&series, provider_generation, Some(range))
+            }
+        }
+        .map_err(str::to_string)
+    }
+
+    fn live_history_coverage(&self, series: &BarSeriesKey) -> Option<(i64, i64)> {
+        if series.provider_id == "hyperliquid" {
+            self.hyperliquid_live.get(series)?.coverage()
+        } else {
+            self.rithmic_live.get(series)?.coverage()
+        }
+    }
+
+    fn begin_live_history_reseed(&mut self, series: &BarSeriesKey) {
+        if series.provider_id == "hyperliquid" {
+            if let Some(live) = self.hyperliquid_live.get_mut(series) {
+                live.begin_history_reseed();
+            }
+        } else if let Some(live) = self.rithmic_live.get_mut(series) {
+            live.begin_history_reseed();
+        }
+    }
+
+    fn cancel_live_history_reseed(&mut self, series: &BarSeriesKey) -> Result<(), String> {
+        if series.provider_id == "hyperliquid" {
+            if let Some(live) = self.hyperliquid_live.get_mut(series) {
+                live.cancel_history_reseed()?;
+            }
+        } else if let Some(live) = self.rithmic_live.get_mut(series) {
+            live.cancel_history_reseed()?;
+        }
+        Ok(())
     }
 
     /// Seeds the live aggregator from installed history and drains the buffer.
@@ -438,7 +736,39 @@ impl Coordinator<'_> {
             return Err("provider does not support historical bars");
         }
         let key = (series.clone(), generation);
-        if self.history_inflight.contains_key(&key) {
+        if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied()
+            && attempts > MAXIMUM_HISTORY_RETRIES
+        {
+            if failed_range == range && Instant::now() < retry_at {
+                return Ok(());
+            }
+            // The failed cooldown expired, or the user moved to a genuinely
+            // different range. Start that request with a fresh retry budget.
+            self.history_retries.remove(&key);
+        }
+        let range = if let Some(requested) = range {
+            if let Some(confirmed_empty) = self.history_confirmed_empty.get(&key).copied() {
+                let Some(missing) = history_range_after_confirmed_empty(requested, confirmed_empty)
+                else {
+                    return Ok(());
+                };
+                Some(missing)
+            } else {
+                Some(requested)
+            }
+        } else {
+            None
+        };
+        if let Some(inflight) = self.history_inflight.get(&key).copied() {
+            let range = match (inflight, range) {
+                (Some(inflight), Some(requested)) => {
+                    let Some(missing) = history_range_after_inflight(requested, inflight) else {
+                        return Ok(());
+                    };
+                    Some(missing)
+                }
+                _ => range,
+            };
             self.history_deferred
                 .entry(key)
                 .and_modify(|deferred| merge_deferred_history_request(deferred, range))
@@ -535,6 +865,7 @@ impl Coordinator<'_> {
             Err(error) => {
                 if !self.schedule_history_retry(series, generation, range, &error) {
                     if range.is_none() {
+                        let _ = self.cancel_live_history_reseed(series);
                         self.history_deferred.remove(&key);
                         self.history_failed(series, generation);
                     } else {
@@ -563,39 +894,78 @@ impl Coordinator<'_> {
             return;
         };
         if snapshot.bars.is_empty() {
-            if range.is_some() {
+            if let Some(range) = range {
+                let key = (series.clone(), generation);
+                self.history_confirmed_empty
+                    .entry(key)
+                    .and_modify(|existing| merge_confirmed_empty_range(existing, range))
+                    .or_insert(range);
                 self.dispatch_deferred_history(series, generation);
             } else {
+                let _ = self.cancel_live_history_reseed(series);
                 self.history_deferred.remove(&(series.clone(), generation));
                 self.history_failed(series, generation);
             }
             return;
         }
         let replacing_existing = self.engine.series_snapshot(series).is_some();
-        let Some(snapshot) = self.prepare_history_repair(series, generation, snapshot) else {
+        let Some(prepared) = self.prepare_history_repair(series, generation, range, snapshot)
+        else {
+            if range.is_none() {
+                let _ = self.cancel_live_history_reseed(series);
+            }
             self.history_failed(series, generation);
             return;
         };
+        let detached_from_live = prepared.detached_from_live;
+        let reseed_live = range.is_none() && !detached_from_live;
+        let install = if prepared.replace_window {
+            CompletedHistoryInstall::Window { reseed_live }
+        } else if replacing_existing {
+            CompletedHistoryInstall::Covering { reseed_live }
+        } else {
+            CompletedHistoryInstall::Initial
+        };
         if self
-            .install_completed_history(
-                series,
-                generation,
-                snapshot,
-                replacing_existing,
-                true,
-                range.is_none(),
-            )
+            .install_completed_history(series, generation, prepared.snapshot, install)
             .is_none()
         {
+            if range.is_none() {
+                let _ = self.cancel_live_history_reseed(series);
+            }
             return;
+        }
+        let key = (series.clone(), generation);
+        if detached_from_live {
+            self.detached_history.insert(key.clone());
+        } else if range.is_none() {
+            self.detached_history.remove(&key);
+        }
+        if range.is_some() && !detached_from_live {
+            let Some(canonical) = self.engine.series_snapshot(series) else {
+                self.history_failed(series, generation);
+                return;
+            };
+            let realigned = if series.provider_id == "hyperliquid" {
+                self.start_hyperliquid_realtime_from_snapshot(series, &canonical)
+            } else {
+                self.start_rithmic_realtime_from_snapshot(series, &canonical)
+            };
+            if realigned.is_err() {
+                self.history_failed(series, generation);
+                return;
+            }
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
-        if range.is_none() {
-            let viewport_demands = self.engine.retained_viewports(series);
-            for (consumer_id, consumer_generation, viewport) in viewport_demands {
-                let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
-            }
+        self.history_confirmed_empty
+            .remove(&(series.clone(), generation));
+        // Re-check visible coverage after every successful non-empty install.
+        // A provider may return a partial page; the canonical snapshot remains
+        // the sole coverage fact and determines whether more older data is due.
+        let viewport_demands = self.engine.retained_viewports(series);
+        for (consumer_id, consumer_generation, viewport) in viewport_demands {
+            let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
         }
         self.dispatch_deferred_history(series, generation);
     }
@@ -611,14 +981,12 @@ impl Coordinator<'_> {
         };
         let _ = self.enqueue_history_request(series, generation, range);
     }
-    pub(super) fn install_completed_history(
+    fn install_completed_history(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         snapshot: HistorySnapshot,
-        replace_covering: bool,
-        publish: bool,
-        reseed_live: bool,
+        install: CompletedHistoryInstall,
     ) -> Option<(Vec<MarketBar>, Option<FormingBar>)> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
@@ -631,23 +999,30 @@ impl Coordinator<'_> {
                 None
             };
         let bars = snapshot.bars;
-        let installed = if replace_covering {
-            self.engine.replace_covering_history(
+        let installed = match install {
+            CompletedHistoryInstall::Window { .. } => self.engine.replace_history_window(
                 generation,
                 series,
                 price_scale,
                 quantity_scale,
                 bars.clone(),
-                publish,
-            )
-        } else {
-            self.engine.install_history(
+                true,
+            ),
+            CompletedHistoryInstall::Covering { .. } => self.engine.replace_covering_history(
                 generation,
                 series,
                 price_scale,
                 quantity_scale,
                 bars.clone(),
-            )
+                true,
+            ),
+            CompletedHistoryInstall::Initial => self.engine.install_history(
+                generation,
+                series,
+                price_scale,
+                quantity_scale,
+                bars.clone(),
+            ),
         };
         let publications = match installed {
             Ok(publications) => publications,
@@ -665,7 +1040,7 @@ impl Coordinator<'_> {
             }
         };
         self.publish_installed_history(&publications);
-        if !reseed_live {
+        if !install.reseeds_live() {
             return Some((bars, forming));
         }
         if series.provider_id == "hyperliquid" {
@@ -723,21 +1098,112 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn prepare_history_repair(
+    /// Keeps a live canonical series inside its per-series high watermark.
+    ///
+    /// The provider-owned handoff remains authoritative for current live state.
+    /// If viewport-focused compaction has to discard the live edge, the canonical
+    /// series is explicitly detached and later live publications are drained but
+    /// not installed until current history rejoins it.
+    pub(super) fn compact_live_series_if_needed(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
+    ) -> Result<bool, String> {
+        let key = (series.clone(), generation);
+        if self.detached_history.contains(&key) {
+            return Ok(true);
+        }
+        if self.engine.series_bar_count(series).unwrap_or(0) < HISTORY_SERIES_HIGH_WATERMARK {
+            return Ok(false);
+        }
+        let snapshot = self
+            .engine
+            .series_snapshot(series)
+            .ok_or_else(|| "canonical series disappeared before compaction".to_string())?;
+        let viewport = self
+            .engine
+            .primary_retained_viewport(series)
+            .map(|(_, _, viewport)| viewport);
+        let compacted = compact_history_window(snapshot.bars.to_vec(), viewport, false);
+        let publications = if compacted.dropped_newer {
+            self.engine.replace_history_window(
+                generation,
+                series,
+                snapshot.price_scale,
+                snapshot.quantity_scale,
+                compacted.bars,
+                true,
+            )
+        } else {
+            self.engine.replace_covering_history(
+                generation,
+                series,
+                snapshot.price_scale,
+                snapshot.quantity_scale,
+                compacted.bars,
+                true,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        self.publish_installed_history(&publications);
+        if compacted.dropped_newer {
+            self.detached_history.insert(key);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn prepare_history_repair(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
         mut snapshot: HistorySnapshot,
-    ) -> Option<HistorySnapshot> {
-        let Some(current) = self.engine.series_snapshot(series) else {
-            return Some(snapshot);
+    ) -> Option<PreparedHistoryRepair> {
+        let key = (series.clone(), generation);
+        let was_detached = self.detached_history.contains(&key);
+        let viewport = self
+            .engine
+            .primary_retained_viewport(series)
+            .map(|(_, _, viewport)| viewport);
+        let current = self.engine.series_snapshot(series);
+        let rejoining_current = range.is_none() && was_detached;
+        let disjoint_newer = current.as_ref().is_some_and(|current| {
+            range.is_some_and(|requested| {
+                requested.start_unix_nanos
+                    >= current
+                        .bars
+                        .last()
+                        .map_or(i64::MAX, |bar| bar.exchange_timestamp_unix_nanos)
+                    && snapshot.bars.first().is_some_and(|bar| {
+                        current.bars.last().is_some_and(|last| {
+                            bar.exchange_timestamp_unix_nanos > last.exchange_timestamp_unix_nanos
+                        })
+                    })
+            })
+        });
+        let bars = if rejoining_current || disjoint_newer {
+            snapshot.bars
+        } else if let Some(current) = current.as_ref() {
+            let Ok(merged) = reconcile_history_repair(current, snapshot.bars) else {
+                self.history_failed(series, generation);
+                return None;
+            };
+            merged
+        } else {
+            snapshot.bars
         };
-        let merged = reconcile_history_repair(&current, snapshot.bars, HISTORY_BARS_PER_SERIES);
-        let Ok(bars) = merged else {
-            self.history_failed(series, generation);
-            return None;
+        let reserve_forming_tail = current.as_ref().is_some_and(|current| current.forming)
+            && !was_detached
+            && !rejoining_current
+            && !disjoint_newer;
+        let compacted = compact_history_window(bars, viewport, reserve_forming_tail);
+        let detached_from_live = if rejoining_current {
+            false
+        } else {
+            was_detached || disjoint_newer || compacted.dropped_newer
         };
-        snapshot.bars = bars;
+        snapshot.bars = compacted.bars;
         if let Some(forming) = snapshot.forming.as_mut() {
             let next_sequence = snapshot
                 .bars
@@ -745,7 +1211,11 @@ impl Coordinator<'_> {
                 .map_or(1, |bar| bar.source_sequence.saturating_add(1));
             forming.bar.source_sequence = next_sequence;
         }
-        Some(snapshot)
+        Some(PreparedHistoryRepair {
+            snapshot,
+            replace_window: detached_from_live || rejoining_current,
+            detached_from_live,
+        })
     }
 
     pub(super) fn start_rithmic_realtime_from_snapshot(
@@ -872,7 +1342,7 @@ impl Coordinator<'_> {
         {
             return true;
         }
-        live.history_ready = false;
+        live.history_state = super::LiveHistoryState::AwaitingHistory;
         live.dirty = false;
         self.broadcast_series_recovery_for(series, "Hyperliquid history/live handoff failed");
         false
@@ -906,7 +1376,7 @@ impl Coordinator<'_> {
         {
             return true;
         }
-        live.history_ready = false;
+        live.history_state = super::LiveHistoryState::AwaitingHistory;
         live.dirty = false;
         self.broadcast_series_recovery_for(series, "Rithmic history/live handoff failed");
         false
@@ -923,6 +1393,28 @@ impl Coordinator<'_> {
         }
         self.history_deferred
             .retain(|(series, _), _| self.engine.has_subscription(series));
+        let demanded_series = self
+            .engine
+            .demanded_series()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        self.history_confirmed_empty
+            .retain(|(series, generation), _| {
+                demanded_series.contains(series)
+                    && self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        == Some(*generation)
+            });
+        self.detached_history.retain(|(series, generation)| {
+            demanded_series.contains(series)
+                && self
+                    .engine
+                    .provider_status(&series.provider_id)
+                    .and_then(|status| status.generation)
+                    == Some(*generation)
+        });
         self.history_retries.retain(|(series, generation), _| {
             self.engine.has_subscription(series)
                 && self
@@ -960,6 +1452,148 @@ mod tests {
             range: None,
             stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn test_bar(sequence: u64, minute: i64) -> MarketBar {
+        let timestamp = minute * 60_i64 * 1_000_000_000;
+        MarketBar {
+            source_sequence: sequence,
+            exchange_timestamp_seconds: minute * 60,
+            exchange_timestamp_unix_nanos: timestamp,
+            open: 100,
+            high: 101,
+            low: 99,
+            close: 100,
+            volume: 1,
+        }
+    }
+
+    #[test]
+    fn historical_backfill_is_retained_beyond_one_provider_page_limit() {
+        let existing = 8_500usize;
+        let older = 1_000usize;
+        let current = SeriesSnapshot {
+            series: test_series("deep-history"),
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 0,
+            forming: false,
+            bars: (0..existing)
+                .map(|index| {
+                    test_bar(
+                        u64::try_from(index + 1).expect("bounded sequence"),
+                        i64::try_from(index + older).expect("bounded minute"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let repair = (0..older)
+            .map(|index| {
+                test_bar(
+                    u64::try_from(index + 1).expect("bounded sequence"),
+                    i64::try_from(index).expect("bounded minute"),
+                )
+            })
+            .collect();
+
+        let merged = reconcile_history_repair(&current, repair).expect("history merges");
+        assert_eq!(merged.len(), existing + older);
+        assert_eq!(
+            merged.first().map(|bar| bar.exchange_timestamp_seconds),
+            Some(0)
+        );
+        assert_eq!(
+            merged.last().map(|bar| bar.exchange_timestamp_seconds),
+            Some(i64::try_from(existing + older - 1).expect("bounded minute") * 60)
+        );
+    }
+
+    #[test]
+    fn history_compaction_is_bounded_and_preserves_visible_prefetch_focus() {
+        let total = HISTORY_SERIES_HIGH_WATERMARK + 1_000;
+        let bars = (0..total)
+            .map(|index| {
+                test_bar(
+                    u64::try_from(index + 1).expect("bounded sequence"),
+                    i64::try_from(index).expect("bounded minute"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let minute = 60_i64 * 1_000_000_000;
+        let viewport = Viewport::try_new(2_000 * minute, 2_200 * minute).expect("viewport");
+
+        let compacted = compact_history_window(bars, Some(viewport), false);
+
+        assert_eq!(compacted.bars.len(), HISTORY_SERIES_TARGET_BARS);
+        assert!(compacted.dropped_newer);
+        let first = compacted
+            .bars
+            .first()
+            .expect("bounded window has a first bar");
+        let last = compacted
+            .bars
+            .last()
+            .expect("bounded window has a last bar");
+        assert!(first.exchange_timestamp_unix_nanos <= 1_800 * minute);
+        assert!(last.exchange_timestamp_unix_nanos >= viewport.end_unix_nanos);
+        assert!(compacted.bars.windows(2).all(|pair| {
+            pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
+                && pair[0].exchange_timestamp_unix_nanos < pair[1].exchange_timestamp_unix_nanos
+        }));
+    }
+
+    #[test]
+    fn detached_viewport_refill_continues_left_moves_right_and_rejoins_live() {
+        let minute = 60_i64 * 1_000_000_000;
+        let series = test_series("movable-window");
+        let snapshot = axiusflow_market_engine::SeriesSnapshot {
+            series: series.clone(),
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 0,
+            forming: false,
+            bars: (1_000..1_100)
+                .enumerate()
+                .map(|(index, minute_index)| {
+                    test_bar(
+                        u64::try_from(index + 1).expect("bounded sequence"),
+                        minute_index,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+
+        let older = Viewport::try_new(900 * minute, 980 * minute).expect("older viewport");
+        assert!(matches!(
+            viewport_refill_plan(&series, &snapshot, older, true, Some((10_000 * minute, 10_500 * minute))),
+            Some(ViewportRefillPlan::Range(range))
+                if range.end_unix_nanos == 1_000 * minute
+                    && range.start_unix_nanos < older.start_unix_nanos
+        ));
+
+        let newer = Viewport::try_new(1_200 * minute, 1_300 * minute).expect("newer viewport");
+        assert!(matches!(
+            viewport_refill_plan(&series, &snapshot, newer, true, Some((10_000 * minute, 10_500 * minute))),
+            Some(ViewportRefillPlan::Range(range))
+                if range.start_unix_nanos == 1_099 * minute
+                    && range.end_unix_nanos > newer.end_unix_nanos
+        ));
+
+        let recent = Viewport::try_new(10_100 * minute, 10_200 * minute).expect("recent viewport");
+        assert_eq!(
+            viewport_refill_plan(
+                &series,
+                &snapshot,
+                recent,
+                true,
+                Some((10_000 * minute, 10_500 * minute)),
+            ),
+            Some(ViewportRefillPlan::Current)
+        );
     }
 
     struct RecordingHistorySource {
@@ -1051,5 +1685,164 @@ mod tests {
             }),
         );
         assert_eq!(deferred, DeferredHistoryRequest::Full);
+    }
+
+    #[test]
+    fn viewport_history_prefetches_one_visible_span_before_the_left_edge() {
+        let minute = 60_i64 * 1_000_000_000;
+        let series = test_series("prefetch");
+        let snapshot = axiusflow_market_engine::SeriesSnapshot {
+            series: series.clone(),
+            provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            publication_generation: 1,
+            price_scale: 2,
+            quantity_scale: 0,
+            forming: false,
+            bars: vec![MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 520 * 60,
+                exchange_timestamp_unix_nanos: 520 * minute,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 1,
+            }]
+            .into(),
+        };
+        let viewport = Viewport::try_new(500 * minute, 550 * minute).expect("viewport");
+
+        assert_eq!(
+            viewport_history_range(&series, &snapshot, viewport),
+            Some(HistoryRange {
+                start_unix_nanos: 450 * minute,
+                end_unix_nanos: 520 * minute,
+            })
+        );
+
+        let partial = axiusflow_market_engine::SeriesSnapshot {
+            bars: vec![MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 510 * 60,
+                exchange_timestamp_unix_nanos: 510 * minute,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 1,
+            }]
+            .into(),
+            ..snapshot
+        };
+        assert_eq!(
+            viewport_history_range(&series, &partial, viewport),
+            Some(HistoryRange {
+                start_unix_nanos: 450 * minute,
+                end_unix_nanos: 510 * minute,
+            })
+        );
+    }
+
+    #[test]
+    fn inflight_viewport_coverage_suppresses_duplicates_and_trims_older_extension() {
+        let inflight = HistoryRange {
+            start_unix_nanos: 100,
+            end_unix_nanos: 200,
+        };
+        assert_eq!(
+            history_range_after_inflight(
+                HistoryRange {
+                    start_unix_nanos: 120,
+                    end_unix_nanos: 180,
+                },
+                inflight,
+            ),
+            None
+        );
+        assert_eq!(
+            history_range_after_inflight(
+                HistoryRange {
+                    start_unix_nanos: 50,
+                    end_unix_nanos: 200,
+                },
+                inflight,
+            ),
+            Some(HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 100,
+            })
+        );
+        let disjoint = HistoryRange {
+            start_unix_nanos: 10,
+            end_unix_nanos: 90,
+        };
+        assert_eq!(
+            history_range_after_inflight(disjoint, inflight),
+            Some(disjoint)
+        );
+    }
+
+    #[test]
+    fn confirmed_empty_history_suppresses_repeats_and_only_fetches_older_extension() {
+        let empty = HistoryRange {
+            start_unix_nanos: 100,
+            end_unix_nanos: 200,
+        };
+        assert_eq!(history_range_after_confirmed_empty(empty, empty), None);
+        assert_eq!(
+            history_range_after_confirmed_empty(
+                HistoryRange {
+                    start_unix_nanos: 50,
+                    end_unix_nanos: 200,
+                },
+                empty,
+            ),
+            Some(HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 100,
+            })
+        );
+
+        let mut accumulated = empty;
+        merge_confirmed_empty_range(
+            &mut accumulated,
+            HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 100,
+            },
+        );
+        assert_eq!(
+            accumulated,
+            HistoryRange {
+                start_unix_nanos: 50,
+                end_unix_nanos: 200,
+            }
+        );
+        assert_eq!(
+            history_range_after_confirmed_empty(
+                HistoryRange {
+                    start_unix_nanos: 0,
+                    end_unix_nanos: 200,
+                },
+                accumulated,
+            ),
+            Some(HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 50,
+            })
+        );
+        assert_eq!(
+            history_range_after_confirmed_empty(
+                HistoryRange {
+                    start_unix_nanos: 50,
+                    end_unix_nanos: 250,
+                },
+                accumulated,
+            ),
+            Some(HistoryRange {
+                start_unix_nanos: 200,
+                end_unix_nanos: 250,
+            })
+        );
     }
 }

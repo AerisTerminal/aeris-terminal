@@ -1,8 +1,8 @@
 use super::{
     BTreeMap, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, ClientId, ConsumerEvents, ConsumerId,
     Coordinator, DemandWaiter, EngineError, EngineFaultCode, FailureStage, GenerationId,
-    MAXIMUM_PUBLISHED_DEPTH_LEVELS, ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET,
-    Reply, SeriesLoadState, SeriesTailOperation, authorize_consumer,
+    ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply, SeriesLoadState,
+    SeriesTailOperation, authorize_consumer,
 };
 use crate::{MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState};
 
@@ -117,6 +117,12 @@ pub(super) fn order_book_snapshot(
         publication.session_generation = order_book.instrument.session_generation;
     }
     let provider_generation = publication.session_generation;
+    if order_book.trade_session_generation == provider_generation {
+        publication
+            .traded_volumes
+            .clone_from(&order_book.traded_volumes);
+        publication.trade_source_watermark = order_book.last_trade_source_sequence;
+    }
     if let Some(quote) = order_book
         .top_of_book
         .as_ref()
@@ -134,17 +140,11 @@ pub(super) fn order_book_snapshot(
         publication.best_ask = publication.asks.first().copied();
         publication.bbo_source_watermark = publication.source_watermark;
     }
-    bound_order_book_publication(&mut publication);
     MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
         consumer_id,
         generation,
         publication,
     })
-}
-
-fn bound_order_book_publication(publication: &mut axiusflow_market_data::OrderBookPublication) {
-    publication.bids.truncate(MAXIMUM_PUBLISHED_DEPTH_LEVELS);
-    publication.asks.truncate(MAXIMUM_PUBLISHED_DEPTH_LEVELS);
 }
 
 pub(super) fn series_state(
@@ -242,15 +242,11 @@ impl Coordinator<'_> {
         consumer_id: ConsumerId,
         series: &BarSeriesKey,
     ) -> SeriesLoadState {
-        if self
-            .rithmic_live
-            .get(series)
-            .is_some_and(|live| live.connected && live.history_ready)
-            || self
-                .hyperliquid_live
-                .get(series)
-                .is_some_and(|live| live.connected && live.history_ready)
-        {
+        if self.rithmic_live.get(series).is_some_and(|live| {
+            live.connected && live.history_state == super::LiveHistoryState::Ready
+        }) || self.hyperliquid_live.get(series).is_some_and(|live| {
+            live.connected && live.history_state == super::LiveHistoryState::Ready
+        }) {
             SeriesLoadState::Live
         } else if self.engine.has_publication(consumer_id) {
             SeriesLoadState::Ready
@@ -589,45 +585,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn order_book_publication_is_bounded_independently_from_canonical_depth() {
-        let mut publication = axiusflow_market_data::OrderBookPublication {
-            provider_id: "rithmic".to_string(),
-            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
-            entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+    fn order_book_publication_preserves_canonical_depth_beyond_the_old_ui_cutoff() {
+        const LEVELS: usize = 64;
+        let instrument = axiusflow_engine_protocol::InstallProviderInstrument {
+            provider: "rithmic".to_string(),
             session_generation: 1,
-            revision: 1,
-            source_watermark: 1,
-            best_bid: None,
-            best_ask: None,
-            bbo_source_watermark: 1,
-            bids: (0..MAXIMUM_PUBLISHED_DEPTH_LEVELS + 7)
+            selection_generation: 1,
+            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+            provider_symbol: "MNQ".to_string(),
+            display_symbol: "MNQ".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
+            entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+            price_increment: Some(25),
+        };
+        let mut order_book = ProviderOrderBook::new(instrument.clone());
+        let snapshot = axiusflow_market_data::DepthSnapshot {
+            metadata: axiusflow_market_data::EventMetadata {
+                provider_id: instrument.provider.clone(),
+                instrument_id: instrument.instrument_id.clone(),
+                entitlement_id: instrument.entitlement_id.clone(),
+                source_sequence: 1,
+                session_generation: 1,
+                timestamps: axiusflow_market_data::QualifiedTimestamp {
+                    exchange_unix_nanos: Some(1),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: 1,
+                },
+            },
+            bids: (0..LEVELS)
                 .map(|index| axiusflow_market_data::DepthLevel {
                     price: 20_000 - i64::try_from(index).expect("bounded index"),
                     quantity: 1,
                     order_count: Some(1),
                 })
                 .collect(),
-            asks: (0..MAXIMUM_PUBLISHED_DEPTH_LEVELS + 7)
+            asks: (0..LEVELS)
                 .map(|index| axiusflow_market_data::DepthLevel {
                     price: 20_001 + i64::try_from(index).expect("bounded index"),
                     quantity: 1,
                     order_count: Some(1),
                 })
                 .collect(),
-            traded_volumes: BTreeMap::new(),
-            state: axiusflow_market_data::OrderBookState::Ready,
         };
-        bound_order_book_publication(&mut publication);
+        assert!(matches!(
+            order_book.book.install_snapshot(&snapshot),
+            Ok(axiusflow_market_data::OrderBookApplyOutcome::Published(_))
+        ));
 
-        assert_eq!(publication.bids.len(), MAXIMUM_PUBLISHED_DEPTH_LEVELS);
-        assert_eq!(publication.asks.len(), MAXIMUM_PUBLISHED_DEPTH_LEVELS);
+        let event = order_book_snapshot(
+            ConsumerId(std::num::NonZeroU64::MIN),
+            GenerationId(std::num::NonZeroU64::MIN),
+            &order_book,
+        );
+        let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = event else {
+            panic!("order-book publication expected");
+        };
+        assert_eq!(snapshot.publication.bids.len(), LEVELS);
+        assert_eq!(snapshot.publication.asks.len(), LEVELS);
         assert_eq!(
-            publication.bids.first().map(|level| level.price),
-            Some(20_000)
+            snapshot.publication.bids.last().map(|level| level.price),
+            Some(19_937)
         );
         assert_eq!(
-            publication.asks.first().map(|level| level.price),
-            Some(20_001)
+            snapshot.publication.asks.last().map(|level| level.price),
+            Some(20_064)
         );
     }
 }

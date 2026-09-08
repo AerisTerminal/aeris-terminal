@@ -47,6 +47,7 @@ pub(crate) struct SeriesStore {
 enum InstallMode {
     History,
     Repair,
+    Window,
     Realtime { forming: bool },
 }
 
@@ -115,6 +116,24 @@ impl SeriesStore {
         )
     }
 
+    pub(crate) fn replace_window(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: &[MarketBar],
+    ) -> Result<Arc<SeriesSnapshot>, EngineError> {
+        self.install_inner(
+            series.clone(),
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+            InstallMode::Window,
+        )
+    }
+
     fn install_inner(
         &mut self,
         series: BarSeriesKey,
@@ -125,14 +144,10 @@ impl SeriesStore {
         mode: InstallMode,
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
         let (forming, realtime) = match mode {
-            InstallMode::History | InstallMode::Repair => (false, false),
+            InstallMode::History | InstallMode::Repair | InstallMode::Window => (false, false),
             InstallMode::Realtime { forming } => (forming, true),
         };
-        series.validate()?;
-        if price_scale > 18 || quantity_scale > 18 {
-            return Err(EngineError::InvalidSeriesPrecision);
-        }
-        validate_bars(bars)?;
+        validate_install_inputs(&series, price_scale, quantity_scale, bars)?;
         let current = self.series.get(&series);
         if let Some(snapshot) = Self::validate_current_install(
             current,
@@ -149,7 +164,7 @@ impl SeriesStore {
                 maximum: self.maximum_series,
             });
         }
-        let retained_tail = retained_history_tail(
+        let (mut retained_tail, tail_overlaps_last) = retained_tail_for_install(
             current,
             mode,
             provider_generation,
@@ -157,39 +172,30 @@ impl SeriesStore {
             quantity_scale,
             bars,
         );
-        let tail_overlaps_last = retained_tail.is_some_and(|tail| {
-            bars.last().is_some_and(|bar| {
-                bar.exchange_timestamp_unix_nanos == tail.bar.exchange_timestamp_unix_nanos
-            })
-        });
-        let retained = current.map_or(0, StoredSeries::bar_count);
-        let replacement_bars = bars
-            .len()
-            .checked_add(usize::from(retained_tail.is_some() && !tail_overlaps_last))
-            .ok_or(EngineError::CapacityOverflow)?;
-        let projected = self
-            .total_bars
-            .checked_sub(retained)
-            .and_then(|count| count.checked_add(replacement_bars))
-            .ok_or(EngineError::CapacityOverflow)?;
-        if projected > self.maximum_bars.get() {
-            return Err(EngineError::BarLimitExceeded {
-                maximum: self.maximum_bars,
-                requested: projected,
-            });
-        }
-        let publication_generation = match current {
-            Some(snapshot) => snapshot
-                .latest_publication_generation()
-                .checked_add(1)
-                .ok_or(EngineError::CapacityOverflow)?,
-            None => 1,
-        };
+        let projected = self.projected_replacement_bars(
+            current,
+            bars.len(),
+            retained_tail.is_some() && !tail_overlaps_last,
+        )?;
+        let publication_generation = next_publication_generation(current)?;
         let covering_bars = if tail_overlaps_last {
             &bars[..bars.len() - 1]
         } else {
             bars
         };
+        if matches!(mode, InstallMode::Repair)
+            && let Some(tail) = retained_tail.as_mut()
+        {
+            // Backwards repair renumbers the completed covering image from one.
+            // The retained forming tail must move with that local sequence base;
+            // otherwise sufficiently deep backfill eventually creates a
+            // duplicate/regressing sequence at the history/live seam.
+            tail.bar.source_sequence = covering_bars.last().map_or(Ok(1), |bar| {
+                bar.source_sequence
+                    .checked_add(1)
+                    .ok_or(EngineError::CapacityOverflow)
+            })?;
+        }
         let covering = Arc::new(SeriesSnapshot {
             series: series.clone(),
             provider_generation,
@@ -200,23 +206,15 @@ impl SeriesStore {
             bars: covering_bars.to_vec().into(),
         });
         self.total_bars = projected;
-        let stored = if let Some(tail) = retained_tail {
-            StoredSeries {
-                covering,
-                completed_tail: Vec::new(),
-                tail: Some(SeriesTail {
-                    provider_generation,
-                    publication_generation,
-                    price_scale,
-                    quantity_scale,
-                    forming: tail.forming,
-                    operation: SeriesTailOperation::Revise,
-                    bar: tail.bar,
-                }),
-            }
-        } else {
-            stored_series(&covering, realtime)?
-        };
+        let stored = replacement_series(
+            covering,
+            retained_tail,
+            provider_generation,
+            publication_generation,
+            price_scale,
+            quantity_scale,
+            realtime,
+        )?;
         let snapshot = stored.snapshot();
         self.series.insert(series, stored);
         Ok(snapshot)
@@ -235,7 +233,7 @@ impl SeriesStore {
         };
         let (forming, realtime, repair) = match mode {
             InstallMode::History => (false, false, false),
-            InstallMode::Repair => (false, false, true),
+            InstallMode::Repair | InstallMode::Window => (false, false, true),
             InstallMode::Realtime { forming } => (forming, true, false),
         };
         if provider_generation < current.covering.provider_generation {
@@ -261,6 +259,30 @@ impl SeriesStore {
             validate_history_transition(&current_snapshot, bars)?;
         }
         Ok(None)
+    }
+
+    fn projected_replacement_bars(
+        &self,
+        current: Option<&StoredSeries>,
+        replacement_len: usize,
+        retains_tail: bool,
+    ) -> Result<usize, EngineError> {
+        let retained = current.map_or(0, StoredSeries::bar_count);
+        let replacement = replacement_len
+            .checked_add(usize::from(retains_tail))
+            .ok_or(EngineError::CapacityOverflow)?;
+        let projected = self
+            .total_bars
+            .checked_sub(retained)
+            .and_then(|count| count.checked_add(replacement))
+            .ok_or(EngineError::CapacityOverflow)?;
+        if projected > self.maximum_bars.get() {
+            return Err(EngineError::BarLimitExceeded {
+                maximum: self.maximum_bars,
+                requested: projected,
+            });
+        }
+        Ok(projected)
     }
 
     pub(crate) fn install_realtime_tail(
@@ -445,6 +467,10 @@ impl SeriesStore {
         self.total_bars
     }
 
+    pub(crate) fn bar_count(&self, series: &BarSeriesKey) -> Option<usize> {
+        self.series.get(series).map(StoredSeries::bar_count)
+    }
+
     pub(crate) fn approximate_bytes(&self) -> usize {
         self.total_bars.saturating_mul(size_of::<MarketBar>())
     }
@@ -526,6 +552,73 @@ impl StoredSeries {
     }
 }
 
+fn validate_install_inputs(
+    series: &BarSeriesKey,
+    price_scale: u8,
+    quantity_scale: u8,
+    bars: &[MarketBar],
+) -> Result<(), EngineError> {
+    series.validate()?;
+    if price_scale > 18 || quantity_scale > 18 {
+        return Err(EngineError::InvalidSeriesPrecision);
+    }
+    validate_bars(bars)
+}
+
+fn retained_tail_for_install(
+    current: Option<&StoredSeries>,
+    mode: InstallMode,
+    generation: ProviderGeneration,
+    price_scale: u8,
+    quantity_scale: u8,
+    bars: &[MarketBar],
+) -> (Option<SeriesTail>, bool) {
+    let retained_tail =
+        retained_history_tail(current, mode, generation, price_scale, quantity_scale, bars);
+    let overlaps_last = retained_tail.is_some_and(|tail| {
+        bars.last().is_some_and(|bar| {
+            bar.exchange_timestamp_unix_nanos == tail.bar.exchange_timestamp_unix_nanos
+        })
+    });
+    (retained_tail, overlaps_last)
+}
+
+fn next_publication_generation(current: Option<&StoredSeries>) -> Result<u64, EngineError> {
+    current.map_or(Ok(1), |stored| {
+        stored
+            .latest_publication_generation()
+            .checked_add(1)
+            .ok_or(EngineError::CapacityOverflow)
+    })
+}
+
+fn replacement_series(
+    covering: Arc<SeriesSnapshot>,
+    retained_tail: Option<SeriesTail>,
+    provider_generation: ProviderGeneration,
+    publication_generation: u64,
+    price_scale: u8,
+    quantity_scale: u8,
+    realtime: bool,
+) -> Result<StoredSeries, EngineError> {
+    if let Some(tail) = retained_tail {
+        return Ok(StoredSeries {
+            covering,
+            completed_tail: Vec::new(),
+            tail: Some(SeriesTail {
+                provider_generation,
+                publication_generation,
+                price_scale,
+                quantity_scale,
+                forming: tail.forming,
+                operation: SeriesTailOperation::Revise,
+                bar: tail.bar,
+            }),
+        });
+    }
+    stored_series(&covering, realtime)
+}
+
 fn stored_series(
     snapshot: &Arc<SeriesSnapshot>,
     realtime: bool,
@@ -569,7 +662,7 @@ fn retained_history_tail(
     quantity_scale: u8,
     bars: &[MarketBar],
 ) -> Option<SeriesTail> {
-    if matches!(mode, InstallMode::Realtime { .. }) {
+    if matches!(mode, InstallMode::Realtime { .. } | InstallMode::Window) {
         return None;
     }
     // Completed history cannot erase a newer forming candle. Preserve its

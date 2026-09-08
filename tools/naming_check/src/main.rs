@@ -995,7 +995,13 @@ mod tests {
         );
         let module = manifest("crates/market_runtime/src/market_service/mod.rs");
         assert!(
-            module.contains("INITIAL_HISTORY_BARS") && module.contains("HISTORY_BARS_PER_SERIES")
+            module.contains("INITIAL_HISTORY_BARS")
+                && module.contains("MAXIMUM_HISTORY_BARS_PER_REQUEST")
+        );
+        let history = manifest("crates/market_runtime/src/market_service/history.rs");
+        assert!(
+            history.contains("historical_backfill_is_retained_beyond_one_provider_page_limit"),
+            "market runtime lost untruncated back-scroll retention regression"
         );
     }
     #[test]

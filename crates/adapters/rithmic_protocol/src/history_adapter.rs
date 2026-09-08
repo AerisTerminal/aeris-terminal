@@ -1329,6 +1329,7 @@ mod tests {
                 venue_id: "CME".to_string(),
                 price_scale: 2,
                 quantity_scale: 0,
+                price_increment: Some(25),
             },
             entitlement_id: "rithmic-test-cme".to_string(),
             trades: true,

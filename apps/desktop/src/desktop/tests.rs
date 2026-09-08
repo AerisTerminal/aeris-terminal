@@ -37,7 +37,7 @@ use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceA
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
 use axiusflow_engine_protocol::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
-    SeriesCadence,
+    SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_observability::FeedConnectionState;
@@ -553,6 +553,147 @@ fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
     assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
     assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
     assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
+}
+
+fn saved_workspace_boot_fixture() -> WorkspaceState {
+    let mut workspace: WorkspaceState = super::local_state::default_workspace();
+    workspace.active_workspace_id = 42;
+    workspace.workspace_revision = 9;
+    workspace.layout_generation = 17;
+    let tab = workspace
+        .workspace_tabs
+        .first_mut()
+        .expect("default workspace tab");
+    tab.workspace_id = 42;
+    tab.label = "Execution".to_string();
+    tab.split_axis = WorkspaceSplitAxis::Vertical as i32;
+    tab.active_pane_id = 8;
+    tab.generation = 6;
+
+    let first = tab.panes.first_mut().expect("default workspace pane");
+    first.pane_id = 7;
+    first.consumer_id = 17;
+    first.size_basis_points = 4_000;
+    first.generation = 6;
+    first.viewport_start_unix_nanos = Some(100);
+    first.viewport_end_unix_nanos = Some(200);
+    let first_instrument = first.instrument.as_mut().expect("default instrument");
+    first_instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
+    first_instrument.provider_symbol = "ETH".to_string();
+    first_instrument.display_symbol = "ETH-PERP".to_string();
+    let first_series = first.series.as_mut().expect("default series");
+    first_series.instrument_id = first_instrument.instrument_id.clone();
+    first_series.cadence = SeriesCadence::FixedSeconds as i32;
+    first_series.cadence_value = 300;
+
+    let mut second: WorkspacePaneState = first.clone();
+    second.pane_id = 8;
+    second.consumer_id = 18;
+    second.size_basis_points = 6_000;
+    second.viewport_start_unix_nanos = Some(300);
+    second.viewport_end_unix_nanos = Some(400);
+    let second_instrument = second.instrument.as_mut().expect("second instrument");
+    second_instrument.instrument_id = "hyperliquid:perp:SOL".to_string();
+    second_instrument.provider_symbol = "SOL".to_string();
+    second_instrument.display_symbol = "SOL-PERP".to_string();
+    let second_instrument_id = second_instrument.instrument_id.clone();
+    let second_series = second.series.as_mut().expect("second series");
+    second_series.instrument_id = second_instrument_id;
+    second_series.cadence = SeriesCadence::FixedSeconds as i32;
+    second_series.cadence_value = 3_600;
+    tab.panes.push(second);
+    tab.layout = Some(WorkspaceLayoutState {
+        pane_id: 0,
+        split_axis: WorkspaceSplitAxis::Vertical as i32,
+        ratio_basis_points: 4_000,
+        first: Some(Box::new(WorkspaceLayoutState {
+            pane_id: 7,
+            split_axis: WorkspaceSplitAxis::Horizontal as i32,
+            ratio_basis_points: 10_000,
+            first: None,
+            second: None,
+        })),
+        second: Some(Box::new(WorkspaceLayoutState {
+            pane_id: 8,
+            split_axis: WorkspaceSplitAxis::Horizontal as i32,
+            ratio_basis_points: 10_000,
+            first: None,
+            second: None,
+        })),
+    });
+    workspace
+}
+
+#[test]
+fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
+    let unique = format!(
+        "axiusflow-workspace-boot-consumption-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos()
+    );
+    let directory = std::env::temp_dir().join(unique);
+    let path = directory.join("workspace-state.frame");
+    let workspace = saved_workspace_boot_fixture();
+
+    super::local_state::save_workspace_fixture(&workspace, &path).expect("workspace fixture saves");
+    let restored =
+        super::local_state::load_workspace_fixture(&path).expect("workspace fixture loads");
+    let shell_plan = super::terminal_view::restored_workspace_shell_plan(&restored);
+    let plan = super::engine_market_worker::restored_workspace_boot_plan(&restored)
+        .expect("restored workspace builds the production boot plan");
+
+    assert_eq!(shell_plan.active_workspace_id, 42);
+    assert_eq!(shell_plan.workspace_revision, 9);
+    assert_eq!(shell_plan.layout_generation, 17);
+    assert_eq!(shell_plan.workspace_tabs[0].active_pane_id, 8);
+    assert_eq!(
+        shell_plan.workspace_tabs[0].layout,
+        Some(WorkspaceLayoutState {
+            pane_id: 0,
+            split_axis: WorkspaceSplitAxis::Vertical as i32,
+            ratio_basis_points: 4_000,
+            first: Some(Box::new(WorkspaceLayoutState {
+                pane_id: 7,
+                split_axis: WorkspaceSplitAxis::Horizontal as i32,
+                ratio_basis_points: 10_000,
+                first: None,
+                second: None,
+            })),
+            second: Some(Box::new(WorkspaceLayoutState {
+                pane_id: 8,
+                split_axis: WorkspaceSplitAxis::Horizontal as i32,
+                ratio_basis_points: 10_000,
+                first: None,
+                second: None,
+            })),
+        })
+    );
+    assert_eq!(plan.panes.len(), 2);
+
+    let eth = &plan.panes[0];
+    assert_eq!(eth.workspace_id, 42);
+    assert_eq!(eth.pane_id, 7);
+    assert_eq!(eth.consumer_id, 17);
+    assert_eq!(eth.instrument.instrument_id, "hyperliquid:perp:ETH");
+    assert_eq!(eth.instrument.display_symbol, "ETH-PERP");
+    assert_eq!(eth.interval, ChartInterval::Minute5);
+    assert_eq!(eth.restored_viewport, Some((100, 200)));
+    assert_eq!(eth.generation, 6);
+
+    let sol = &plan.panes[1];
+    assert_eq!(sol.workspace_id, 42);
+    assert_eq!(sol.pane_id, 8);
+    assert_eq!(sol.consumer_id, 18);
+    assert_eq!(sol.instrument.instrument_id, "hyperliquid:perp:SOL");
+    assert_eq!(sol.instrument.display_symbol, "SOL-PERP");
+    assert_eq!(sol.interval, ChartInterval::Hour1);
+    assert_eq!(sol.restored_viewport, Some((300, 400)));
+    assert_eq!(sol.generation, 6);
+
+    std::fs::remove_dir_all(&directory).expect("workspace boot fixture cleanup");
 }
 
 #[test]

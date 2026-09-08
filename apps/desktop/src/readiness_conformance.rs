@@ -736,6 +736,7 @@ fn order_book_selection(
         session_generation,
         selection_generation,
         precision: InstrumentPrecision::try_new(2, 0)?,
+        price_increment: Some(25),
     })
 }
 

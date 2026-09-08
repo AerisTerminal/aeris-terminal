@@ -1,11 +1,18 @@
-use crate::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
+#[cfg(test)]
+use crate::OrderBookRow;
+use crate::order_book::{compact_quantity_text, grouped_fixed_point_text};
+use crate::{OrderBookColumnLevel, OrderBookFrame};
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
-use axiusflow_market_data::{OrderBookRecoveryReason, OrderBookState};
+use axiusflow_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
 use gpui::{
-    Context, Div, Hsla, IntoElement, Render, ScrollHandle, Task, Window, div, prelude::*, px,
-    relative,
+    AnyElement, Context, Div, Hsla, IntoElement, Render, ScrollStrategy, Task,
+    UniformListScrollHandle, Window, div, prelude::*, px, relative, uniform_list,
 };
-use std::time::{Duration, Instant};
+use std::{
+    cmp::Ordering,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 22.0;
@@ -14,21 +21,33 @@ const TEXT_SIZE: f32 = 11.0;
 // intermediate depth revisions. The previous 100 ms cadence made a healthy
 // provider appear stale at only ~10 visible updates per second.
 const PRESENTATION_INTERVAL: Duration = Duration::from_millis(16);
-const PNL_WIDTH: f32 = 0.12;
-const BOOK_WIDTH: f32 = 0.18;
-const PRICE_WIDTH: f32 = 0.22;
-const ORDERS_WIDTH: f32 = 0.14;
-const VOLUME_WIDTH: f32 = 0.16;
+/// A continuous presentation grid extends at least this many authoritative
+/// ticks above and below the spread when a provider supplied a real increment.
+/// This is UI runway only; canonical depth remains untouched and real levels
+/// farther away extend the grid as needed.
+const MINIMUM_PRICE_GRID_ROWS_PER_SIDE: usize = 4_096;
+/// Protect GPUI/f32 layout precision from pathological sparse books. Crossing
+/// this limit falls back to the all-real-level virtual ladder, so no depth is
+/// hidden or truncated.
+// 524,288 rows * 22 px ~= 11.5M px, comfortably below f32's 2^24
+// integer-exact boundary. Wider sparse spans fall back to the real-level list.
+const MAXIMUM_PRICE_GRID_ROWS: usize = 524_288;
+const PNL_WIDTH: f32 = 0.10;
+const BOOK_WIDTH: f32 = 0.30;
+const TRADE_WIDTH: f32 = 0.10;
+const PRICE_WIDTH: f32 = 0.20;
+const ORDERS_WIDTH: f32 = 0.10;
 
 /// Columns available in the read-only order-book ladder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderBookColumn {
     ProfitLoss,
     Bid,
+    SellTrades,
     Price,
+    BuyTrades,
     Ask,
     Orders,
-    Volume,
 }
 
 /// Provider connectivity shown independently from the last valid book frame.
@@ -40,13 +59,14 @@ pub enum OrderBookConnectionState {
 }
 
 impl OrderBookColumn {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ProfitLoss,
         Self::Bid,
+        Self::SellTrades,
         Self::Price,
+        Self::BuyTrades,
         Self::Ask,
         Self::Orders,
-        Self::Volume,
     ];
 
     #[must_use]
@@ -54,10 +74,11 @@ impl OrderBookColumn {
         match self {
             Self::ProfitLoss => "P/L",
             Self::Bid => "Bid",
+            Self::SellTrades => "Sell",
             Self::Price => "Price",
+            Self::BuyTrades => "Buy",
             Self::Ask => "Ask",
             Self::Orders => "Orders",
-            Self::Volume => "Traded",
         }
     }
 
@@ -65,9 +86,9 @@ impl OrderBookColumn {
         match self {
             Self::ProfitLoss => PNL_WIDTH,
             Self::Bid | Self::Ask => BOOK_WIDTH,
+            Self::SellTrades | Self::BuyTrades => TRADE_WIDTH,
             Self::Price => PRICE_WIDTH,
             Self::Orders => ORDERS_WIDTH,
-            Self::Volume => VOLUME_WIDTH,
         }
     }
 
@@ -75,10 +96,11 @@ impl OrderBookColumn {
         match self {
             Self::ProfitLoss => 1 << 0,
             Self::Bid => 1 << 1,
-            Self::Price => 1 << 2,
-            Self::Ask => 1 << 3,
-            Self::Orders => 1 << 4,
-            Self::Volume => 1 << 5,
+            Self::SellTrades => 1 << 2,
+            Self::Price => 1 << 3,
+            Self::BuyTrades => 1 << 4,
+            Self::Ask => 1 << 5,
+            Self::Orders => 1 << 6,
         }
     }
 
@@ -99,10 +121,10 @@ impl Default for OrderBookColumnVisibility {
     fn default() -> Self {
         Self {
             visible: OrderBookColumn::Bid.bit()
+                | OrderBookColumn::SellTrades.bit()
                 | OrderBookColumn::Price.bit()
-                | OrderBookColumn::Ask.bit()
-                | OrderBookColumn::Orders.bit()
-                | OrderBookColumn::Volume.bit(),
+                | OrderBookColumn::BuyTrades.bit()
+                | OrderBookColumn::Ask.bit(),
         }
     }
 }
@@ -137,14 +159,14 @@ impl OrderBookColumnVisibility {
 
 /// Flush, square-edged GPUI view for one immutable read-only Order Book frame.
 pub struct ReadOnlyOrderBookView {
-    frame: Option<OrderBookFrame>,
-    pending_frame: Option<OrderBookFrame>,
+    frame: Option<Arc<OrderBookFrame>>,
+    pending_frame: Option<Arc<OrderBookFrame>>,
     unavailable: bool,
     connection_state: OrderBookConnectionState,
     last_presented: Option<Instant>,
     presentation_task: Option<Task<()>>,
     theme: AxiusflowTheme,
-    ask_scroll: ScrollHandle,
+    ladder_scroll: UniformListScrollHandle,
     columns: OrderBookColumnVisibility,
 }
 
@@ -159,14 +181,14 @@ impl ReadOnlyOrderBookView {
             last_presented: None,
             presentation_task: None,
             theme,
-            ask_scroll: ScrollHandle::new(),
+            ladder_scroll: UniformListScrollHandle::new(),
             columns: OrderBookColumnVisibility::default(),
         }
     }
 
     #[must_use]
-    pub const fn frame(&self) -> Option<&OrderBookFrame> {
-        self.frame.as_ref()
+    pub fn frame(&self) -> Option<&OrderBookFrame> {
+        self.frame.as_deref()
     }
 
     #[must_use]
@@ -182,12 +204,13 @@ impl ReadOnlyOrderBookView {
 
     /// Replaces the immutable frame. Older sessions, selections, and revisions are rejected.
     pub fn replace_frame(&mut self, frame: OrderBookFrame, cx: &mut Context<Self>) -> bool {
-        let newest = self.pending_frame.as_ref().or(self.frame.as_ref());
-        if newest.is_some_and(|current| frame_precedes(&frame, current)) {
+        let frame = Arc::new(frame);
+        let newest = self.pending_frame.as_deref().or(self.frame.as_deref());
+        if newest.is_some_and(|current| frame_precedes(frame.as_ref(), current)) {
             return false;
         }
 
-        if requires_immediate_presentation(self.frame.as_ref(), &frame) {
+        if requires_immediate_presentation(self.frame.as_deref(), frame.as_ref()) {
             self.pending_frame = None;
             self.presentation_task = None;
             self.install_frame(frame, cx);
@@ -246,17 +269,16 @@ impl ReadOnlyOrderBookView {
         }
     }
 
-    fn install_frame(&mut self, frame: OrderBookFrame, cx: &mut Context<Self>) {
-        let recenter = self.frame.as_ref().is_none_or(|current| {
-            frame.selection_generation != current.selection_generation
-                || frame.session_generation != current.session_generation
-                || (current.rows.is_empty() && !frame.rows.is_empty())
-        });
+    fn install_frame(&mut self, frame: Arc<OrderBookFrame>, cx: &mut Context<Self>) {
+        let recenter = should_recenter_ladder(self.frame.as_deref(), frame.as_ref());
+        let recenter_index = recenter.then(|| ladder_recenter_index(frame.as_ref()));
         self.frame = Some(frame);
         self.unavailable = false;
         self.last_presented = Some(Instant::now());
-        if recenter {
-            self.ask_scroll.scroll_to_bottom();
+        if let Some(Some(index)) = recenter_index {
+            self.ladder_scroll = UniformListScrollHandle::new();
+            self.ladder_scroll
+                .scroll_to_item_strict(index, ScrollStrategy::Center);
         }
         cx.notify();
     }
@@ -280,12 +302,23 @@ impl ReadOnlyOrderBookView {
     }
 }
 
+fn should_recenter_ladder(current: Option<&OrderBookFrame>, next: &OrderBookFrame) -> bool {
+    current.is_none_or(|current| {
+        next.selection_generation != current.selection_generation
+            || next.session_generation != current.session_generation
+            || (ladder_recenter_index(current).is_none() && ladder_recenter_index(next).is_some())
+    })
+}
+
 fn frame_precedes(candidate: &OrderBookFrame, current: &OrderBookFrame) -> bool {
     candidate.session_generation < current.session_generation
         || (candidate.session_generation == current.session_generation
             && (candidate.selection_generation < current.selection_generation
                 || (candidate.selection_generation == current.selection_generation
-                    && candidate.revision < current.revision)))
+                    && (candidate.revision < current.revision
+                        || (candidate.revision == current.revision
+                            && candidate.trade_source_watermark
+                                < current.trade_source_watermark)))))
 }
 
 fn requires_immediate_presentation(
@@ -303,25 +336,14 @@ fn requires_immediate_presentation(
 impl Render for ReadOnlyOrderBookView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
-        let state = self.frame.as_ref().map(|frame| frame.state);
-        let rows = self
-            .frame
-            .as_ref()
-            .map_or(&[][..], |frame| frame.rows.as_slice());
+        let state = self.frame.as_deref().map(|frame| frame.state);
         let watermark = self
             .frame
-            .as_ref()
+            .as_deref()
             .map_or(0, |frame| frame.source_watermark);
-        let best_bid = self
-            .frame
-            .as_ref()
-            .and_then(|frame| frame.best_bid.as_ref());
-        let best_ask = self
-            .frame
-            .as_ref()
-            .and_then(|frame| frame.best_ask.as_ref());
         let empty_copy = empty_book_copy(self.unavailable, self.frame.is_some());
-        let ask_scroll = self.ask_scroll.clone();
+        let frame = self.frame.clone();
+        let ladder_scroll = self.ladder_scroll.clone();
         let columns = self.columns;
 
         div()
@@ -355,13 +377,11 @@ impl Render for ReadOnlyOrderBookView {
                             .flatten(),
                     )
                     .child(render_ladder(
-                        rows,
-                        best_bid,
-                        best_ask,
+                        frame,
                         empty_copy,
                         columns,
                         &self.theme,
-                        &ask_scroll,
+                        &ladder_scroll,
                     )),
             )
     }
@@ -448,13 +468,11 @@ const fn empty_book_copy(unavailable: bool, has_frame: bool) -> &'static str {
 }
 
 fn render_ladder(
-    rows: &[OrderBookRow],
-    best_bid: Option<&OrderBookColumnLevel>,
-    best_ask: Option<&OrderBookColumnLevel>,
+    frame: Option<Arc<OrderBookFrame>>,
     empty_copy: &'static str,
     columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
-    ask_scroll: &ScrollHandle,
+    ladder_scroll: &UniformListScrollHandle,
 ) -> impl IntoElement + use<> {
     let body = div()
         .id("read_only_order_book_rows")
@@ -463,8 +481,8 @@ fn render_ladder(
         .flex_1()
         .min_h_0()
         .overflow_hidden();
-    if rows.is_empty() {
-        return body.children(spread_row(best_bid, best_ask, theme)).child(
+    let Some(frame) = frame else {
+        return body.child(
             div()
                 .flex_1()
                 .flex()
@@ -474,49 +492,544 @@ fn render_ladder(
                 .text_color(gpui_color(theme.colors.text_secondary))
                 .child(empty_copy),
         );
+    };
+    if frame.rows.is_empty() && price_grid_layout(frame.as_ref()).is_none() {
+        return body
+            .children(spread_row(
+                frame.best_bid.as_ref(),
+                frame.best_ask.as_ref(),
+                theme,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(gpui_color(theme.colors.text_secondary))
+                    .child(empty_copy),
+            );
     }
+    let list = render_virtualized_ladder_list(&frame, columns, theme, ladder_scroll);
 
     body.child(
         div()
-            .flex()
-            .flex_col()
+            .relative()
             .size_full()
             .overflow_hidden()
-            .child(
-                div()
-                    .id("read_only_order_book_asks")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .overflow_y_scroll()
-                    .track_scroll(ask_scroll)
-                    .children(rows.iter().rev().filter_map(|row| {
-                        row.ask.as_ref().map(|level| {
-                            render_level_row(level, BookColumnSide::Ask, columns, theme)
-                        })
-                    }))
-                    .children(column_rails(columns, theme)),
-            )
-            .children(spread_row(best_bid, best_ask, theme))
-            .child(
-                div()
-                    .id("read_only_order_book_bids")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .overflow_y_scroll()
-                    .children(rows.iter().filter_map(|row| {
-                        row.bid.as_ref().map(|level| {
-                            render_level_row(level, BookColumnSide::Bid, columns, theme)
-                        })
-                    }))
-                    .children(column_rails(columns, theme)),
-            ),
+            .child(list)
+            .children(column_rails(columns, theme)),
     )
+}
+
+fn render_virtualized_ladder_list(
+    frame: &Arc<OrderBookFrame>,
+    columns: OrderBookColumnVisibility,
+    theme: &AxiusflowTheme,
+    ladder_scroll: &UniformListScrollHandle,
+) -> AnyElement {
+    let list_frame = Arc::clone(frame);
+    let list_theme = *theme;
+    if let Some(grid) = price_grid_layout(frame.as_ref()) {
+        return uniform_list(
+            "read_only_order_book_ladder",
+            grid.item_count(),
+            move |range, _, _| {
+                let maximum_quantity =
+                    price_grid_visible_max_quantity(list_frame.as_ref(), grid, range.clone());
+                let maximum_trade_quantity =
+                    price_grid_visible_max_trade_quantity(list_frame.as_ref(), grid, range.clone());
+                range
+                    .filter_map(|index| {
+                        render_price_grid_item(
+                            list_frame.as_ref(),
+                            grid,
+                            index,
+                            columns,
+                            &list_theme,
+                            maximum_quantity,
+                            maximum_trade_quantity,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(ladder_scroll)
+        .size_full()
+        .into_any_element();
+    }
+
+    let layout = ladder_layout(frame.as_ref());
+    uniform_list(
+        "read_only_order_book_ladder",
+        layout.item_count(),
+        move |range, _, _| {
+            let maximum_quantity =
+                ladder_visible_max_quantity(list_frame.as_ref(), layout, range.clone());
+            let maximum_trade_quantity =
+                ladder_visible_max_trade_quantity(list_frame.as_ref(), layout, range.clone());
+            range
+                .filter_map(|index| {
+                    render_ladder_item(
+                        list_frame.as_ref(),
+                        layout,
+                        index,
+                        columns,
+                        &list_theme,
+                        maximum_quantity,
+                        maximum_trade_quantity,
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .track_scroll(ladder_scroll)
+    .size_full()
+    .into_any_element()
+}
+
+fn ladder_recenter_index(frame: &OrderBookFrame) -> Option<usize> {
+    price_grid_layout(frame)
+        .map(PriceGridLayout::recenter_index)
+        .or_else(|| ladder_layout(frame).recenter_index())
+}
+
+/// Presentation-only fixed-tick layout. Prices without provider depth become
+/// blank price rows; quantities/orders are looked up only from the immutable
+/// real frame. If any real price is off the provider-declared lattice, fail
+/// closed to the existing real-level ladder instead of snapping it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PriceGridLayout {
+    best_bid: i64,
+    tick: i64,
+    ask_rows: usize,
+    bid_rows: usize,
+}
+
+impl PriceGridLayout {
+    const fn item_count(self) -> usize {
+        self.ask_rows + 1 + self.bid_rows
+    }
+
+    const fn recenter_index(self) -> usize {
+        self.ask_rows
+    }
+}
+
+fn price_grid_layout(frame: &OrderBookFrame) -> Option<PriceGridLayout> {
+    let tick = frame.price_increment.filter(|increment| *increment > 0)?;
+    let best_bid = price_grid_anchor_best_bid(frame, tick)?;
+    let ask_start = best_bid.checked_add(tick)?;
+
+    let mut bid_rows = 1usize;
+    let mut ask_rows = 1usize;
+
+    if let Some(best_ask) = frame.best_ask.as_ref().map(|level| level.price) {
+        if best_ask < ask_start || (best_ask - ask_start) % tick != 0 {
+            return None;
+        }
+        ask_rows = ask_rows.max(
+            usize::try_from((best_ask - ask_start) / tick)
+                .ok()?
+                .saturating_add(1),
+        );
+    }
+
+    for level in frame.rows.iter().filter_map(|row| row.bid.as_ref()) {
+        if level.price > best_bid {
+            return None;
+        }
+        let distance = best_bid.checked_sub(level.price)?;
+        if distance % tick != 0 {
+            return None;
+        }
+        bid_rows = bid_rows.max(usize::try_from(distance / tick).ok()?.saturating_add(1));
+    }
+    for level in frame.rows.iter().filter_map(|row| row.ask.as_ref()) {
+        if level.price < ask_start {
+            return None;
+        }
+        let distance = level.price.checked_sub(ask_start)?;
+        if distance % tick != 0 {
+            return None;
+        }
+        ask_rows = ask_rows.max(usize::try_from(distance / tick).ok()?.saturating_add(1));
+    }
+    for price in frame.traded_volumes.keys().copied() {
+        if price <= 0 {
+            return None;
+        }
+        if price <= best_bid {
+            let distance = best_bid.checked_sub(price)?;
+            if distance % tick != 0 {
+                return None;
+            }
+            bid_rows = bid_rows.max(usize::try_from(distance / tick).ok()?.saturating_add(1));
+        } else {
+            if price < ask_start {
+                return None;
+            }
+            let distance = price.checked_sub(ask_start)?;
+            if distance % tick != 0 {
+                return None;
+            }
+            ask_rows = ask_rows.max(usize::try_from(distance / tick).ok()?.saturating_add(1));
+        }
+    }
+
+    // Grid rows are presentation ticks, but their prices still obey the
+    // domain's positive-price invariant. Cap the empty runway at the natural
+    // numeric boundary so `uniform_list` never receives an index that cannot
+    // map to a concrete display price.
+    let bid_capacity = usize::try_from((best_bid - 1) / tick)
+        .ok()?
+        .saturating_add(1);
+    let ask_capacity = usize::try_from((i64::MAX - ask_start) / tick)
+        .ok()?
+        .saturating_add(1);
+    bid_rows = bid_rows
+        .max(MINIMUM_PRICE_GRID_ROWS_PER_SIDE)
+        .min(bid_capacity);
+    ask_rows = ask_rows
+        .max(MINIMUM_PRICE_GRID_ROWS_PER_SIDE)
+        .min(ask_capacity);
+    let item_count = ask_rows.checked_add(1)?.checked_add(bid_rows)?;
+    if item_count > MAXIMUM_PRICE_GRID_ROWS {
+        return None;
+    }
+    Some(PriceGridLayout {
+        best_bid,
+        tick,
+        ask_rows,
+        bid_rows,
+    })
+}
+
+/// Flowsurface keeps the ladder usable with only one depth side, and can even
+/// anchor from retained trades while a covering depth image is absent. Mirror
+/// that presentation behavior without promoting quotes/trades into canonical
+/// depth. Every generated row still uses the provider-declared increment.
+fn price_grid_anchor_best_bid(frame: &OrderBookFrame, tick: i64) -> Option<i64> {
+    if let Some(best_bid) = frame.best_bid.as_ref().map(|level| level.price) {
+        return (best_bid > 0).then_some(best_bid);
+    }
+    if let Some(best_ask) = frame.best_ask.as_ref().map(|level| level.price) {
+        return best_ask.checked_sub(tick).filter(|price| *price > 0);
+    }
+
+    let (&minimum_trade, _) = frame.traded_volumes.first_key_value()?;
+    let (&maximum_trade, _) = frame.traded_volumes.last_key_value()?;
+    let distance = maximum_trade.checked_sub(minimum_trade)?;
+    if minimum_trade <= 0 || distance % tick != 0 {
+        return None;
+    }
+    let inclusive_steps = distance.checked_div(tick)?.checked_add(1)?;
+    maximum_trade
+        .checked_sub(tick.checked_mul(inclusive_steps / 2)?)
+        .filter(|price| *price > 0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PriceGridItem {
+    Ask(i64),
+    Spread,
+    Bid(i64),
+}
+
+fn price_grid_item(layout: PriceGridLayout, index: usize) -> Option<PriceGridItem> {
+    if index >= layout.item_count() {
+        return None;
+    }
+    if index < layout.ask_rows {
+        let steps_from_ask_start = layout.ask_rows.checked_sub(index + 1)?;
+        let steps = i64::try_from(steps_from_ask_start).ok()?;
+        let price = layout
+            .best_bid
+            .checked_add(layout.tick)?
+            .checked_add(layout.tick.checked_mul(steps)?)?;
+        return Some(PriceGridItem::Ask(price));
+    }
+    if index == layout.ask_rows {
+        return Some(PriceGridItem::Spread);
+    }
+    let steps = i64::try_from(index.checked_sub(layout.ask_rows + 1)?).ok()?;
+    let price = layout
+        .best_bid
+        .checked_sub(layout.tick.checked_mul(steps)?)?;
+    Some(PriceGridItem::Bid(price))
+}
+
+fn real_level_at_price(
+    frame: &OrderBookFrame,
+    side: BookColumnSide,
+    price: i64,
+) -> Option<&OrderBookColumnLevel> {
+    let index = frame
+        .rows
+        .binary_search_by(|row| match side {
+            // Projection stores asks best-first in ascending price order; a
+            // missing tail entry sorts after every concrete price.
+            BookColumnSide::Ask => row
+                .ask
+                .as_ref()
+                .map_or(Ordering::Greater, |level| level.price.cmp(&price)),
+            // Bids are best-first in descending price order. Reverse the
+            // comparison so binary_search still observes Less..Equal..Greater.
+            BookColumnSide::Bid => row
+                .bid
+                .as_ref()
+                .map_or(Ordering::Greater, |level| price.cmp(&level.price)),
+        })
+        .ok()?;
+    match side {
+        BookColumnSide::Bid => frame.rows.get(index)?.bid.as_ref(),
+        BookColumnSide::Ask => frame.rows.get(index)?.ask.as_ref(),
+    }
+}
+
+fn render_price_grid_item(
+    frame: &OrderBookFrame,
+    layout: PriceGridLayout,
+    index: usize,
+    columns: OrderBookColumnVisibility,
+    theme: &AxiusflowTheme,
+    maximum_quantity: i64,
+    maximum_trade_quantity: i64,
+) -> Option<AnyElement> {
+    match price_grid_item(layout, index)? {
+        PriceGridItem::Ask(price) => Some(
+            real_level_at_price(frame, BookColumnSide::Ask, price).map_or_else(
+                || {
+                    render_empty_price_tick(
+                        frame,
+                        price,
+                        frame.price_scale,
+                        BookColumnSide::Ask,
+                        columns,
+                        theme,
+                        maximum_trade_quantity,
+                    )
+                    .into_any_element()
+                },
+                |level| {
+                    render_level_row(
+                        frame,
+                        level,
+                        BookColumnSide::Ask,
+                        columns,
+                        theme,
+                        maximum_quantity,
+                        maximum_trade_quantity,
+                    )
+                    .into_any_element()
+                },
+            ),
+        ),
+        PriceGridItem::Spread => Some(price_grid_center_row(frame, theme)),
+        PriceGridItem::Bid(price) => Some(
+            real_level_at_price(frame, BookColumnSide::Bid, price).map_or_else(
+                || {
+                    render_empty_price_tick(
+                        frame,
+                        price,
+                        frame.price_scale,
+                        BookColumnSide::Bid,
+                        columns,
+                        theme,
+                        maximum_trade_quantity,
+                    )
+                    .into_any_element()
+                },
+                |level| {
+                    render_level_row(
+                        frame,
+                        level,
+                        BookColumnSide::Bid,
+                        columns,
+                        theme,
+                        maximum_quantity,
+                        maximum_trade_quantity,
+                    )
+                    .into_any_element()
+                },
+            ),
+        ),
+    }
+}
+
+fn price_grid_visible_max_quantity(
+    frame: &OrderBookFrame,
+    layout: PriceGridLayout,
+    range: std::ops::Range<usize>,
+) -> i64 {
+    range
+        .filter_map(|index| match price_grid_item(layout, index)? {
+            PriceGridItem::Ask(price) => {
+                real_level_at_price(frame, BookColumnSide::Ask, price).map(|level| level.quantity)
+            }
+            PriceGridItem::Bid(price) => {
+                real_level_at_price(frame, BookColumnSide::Bid, price).map(|level| level.quantity)
+            }
+            PriceGridItem::Spread => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn price_grid_visible_max_trade_quantity(
+    frame: &OrderBookFrame,
+    layout: PriceGridLayout,
+    range: std::ops::Range<usize>,
+) -> i64 {
+    range
+        .filter_map(|index| match price_grid_item(layout, index)? {
+            PriceGridItem::Ask(price) | PriceGridItem::Bid(price) => frame
+                .traded_volumes
+                .get(&price)
+                .copied()
+                .map(AggressorTradeVolumes::maximum_side),
+            PriceGridItem::Spread => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LadderLayout {
+    ask_count: usize,
+    bid_count: usize,
+    spread: bool,
+}
+
+impl LadderLayout {
+    const fn item_count(self) -> usize {
+        self.ask_count + self.bid_count + self.spread as usize
+    }
+
+    const fn recenter_index(self) -> Option<usize> {
+        if self.spread {
+            Some(self.ask_count)
+        } else if self.ask_count > 0 {
+            Some(self.ask_count - 1)
+        } else if self.bid_count > 0 {
+            Some(0)
+        } else {
+            None
+        }
+    }
+}
+
+fn ladder_layout(frame: &OrderBookFrame) -> LadderLayout {
+    LadderLayout {
+        ask_count: frame.rows.iter().filter(|row| row.ask.is_some()).count(),
+        bid_count: frame.rows.iter().filter(|row| row.bid.is_some()).count(),
+        spread: frame.best_bid.is_some() && frame.best_ask.is_some(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LadderItemIndex {
+    Ask(usize),
+    Spread,
+    Bid(usize),
+}
+
+fn ladder_item_index(layout: LadderLayout, index: usize) -> Option<LadderItemIndex> {
+    if index < layout.ask_count {
+        return Some(LadderItemIndex::Ask(layout.ask_count - index - 1));
+    }
+    let after_asks = index - layout.ask_count;
+    if layout.spread {
+        if after_asks == 0 {
+            return Some(LadderItemIndex::Spread);
+        }
+        let bid_index = after_asks - 1;
+        return if bid_index < layout.bid_count {
+            Some(LadderItemIndex::Bid(bid_index))
+        } else {
+            None
+        };
+    }
+    if after_asks < layout.bid_count {
+        Some(LadderItemIndex::Bid(after_asks))
+    } else {
+        None
+    }
+}
+
+fn render_ladder_item(
+    frame: &OrderBookFrame,
+    layout: LadderLayout,
+    index: usize,
+    columns: OrderBookColumnVisibility,
+    theme: &AxiusflowTheme,
+    maximum_quantity: i64,
+    maximum_trade_quantity: i64,
+) -> Option<AnyElement> {
+    match ladder_item_index(layout, index)? {
+        LadderItemIndex::Ask(row_index) => frame.rows.get(row_index)?.ask.as_ref().map(|level| {
+            render_level_row(
+                frame,
+                level,
+                BookColumnSide::Ask,
+                columns,
+                theme,
+                maximum_quantity,
+                maximum_trade_quantity,
+            )
+            .into_any_element()
+        }),
+        LadderItemIndex::Spread => {
+            spread_row(frame.best_bid.as_ref(), frame.best_ask.as_ref(), theme)
+                .map(gpui::IntoElement::into_any_element)
+        }
+        LadderItemIndex::Bid(row_index) => frame.rows.get(row_index)?.bid.as_ref().map(|level| {
+            render_level_row(
+                frame,
+                level,
+                BookColumnSide::Bid,
+                columns,
+                theme,
+                maximum_quantity,
+                maximum_trade_quantity,
+            )
+            .into_any_element()
+        }),
+    }
+}
+
+fn ladder_visible_max_quantity(
+    frame: &OrderBookFrame,
+    layout: LadderLayout,
+    range: std::ops::Range<usize>,
+) -> i64 {
+    range
+        .filter_map(|index| match ladder_item_index(layout, index)? {
+            LadderItemIndex::Ask(row_index) => frame.rows.get(row_index)?.ask.as_ref(),
+            LadderItemIndex::Bid(row_index) => frame.rows.get(row_index)?.bid.as_ref(),
+            LadderItemIndex::Spread => None,
+        })
+        .map(|level| level.quantity)
+        .max()
+        .unwrap_or(0)
+}
+
+fn ladder_visible_max_trade_quantity(
+    frame: &OrderBookFrame,
+    layout: LadderLayout,
+    range: std::ops::Range<usize>,
+) -> i64 {
+    range
+        .filter_map(|index| match ladder_item_index(layout, index)? {
+            LadderItemIndex::Ask(row_index) => frame.rows.get(row_index)?.ask.as_ref(),
+            LadderItemIndex::Bid(row_index) => frame.rows.get(row_index)?.bid.as_ref(),
+            LadderItemIndex::Spread => None,
+        })
+        .filter_map(|level| frame.traded_volumes.get(&level.price).copied())
+        .map(AggressorTradeVolumes::maximum_side)
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -532,16 +1045,44 @@ enum CellAlignment {
     Right,
 }
 
+#[derive(Clone, Copy)]
+struct LevelCellContext<'a> {
+    columns: OrderBookColumnVisibility,
+    price_color: ThemeColor,
+    theme: &'a AxiusflowTheme,
+    maximum_quantity: i64,
+    maximum_trade_quantity: i64,
+    trade_volumes: AggressorTradeVolumes,
+    quantity_scale: u8,
+}
+
 fn render_level_row(
+    frame: &OrderBookFrame,
     level: &OrderBookColumnLevel,
     side: BookColumnSide,
     columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
+    maximum_quantity: i64,
+    maximum_trade_quantity: i64,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let (price_color, row_id) = match side {
         BookColumnSide::Bid => (colors.bullish, "order_book_bid_row"),
         BookColumnSide::Ask => (colors.bearish, "order_book_ask_row"),
+    };
+    let trade_volumes = frame
+        .traded_volumes
+        .get(&level.price)
+        .copied()
+        .unwrap_or_default();
+    let context = LevelCellContext {
+        columns,
+        price_color,
+        theme,
+        maximum_quantity,
+        maximum_trade_quantity,
+        trade_volumes,
+        quantity_scale: frame.quantity_scale,
     };
     div()
         .id((row_id, u64::try_from(level.price).unwrap_or(0)))
@@ -558,56 +1099,154 @@ fn render_level_row(
             OrderBookColumn::ALL
                 .into_iter()
                 .filter(|column| columns.is_visible(*column))
-                .map(|column| render_level_cell(column, level, side, columns, price_color, theme)),
+                .map(|column| render_level_cell(column, level, side, context)),
         )
+}
+
+/// A price-grid tick with no corresponding provider depth. Resting quantity and
+/// order-count stay blank, while real aggressor trades at this exact tick remain
+/// visible. This is presentation geometry, never a zero-quantity level inserted
+/// into the canonical book.
+fn render_empty_price_tick(
+    frame: &OrderBookFrame,
+    price: i64,
+    price_scale: u8,
+    side: BookColumnSide,
+    columns: OrderBookColumnVisibility,
+    theme: &AxiusflowTheme,
+    maximum_trade_quantity: i64,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let (price_color, row_id) = match side {
+        BookColumnSide::Bid => (colors.bullish, "order_book_bid_price_tick"),
+        BookColumnSide::Ask => (colors.bearish, "order_book_ask_price_tick"),
+    };
+    let trade_volumes = frame
+        .traded_volumes
+        .get(&price)
+        .copied()
+        .unwrap_or_default();
+    let quantity_scale = frame.quantity_scale;
+    div()
+        .id((row_id, u64::try_from(price).unwrap_or(0)))
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .text_size(px(TEXT_SIZE))
+        .children(
+            OrderBookColumn::ALL
+                .into_iter()
+                .filter(|column| columns.is_visible(*column))
+                .map(|column| {
+                    let width = columns.width(column);
+                    match column {
+                        OrderBookColumn::Price => table_cell(width)
+                            .px_1()
+                            .text_center()
+                            .text_color(gpui_color(price_color))
+                            .child(grouped_fixed_point_text(price, price_scale))
+                            .into_any_element(),
+                        OrderBookColumn::SellTrades => trade_volume_cell(
+                            width,
+                            trade_volumes.sell,
+                            quantity_scale,
+                            theme.colors.bearish,
+                            true,
+                            maximum_trade_quantity,
+                        )
+                        .into_any_element(),
+                        OrderBookColumn::BuyTrades => trade_volume_cell(
+                            width,
+                            trade_volumes.buy,
+                            quantity_scale,
+                            theme.colors.bullish,
+                            false,
+                            maximum_trade_quantity,
+                        )
+                        .into_any_element(),
+                        _ => table_cell(width).into_any_element(),
+                    }
+                }),
+        )
+}
+
+fn price_grid_center_row(frame: &OrderBookFrame, theme: &AxiusflowTheme) -> AnyElement {
+    if let Some(row) = spread_row(frame.best_bid.as_ref(), frame.best_ask.as_ref(), theme) {
+        return row.into_any_element();
+    }
+    div()
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .flex_none()
+        .border_b_1()
+        .border_color(gpui_color(theme.colors.border))
+        .bg(gpui_color(theme.colors.surface_secondary))
+        .into_any_element()
 }
 
 fn render_level_cell(
     column: OrderBookColumn,
     level: &OrderBookColumnLevel,
     side: BookColumnSide,
-    columns: OrderBookColumnVisibility,
-    price_color: ThemeColor,
-    theme: &AxiusflowTheme,
+    context: LevelCellContext<'_>,
 ) -> gpui::AnyElement {
-    let width = columns.width(column);
+    let width = context.columns.width(column);
     match column {
         OrderBookColumn::ProfitLoss => table_cell(width).into_any_element(),
         OrderBookColumn::Bid => quantity_cell(
             width,
             (side == BookColumnSide::Bid).then_some(level),
-            theme.colors.bullish,
+            context.theme.colors.bullish,
             true,
+            context.maximum_quantity,
+        )
+        .into_any_element(),
+        OrderBookColumn::SellTrades => trade_volume_cell(
+            width,
+            context.trade_volumes.sell,
+            context.quantity_scale,
+            context.theme.colors.bearish,
+            true,
+            context.maximum_trade_quantity,
         )
         .into_any_element(),
         OrderBookColumn::Price => table_cell(width)
             .px_1()
             .text_center()
-            .text_color(gpui_color(price_color))
+            .text_color(gpui_color(context.price_color))
             .child(level.price_text.clone())
             .into_any_element(),
+        OrderBookColumn::BuyTrades => trade_volume_cell(
+            width,
+            context.trade_volumes.buy,
+            context.quantity_scale,
+            context.theme.colors.bullish,
+            false,
+            context.maximum_trade_quantity,
+        )
+        .into_any_element(),
         OrderBookColumn::Ask => quantity_cell(
             width,
             (side == BookColumnSide::Ask).then_some(level),
-            theme.colors.bearish,
+            context.theme.colors.bearish,
             false,
+            context.maximum_quantity,
         )
         .into_any_element(),
         OrderBookColumn::Orders => table_cell(width)
             .px_1()
             .text_right()
-            .text_color(gpui_color(theme.colors.text_secondary))
+            .text_color(gpui_color(context.theme.colors.text_secondary))
             .child(
                 level
                     .order_count
                     .map_or_else(String::new, |count| count.to_string()),
             )
-            .into_any_element(),
-        OrderBookColumn::Volume => table_cell(width)
-            .px_1()
-            .text_right()
-            .text_color(gpui_color(theme.colors.text_secondary))
-            .child(level.traded_volume_text.clone())
             .into_any_element(),
     }
 }
@@ -636,13 +1275,47 @@ fn header_cell(width: f32, label: String, alignment: CellAlignment) -> impl Into
 
 const fn column_alignment(column: OrderBookColumn) -> CellAlignment {
     match column {
-        OrderBookColumn::Ask => CellAlignment::Left,
+        OrderBookColumn::Ask | OrderBookColumn::BuyTrades => CellAlignment::Left,
         OrderBookColumn::Price => CellAlignment::Center,
         OrderBookColumn::ProfitLoss
         | OrderBookColumn::Bid
         | OrderBookColumn::Orders
-        | OrderBookColumn::Volume => CellAlignment::Right,
+        | OrderBookColumn::SellTrades => CellAlignment::Right,
     }
+}
+
+fn trade_volume_cell(
+    column_width: f32,
+    quantity: i64,
+    quantity_scale: u8,
+    color: ThemeColor,
+    align_right: bool,
+    maximum_trade_quantity: i64,
+) -> impl IntoElement + use<> {
+    let width = visible_quantity_width(quantity, maximum_trade_quantity);
+    let bar = div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .w(relative(width))
+        .bg(gpui_color(color.with_alpha(0.3)));
+    let text = if quantity > 0 {
+        compact_quantity_text(quantity, quantity_scale)
+    } else {
+        String::new()
+    };
+    let cell = table_cell(column_width)
+        .relative()
+        .px_1()
+        .children((quantity > 0).then(|| {
+            if align_right {
+                bar.right_0().into_any_element()
+            } else {
+                bar.left_0().into_any_element()
+            }
+        }))
+        .child(div().relative().w_full().truncate().child(text));
+    if align_right { cell.text_right() } else { cell }
 }
 
 fn quantity_cell(
@@ -650,8 +1323,11 @@ fn quantity_cell(
     level: Option<&OrderBookColumnLevel>,
     color: ThemeColor,
     align_right: bool,
+    maximum_quantity: i64,
 ) -> impl IntoElement + use<> {
-    let width = level.map_or(0.0, |level| f32::from(level.relative_size_bps) / 10_000.0);
+    let width = level.map_or(0.0, |level| {
+        visible_quantity_width(level.quantity, maximum_quantity)
+    });
     let bar = div()
         .absolute()
         .top_0()
@@ -676,6 +1352,21 @@ fn quantity_cell(
                 .child(level.map_or_else(String::new, |level| level.quantity_text.clone())),
         );
     if align_right { cell.text_right() } else { cell }
+}
+
+fn visible_quantity_width(quantity: i64, maximum_quantity: i64) -> f32 {
+    if quantity <= 0 || maximum_quantity <= 0 {
+        return 0.0;
+    }
+    let quantity = u128::try_from(quantity).unwrap_or_default();
+    let maximum = u128::try_from(maximum_quantity).unwrap_or(1);
+    let basis_points = quantity
+        .saturating_mul(10_000)
+        .checked_div(maximum)
+        .unwrap_or_default()
+        .min(10_000);
+    let basis_points = u16::try_from(basis_points).unwrap_or(10_000);
+    f32::from(basis_points) / 10_000.0
 }
 
 fn column_rails(
@@ -715,7 +1406,7 @@ fn spread_row(
     Some(
         div()
             .w_full()
-            .h(px(HEADER_HEIGHT))
+            .h(px(ROW_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
@@ -811,8 +1502,13 @@ mod tests {
             source_watermark: revision,
             bbo_source_watermark: revision,
             state,
+            price_scale: 2,
+            quantity_scale: 0,
+            price_increment: None,
             best_bid: None,
             best_ask: None,
+            traded_volumes: std::collections::BTreeMap::default(),
+            trade_source_watermark: revision,
             rows: has_rows
                 .then_some(OrderBookRow {
                     bid: None,
@@ -826,8 +1522,8 @@ mod tests {
     #[test]
     fn retiring_a_book_discards_both_displayed_and_scheduled_frames() {
         let mut view = ReadOnlyOrderBookView::new(AxiusflowTheme::dark());
-        view.frame = Some(frame(1, 8, 40, OrderBookState::Ready, true));
-        view.pending_frame = Some(frame(1, 8, 41, OrderBookState::Ready, true));
+        view.frame = Some(Arc::new(frame(1, 8, 40, OrderBookState::Ready, true)));
+        view.pending_frame = Some(Arc::new(frame(1, 8, 41, OrderBookState::Ready, true)));
         view.last_presented = Some(Instant::now());
         assert!(view.discard_frames());
         assert!(view.frame.is_none());
@@ -858,8 +1554,21 @@ mod tests {
     #[test]
     fn available_columns_toggle_and_renormalize_widths() {
         let mut columns = OrderBookColumnVisibility::default();
+        assert_eq!(
+            OrderBookColumn::ALL
+                .into_iter()
+                .filter(|column| columns.is_visible(*column))
+                .collect::<Vec<_>>(),
+            vec![
+                OrderBookColumn::Bid,
+                OrderBookColumn::SellTrades,
+                OrderBookColumn::Price,
+                OrderBookColumn::BuyTrades,
+                OrderBookColumn::Ask,
+            ]
+        );
         assert!(columns.toggle(OrderBookColumn::Orders));
-        assert!(!columns.is_visible(OrderBookColumn::Orders));
+        assert!(columns.is_visible(OrderBookColumn::Orders));
         let width = OrderBookColumn::ALL
             .into_iter()
             .filter(|column| columns.is_visible(*column))
@@ -986,5 +1695,291 @@ mod tests {
             &frame(9, 3, 99, OrderBookState::Ready, true),
             &current
         ));
+
+        let mut stale_trade_frame = current.clone();
+        stale_trade_frame.trade_source_watermark = current.trade_source_watermark.saturating_sub(1);
+        assert!(frame_precedes(&stale_trade_frame, &current));
+    }
+
+    #[test]
+    fn trade_only_grid_keeps_scroll_position_when_depth_arrives() {
+        let mut trade_only = price_grid_frame();
+        trade_only.best_bid = None;
+        trade_only.best_ask = None;
+        trade_only.rows.clear();
+        assert!(ladder_recenter_index(&trade_only).is_some());
+
+        let depth = price_grid_frame();
+        assert!(!should_recenter_ladder(Some(&trade_only), &depth));
+        assert!(should_recenter_ladder(None, &depth));
+
+        let mut replacement = depth.clone();
+        replacement.selection_generation += 1;
+        assert!(should_recenter_ladder(Some(&depth), &replacement));
+    }
+
+    #[test]
+    fn deep_ladder_indexes_every_real_level_once_around_the_spread() {
+        let layout = LadderLayout {
+            ask_count: 4_096,
+            bid_count: 4_096,
+            spread: true,
+        };
+        assert_eq!(layout.item_count(), 8_193);
+        assert_eq!(layout.recenter_index(), Some(4_096));
+        assert_eq!(
+            ladder_item_index(layout, 0),
+            Some(LadderItemIndex::Ask(4_095))
+        );
+        assert_eq!(
+            ladder_item_index(layout, 4_095),
+            Some(LadderItemIndex::Ask(0))
+        );
+        assert_eq!(
+            ladder_item_index(layout, 4_096),
+            Some(LadderItemIndex::Spread)
+        );
+        assert_eq!(
+            ladder_item_index(layout, 4_097),
+            Some(LadderItemIndex::Bid(0))
+        );
+        assert_eq!(
+            ladder_item_index(layout, 8_192),
+            Some(LadderItemIndex::Bid(4_095))
+        );
+        assert_eq!(ladder_item_index(layout, 8_193), None);
+    }
+
+    #[test]
+    fn one_sided_ladder_recenters_on_the_best_real_level_without_inventing_rows() {
+        let asks = LadderLayout {
+            ask_count: 5,
+            bid_count: 0,
+            spread: false,
+        };
+        assert_eq!(asks.item_count(), 5);
+        assert_eq!(asks.recenter_index(), Some(4));
+        assert_eq!(ladder_item_index(asks, 4), Some(LadderItemIndex::Ask(0)));
+
+        let bids = LadderLayout {
+            ask_count: 0,
+            bid_count: 5,
+            spread: false,
+        };
+        assert_eq!(bids.item_count(), 5);
+        assert_eq!(bids.recenter_index(), Some(0));
+        assert_eq!(ladder_item_index(bids, 4), Some(LadderItemIndex::Bid(4)));
+    }
+
+    fn grid_level(price: i64, quantity: i64) -> OrderBookColumnLevel {
+        OrderBookColumnLevel {
+            price,
+            quantity,
+            order_count: Some(1),
+            price_text: grouped_fixed_point_text(price, 2),
+            quantity_text: quantity.to_string(),
+            traded_volume: 0,
+            traded_volume_text: String::new(),
+            relative_size_bps: 10_000,
+        }
+    }
+
+    fn price_grid_frame() -> OrderBookFrame {
+        OrderBookFrame {
+            provider_id: "rithmic".into(),
+            instrument_id: "MNQ".into(),
+            entitlement_id: "test".into(),
+            session_generation: 1,
+            selection_generation: 1,
+            revision: 1,
+            source_watermark: 1,
+            bbo_source_watermark: 1,
+            state: OrderBookState::Ready,
+            price_scale: 2,
+            quantity_scale: 0,
+            price_increment: Some(25),
+            best_bid: Some(grid_level(20_000, 5)),
+            best_ask: Some(grid_level(20_100, 7)),
+            traded_volumes: std::collections::BTreeMap::from([(
+                20_025,
+                AggressorTradeVolumes { buy: 8, sell: 3 },
+            )]),
+            trade_source_watermark: 2,
+            rows: vec![
+                OrderBookRow {
+                    bid: Some(grid_level(20_000, 5)),
+                    ask: Some(grid_level(20_100, 7)),
+                },
+                OrderBookRow {
+                    bid: Some(grid_level(19_950, 3)),
+                    ask: Some(grid_level(20_150, 2)),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn authoritative_tick_builds_blank_price_rows_without_synthesizing_depth() {
+        let frame = price_grid_frame();
+        let grid = price_grid_layout(&frame).expect("Rithmic tick builds grid");
+        assert_eq!(grid.recenter_index(), MINIMUM_PRICE_GRID_ROWS_PER_SIDE);
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index()),
+            Some(PriceGridItem::Spread)
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() - 1),
+            Some(PriceGridItem::Ask(20_025))
+        );
+        assert!(real_level_at_price(&frame, BookColumnSide::Ask, 20_025).is_none());
+        assert_eq!(
+            frame.traded_volumes.get(&20_025).copied(),
+            Some(AggressorTradeVolumes { buy: 8, sell: 3 })
+        );
+        assert_eq!(
+            price_grid_visible_max_trade_quantity(
+                &frame,
+                grid,
+                (grid.recenter_index() - 1)..grid.recenter_index()
+            ),
+            8
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() - 4),
+            Some(PriceGridItem::Ask(20_100))
+        );
+        assert_eq!(
+            real_level_at_price(&frame, BookColumnSide::Ask, 20_100).map(|level| level.quantity),
+            Some(7)
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() + 1),
+            Some(PriceGridItem::Bid(20_000))
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() + 3),
+            Some(PriceGridItem::Bid(19_950))
+        );
+    }
+
+    #[test]
+    fn authoritative_grid_survives_one_sided_depth_and_trade_only_recovery() {
+        let mut ask_only = price_grid_frame();
+        ask_only.best_bid = None;
+        for row in &mut ask_only.rows {
+            row.bid = None;
+        }
+        let grid = price_grid_layout(&ask_only).expect("ask-only depth keeps the provider grid");
+        let center = grid.recenter_index();
+        assert_eq!(price_grid_item(grid, center), Some(PriceGridItem::Spread));
+        assert_eq!(
+            price_grid_item(grid, center - 1),
+            Some(PriceGridItem::Ask(20_100))
+        );
+        assert_eq!(
+            price_grid_item(grid, center + 1),
+            Some(PriceGridItem::Bid(20_075))
+        );
+        assert!(real_level_at_price(&ask_only, BookColumnSide::Bid, 20_075).is_none());
+
+        let mut trade_only = price_grid_frame();
+        trade_only.best_bid = None;
+        trade_only.best_ask = None;
+        trade_only.rows.clear();
+        trade_only.traded_volumes = std::collections::BTreeMap::from([
+            (20_025, AggressorTradeVolumes { buy: 0, sell: 5 }),
+            (20_075, AggressorTradeVolumes { buy: 8, sell: 0 }),
+        ]);
+        let grid =
+            price_grid_layout(&trade_only).expect("retained trades anchor the provider grid");
+        let center = grid.recenter_index();
+        assert_eq!(
+            price_grid_item(grid, center - 1),
+            Some(PriceGridItem::Ask(20_075))
+        );
+        assert_eq!(
+            price_grid_item(grid, center + 2),
+            Some(PriceGridItem::Bid(20_025))
+        );
+        assert_eq!(
+            price_grid_visible_max_trade_quantity(&trade_only, grid, center - 1..center + 3),
+            8
+        );
+        assert!(real_level_at_price(&trade_only, BookColumnSide::Ask, 20_075).is_none());
+        assert!(real_level_at_price(&trade_only, BookColumnSide::Bid, 20_025).is_none());
+        assert_eq!(
+            trade_only.traded_volumes.get(&20_075).copied(),
+            Some(AggressorTradeVolumes { buy: 8, sell: 0 })
+        );
+        assert_eq!(
+            trade_only.traded_volumes.get(&20_025).copied(),
+            Some(AggressorTradeVolumes { buy: 0, sell: 5 })
+        );
+    }
+
+    #[test]
+    fn missing_or_inconsistent_tick_metadata_falls_back_to_real_levels() {
+        let mut frame = price_grid_frame();
+        frame.price_increment = None;
+        assert!(price_grid_layout(&frame).is_none());
+
+        frame.price_increment = Some(25);
+        frame.rows[1].bid.as_mut().expect("bid").price = 19_949;
+        assert!(price_grid_layout(&frame).is_none());
+        assert_eq!(
+            ladder_layout(&frame).item_count(),
+            frame.rows.iter().filter(|row| row.ask.is_some()).count()
+                + frame.rows.iter().filter(|row| row.bid.is_some()).count()
+                + 1
+        );
+    }
+
+    #[test]
+    fn sparse_real_level_lookup_handles_descending_bids_and_ascending_asks() {
+        let mut frame = price_grid_frame();
+        frame.rows[1].ask.as_mut().expect("ask").quantity = 99;
+        assert_eq!(
+            real_level_at_price(&frame, BookColumnSide::Bid, 19_950).map(|level| level.quantity),
+            Some(3)
+        );
+        assert_eq!(
+            real_level_at_price(&frame, BookColumnSide::Ask, 20_150).map(|level| level.quantity),
+            Some(99)
+        );
+        assert!(real_level_at_price(&frame, BookColumnSide::Bid, 19_975).is_none());
+        assert!(real_level_at_price(&frame, BookColumnSide::Ask, 20_025).is_none());
+
+        let grid = price_grid_layout(&frame).expect("grid");
+        let center = grid.recenter_index();
+        // The 99-lot ask at 201.50 is one row outside this visible slice, so
+        // the visible 7-lot ask scales to full width like Flowsurface.
+        assert_eq!(
+            price_grid_visible_max_quantity(&frame, grid, center - 5..center + 2),
+            7
+        );
+        assert!((visible_quantity_width(7, 7) - 1.0).abs() < f32::EPSILON);
+        assert!((visible_quantity_width(3, 7) - (3.0 / 7.0)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn price_grid_runway_stops_at_the_positive_price_boundary() {
+        let mut frame = price_grid_frame();
+        frame.best_bid = Some(grid_level(50, 5));
+        frame.best_ask = Some(grid_level(75, 7));
+        frame.rows = vec![OrderBookRow {
+            bid: Some(grid_level(50, 5)),
+            ask: Some(grid_level(75, 7)),
+        }];
+        let grid = price_grid_layout(&frame).expect("low price still supports a grid");
+        assert_eq!(grid.bid_rows, 2);
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() + 1),
+            Some(PriceGridItem::Bid(50))
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() + 2),
+            Some(PriceGridItem::Bid(25))
+        );
+        assert_eq!(price_grid_item(grid, grid.recenter_index() + 3), None);
     }
 }

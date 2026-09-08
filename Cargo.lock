@@ -600,11 +600,11 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_account"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_account_runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_account",
  "axiusflow_engine_protocol",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_application"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_instruments",
  "axiusflow_market_data",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_chart_integration"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_application",
  "axiusflow_terminal_ui",
@@ -644,11 +644,11 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_design_system"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_account_runtime",
  "axiusflow_application",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_engine_protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_transport",
  "prost",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_hyperliquid_market_adapter"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_market_data",
  "rustls",
@@ -697,11 +697,11 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_instruments"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_local_storage"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_provider_history",
  "chacha20poly1305",
@@ -714,11 +714,11 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_market_data"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_market_engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_market_data",
  "serde_json",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_market_runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_engine_protocol",
  "axiusflow_hyperliquid_market_adapter",
@@ -742,15 +742,15 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_naming_check"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_observability"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_platform_runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.23.1",
  "display-info",
@@ -772,11 +772,11 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_provider_history"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "axiusflow_rithmic_protocol_adapter"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_local_storage",
  "axiusflow_market_data",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_terminal_ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axiusflow_design_system",
  "axiusflow_instruments",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "axiusflow_transport"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "backtrace"

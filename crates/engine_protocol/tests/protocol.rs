@@ -95,6 +95,7 @@ fn workspace_tab() -> WorkspaceTabState {
         price_scale: 2,
         quantity_scale: 8,
         entitlement_id: "rithmic-public-market-data".into(),
+        price_increment: Some(25),
     };
     let series = SeriesKey {
         provider: "rithmic".into(),

@@ -129,6 +129,7 @@ pub(crate) fn runtime_order_book_frame(
             session_generation: publication.session_generation,
             selection_generation: instrument.selection_generation,
             precision,
+            price_increment: instrument.price_increment,
         },
         publication,
     )

@@ -528,6 +528,7 @@ impl TerminalApp {
             return;
         }
         workspace.generation = workspace.generation.saturating_add(1);
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
@@ -688,6 +689,7 @@ impl TerminalApp {
             .position(|workspace| workspace.id == active_id)
             .unwrap_or(0);
         self.refresh_workspace_focus_order();
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
         true
     }
@@ -806,6 +808,7 @@ impl TerminalApp {
             self.workspaces[self.active].focus.focus(window, cx);
         }
         self.workspace_error = None;
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
@@ -875,6 +878,7 @@ impl TerminalApp {
         self.refresh_workspace_focus_order();
         self.active = self.workspaces.len() - 1;
         self.workspace_error = None;
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
@@ -971,6 +975,7 @@ impl TerminalApp {
         workspace.active_pane = insertion_index;
         workspace.generation = workspace.generation.saturating_add(1);
         self.workspace_error = None;
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
@@ -1031,6 +1036,7 @@ impl TerminalApp {
         });
         workspace.panes[recipient].focus.focus(window, cx);
         self.workspace_error = None;
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 

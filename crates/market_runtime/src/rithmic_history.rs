@@ -315,6 +315,7 @@ fn provider_instrument(
                 .map_err(|_| "Rithmic price scale is invalid".to_string())?,
             quantity_scale: u8::try_from(installed.quantity_scale)
                 .map_err(|_| "Rithmic quantity scale is invalid".to_string())?,
+            price_increment: installed.price_increment,
         },
         entitlement_id: installed.entitlement_id.clone(),
         trades: true,
@@ -549,6 +550,7 @@ mod tests {
             price_scale: 2,
             quantity_scale: 0,
             entitlement_id: series.entitlement_id,
+            price_increment: Some(25),
         }
     }
 

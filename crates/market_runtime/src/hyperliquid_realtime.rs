@@ -463,6 +463,7 @@ fn handle_catalog_select(
                 price_scale: u32::from(resolved.price_scale),
                 quantity_scale: u32::from(resolved.quantity_scale),
                 entitlement_id: HYPERLIQUID_PUBLIC_ENTITLEMENT_ID.to_string(),
+                price_increment: None,
             },
         },
         stop,

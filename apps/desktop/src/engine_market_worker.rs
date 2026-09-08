@@ -68,7 +68,9 @@ pub(crate) fn shared_market_runtime() -> Result<MarketService, String> {
 
 pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
     if depth_visible {
-        StreamRequirements::BARS.with(MarketStream::Depth)
+        StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Depth)
     } else {
         StreamRequirements::BARS
     }
@@ -167,7 +169,8 @@ const fn checked_add_one(value: u64) -> Option<u64> {
     value.checked_add(1)
 }
 
-pub(super) fn start() -> Result<
+#[cfg(test)]
+fn start() -> Result<
     (
         MarketWorkerStartup,
         MarketDataWorker,
@@ -215,34 +218,19 @@ pub(super) fn start_workspace_tabs(
     let client_id = random_order_book_identity()?;
     let mut initial = Vec::new();
     let mut endpoints = Vec::new();
-    let (maximum_workspace_id, maximum_pane_id, maximum_consumer_id) =
-        workspace_identity_high_watermarks(workspace);
-    for tab in &workspace.workspace_tabs {
-        for pane in &tab.panes {
-            if WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart) {
-                continue;
-            }
-            let instrument = pane
-                .instrument
-                .clone()
-                .ok_or_else(|| "workspace chart instrument is missing".to_string())?;
-            let interval = pane_interval(pane.series.as_ref())?;
-            let (worker, endpoint) = worker_endpoint(
-                tab.workspace_id,
-                pane.pane_id,
-                instrument,
-                pane.consumer_id,
-                interval,
-                pane.viewport_start_unix_nanos
-                    .zip(pane.viewport_end_unix_nanos),
-                pane.generation,
-            );
-            initial.push(worker);
-            endpoints.push(endpoint);
-        }
-    }
-    if initial.is_empty() {
-        return Err("persisted workspace contains no chart panes".to_string());
+    let plan = restored_workspace_boot_plan(workspace)?;
+    for pane in plan.panes {
+        let (worker, endpoint) = worker_endpoint(
+            pane.workspace_id,
+            pane.pane_id,
+            pane.instrument,
+            pane.consumer_id,
+            pane.interval,
+            pane.restored_viewport,
+            pane.generation,
+        );
+        initial.push(worker);
+        endpoints.push(endpoint);
     }
     let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
     spawn_group(client_id, endpoints, Some(addition_rx))?;
@@ -250,11 +238,75 @@ pub(super) fn start_workspace_tabs(
         initial,
         factory: WorkspaceMarketFactory {
             additions: addition_tx,
-            next_workspace_id: Arc::new(AtomicU64::new(maximum_workspace_id.saturating_add(1))),
-            next_pane_id: Arc::new(AtomicU64::new(maximum_pane_id.saturating_add(1))),
-            next_consumer_id: Arc::new(AtomicU64::new(maximum_consumer_id.saturating_add(1))),
+            next_workspace_id: Arc::new(AtomicU64::new(
+                plan.maximum_workspace_id.saturating_add(1),
+            )),
+            next_pane_id: Arc::new(AtomicU64::new(plan.maximum_pane_id.saturating_add(1))),
+            next_consumer_id: Arc::new(AtomicU64::new(plan.maximum_consumer_id.saturating_add(1))),
         },
     })
+}
+
+pub(super) struct RestoredWorkspacePaneSpec {
+    pub(super) workspace_id: u64,
+    pub(super) pane_id: u64,
+    pub(super) consumer_id: u64,
+    pub(super) instrument: InstallProviderInstrument,
+    pub(super) interval: ChartInterval,
+    pub(super) restored_viewport: Option<(i64, i64)>,
+    pub(super) generation: u64,
+}
+
+pub(super) struct RestoredWorkspaceBootPlan {
+    pub(super) panes: Vec<RestoredWorkspacePaneSpec>,
+    maximum_workspace_id: u64,
+    maximum_pane_id: u64,
+    maximum_consumer_id: u64,
+}
+
+pub(super) fn restored_workspace_boot_plan(
+    workspace: &WorkspaceState,
+) -> Result<RestoredWorkspaceBootPlan, String> {
+    let panes = restored_workspace_pane_specs(workspace)?;
+    let (maximum_workspace_id, maximum_pane_id, maximum_consumer_id) =
+        workspace_identity_high_watermarks(workspace);
+    Ok(RestoredWorkspaceBootPlan {
+        panes,
+        maximum_workspace_id,
+        maximum_pane_id,
+        maximum_consumer_id,
+    })
+}
+
+fn restored_workspace_pane_specs(
+    workspace: &WorkspaceState,
+) -> Result<Vec<RestoredWorkspacePaneSpec>, String> {
+    let mut panes = Vec::new();
+    for tab in &workspace.workspace_tabs {
+        for pane in &tab.panes {
+            if WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart) {
+                continue;
+            }
+            panes.push(RestoredWorkspacePaneSpec {
+                workspace_id: tab.workspace_id,
+                pane_id: pane.pane_id,
+                consumer_id: pane.consumer_id,
+                instrument: pane
+                    .instrument
+                    .clone()
+                    .ok_or_else(|| "workspace chart instrument is missing".to_string())?,
+                interval: pane_interval(pane.series.as_ref())?,
+                restored_viewport: pane
+                    .viewport_start_unix_nanos
+                    .zip(pane.viewport_end_unix_nanos),
+                generation: pane.generation,
+            });
+        }
+    }
+    if panes.is_empty() {
+        return Err("persisted workspace contains no chart panes".to_string());
+    }
+    Ok(panes)
 }
 
 fn workspace_identity_high_watermarks(workspace: &WorkspaceState) -> (u64, u64, u64) {
@@ -515,10 +567,12 @@ fn default_product(product_id: &str) -> InstallProviderInstrument {
         price_scale: 2,
         quantity_scale: 0,
         entitlement_id: format!("rithmic-test:CME:{product_id}"),
+        price_increment: None,
     }
 }
 
 /// Fresh-install default: Hyperliquid BTC perpetual, one-minute candles.
+#[cfg(test)]
 fn default_hyperliquid_product() -> InstallProviderInstrument {
     InstallProviderInstrument {
         provider: "hyperliquid".to_string(),
@@ -531,6 +585,7 @@ fn default_hyperliquid_product() -> InstallProviderInstrument {
         price_scale: 8,
         quantity_scale: 8,
         entitlement_id: "hyperliquid-public".to_string(),
+        price_increment: None,
     }
 }
 
@@ -622,6 +677,15 @@ mod tests {
         MarketProviderGeneration, MarketProviderInstrumentSelection,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn depth_visible_chart_explicitly_demands_real_trades() {
+        let streams = chart_streams(true);
+        assert!(streams.contains(MarketStream::Bars));
+        assert!(streams.contains(MarketStream::Depth));
+        assert!(streams.contains(MarketStream::Trades));
+        assert!(!chart_streams(false).contains(MarketStream::Trades));
+    }
 
     fn handle_rithmic_catalog_event(
         endpoint: &mut WorkerEndpoint,
@@ -2014,6 +2078,7 @@ mod tests {
                     }),
                     bbo_source_watermark: 2,
                     traded_volumes: BTreeMap::new(),
+                    trade_source_watermark: 0,
                 },
             }),
             &PushedEventContext {

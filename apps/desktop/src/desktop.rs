@@ -2106,10 +2106,15 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             std::process::exit(2);
         }
     } else {
+        // The installed desktop is a persisted workspace, not the legacy
+        // single-chart/window bootstrap. Starting through the workspace group
+        // restores pane identity, symbol, interval, viewport and layout and
+        // mounts the persistence owner used for subsequent durable changes.
         let lifecycle = configure_desktop_state();
-        let (startup, worker, factory) = engine_market_worker::start()?;
-        workspace_factory = Some(factory);
-        (vec![(startup, worker)], Vec::new(), lifecycle)
+        layout = DesktopLayout::WorkspaceTabs;
+        let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
+        workspace_factory = Some(group.factory);
+        (Vec::new(), group.initial, lifecycle)
     };
     Ok(Some(ConfiguredDesktop {
         market_workers,

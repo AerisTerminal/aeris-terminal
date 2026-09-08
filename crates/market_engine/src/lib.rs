@@ -511,6 +511,20 @@ impl MarketEngine {
         self.demands.retained_viewports(series)
     }
 
+    /// Returns the deterministic foreground viewport that owns bounded history
+    /// backfill when several visible consumers share one canonical series.
+    ///
+    /// `DemandRegistry` is keyed by `ConsumerId`, so the lowest current consumer
+    /// id wins. Other foreground consumers still consume the same immutable
+    /// canonical window but cannot force it to ping-pong between disjoint ranges.
+    #[must_use]
+    pub fn primary_retained_viewport(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Option<(ConsumerId, GenerationId, Viewport)> {
+        self.demands.primary_retained_viewport(series)
+    }
+
     /// Returns the complete bounded shared upstream subscription set.
     ///
     /// This is the authoritative provider-work view derived from consumer
@@ -660,6 +674,44 @@ impl MarketEngine {
         }
     }
 
+    /// Replaces one canonical series with a bounded historical working window.
+    ///
+    /// Unlike [`MarketEngine::replace_covering_history`], this deliberately does
+    /// not retain an existing forming tail. Runtime uses it only after declaring
+    /// the canonical window detached from live while the provider-owned live
+    /// handoff continues independently.
+    ///
+    /// # Errors
+    /// Returns an error for stale provider generation, precision, invalid bars,
+    /// publication capacity, or the configured global bar ceiling.
+    pub fn replace_history_window(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
+        bars: Vec<MarketBar>,
+        publish: bool,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::HistoricalBars)?;
+        let bars = bars.into_boxed_slice();
+        let snapshot = self.series.replace_window(
+            series,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            &bars,
+        )?;
+        if publish {
+            self.publish_snapshot(series, &snapshot)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     /// Publishes the current covering snapshot of one installed series to every
     /// matching consumer; a series without installed history publishes nothing.
     ///
@@ -794,6 +846,13 @@ impl MarketEngine {
         self.demands.current(consumer_id)
     }
 
+    /// Returns every series still referenced by a registered consumer, even if
+    /// that consumer has temporarily released its upstream subscription.
+    #[must_use]
+    pub fn demanded_series(&self) -> Vec<BarSeriesKey> {
+        self.demands.referenced_series()
+    }
+
     #[must_use]
     pub fn has_publication(&self, consumer_id: ConsumerId) -> bool {
         self.publications.contains(consumer_id)
@@ -803,6 +862,11 @@ impl MarketEngine {
     #[must_use]
     pub fn series_snapshot(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
         self.series.get(series)
+    }
+
+    #[must_use]
+    pub fn series_bar_count(&self, series: &BarSeriesKey) -> Option<usize> {
+        self.series.bar_count(series)
     }
 
     /// Returns the closest compatible finer fixed-time source for derivation.
@@ -1136,6 +1200,23 @@ mod tests {
         assert_eq!(engine.metrics().stored_bars, 0);
     }
 
+    #[test]
+    fn unbounded_bar_ceiling_is_logical_and_accounts_only_real_bars() {
+        let mut engine = engine(1, 1, usize::MAX);
+        let btc = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(3))
+            .expect("small history installs under logical unbounded ceiling");
+
+        let metrics = engine.metrics();
+        assert_eq!(metrics.stored_series, 1);
+        assert_eq!(metrics.stored_bars, 3);
+        assert_eq!(
+            metrics.approximate_series_bytes,
+            3 * std::mem::size_of::<MarketBar>()
+        );
+    }
+
     /// A covering repair invalidates the series it is about to replace. The
     /// consumer's publication generation is its ordering contract with the
     /// client, so it has to survive that: rewinding it made the repaired snapshot
@@ -1196,6 +1277,44 @@ mod tests {
         assert_eq!(engine.metrics().stored_bars, 4);
         assert!(engine.invalidate_series(&retained));
         assert!(engine.invalidate_series(&active));
+    }
+
+    #[test]
+    fn demand_references_protect_background_history_but_not_replaced_symbols() {
+        let mut engine = engine(1, 2, 4);
+        let first = series("rithmic:spot:BTC-USD");
+        let second = series("rithmic:spot:ETH-USD");
+        engine
+            .install_history(provider_generation(1), &first, 2, 8, bars(2))
+            .expect("history installs");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand(id(1), generation(1), &first)
+            .expect("first demand installs");
+        engine
+            .set_resource_class(id(1), ConsumerResourceClass::Background)
+            .expect("consumer backgrounds");
+        assert!(!engine.has_subscription(&first));
+
+        let protected = engine.demanded_series();
+        assert_eq!(protected, vec![first.clone()]);
+        assert!(
+            engine
+                .evict_unsubscribed_series(0, 0, &protected)
+                .is_empty()
+        );
+        assert!(engine.series_snapshot(&first).is_some());
+
+        engine
+            .set_series_demand(id(1), generation(2), &second)
+            .expect("replacement demand installs");
+        let protected = engine.demanded_series();
+        assert_eq!(protected, vec![second]);
+        assert_eq!(
+            engine.evict_unsubscribed_series(0, 0, &protected),
+            vec![first.clone()]
+        );
+        assert!(engine.series_snapshot(&first).is_none());
     }
 
     #[test]
@@ -1362,6 +1481,133 @@ mod tests {
         assert!(snapshot.forming);
         assert_eq!(snapshot.bars[2].close, 105);
         assert_eq!(snapshot.publication_generation, 3);
+    }
+
+    #[test]
+    fn backwards_repair_rebases_the_retained_forming_tail_sequence() {
+        let mut engine = engine(1, 1, usize::MAX);
+        let btc = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("forming tail appends");
+
+        let mut repaired = bars(3);
+        for bar in &mut repaired {
+            bar.exchange_timestamp_seconds -= 60;
+            bar.exchange_timestamp_unix_nanos -= 60_000_000_000;
+        }
+        engine
+            .replace_covering_history(provider_generation(1), &btc, 2, 8, repaired, true)
+            .expect("older covering repair installs");
+
+        let snapshot = engine.series_snapshot(&btc).expect("series materializes");
+        assert!(snapshot.forming);
+        assert_eq!(snapshot.bars.len(), 4);
+        assert_eq!(
+            snapshot
+                .bars
+                .iter()
+                .map(|bar| bar.source_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(snapshot.bars.windows(2).all(|pair| {
+            pair[0].source_sequence.checked_add(1) == Some(pair[1].source_sequence)
+                && pair[0].exchange_timestamp_unix_nanos < pair[1].exchange_timestamp_unix_nanos
+        }));
+    }
+
+    #[test]
+    fn historical_window_replacement_drops_live_tail_and_keeps_generation_monotonic() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
+            .expect("forming tail appends");
+        let before = engine.series_snapshot(&btc).expect("live snapshot");
+        assert!(before.forming);
+
+        let mut historical = bars(2);
+        for bar in &mut historical {
+            bar.exchange_timestamp_seconds -= 3_600;
+            bar.exchange_timestamp_unix_nanos -= 3_600_000_000_000;
+        }
+        engine
+            .replace_history_window(provider_generation(1), &btc, 2, 8, historical, true)
+            .expect("detached historical window replaces canonical state");
+
+        let after = engine.series_snapshot(&btc).expect("historical window");
+        assert!(!after.forming);
+        assert_eq!(after.bars.len(), 2);
+        assert!(after.publication_generation > before.publication_generation);
+        assert!(
+            after
+                .bars
+                .last()
+                .expect("window tail")
+                .exchange_timestamp_unix_nanos
+                < before
+                    .bars
+                    .first()
+                    .expect("live head")
+                    .exchange_timestamp_unix_nanos
+        );
+    }
+
+    #[test]
+    fn historical_window_replacement_is_provider_generation_fenced() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        let before = engine.series_snapshot(&btc).expect("current snapshot");
+        engine
+            .end_provider_session("rithmic", provider_generation(1))
+            .expect("first session ends");
+        engine
+            .begin_provider_session("rithmic", provider_generation(2))
+            .expect("new session begins");
+
+        assert!(matches!(
+            engine.replace_history_window(provider_generation(1), &btc, 2, 8, bars(1), true,),
+            Err(EngineError::StaleProviderGeneration { .. })
+        ));
+        let after = engine
+            .series_snapshot(&btc)
+            .expect("stale write is rejected");
+        assert_eq!(after.bars, before.bars);
+        assert_eq!(after.publication_generation, before.publication_generation);
+    }
+
+    #[test]
+    fn global_bar_ceiling_rejects_window_growth_without_mutation() {
+        let mut engine = engine(1, 2, 5);
+        let btc = series("rithmic:spot:BTC-USD");
+        let eth = series("rithmic:spot:ETH-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(3))
+            .expect("first series installs");
+        engine
+            .install_history(provider_generation(1), &eth, 2, 8, bars(2))
+            .expect("second series fills global budget");
+        let before = engine.series_snapshot(&eth).expect("second snapshot");
+
+        assert!(matches!(
+            engine.replace_history_window(provider_generation(1), &eth, 2, 8, bars(3), true,),
+            Err(EngineError::BarLimitExceeded { requested: 6, .. })
+        ));
+        assert_eq!(engine.metrics().stored_bars, 5);
+        assert_eq!(
+            engine.series_snapshot(&eth).expect("state survives").bars,
+            before.bars
+        );
     }
 
     #[test]
@@ -1658,6 +1904,44 @@ mod tests {
         );
         assert_eq!(engine.subscriptions().len(), 1);
         assert_eq!(engine.subscriptions()[0].1.consumer_count, 1);
+    }
+
+    #[test]
+    fn primary_retained_viewport_is_the_lowest_foreground_consumer_id() {
+        let mut engine = engine(3, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        for consumer in [3, 1, 2] {
+            register(&mut engine, consumer, 1);
+            engine
+                .set_series_demand(id(consumer), generation(1), &btc)
+                .expect("shared demand installs");
+            let start = i64::try_from(consumer * 100).expect("small test viewport fits");
+            engine
+                .set_viewport(
+                    id(consumer),
+                    generation(1),
+                    Viewport::try_new(start, start + 50).expect("viewport"),
+                )
+                .expect("viewport installs");
+        }
+
+        assert_eq!(
+            engine.primary_retained_viewport(&btc),
+            Some((
+                id(1),
+                generation(1),
+                Viewport::try_new(100, 150).expect("expected viewport"),
+            ))
+        );
+        engine
+            .set_resource_class(id(1), ConsumerResourceClass::Background)
+            .expect("primary backgrounds");
+        assert_eq!(
+            engine
+                .primary_retained_viewport(&btc)
+                .map(|(consumer, _, _)| consumer),
+            Some(id(2))
+        );
     }
 
     #[test]

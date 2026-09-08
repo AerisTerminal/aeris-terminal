@@ -117,6 +117,6 @@ fn initial_history_is_small_and_viewport_fetches_are_bounded() {
     };
     assert_eq!(
         history::history_request_bar_limit(&series, Some(enormous)),
-        HISTORY_BARS_PER_SERIES
+        MAXIMUM_HISTORY_BARS_PER_REQUEST
     );
 }

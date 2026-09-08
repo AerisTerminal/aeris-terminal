@@ -13,6 +13,7 @@ pub enum ProviderContractError {
     ControlCharacter(&'static str),
     FieldTooLong { field: &'static str, maximum: usize },
     ScaleOutOfRange,
+    InvalidPriceIncrement,
     SystemLimitExceeded { maximum: usize },
     InstrumentLimitExceeded { maximum: usize },
     SeriesLimitExceeded { maximum: usize },
@@ -71,6 +72,10 @@ pub struct InstrumentDescriptor {
     pub venue_id: String,
     pub price_scale: u8,
     pub quantity_scale: u8,
+    /// Authoritative minimum price increment in the same fixed-point units as
+    /// canonical prices. `None` means the provider did not supply a safely
+    /// representable trading increment; decimal scale alone is not a tick.
+    pub price_increment: Option<i64>,
 }
 
 impl InstrumentDescriptor {
@@ -86,6 +91,9 @@ impl InstrumentDescriptor {
         validate_discovery_field("venue_id", &self.venue_id)?;
         if self.price_scale > 18 || self.quantity_scale > 18 {
             return Err(ProviderContractError::ScaleOutOfRange);
+        }
+        if self.price_increment.is_some_and(|increment| increment <= 0) {
+            return Err(ProviderContractError::InvalidPriceIncrement);
         }
         Ok(())
     }
@@ -618,6 +626,7 @@ mod tests {
             venue_id: "fixture".to_string(),
             price_scale: 2,
             quantity_scale: 0,
+            price_increment: Some(25),
         };
         assert_eq!(
             instrument.validate(),

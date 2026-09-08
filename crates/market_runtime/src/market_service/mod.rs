@@ -22,8 +22,9 @@ use axiusflow_hyperliquid_market_adapter::{
     HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
 };
 use axiusflow_market_data::{
-    BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
-    OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState, TopOfBookQuote,
+    AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
+    MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
+    TopOfBookQuote,
 };
 use axiusflow_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
@@ -55,20 +56,29 @@ const REALTIME_DRAIN_BUDGET: usize = 256;
 const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// After the bounded automatic retry budget is exhausted, keep the identical
+/// ranged request in a failed cooldown like Flowsurface's `RequestHandler`.
+const HISTORY_FAILED_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporarily exhausted";
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 64;
-const HISTORY_BARS_PER_SERIES: usize = 8_192;
+/// Upper bound for one provider history request. Retained chart history itself
+/// is managed separately by the canonical working-window watermarks below.
+const MAXIMUM_HISTORY_BARS_PER_REQUEST: usize = 8_192;
+/// Canonical history compacts to this many bars after crossing the high watermark.
+const HISTORY_SERIES_TARGET_BARS: usize = 12_288;
+/// Hard runtime working-set watermark for one canonical series.
+const HISTORY_SERIES_HIGH_WATERMARK: usize = 16_384;
+/// Global canonical bar ceiling. Provider/live buffers are independently bounded.
+const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * HISTORY_SERIES_HIGH_WATERMARK;
 const INITIAL_HISTORY_BARS: usize = 600;
 const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
-const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
 const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
-const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 50;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -285,9 +295,29 @@ struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
+    recent_trades: VecDeque<RecentAggressorTrade>,
+    traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
+    trade_session_generation: u64,
+    last_trade_source_sequence: u64,
+    retention_clock_unix_nanos: i64,
+}
+
+#[derive(Clone, Copy)]
+struct RecentAggressorTrade {
+    observed_unix_nanos: i64,
+    price: i64,
+    quantity: i64,
+    aggressor: AggressorSide,
 }
 
 mod realtime;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveHistoryState {
+    AwaitingHistory,
+    Ready,
+    Reseeding,
+}
 
 /// Live candle handoff for one Hyperliquid series.
 ///
@@ -308,7 +338,7 @@ struct HyperliquidLiveHandoff {
     buffered: VecDeque<HyperliquidLiveCandle>,
     pending_publications: VecDeque<MarketBar>,
     connected: bool,
-    history_ready: bool,
+    history_state: LiveHistoryState,
     dirty: bool,
 }
 
@@ -322,7 +352,7 @@ struct RithmicLiveHandoff {
     buffered: VecDeque<MarketTrade>,
     pending_publications: VecDeque<MarketBar>,
     connected: bool,
-    history_ready: bool,
+    history_state: LiveHistoryState,
     dirty: bool,
     /// The sequence of the period the provider caught open, when it caught one.
     ///
@@ -639,6 +669,8 @@ fn configured_engine() -> Result<MarketEngine, String> {
     let mut engine = MarketEngine::new(MarketEngineConfig {
         maximum_consumers: NonZeroUsize::new(MAXIMUM_CONSUMERS).unwrap_or(NonZeroUsize::MIN),
         maximum_series: NonZeroUsize::new(MAXIMUM_SERIES).unwrap_or(NonZeroUsize::MIN),
+        // SeriesStore performs no eager allocation for this logical capacity;
+        // runtime compaction keeps each series at/below its high watermark.
         maximum_bars: NonZeroUsize::new(MAXIMUM_STORED_BARS).unwrap_or(NonZeroUsize::MIN),
     });
     engine

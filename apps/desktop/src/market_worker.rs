@@ -2577,8 +2577,13 @@ mod tests {
             source_watermark: revision,
             bbo_source_watermark: revision,
             state,
+            price_scale: 2,
+            quantity_scale: 0,
+            price_increment: Some(25),
             best_bid: None,
             best_ask: None,
+            traded_volumes: std::collections::BTreeMap::default(),
+            trade_source_watermark: revision,
             rows: Vec::new(),
         };
         assert!(
@@ -2624,8 +2629,13 @@ mod tests {
             source_watermark: revision,
             bbo_source_watermark: revision,
             state: OrderBookState::Ready,
+            price_scale: 2,
+            quantity_scale: 0,
+            price_increment: Some(25),
             best_bid: None,
             best_ask: None,
+            traded_volumes: std::collections::BTreeMap::default(),
+            trade_source_watermark: revision,
             rows: Vec::new(),
         };
         sender

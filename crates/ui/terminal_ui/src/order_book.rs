@@ -12,6 +12,9 @@ pub struct OrderBookSelection {
     pub session_generation: u64,
     pub selection_generation: u64,
     pub precision: InstrumentPrecision,
+    /// Authoritative minimum fixed-point trading increment for presentation.
+    /// Canonical depth remains real-only; this only permits blank price ticks.
+    pub price_increment: Option<i64>,
 }
 
 /// Projects the one authoritative runtime-owned order book into display rows.
@@ -51,11 +54,6 @@ pub fn project_order_book(
                     selection.precision.price_scale(),
                     selection.precision.quantity_scale(),
                     maximum_quantity,
-                    publication
-                        .traded_volumes
-                        .get(&level.price)
-                        .copied()
-                        .unwrap_or(0),
                 )
             }),
             ask: publication.asks.get(index).map(|level| {
@@ -64,11 +62,6 @@ pub fn project_order_book(
                     selection.precision.price_scale(),
                     selection.precision.quantity_scale(),
                     maximum_quantity,
-                    publication
-                        .traded_volumes
-                        .get(&level.price)
-                        .copied()
-                        .unwrap_or(0),
                 )
             }),
         });
@@ -83,17 +76,15 @@ pub fn project_order_book(
         source_watermark: publication.source_watermark,
         bbo_source_watermark: publication.bbo_source_watermark,
         state: publication.state,
+        price_scale: selection.precision.price_scale(),
+        quantity_scale: selection.precision.quantity_scale(),
+        price_increment: selection.price_increment.filter(|increment| *increment > 0),
         best_bid: publication.best_bid.map(|level| {
             project_level(
                 level,
                 selection.precision.price_scale(),
                 selection.precision.quantity_scale(),
                 maximum_quantity,
-                publication
-                    .traded_volumes
-                    .get(&level.price)
-                    .copied()
-                    .unwrap_or(0),
             )
         }),
         best_ask: publication.best_ask.map(|level| {
@@ -102,13 +93,10 @@ pub fn project_order_book(
                 selection.precision.price_scale(),
                 selection.precision.quantity_scale(),
                 maximum_quantity,
-                publication
-                    .traded_volumes
-                    .get(&level.price)
-                    .copied()
-                    .unwrap_or(0),
             )
         }),
+        traded_volumes: publication.traded_volumes.clone(),
+        trade_source_watermark: publication.trade_source_watermark,
         rows,
     })
 }
@@ -118,7 +106,6 @@ fn project_level(
     price_scale: u8,
     quantity_scale: u8,
     maximum_quantity: i64,
-    traded_volume: i64,
 ) -> OrderBookColumnLevel {
     OrderBookColumnLevel {
         price: level.price,
@@ -126,12 +113,8 @@ fn project_level(
         order_count: level.order_count,
         price_text: grouped_fixed_point_text(level.price, price_scale),
         quantity_text: compact_quantity_text(level.quantity, quantity_scale),
-        traded_volume,
-        traded_volume_text: if traded_volume > 0 {
-            compact_quantity_text(traded_volume, quantity_scale)
-        } else {
-            String::new()
-        },
+        traded_volume: 0,
+        traded_volume_text: String::new(),
         relative_size_bps: relative_size_bps(level.quantity, maximum_quantity),
     }
 }
@@ -172,7 +155,7 @@ fn compact_fixed_point_text(value: i64, scale: u8) -> String {
     text
 }
 
-fn compact_quantity_text(value: i64, scale: u8) -> String {
+pub(crate) fn compact_quantity_text(value: i64, scale: u8) -> String {
     const DISPLAY_SCALE: u8 = 4;
     if scale <= DISPLAY_SCALE {
         return compact_fixed_point_text(value, scale);
@@ -189,7 +172,7 @@ fn compact_quantity_text(value: i64, scale: u8) -> String {
     )
 }
 
-fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
+pub(crate) fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
     let mut significant_places = scale;
     let mut significant = value;
     while significant_places > 0 && significant % 10 == 0 {
@@ -233,6 +216,7 @@ mod tests {
             session_generation: 7,
             selection_generation,
             precision: InstrumentPrecision::try_new(2, 0).expect("valid fixture precision"),
+            price_increment: Some(25),
         }
     }
 
@@ -272,7 +256,11 @@ mod tests {
                 quantity: 3,
                 order_count: Some(1),
             }],
-            traded_volumes: BTreeMap::from([(20_025, 4)]),
+            traded_volumes: BTreeMap::from([(
+                20_025,
+                axiusflow_market_data::AggressorTradeVolumes { buy: 4, sell: 2 },
+            )]),
+            trade_source_watermark: 11,
             state: OrderBookState::Ready,
         }
     }
@@ -283,6 +271,8 @@ mod tests {
             .expect("matching publication projects");
         assert_eq!(frame.state, OrderBookState::Ready);
         assert_eq!(frame.selection_generation, 1);
+        assert_eq!(frame.price_scale, 2);
+        assert_eq!(frame.price_increment, Some(25));
         assert_eq!(frame.source_watermark, 10);
         assert_eq!(frame.rows.len(), 2);
         assert_eq!(
@@ -314,9 +304,10 @@ mod tests {
             Some(2_500)
         );
         assert_eq!(
-            frame.rows[0].bid.as_ref().map(|level| level.traded_volume),
-            Some(4)
+            frame.traded_volumes.get(&20_025).copied(),
+            Some(axiusflow_market_data::AggressorTradeVolumes { buy: 4, sell: 2 })
         );
+        assert_eq!(frame.trade_source_watermark, 11);
         assert!(frame.rows[1].ask.is_none());
     }
 

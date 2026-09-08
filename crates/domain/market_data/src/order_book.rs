@@ -1,6 +1,24 @@
 use crate::{BookSide, DepthDelta, DepthLevel, DepthSnapshot, MarketDataValidationError};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
+/// Recent real aggressor-side traded quantity accumulated at one price.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AggressorTradeVolumes {
+    pub buy: i64,
+    pub sell: i64,
+}
+
+impl AggressorTradeVolumes {
+    #[must_use]
+    pub const fn maximum_side(self) -> i64 {
+        if self.buy > self.sell {
+            self.buy
+        } else {
+            self.sell
+        }
+    }
+}
+
 /// Coarse reason that candidate order-book state was discarded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderBookRecoveryReason {
@@ -35,7 +53,8 @@ pub struct OrderBookPublication {
     pub bbo_source_watermark: u64,
     pub bids: Vec<DepthLevel>,
     pub asks: Vec<DepthLevel>,
-    pub traded_volumes: BTreeMap<i64, i64>,
+    pub traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
+    pub trade_source_watermark: u64,
     pub state: OrderBookState,
 }
 
@@ -72,8 +91,18 @@ pub struct OrderBookFrame {
     pub source_watermark: u64,
     pub bbo_source_watermark: u64,
     pub state: OrderBookState,
+    /// Decimal scale used to format presentation-only price-grid rows.
+    pub price_scale: u8,
+    /// Decimal scale used to format recent trade quantities.
+    pub quantity_scale: u8,
+    /// Authoritative minimum fixed-point price increment. Missing means the UI
+    /// must render only provider-published prices rather than infer a tick grid.
+    pub price_increment: Option<i64>,
     pub best_bid: Option<OrderBookColumnLevel>,
     pub best_ask: Option<OrderBookColumnLevel>,
+    /// Runtime-owned recent aggressor volume, independent of resting depth.
+    pub traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
+    pub trade_source_watermark: u64,
     pub rows: Vec<OrderBookRow>,
 }
 
@@ -342,6 +371,7 @@ impl OrderBook {
             bids: self.bids.values().rev().copied().collect(),
             asks: self.asks.values().copied().collect(),
             traded_volumes: BTreeMap::new(),
+            trade_source_watermark: 0,
             state: self.state,
         }
     }

@@ -567,6 +567,7 @@ fn protocol_instrument(
         price_scale: u32::from(instrument.price_scale),
         quantity_scale: u32::from(instrument.quantity_scale),
         entitlement_id,
+        price_increment: instrument.price_increment,
     }
 }
 
@@ -1401,6 +1402,7 @@ fn provider_instrument(
             .map_err(|_| RithmicProviderCommandError::InvalidRequest)?,
         quantity_scale: u8::try_from(selected.quantity_scale)
             .map_err(|_| RithmicProviderCommandError::InvalidRequest)?,
+        price_increment: selected.price_increment,
     };
     Ok(RithmicProviderInstrument {
         descriptor,
@@ -1566,6 +1568,7 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 0,
                 entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+                price_increment: Some(25),
             },
         };
 

@@ -495,6 +495,7 @@ impl RithmicCatalogEvent {
             venue_id,
             price_scale,
             quantity_scale,
+            price_increment: None,
         };
         instrument
             .validate()
@@ -2220,6 +2221,7 @@ mod tests {
                 venue_id: "CME".to_string(),
                 price_scale: 2,
                 quantity_scale: 2,
+                price_increment: Some(25),
             },
             entitlement_id: "rithmic-test-cme".to_string(),
             trades: true,
@@ -3221,6 +3223,7 @@ mod tests {
         .expect("base-venue reference installs");
 
         assert_eq!(selected.descriptor.venue_id, "CME");
+        assert_eq!(selected.descriptor.price_increment, Some(25));
         assert_eq!(selected.entitlement_id, entitlement_id);
         let callback = RithmicCatalogEvent::SelectionInstalled {
             session_generation: generation(1),

@@ -261,6 +261,20 @@ impl DemandRegistry {
             .collect()
     }
 
+    pub(crate) fn primary_retained_viewport(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Option<(ConsumerId, GenerationId, Viewport)> {
+        self.consumers.values().find_map(|demand| {
+            (demand.resource_class.publishes_ui() && demand.series.as_ref() == Some(series))
+                .then_some((
+                    demand.identity.consumer_id,
+                    demand.generation?,
+                    demand.viewport?,
+                ))
+        })
+    }
+
     pub(crate) fn matching(&self, series: &BarSeriesKey) -> Vec<(ConsumerId, GenerationId)> {
         self.consumers
             .values()
@@ -270,6 +284,13 @@ impl DemandRegistry {
                     .flatten()
                     .map(|generation| (demand.identity.consumer_id, generation))
             })
+            .collect()
+    }
+
+    pub(crate) fn referenced_series(&self) -> Vec<BarSeriesKey> {
+        self.consumers
+            .values()
+            .filter_map(|demand| demand.series.clone())
             .collect()
     }
 
