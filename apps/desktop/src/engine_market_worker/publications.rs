@@ -126,11 +126,8 @@ pub(super) fn apply_pushed_event(
             messages,
         ),
         envelope::Payload::ProviderState(state) => {
-            if stale_generation(
-                state.generation,
-                instrument.session_generation,
-                "engine provider state generation advanced unexpectedly",
-            )? {
+            // Provider reconnects advance independently of a chart selection.
+            if state.generation < instrument.session_generation {
                 return Ok(());
             }
             apply_provider_state(&state, instrument.provider.as_str(), realtime, messages)?;

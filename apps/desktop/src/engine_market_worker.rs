@@ -292,6 +292,7 @@ struct WorkerEndpoint {
     /// a `Partial` state is a background history repair, not a loading chart.
     live: bool,
     active_generation: u64,
+    provider_state_generation: Option<u64>,
     resource_class: ConsumerResourceClass,
     active: bool,
 }
@@ -403,6 +404,7 @@ fn worker_endpoint(
             pending_recovery: None,
             live: false,
             active_generation: initial_generation,
+            provider_state_generation: None,
             resource_class: ConsumerResourceClass::Foreground,
             active: true,
         },
@@ -1448,6 +1450,41 @@ mod tests {
                 message,
                 transport_rtt_nanos: None,
             }] if message.contains("retained history")
+        ));
+    }
+
+    #[test]
+    fn newer_provider_session_reaches_the_connection_presentation() {
+        let product = default_product("MNQ");
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+        let mut publication = None;
+        let mut live = false;
+        apply_pushed_event(
+            envelope::Payload::ProviderState(ProviderState {
+                provider: product.provider.clone(),
+                state: ProviderConnectionState::Online as i32,
+                generation: product.session_generation + 1,
+                detail: None,
+                transport_rtt_nanos: None,
+            }),
+            &PushedEventContext {
+                consumer_id: 1,
+                active_generation: 7,
+                realtime: true,
+                instrument: &product,
+            },
+            &mut publication,
+            &mut live,
+            &sender,
+        )
+        .expect("new engine-owned provider session");
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Connection {
+                state: FeedConnectionState::Streaming,
+                ..
+            }]
         ));
     }
 

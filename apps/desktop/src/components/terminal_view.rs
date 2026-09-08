@@ -55,6 +55,7 @@ impl TerminalApp {
         terminal: &Entity<Self>,
         window: &Window,
         fullscreen: bool,
+        cx: &App,
     ) -> Option<impl IntoElement + use<>> {
         workspace_title_bar_visible(fullscreen).then(|| {
             workspace_title_bar(
@@ -68,6 +69,7 @@ impl TerminalApp {
                     theme: self.theme,
                 },
                 window,
+                cx,
             )
         })
     }
@@ -143,7 +145,7 @@ impl Render for TerminalApp {
         );
         let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
         let about_dialog = self.rendered_about_dialog(&terminal);
-        let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
+        let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
         let header = self.rendered_header(&terminal, &active, fullscreen, cx);
         let market = workspace_market_area(
             &terminal,
@@ -369,11 +371,41 @@ fn workspace_add_button(
         .child(header_icon(HugeIcon::AddIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
+fn workspace_tab_content(
+    workspace: &WorkspaceTab,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> (String, Div) {
+    let surface = workspace.panes[workspace.active_pane].surface.read(cx);
+    let label = terminal_instrument_label(surface);
+    let exchange = match surface.provider {
+        TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
+        TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
+    };
+    let content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(exchange_mark(exchange, px(16.0), false, &theme.colors))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(label.clone()),
+        );
+    (label, content)
+}
+
 fn workspace_tab(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     state: &WorkspaceTabRenderState,
+    cx: &App,
 ) -> AnyElement {
+    let (label, content) = workspace_tab_content(workspace, &state.theme, cx);
     let index = state.index;
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
@@ -420,7 +452,7 @@ fn workspace_tab(
         }))
         .track_focus(&tab_focus)
         .role(Role::Tab)
-        .aria_label(workspace.label.clone())
+        .aria_label(label.clone())
         .aria_selected(selected)
         .aria_position_in_set(index + 1)
         .aria_size_of_set(state.workspace_count)
@@ -460,12 +492,12 @@ fn workspace_tab(
                 cx.new(|_| drag.clone())
             })
         })
-        .child(workspace.label.clone())
+        .child(content)
         .child(workspace_tab_close_button(
             terminal.clone(),
             tab_id,
             index,
-            &workspace.label,
+            &label,
             &theme,
         ))
         .into_any_element()
@@ -474,6 +506,7 @@ fn workspace_tab(
 pub(super) fn workspace_tab_strip(
     terminal: &Entity<TerminalApp>,
     state: &WorkspaceTabBarState<'_>,
+    cx: &App,
 ) -> impl IntoElement + use<> {
     let workspaces = state.workspaces;
     let enabled = state.enabled;
@@ -495,6 +528,7 @@ pub(super) fn workspace_tab_strip(
                 ),
                 theme,
             },
+            cx,
         )
     });
     let add_terminal = terminal.clone();

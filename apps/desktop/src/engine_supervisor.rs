@@ -122,7 +122,17 @@ impl EngineSupervisor {
         let provider = series.provider.clone();
         self.pending_instruments
             .remove(&(provider.clone(), series.instrument_id.clone()));
-        self.consumer_mut(consumer_id)?.demand = Some((generation, series));
+        let consumer = self.consumer_mut(consumer_id)?;
+        // Match the engine demand owner: a new selection retires its viewport.
+        // Replaying an old viewport would fail restoration with a stale generation.
+        if consumer
+            .demand
+            .as_ref()
+            .is_none_or(|(current, _)| *current != generation)
+        {
+            consumer.viewport = None;
+        }
+        consumer.demand = Some((generation, series));
         if let Some(previous_provider) = previous_provider
             && previous_provider != provider
         {
@@ -1127,6 +1137,15 @@ mod tests {
 
     #[test]
     fn restart_restores_every_consumer_and_resumes_a_covering_snapshot() {
+        assert_restart_restores_consumers(false);
+    }
+
+    #[test]
+    fn restart_after_selection_does_not_restore_the_retired_viewport() {
+        assert_restart_restores_consumers(true);
+    }
+
+    fn assert_restart_restores_consumers(change_selection: bool) {
         let token = [23_u8; 32];
         let requested = series();
         let (first_name, _, first_server) = start_fixture(1, true, requested.clone());
@@ -1150,6 +1169,17 @@ mod tests {
             .attach_client(9)
             .expect("attach first client");
         configure_restore_state(&mut supervisor, &requested);
+        // Repeating an acknowledged demand preserves its current viewport.
+        supervisor
+            .record_series_demand(12, 7, requested.clone())
+            .expect("same demand");
+        assert!(supervisor.consumers[&12].viewport.is_some());
+        if change_selection {
+            supervisor
+                .record_series_demand(12, 8, requested.clone())
+                .expect("new demand");
+            assert!(supervisor.consumers[&12].viewport.is_none());
+        }
 
         let recovered = supervisor
             .receive_market_event_for(11, Duration::from_secs(1))
@@ -1189,7 +1219,7 @@ mod tests {
                 .iter()
                 .filter(|payload| matches!(payload, envelope::Payload::ViewportDemand(_)))
                 .count(),
-            2
+            if change_selection { 1 } else { 2 }
         );
         assert_eq!(
             commands

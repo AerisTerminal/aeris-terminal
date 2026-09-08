@@ -201,6 +201,7 @@ fn receive_and_apply_event(
             .map(|record| &mut record.endpoint)
         {
             endpoint.publication = None;
+            endpoint.provider_state_generation = None;
             let _ = endpoint.messages.send(MarketWorkerMessage::Connection {
                 state: FeedConnectionState::Recovering,
                 message: ENGINE_RESTARTED_MESSAGE.to_string(),
@@ -247,6 +248,20 @@ fn receive_and_apply_event(
         None => event,
     };
     let Some(event) = event else { return Ok(true) };
+    if let envelope::Payload::ProviderState(state) = &event {
+        if state.provider != record.product.provider {
+            return Err("engine provider state identity mismatched".to_string());
+        }
+        super::ProviderConnectionState::try_from(state.state)
+            .map_err(|_| "engine returned an invalid provider state".to_string())?;
+        if !accept_provider_generation(
+            state.generation,
+            record.product.session_generation,
+            &mut endpoint.provider_state_generation,
+        ) {
+            return Ok(true);
+        }
+    }
     if complete_pending_recovery(&event, &record.product, endpoint)? {
         return Ok(true);
     }
@@ -291,4 +306,30 @@ pub(super) fn retire_endpoint(client: &mut EngineSupervisor, endpoint: &mut Work
     let _ = client.remove_market_consumer(endpoint.consumer_id);
     endpoint.active = false;
     let _ = endpoint.shutdown.try_send(());
+}
+
+// Connection status has its own high-water mark: a catalog selection can stay
+// unchanged through several engine-owned provider reconnects.
+fn accept_provider_generation(received: u64, minimum: u64, current: &mut Option<u64>) -> bool {
+    if received < current.unwrap_or(minimum).max(minimum) {
+        return false;
+    }
+    *current = Some(received);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accept_provider_generation;
+
+    #[test]
+    fn provider_reconnect_advances_status_without_accepting_retired_sessions() {
+        let mut current = None;
+        assert!(!accept_provider_generation(1, 2, &mut current));
+        assert!(accept_provider_generation(2, 2, &mut current));
+        assert!(accept_provider_generation(3, 2, &mut current));
+        assert!(!accept_provider_generation(2, 2, &mut current));
+        assert_eq!(current, Some(3));
+        assert!(accept_provider_generation(3, 2, &mut current));
+    }
 }

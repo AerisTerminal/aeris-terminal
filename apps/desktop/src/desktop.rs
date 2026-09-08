@@ -1541,7 +1541,7 @@ fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: None,
+            title: Some("Axiusflow".into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(9.0), px(9.0))),
         }),
