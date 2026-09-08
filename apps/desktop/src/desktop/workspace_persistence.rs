@@ -1,0 +1,236 @@
+//! Coalesced asynchronous workspace layout persistence.
+
+use super::*;
+
+#[derive(Clone)]
+struct WorkspaceLayoutRequest {
+    layout_generation: u64,
+    active_workspace_id: u64,
+    workspace_tabs: Vec<WorkspaceTabState>,
+}
+
+struct WorkspaceLayoutCompletion {
+    request_generation: u64,
+    result: Result<WorkspaceState, String>,
+}
+
+#[derive(Clone)]
+pub(super) struct WorkspaceLayoutPersistence {
+    latest: Arc<Mutex<Option<WorkspaceLayoutRequest>>>,
+    wake: SyncSender<()>,
+    result: Arc<Mutex<Option<WorkspaceLayoutCompletion>>>,
+    workspace_revision: Rc<Cell<u64>>,
+    layout_generation: Rc<Cell<u64>>,
+    pending: Rc<Cell<bool>>,
+    error: Rc<RefCell<Option<String>>>,
+}
+
+impl WorkspaceLayoutPersistence {
+    pub(super) fn new(workspace_revision: u64, layout_generation: u64) -> Result<Self, String> {
+        let latest = Arc::new(Mutex::new(None));
+        let (wake_tx, wake_rx) = mpsc::sync_channel(1);
+        let result = Arc::new(Mutex::new(None));
+        let worker_latest = Arc::clone(&latest);
+        let worker_result = Arc::clone(&result);
+        std::thread::Builder::new()
+            .name("axiusflow-workspace-layout-client".to_string())
+            .spawn(move || {
+                run_workspace_layout_persistence(&worker_latest, &wake_rx, &worker_result);
+            })
+            .map_err(|_| "workspace layout client could not start".to_string())?;
+        Ok(Self {
+            latest,
+            wake: wake_tx,
+            result,
+            workspace_revision: Rc::new(Cell::new(workspace_revision)),
+            layout_generation: Rc::new(Cell::new(layout_generation)),
+            pending: Rc::new(Cell::new(false)),
+            error: Rc::new(RefCell::new(None)),
+        })
+    }
+
+    pub(super) fn request(
+        &self,
+        active_workspace_id: u64,
+        workspace_tabs: Vec<WorkspaceTabState>,
+    ) -> Result<(), String> {
+        let generation = self
+            .layout_generation
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| "workspace layout generation is exhausted".to_string())?;
+        *self
+            .latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutRequest {
+            layout_generation: generation,
+            active_workspace_id,
+            workspace_tabs,
+        });
+        match self.wake.try_send(()) {
+            Ok(()) | Err(mpsc::TrySendError::Full(())) => {
+                self.layout_generation.set(generation);
+                self.pending.set(true);
+                self.error.borrow_mut().take();
+                Ok(())
+            }
+            Err(mpsc::TrySendError::Disconnected(())) => {
+                Err("workspace layout client is unavailable".to_string())
+            }
+        }
+    }
+
+    pub(super) fn poll(&self) -> bool {
+        let Some(result) = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return false;
+        };
+        // A save may complete while a newer layout is waiting in the coalesced slot.
+        // Its success or error must not retire the current request's presentation.
+        if result.request_generation != self.layout_generation.get() {
+            return false;
+        }
+        match result.result {
+            Ok(workspace) => {
+                self.workspace_revision.set(workspace.workspace_revision);
+                self.layout_generation.set(workspace.layout_generation);
+                self.error.borrow_mut().take();
+            }
+            Err(error) => {
+                *self.error.borrow_mut() = Some(error);
+            }
+        }
+        self.pending.set(false);
+        true
+    }
+
+    pub(super) fn error(&self) -> Option<String> {
+        self.error.borrow().clone()
+    }
+}
+
+fn run_workspace_layout_persistence(
+    latest: &Mutex<Option<WorkspaceLayoutRequest>>,
+    wake: &Receiver<()>,
+    result: &Mutex<Option<WorkspaceLayoutCompletion>>,
+) {
+    while wake.recv().is_ok() {
+        while wake.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        let Some(request) = latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            continue;
+        };
+        let request_generation = request.layout_generation;
+        let completed = axiusflow_local_engine_client::sibling_engine_executable()
+            .and_then(|executable| {
+                axiusflow_local_engine_client::connect_or_start_engine(&executable)
+            })
+            .and_then(|mut client| {
+                let current = client.restore_workspace()?;
+                client.set_workspace_layout(
+                    current.workspace_revision,
+                    request
+                        .layout_generation
+                        .max(current.layout_generation.saturating_add(1)),
+                    request.active_workspace_id,
+                    request.workspace_tabs,
+                )
+            });
+        *result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutCompletion {
+            request_generation,
+            result: completed,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn persistence() -> (WorkspaceLayoutPersistence, Receiver<()>) {
+        let (wake, receiver) = mpsc::sync_channel(1);
+        (
+            WorkspaceLayoutPersistence {
+                latest: Arc::new(Mutex::new(None)),
+                wake,
+                result: Arc::new(Mutex::new(None)),
+                workspace_revision: Rc::new(Cell::new(1)),
+                layout_generation: Rc::new(Cell::new(1)),
+                pending: Rc::new(Cell::new(false)),
+                error: Rc::new(RefCell::new(None)),
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn superseded_save_results_cannot_clear_pending_or_publish_an_error() {
+        for result in [
+            Ok(WorkspaceState {
+                workspace_revision: 2,
+                layout_generation: 2,
+                ..WorkspaceState::default()
+            }),
+            Err("old save failed".to_string()),
+        ] {
+            let (state, _receiver) = persistence();
+            state.request(1, vec![]).expect("first request");
+            state.request(2, vec![]).expect("coalesced replacement");
+            *state.result.lock().expect("result") = Some(WorkspaceLayoutCompletion {
+                request_generation: 2,
+                result,
+            });
+            assert!(!state.poll());
+            assert!(state.pending.get());
+            assert_eq!(state.layout_generation.get(), 3);
+            assert_eq!(state.workspace_revision.get(), 1);
+            assert_eq!(state.error(), None);
+            assert_eq!(
+                state
+                    .latest
+                    .lock()
+                    .expect("latest")
+                    .as_ref()
+                    .expect("request")
+                    .active_workspace_id,
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn current_save_result_finishes_pending_and_preserves_concrete_error() {
+        let (state, _receiver) = persistence();
+        state.request(1, vec![]).expect("request");
+        *state.result.lock().expect("result") = Some(WorkspaceLayoutCompletion {
+            request_generation: 2,
+            result: Err("layout storage is unavailable".to_string()),
+        });
+        assert!(state.poll());
+        assert!(!state.pending.get());
+        assert_eq!(
+            state.error().as_deref(),
+            Some("layout storage is unavailable")
+        );
+        state.request(1, vec![]).expect("retry");
+        assert_eq!(state.error(), None);
+    }
+
+    #[test]
+    fn exhausted_generation_does_not_enqueue_or_overwrite_pending_layout() {
+        let (state, receiver) = persistence();
+        state.layout_generation.set(u64::MAX);
+        assert!(state.request(1, vec![]).is_err());
+        assert!(state.latest.lock().expect("latest").is_none());
+        assert!(receiver.try_recv().is_err());
+    }
+}

@@ -3,13 +3,13 @@ use std::time::Duration;
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken};
 use gpui::{App, Context, Entity, FontWeight, Render, Role, Window, div, prelude::*, px};
 
-use crate::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
+use crate::desktop::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
 
 pub(super) struct OnboardingApp {
     theme: AxiusflowTheme,
     polling: bool,
     launch_error: Option<String>,
-    terminal: Option<Entity<crate::TerminalApp>>,
+    terminal: Option<Entity<crate::desktop::TerminalApp>>,
     loading: bool,
 }
 
@@ -88,7 +88,7 @@ impl OnboardingApp {
                     // startup must never block the window's event loop.
                     let configured = cx
                         .background_executor()
-                        .spawn(async { crate::configured_market_workers() })
+                        .spawn(async { crate::desktop::configured_market_workers() })
                         .await;
                     // Retired completion fencing: sign-out, cancellation, or
                     // expiry may have landed while startup ran. Drop the
@@ -111,7 +111,7 @@ impl OnboardingApp {
                         screen.loading = false;
                         match configured {
                             Ok(Some(configured)) => {
-                                let lifecycle = match crate::DesktopLifecycle::new(
+                                let lifecycle = match crate::desktop::DesktopLifecycle::new(
                                     configured.lifetime_mode,
                                     configured.autostart_enabled,
                                     configured.markets_live_permitted,
@@ -128,7 +128,7 @@ impl OnboardingApp {
                                 // client; a sign-out that races this mount is
                                 // observed on the next poll and returns to
                                 // onboarding without stale state.
-                                screen.terminal = crate::mount_desktop(
+                                screen.terminal = crate::desktop::mount_desktop(
                                     configured,
                                     lifecycle,
                                     Some(window),

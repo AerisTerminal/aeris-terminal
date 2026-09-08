@@ -1,4 +1,4 @@
-use crate::rithmic_history::RithmicSeriesRequest;
+use crate::desktop::rithmic_history::RithmicSeriesRequest;
 
 use axiusflow_application::{
     MarketEventProvenance, MarketGeneration, Provenanced, ProvenancedMarketBar, ReplayProvenance,
@@ -501,7 +501,7 @@ fn unix_nanos_now() -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rithmic_history::RithmicSeries;
+    use crate::desktop::rithmic_history::RithmicSeries;
     use axiusflow_engine_protocol::MarketBar as IpcMarketBar;
     use std::num::NonZeroUsize;
 

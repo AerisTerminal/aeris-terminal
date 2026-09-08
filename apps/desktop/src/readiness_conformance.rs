@@ -7,7 +7,7 @@
 //! market gate, whose result this report carries verbatim — including
 //! [`LiveMarketGate::NotRun`], which is never reported as a pass.
 
-use crate::frame_poll_gate::FramePollGate;
+use crate::desktop::frame_poll_gate::FramePollGate;
 
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,

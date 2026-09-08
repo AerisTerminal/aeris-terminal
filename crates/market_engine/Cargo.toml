@@ -11,3 +11,7 @@ axiusflow_market_data = { path = "../domain/market_data" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

@@ -1,0 +1,1661 @@
+#![cfg(test)]
+
+use super::{
+    CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_FOOTER_HEIGHT,
+    CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
+    CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
+    ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, InputEvent, InstrumentMenuEntry,
+    InstrumentMenuSelection, LifecycleToggle, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
+    PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, RITHMIC_ENTITLEMENT_ID,
+    RITHMIC_INTERVALS, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
+    RithmicSessionRetirement, RithmicSwitchState, SidePanel, SidePanelResize, SymbolInputAction,
+    SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
+    TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
+    WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
+    WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
+    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+    chart_status_detail, chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
+    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
+    connectivity_chart_state, current_instrument_menu_index, default_rithmic_contract_index,
+    durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+    instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
+    nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+    ready_state_can_complete_switch, reconciled_bridge_state, reconnect_contract_index,
+    reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action, series_selector_label,
+    should_finish_chrome_overlay_close, split_lifetime_mode, stabilized_connection_state,
+    stable_connection_message, stopped_worker_chart_detail, switch_requires_chart_cover,
+    symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
+    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
+    timeframe_overlay_left, window_move_gesture_transition, workspace_drag_destination,
+    workspace_drag_translation, workspace_label, workspace_series, workspace_split_ratio,
+    workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
+};
+#[cfg(feature = "diagnostics")]
+use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
+use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
+use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
+use axiusflow_engine_protocol::{
+    EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejectionReason,
+    ProviderInstrumentSummary, ResourceMode, SeriesCadence, WorkspaceState,
+};
+use axiusflow_market_data::ChartInterval;
+use axiusflow_observability::FeedConnectionState;
+use gpui::{Bounds, point, px, size};
+use std::{cell::Cell, ffi::OsString};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogCommandOrderBookain {
+    Search,
+    Selection,
+}
+
+const fn catalog_rejection_order_bookain(
+    command: ProviderCatalogCommand,
+) -> CatalogCommandOrderBookain {
+    match command {
+        ProviderCatalogCommand::Search => CatalogCommandOrderBookain::Search,
+        ProviderCatalogCommand::Selection => CatalogCommandOrderBookain::Selection,
+    }
+}
+
+#[test]
+fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
+    use crate::desktop::rithmic_shell::RithmicSymbolBrowser;
+    use std::num::NonZeroUsize;
+
+    let startup = NonZeroUsize::MIN;
+    let mut browser = RithmicSymbolBrowser::rithmic_catalog_awaiting_search(startup, "");
+    assert!(
+        !instrument_listing_refresh_needed(&browser, false),
+        "startup search is already pending"
+    );
+
+    let result = ProviderInstrumentSummary {
+        symbol: "BTC-USD".to_string(),
+        exchange: "rithmic".to_string(),
+        name: Some("BTC/USD".to_string()),
+        product_code: Some("BTC-USD".to_string()),
+        instrument_type: Some("spot".to_string()),
+        expiration_date: None,
+    };
+    assert!(browser.apply_results(startup, vec![result]));
+    assert!(
+        !instrument_listing_refresh_needed(&browser, false),
+        "populated listing needs no refresh"
+    );
+
+    let selection = browser.select(0).expect("catalog result is selectable");
+    assert!(
+        !instrument_listing_refresh_needed(&browser, true),
+        "in-flight selection defers the refresh"
+    );
+    assert!(browser.confirm_selection(selection.generation));
+    assert!(browser.consume_completed_search(selection.search_generation));
+    assert!(
+        instrument_listing_refresh_needed(&browser, false),
+        "consumed selection authorization reopens as a fresh default listing"
+    );
+    let refreshed = browser
+        .begin_search("")
+        .expect("resident-provider catalog permits a fresh empty listing query");
+    assert_eq!(refreshed.query, "");
+    assert!(browser.search_pending());
+    assert!(browser.reject_search(refreshed.request_id));
+
+    browser
+        .retain_latest_search("ETH")
+        .expect("typed query validates");
+    assert!(
+        !instrument_listing_refresh_needed(&browser, false),
+        "a retained typed query outranks the default listing"
+    );
+}
+
+fn should_apply_rithmic_worker_stop(
+    disconnected: bool,
+    connection_state: Option<FeedConnectionState>,
+) -> bool {
+    disconnected
+        && matches!(
+            connection_state,
+            Some(state) if !matches!(state, FeedConnectionState::Stopped)
+        )
+}
+
+impl RithmicReconnectState {
+    fn capture_retired_selection(
+        &mut self,
+        selection: Option<super::rithmic_shell::RithmicSymbolSelection>,
+        series: super::rithmic_history::RithmicSeries,
+    ) -> bool {
+        if *self == Self::Idle
+            && let Some(selection) = selection
+        {
+            *self = Self::AwaitingSearch(super::RithmicReconnectTarget {
+                symbol: selection.instrument.symbol,
+                exchange: selection.instrument.exchange,
+                series,
+            });
+        }
+        *self == Self::Idle
+    }
+}
+
+#[test]
+fn chrome_overlay_motion_opens_and_closes_in_opposite_directions() {
+    let assert_progress = |actual: f32, expected: f32| {
+        assert!((actual - expected).abs() < f32::EPSILON);
+    };
+    assert_progress(
+        chrome_overlay_progress(ChromeOverlayPhase::Opening, 0.0),
+        0.0,
+    );
+    assert_progress(
+        chrome_overlay_progress(ChromeOverlayPhase::Opening, 1.0),
+        1.0,
+    );
+    assert_progress(
+        chrome_overlay_progress(ChromeOverlayPhase::Closing, 0.0),
+        1.0,
+    );
+    assert_progress(
+        chrome_overlay_progress(ChromeOverlayPhase::Closing, 1.0),
+        0.0,
+    );
+    assert_progress(
+        chrome_overlay_progress(ChromeOverlayPhase::Opening, -1.0),
+        0.0,
+    );
+    assert_progress(
+        chrome_overlay_progress(ChromeOverlayPhase::Closing, 2.0),
+        0.0,
+    );
+}
+
+#[test]
+fn stale_close_completion_cannot_remove_a_reopened_overlay() {
+    assert!(should_finish_chrome_overlay_close(
+        ChromeOverlayPhase::Closing,
+        7,
+        7
+    ));
+    assert!(!should_finish_chrome_overlay_close(
+        ChromeOverlayPhase::Opening,
+        8,
+        7
+    ));
+    assert!(!should_finish_chrome_overlay_close(
+        ChromeOverlayPhase::Closing,
+        8,
+        7
+    ));
+}
+
+#[test]
+fn timeframe_overlay_uses_the_trigger_left_edge() {
+    let trigger = Bounds::new(point(px(214.0), px(52.0)), size(px(64.0), px(32.0)));
+    assert_eq!(timeframe_overlay_left(Some(trigger)), px(214.0));
+    assert_eq!(timeframe_overlay_left(None), px(0.0));
+}
+
+#[test]
+fn timeframe_menu_groups_every_catalog_interval() {
+    let groups: Vec<TimeframeMenuGroup> = ChartInterval::ALL
+        .into_iter()
+        .map(timeframe_interval_group)
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            TimeframeMenuGroup::Ticks,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Days,
+            TimeframeMenuGroup::Days,
+            TimeframeMenuGroup::Weeks,
+            TimeframeMenuGroup::Months,
+        ]
+    );
+    let rithmic_groups: Vec<TimeframeMenuGroup> = RITHMIC_INTERVALS
+        .iter()
+        .copied()
+        .map(timeframe_interval_group)
+        .collect();
+    assert_eq!(
+        rithmic_groups,
+        [
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Days,
+            TimeframeMenuGroup::Weeks,
+            TimeframeMenuGroup::Months,
+        ]
+    );
+}
+
+#[test]
+fn timeframe_menu_uses_dual_group_and_interval_containers() {
+    assert_eq!(
+        timeframe_menu_groups(&ChartInterval::ALL),
+        [
+            TimeframeMenuGroup::Ticks,
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Days,
+            TimeframeMenuGroup::Weeks,
+            TimeframeMenuGroup::Months,
+        ]
+    );
+    assert_eq!(
+        timeframe_menu_groups(RITHMIC_INTERVALS),
+        [
+            TimeframeMenuGroup::Minutes,
+            TimeframeMenuGroup::Hours,
+            TimeframeMenuGroup::Days,
+            TimeframeMenuGroup::Weeks,
+            TimeframeMenuGroup::Months,
+        ]
+    );
+    assert_eq!(
+        timeframe_group_intervals(TimeframeMenuGroup::Minutes, &ChartInterval::ALL),
+        [
+            ChartInterval::Minute1,
+            ChartInterval::Minute3,
+            ChartInterval::Minute5,
+            ChartInterval::Minute15,
+            ChartInterval::Minute30,
+        ]
+    );
+    assert_eq!(timeframe_menu_row_label(ChartInterval::Minute1), "1 Minute");
+    assert_eq!(timeframe_menu_row_label(ChartInterval::Hour4), "4 Hours");
+    assert_eq!(timeframe_menu_row_label(ChartInterval::Day1), "1 Day");
+    assert_eq!(TimeframeMenuGroup::Minutes.label(), "Minutes");
+    assert!(
+        timeframe_menu_groups(RITHMIC_INTERVALS)
+            .into_iter()
+            .all(|group| !timeframe_group_intervals(group, RITHMIC_INTERVALS).is_empty()),
+        "a hovered group owns its submenu; the root list does not keep a flyout open"
+    );
+    assert!((timeframe_flyout_offset(1) - CHART_CONTEXT_MENU_ROW_HEIGHT).abs() < f32::EPSILON);
+    assert!(
+        (timeframe_flyout_height(1) - (CHART_CONTEXT_MENU_ROW_HEIGHT + 2.0)).abs() < f32::EPSILON,
+        "submenu height is the rows plus the 1px border"
+    );
+    assert!(
+        (timeframe_overlay_extent(5, None).0 - TIMEFRAME_MENU_WIDTH).abs() < f32::EPSILON,
+        "closed menu must not reserve a dead gap beside the root list"
+    );
+    let hours = timeframe_overlay_extent(5, Some((1, 5)));
+    assert!(
+        (hours.0 - (TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP + TIMEFRAME_FLYOUT_WIDTH)).abs()
+            < f32::EPSILON
+    );
+    assert!(hours.1 >= timeframe_flyout_offset(1) + timeframe_flyout_height(5));
+    assert!(
+        !timeframe_flyout_row_is_active(ChartInterval::Hour1, ChartInterval::Minute1, None, 0),
+        "hovering a group must not mark its first row selected"
+    );
+    assert!(timeframe_flyout_row_is_active(
+        ChartInterval::Minute1,
+        ChartInterval::Minute1,
+        None,
+        0
+    ));
+    assert!(timeframe_flyout_row_is_active(
+        ChartInterval::Hour1,
+        ChartInterval::Minute1,
+        Some(0),
+        0
+    ));
+}
+
+#[test]
+fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
+    assert_eq!(chrome_typeahead_char_from("1", Some("1"), false), Some('1'));
+    assert_eq!(chrome_typeahead_char_from("m", Some("m"), false), Some('m'));
+    assert_eq!(chrome_typeahead_char_from("m", Some("M"), true), Some('M'));
+    assert_eq!(chrome_typeahead_char_from("m", None, true), Some('M'));
+    assert_eq!(chrome_typeahead_char_from("a", Some("a"), false), Some('a'));
+    assert_eq!(chrome_typeahead_char_from("enter", None, false), None);
+    assert_eq!(
+        RITHMIC_INTERVALS
+            .iter()
+            .copied()
+            .filter(|interval| interval.matches_typeahead("1m"))
+            .collect::<Vec<_>>(),
+        [ChartInterval::Minute1]
+    );
+    assert_eq!(
+        RITHMIC_INTERVALS
+            .iter()
+            .copied()
+            .filter(|interval| interval.matches_typeahead("1M"))
+            .collect::<Vec<_>>(),
+        [ChartInterval::Month1]
+    );
+    assert!(ChartInterval::Minute1.matches_typeahead("1"));
+    assert!(ChartInterval::Hour1.matches_typeahead("1"));
+    assert!(!ChartInterval::Minute1.matches_typeahead("1M"));
+}
+
+#[test]
+fn workspace_split_ratio_tracks_the_active_axis_and_clamps_safe_bounds() {
+    assert_eq!(
+        workspace_split_ratio(
+            ChartSplitDirection::Horizontal,
+            350.0,
+            0.0,
+            100.0,
+            0.0,
+            500.0,
+            200.0,
+        ),
+        Some(0.5)
+    );
+    assert_eq!(
+        workspace_split_ratio(
+            ChartSplitDirection::Vertical,
+            0.0,
+            325.0,
+            0.0,
+            25.0,
+            500.0,
+            400.0,
+        ),
+        Some(0.75)
+    );
+    let minimum = workspace_split_ratio(
+        ChartSplitDirection::Horizontal,
+        -100.0,
+        0.0,
+        0.0,
+        0.0,
+        500.0,
+        200.0,
+    )
+    .expect("finite horizontal bounds produce a ratio");
+    assert!((minimum - 0.05).abs() < f64::from(f32::EPSILON));
+    assert_eq!(
+        workspace_split_ratio(
+            ChartSplitDirection::Vertical,
+            0.0,
+            100.0,
+            0.0,
+            0.0,
+            500.0,
+            0.0,
+        ),
+        None
+    );
+}
+
+#[test]
+fn desktop_lifetime_modes_are_explicit_per_launch_policies() {
+    let mut remaining = vec![OsString::from("--multi-chart")].into_iter();
+    let (mode, command) =
+        split_lifetime_mode(Some(OsString::from("--exit-with-desktop")), &mut remaining);
+    assert_eq!(mode, Some(DesktopLifetimeMode::ExitWithDesktop));
+    assert_eq!(command, Some(OsString::from("--multi-chart")));
+
+    let mut remaining = vec![OsString::from("--rithmic-test")].into_iter();
+    let (mode, command) =
+        split_lifetime_mode(Some(OsString::from("--keep-markets-live")), &mut remaining);
+    assert_eq!(mode, Some(DesktopLifetimeMode::KeepMarketsLive));
+    assert_eq!(
+        mode.expect("launch override exists").engine_resource_mode(),
+        ResourceMode::MarketsLive
+    );
+    assert_eq!(command, Some(OsString::from("--rithmic-test")));
+
+    let mut empty = Vec::<OsString>::new().into_iter();
+    let (mode, command) = split_lifetime_mode(None, &mut empty);
+    assert_eq!(mode, None);
+    assert_eq!(command, None);
+}
+
+#[test]
+fn lifecycle_controls_never_enter_markets_live_without_explicit_permission() {
+    assert_eq!(
+        DesktopLifetimeMode::KeepEngineWarm.next(false),
+        DesktopLifetimeMode::ExitWithDesktop
+    );
+    assert_eq!(
+        DesktopLifetimeMode::KeepEngineWarm.next(true),
+        DesktopLifetimeMode::KeepMarketsLive
+    );
+    assert_eq!(
+        DesktopLifetimeMode::KeepMarketsLive.next(true),
+        DesktopLifetimeMode::ExitWithDesktop
+    );
+    assert_eq!(DesktopLifetimeMode::ExitWithDesktop.label(), "Exit fully");
+    assert_eq!(DesktopLifetimeMode::KeepEngineWarm.label(), "Engine warm");
+    assert_eq!(DesktopLifetimeMode::KeepMarketsLive.label(), "Markets live");
+    assert!(
+        DesktopLifetimeMode::ExitWithDesktop
+            .description()
+            .contains("Prices will not keep updating")
+    );
+    assert!(
+        DesktopLifetimeMode::KeepEngineWarm
+            .description()
+            .contains("start faster")
+    );
+    assert!(
+        DesktopLifetimeMode::KeepMarketsLive
+            .description()
+            .contains("internet data")
+    );
+    assert_eq!(LifecycleToggle::AutoStart.label(), "Start automatically");
+    assert!(
+        LifecycleToggle::AutoStart
+            .description()
+            .contains("when you sign in")
+    );
+    assert!(
+        LifecycleToggle::LiveRetention
+            .description()
+            .contains("after you close Axiusflow")
+    );
+
+    for description in [
+        DesktopLifetimeMode::ExitWithDesktop.description(),
+        DesktopLifetimeMode::KeepEngineWarm.description(),
+        DesktopLifetimeMode::KeepMarketsLive.description(),
+        LifecycleToggle::AutoStart.description(),
+        LifecycleToggle::LiveRetention.description(),
+    ] {
+        assert!(!description.contains("resident engine"));
+        assert!(!description.contains("resource mode"));
+    }
+
+    let mut workspace = WorkspaceState {
+        lifetime_mode: EngineLifetimeMode::KeepMarketsLive as i32,
+        markets_live_permitted: false,
+        ..WorkspaceState::default()
+    };
+    assert!(DesktopLifetimeMode::from_workspace(&workspace).is_err());
+    workspace.markets_live_permitted = true;
+    assert_eq!(
+        DesktopLifetimeMode::from_workspace(&workspace),
+        Ok(DesktopLifetimeMode::KeepMarketsLive)
+    );
+}
+
+#[test]
+fn exit_with_desktop_still_requests_engine_shutdown_after_detach_expiry() {
+    let shutdown_called = Cell::new(false);
+    let result = finish_desktop_shutdown(DesktopLifetimeMode::ExitWithDesktop, true, || {
+        shutdown_called.set(true);
+        Ok(())
+    });
+    assert!(shutdown_called.get());
+    assert!(result.is_err());
+}
+
+#[cfg(feature = "diagnostics")]
+#[test]
+fn foreground_interaction_samples_are_bounded_per_handler() {
+    let mut diagnostics = ForegroundInteractionDiagnostics::default();
+    for sample in 0..=FOREGROUND_INTERACTION_SAMPLE_CAPACITY {
+        let elapsed = u64::try_from(sample).unwrap_or(u64::MAX);
+        diagnostics.record_symbol_input(false, elapsed);
+        diagnostics.record_symbol_input(true, elapsed);
+        diagnostics.record_instrument_selection(elapsed);
+        diagnostics.record_interval_selection(elapsed);
+    }
+    assert_eq!(
+        diagnostics.symbol_input_change.len(),
+        FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+    );
+    assert_eq!(
+        diagnostics.symbol_input_submit.len(),
+        FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+    );
+    assert_eq!(
+        diagnostics.instrument_selection.len(),
+        FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+    );
+    assert_eq!(
+        diagnostics.interval_selection.len(),
+        FOREGROUND_INTERACTION_SAMPLE_CAPACITY
+    );
+}
+
+#[test]
+fn escape_exits_fullscreen_without_stealing_regular_escape() {
+    assert_eq!(
+        fullscreen_escape_command("escape", true),
+        Some(WindowCommand::ToggleFullscreen)
+    );
+    assert_eq!(fullscreen_escape_command("escape", false), None);
+    assert_eq!(fullscreen_escape_command("enter", true), None);
+}
+
+#[test]
+fn fullscreen_hides_workspace_title_bar_and_native_controls() {
+    assert!(!workspace_title_bar_visible(true));
+    assert!(workspace_title_bar_visible(false));
+}
+
+#[test]
+fn caption_pointer_ownership_is_exclusive_per_platform() {
+    assert_eq!(
+        caption_pointer_owner(CaptionPlatform::Windows),
+        CaptionPointerOwner::Native
+    );
+    assert_eq!(
+        caption_pointer_owner(CaptionPlatform::Linux),
+        CaptionPointerOwner::Application
+    );
+    assert_eq!(
+        caption_pointer_owner(CaptionPlatform::MacOs),
+        CaptionPointerOwner::System
+    );
+    assert_eq!(
+        caption_pointer_owner(CaptionPlatform::Other),
+        CaptionPointerOwner::Application
+    );
+}
+
+#[test]
+fn caption_keyboard_activation_accepts_only_button_activation_keys() {
+    assert!(caption_keyboard_activates("enter"));
+    assert!(caption_keyboard_activates("space"));
+    assert!(!caption_keyboard_activates("escape"));
+    assert!(!caption_keyboard_activates("tab"));
+}
+
+#[test]
+fn window_move_waits_for_a_pressed_pointer_move_and_cancels_cleanly() {
+    assert_eq!(
+        window_move_gesture_transition(false, WindowMoveGestureEvent::Press),
+        WindowMoveGestureTransition {
+            pending: true,
+            start_move: false,
+        }
+    );
+    assert_eq!(
+        window_move_gesture_transition(true, WindowMoveGestureEvent::Move { left_pressed: true },),
+        WindowMoveGestureTransition {
+            pending: false,
+            start_move: true,
+        }
+    );
+    assert_eq!(
+        window_move_gesture_transition(
+            true,
+            WindowMoveGestureEvent::Move {
+                left_pressed: false,
+            },
+        ),
+        WindowMoveGestureTransition {
+            pending: false,
+            start_move: false,
+        }
+    );
+    assert_eq!(
+        window_move_gesture_transition(true, WindowMoveGestureEvent::Cancel),
+        WindowMoveGestureTransition {
+            pending: false,
+            start_move: false,
+        }
+    );
+}
+
+#[test]
+fn side_panel_resize_clamps_and_reuses_no_stale_pointer_state() {
+    let resize = SidePanelResize {
+        pointer_x: 500.0,
+        width: 320.0,
+    };
+    assert!((resized_side_panel_width(resize, 420.0) - 400.0).abs() < f32::EPSILON);
+    assert!((resized_side_panel_width(resize, -500.0) - 480.0).abs() < f32::EPSILON);
+    assert!((resized_side_panel_width(resize, 1_000.0) - 300.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn window_close_retirement_is_claimed_exactly_once() {
+    let mut closing = false;
+    assert!(claim_once(&mut closing));
+    assert!(!claim_once(&mut closing));
+}
+
+#[test]
+fn workspace_tabs_switch_one_surface_and_preserve_stable_labels() {
+    assert_eq!(workspace_switch(0, 1, 2), Some((0, 1)));
+    assert_eq!(workspace_switch(1, 1, 2), None);
+    assert_eq!(workspace_switch(0, 2, 2), None);
+    assert_eq!(wrapped_workspace_index(0, 3, -1), Some(2));
+    assert_eq!(wrapped_workspace_index(2, 3, 1), Some(0));
+    assert_eq!(wrapped_workspace_index(1, 3, -1), Some(0));
+    assert_eq!(wrapped_workspace_index(1, 3, 1), Some(2));
+    assert_eq!(wrapped_workspace_index(0, 0, 1), None);
+    assert_eq!(workspace_label(0), "Workspace 1");
+    assert_eq!(workspace_label(7), "Workspace 8");
+}
+
+#[test]
+fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
+    let mut ids = vec![1, 2, 3];
+    assert!(reorder_workspace_ids(&mut ids, 1, 2));
+    assert_eq!(ids, vec![2, 3, 1]);
+    assert!(reorder_workspace_ids(&mut ids, 1, 0));
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert!(reorder_workspace_ids(&mut ids, 1, 1));
+    assert_eq!(ids, vec![2, 1, 3]);
+    assert!(reorder_workspace_ids(&mut ids, 1, 0));
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert!(reorder_workspace_ids(&mut ids, 3, 0));
+    assert_eq!(ids, vec![3, 1, 2]);
+    let trailing_index = ids.len();
+    assert!(reorder_workspace_ids(&mut ids, 3, trailing_index));
+    assert_eq!(ids, vec![1, 2, 3]);
+    let trailing_index = ids.len();
+    assert!(!reorder_workspace_ids(&mut ids, 3, trailing_index));
+    assert!(!reorder_workspace_ids(&mut ids, 2, 1));
+    assert!(!reorder_workspace_ids(&mut ids, 99, 0));
+
+    assert_eq!(active_workspace_after_close(&ids, 2, 1), Some(2));
+    assert_eq!(active_workspace_after_close(&ids, 2, 2), Some(3));
+    assert_eq!(active_workspace_after_close(&ids, 3, 3), Some(2));
+    assert_eq!(active_workspace_after_close(&[1], 1, 1), None);
+}
+
+#[test]
+fn workspace_viewport_persistence_ignores_automatic_live_scrolling() {
+    let restored = Some((100, 200));
+    let current = Some((300, 400));
+    assert_eq!(
+        durable_workspace_viewport(restored, false, false, current),
+        restored
+    );
+    assert_eq!(
+        durable_workspace_viewport(restored, true, true, current),
+        None
+    );
+    assert_eq!(
+        durable_workspace_viewport(restored, true, false, current),
+        current
+    );
+}
+
+#[test]
+fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
+    let strip_left = 100.0;
+    let cursor_offset = WORKSPACE_TAB_WIDTH / 2.0;
+    let first_center = strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + cursor_offset;
+    let second_center = first_center + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+    let third_center = second_center + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+
+    assert_eq!(
+        workspace_drag_destination(first_center, strip_left, cursor_offset, 3),
+        Some(0)
+    );
+    assert_eq!(
+        workspace_drag_destination(second_center, strip_left, cursor_offset, 3),
+        Some(1)
+    );
+    assert_eq!(
+        workspace_drag_destination(third_center, strip_left, cursor_offset, 3),
+        Some(2)
+    );
+    assert_eq!(
+        workspace_drag_destination(strip_left - 500.0, strip_left, cursor_offset, 3),
+        Some(0)
+    );
+    assert_eq!(
+        workspace_drag_destination(third_center + 500.0, strip_left, cursor_offset, 3),
+        Some(2)
+    );
+    assert_eq!(
+        workspace_drag_destination(first_center, strip_left, cursor_offset, 0),
+        None
+    );
+    assert_eq!(
+        workspace_drag_destination(f32::NAN, strip_left, cursor_offset, 3),
+        None
+    );
+
+    let drag = WorkspaceDragState {
+        tab_id: 7,
+        cursor_offset_x: cursor_offset,
+        pointer_x: Some(second_center + 10.0),
+        strip_left,
+    };
+    assert_eq!(workspace_drag_translation(Some(drag), 7, 1), Some(10.0));
+    assert_eq!(workspace_drag_translation(Some(drag), 8, 1), None);
+}
+
+#[test]
+fn chrome_controls_use_icon_and_disabled_hierarchy() {
+    let colors = AxiusflowTheme::light().colors;
+    assert_eq!(chrome_control_foreground(&colors, false, true), colors.icon);
+    assert_eq!(
+        chrome_control_foreground(&colors, true, true),
+        colors.icon_active
+    );
+    assert_eq!(
+        chrome_control_foreground(&colors, false, false),
+        colors.text_muted
+    );
+}
+
+#[test]
+fn shell_theme_maps_only_to_nucleus_theme_selection() {
+    assert_eq!(
+        nucleus_chart_theme(ThemeMode::Light),
+        NucleusChartTheme::Light
+    );
+    assert_eq!(
+        nucleus_chart_theme(ThemeMode::Dark),
+        NucleusChartTheme::Dark
+    );
+}
+
+#[test]
+fn publication_is_ready_only_after_bridge_acceptance_without_recovery() {
+    assert_eq!(publication_chart_state(true, false), ChartState::Ready);
+    assert_eq!(publication_chart_state(false, true), ChartState::Recovering);
+    assert_eq!(publication_chart_state(true, true), ChartState::Recovering);
+}
+
+#[test]
+fn catalog_rejections_preserve_search_and_selection_generation_order_bookains() {
+    assert_eq!(
+        catalog_rejection_order_bookain(ProviderCatalogCommand::Search),
+        CatalogCommandOrderBookain::Search
+    );
+    assert_eq!(
+        catalog_rejection_order_bookain(ProviderCatalogCommand::Selection),
+        CatalogCommandOrderBookain::Selection
+    );
+}
+
+#[test]
+fn symbol_input_searches_only_on_change_events() {
+    assert_eq!(
+        symbol_input_action(&InputEvent::Change),
+        SymbolInputAction::Search
+    );
+    assert_eq!(
+        symbol_input_action(&InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        }),
+        SymbolInputAction::Submit
+    );
+    assert_eq!(
+        symbol_input_action(&InputEvent::Focus),
+        SymbolInputAction::Ignore
+    );
+    assert_eq!(
+        symbol_input_action(&InputEvent::Blur),
+        SymbolInputAction::Ignore
+    );
+}
+
+#[test]
+fn enter_closes_only_for_an_available_provider_selection() {
+    assert_eq!(
+        symbol_submit_decision(TerminalProvider::Rithmic, 3, 1),
+        SymbolSubmitDecision::Select(1)
+    );
+    assert_eq!(
+        symbol_submit_decision(TerminalProvider::Rithmic, 0, 0),
+        SymbolSubmitDecision::Search
+    );
+    assert_eq!(
+        symbol_submit_decision(TerminalProvider::Rithmic, 1, 2),
+        SymbolSubmitDecision::Search
+    );
+    assert_eq!(
+        symbol_submit_decision(TerminalProvider::Rithmic, 2, 0),
+        SymbolSubmitDecision::Select(0)
+    );
+}
+
+#[test]
+fn instrument_menu_highlights_only_the_live_market_until_keyboard_moves() {
+    assert!(instrument_row_highlighted(true, 4, 0, false));
+    assert!(
+        !instrument_row_highlighted(false, 0, 0, false),
+        "opening the menu must not paint catalog index 0 as the live stream"
+    );
+    assert!(instrument_row_highlighted(false, 0, 0, true));
+    assert!(!instrument_row_highlighted(true, 4, 0, true));
+    assert!(instrument_row_highlighted(true, 4, 4, true));
+}
+
+#[test]
+fn instrument_menu_index_follows_the_checked_live_market() {
+    let entries = [
+        InstrumentMenuEntry {
+            symbol: "BTC/USD".into(),
+            checked: false,
+            selection: InstrumentMenuSelection::Rithmic(0),
+        },
+        InstrumentMenuEntry {
+            symbol: "ETH/USD".into(),
+            checked: true,
+            selection: InstrumentMenuSelection::Rithmic(1),
+        },
+    ];
+    assert_eq!(current_instrument_menu_index(&entries), Some(1));
+    assert_eq!(
+        current_instrument_menu_index(&[InstrumentMenuEntry {
+            symbol: "AAVE/USD".into(),
+            checked: false,
+            selection: InstrumentMenuSelection::Rithmic(0),
+        }]),
+        None
+    );
+}
+
+#[test]
+fn hyperliquid_catalog_rejections_never_name_rithmic() {
+    for reason in [
+        ProviderCatalogRejectionReason::SearchRejected,
+        ProviderCatalogRejectionReason::SupersededSearch,
+        ProviderCatalogRejectionReason::InstrumentUnavailable,
+        ProviderCatalogRejectionReason::SubscriptionRejected,
+        ProviderCatalogRejectionReason::DispatchUnavailable,
+        ProviderCatalogRejectionReason::SearchTimedOut,
+        ProviderCatalogRejectionReason::SelectionTimedOut,
+        ProviderCatalogRejectionReason::Unspecified,
+    ] {
+        for command in [
+            ProviderCatalogCommand::Search,
+            ProviderCatalogCommand::Selection,
+        ] {
+            let message = catalog_rejection_message(reason, command, TerminalProvider::Hyperliquid);
+            assert!(!message.contains("Rithmic"), "{message}");
+        }
+    }
+    assert_eq!(
+        catalog_rejection_message(
+            ProviderCatalogRejectionReason::SearchTimedOut,
+            ProviderCatalogCommand::Search,
+            TerminalProvider::Rithmic,
+        ),
+        "The Rithmic market search timed out; try again"
+    );
+    assert_eq!(
+        catalog_rejection_message(
+            ProviderCatalogRejectionReason::SelectionTimedOut,
+            ProviderCatalogCommand::Selection,
+            TerminalProvider::Rithmic,
+        ),
+        "The Rithmic market selection timed out; try again"
+    );
+}
+
+#[test]
+fn persisted_calendar_series_keep_week_and_month_identity() {
+    let instrument = InstallProviderInstrument {
+        provider: "rithmic".to_string(),
+        instrument_id: "instrument:rithmic:btc:usd".to_string(),
+        entitlement_id: RITHMIC_ENTITLEMENT_ID.to_string(),
+        ..InstallProviderInstrument::default()
+    };
+    let week = workspace_series(ChartInterval::Week1, &instrument);
+    let month = workspace_series(ChartInterval::Month1, &instrument);
+    assert_eq!(week.cadence, SeriesCadence::CalendarWeeks as i32);
+    assert_eq!(month.cadence, SeriesCadence::CalendarMonths as i32);
+    assert_eq!(week.cadence_value, 1);
+    assert_eq!(month.cadence_value, 1);
+    assert!(RITHMIC_INTERVALS.contains(&ChartInterval::Month1));
+}
+
+#[test]
+fn bridge_recovery_replaces_ready_after_deferred_gap_validation() {
+    assert_eq!(
+        reconciled_bridge_state(ChartState::Ready, true),
+        ChartState::Recovering
+    );
+    assert_eq!(
+        reconciled_bridge_state(ChartState::Stale, true),
+        ChartState::Stale
+    );
+}
+
+#[test]
+fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
+    let result = |symbol: &str, expiration: &str| ProviderInstrumentSummary {
+        symbol: symbol.to_string(),
+        exchange: "CME-Delayed".to_string(),
+        name: None,
+        product_code: Some("MNQ".to_string()),
+        instrument_type: Some("FUTURE".to_string()),
+        expiration_date: Some(expiration.to_string()),
+    };
+    let results = vec![
+        result("MNQ", "20260918"),
+        result("MNQU6-MNQZ6", "20260918"),
+        result("MNQZ6", "20261218"),
+        result("MNQU6", "20260918"),
+        ProviderInstrumentSummary {
+            symbol: "NQ".to_string(),
+            exchange: "CME-Delayed".to_string(),
+            name: None,
+            product_code: Some("NQ".to_string()),
+            instrument_type: Some("FUTURE".to_string()),
+            expiration_date: None,
+        },
+    ];
+    assert_eq!(default_rithmic_contract_index(&results), Some(3));
+}
+
+#[test]
+fn reconnect_contract_requires_the_exact_symbol_and_exchange() {
+    let result = |exchange: &str| ProviderInstrumentSummary {
+        symbol: "MNQU6".to_string(),
+        exchange: exchange.to_string(),
+        name: None,
+        product_code: Some("MNQ".to_string()),
+        instrument_type: Some("FUTURE".to_string()),
+        expiration_date: Some("20260918".to_string()),
+    };
+    let results = vec![result("CME-Delayed"), result("CME")];
+    let target = RithmicReconnectTarget {
+        symbol: "MNQU6".to_string(),
+        exchange: "CME".to_string(),
+        series: crate::desktop::rithmic_history::RithmicSeries::from(ChartInterval::Minute5),
+    };
+    assert_eq!(reconnect_contract_index(&results, &target), Some(1));
+    let missing = RithmicReconnectTarget {
+        exchange: "CBOT".to_string(),
+        ..target
+    };
+    assert_eq!(reconnect_contract_index(&results, &missing), None);
+}
+
+#[test]
+fn disconnected_session_retires_surfaces_and_keeps_a_stale_chart_notice() {
+    let retirement = RithmicSessionRetirement::from_connection(FeedConnectionState::Disconnected);
+    assert_eq!(retirement, RithmicSessionRetirement::Offline);
+    assert_eq!(retirement.chart_state(true), Some(ChartState::Stale));
+    assert_eq!(retirement.chart_state(false), None);
+    let mut retained_chart_state = retirement
+        .chart_state(true)
+        .expect("offline retained chart becomes stale");
+    assert_eq!(retained_chart_state, ChartState::Stale);
+    retained_chart_state =
+        RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
+            .chart_state(true)
+            .expect("the same retained chart advances to reconnecting");
+    assert_eq!(retained_chart_state, ChartState::Recovering);
+    assert_eq!(
+        RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
+            .chart_state(true),
+        Some(ChartState::Recovering)
+    );
+    assert_eq!(
+        RithmicSessionRetirement::from_connection(FeedConnectionState::Streaming),
+        RithmicSessionRetirement::None
+    );
+}
+
+#[test]
+fn terminal_session_stop_is_a_truthful_chart_error_with_or_without_data() {
+    let stopped = RithmicSessionRetirement::from_connection(FeedConnectionState::Stopped);
+    assert_eq!(stopped.chart_state(true), Some(ChartState::Error));
+    assert_eq!(stopped.chart_state(false), Some(ChartState::Error));
+    assert_eq!(
+        chart_surface_notice(
+            stopped.chart_state(true).expect("stopped chart state"),
+            true,
+            false,
+            "Rithmic market worker stopped",
+        )
+        .expect("retained chart error notice")
+        .placement,
+        ChartNoticePlacement::BottomRight
+    );
+    assert_eq!(
+        chart_surface_notice(
+            stopped.chart_state(false).expect("stopped chart state"),
+            false,
+            false,
+            "Rithmic market worker stopped",
+        )
+        .expect("empty chart error notice")
+        .placement,
+        ChartNoticePlacement::Center
+    );
+}
+
+#[test]
+fn dead_rithmic_worker_stop_transition_is_applied_once() {
+    assert!(should_apply_rithmic_worker_stop(
+        true,
+        Some(FeedConnectionState::Streaming)
+    ));
+    assert!(!should_apply_rithmic_worker_stop(
+        true,
+        Some(FeedConnectionState::Stopped)
+    ));
+    assert!(!should_apply_rithmic_worker_stop(
+        false,
+        Some(FeedConnectionState::Streaming)
+    ));
+    assert!(!should_apply_rithmic_worker_stop(true, None));
+}
+
+#[test]
+fn authentication_ready_reselects_the_retired_contract() {
+    let reconnect = RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
+        symbol: "MNQU6".to_string(),
+        exchange: "CME".to_string(),
+        series: crate::desktop::rithmic_history::RithmicSeries::from(ChartInterval::Minute5),
+    });
+    assert_eq!(
+        rithmic_ready_action(
+            FeedConnectionState::Authenticating,
+            "Rithmic Test session is ready for instrument search",
+            &reconnect,
+            true,
+        ),
+        RithmicReadyAction::Reconnect("MNQU6".to_string())
+    );
+    assert_eq!(
+        rithmic_ready_action(
+            FeedConnectionState::Discovering,
+            "discovering Rithmic Test systems",
+            &reconnect,
+            true,
+        ),
+        RithmicReadyAction::None
+    );
+}
+
+#[test]
+fn interrupted_initial_autoload_restarts_after_authentication() {
+    let mut reconnect = RithmicReconnectState::Idle;
+    assert!(reconnect.capture_retired_selection(
+        None,
+        crate::desktop::rithmic_history::RithmicSeries::Minute1,
+    ));
+    assert_eq!(
+        rithmic_ready_action(
+            FeedConnectionState::Authenticating,
+            "Rithmic Test session is ready for instrument search",
+            &reconnect,
+            false,
+        ),
+        RithmicReadyAction::Autoload
+    );
+    assert_eq!(
+        rithmic_ready_action(
+            FeedConnectionState::Authenticating,
+            "Rithmic Test session is ready for instrument search",
+            &RithmicReconnectState::Idle,
+            true,
+        ),
+        RithmicReadyAction::None
+    );
+}
+
+#[test]
+fn gpui_theme_attachment_preserves_alpha() {
+    let attached = gpui_color(ThemeColor::from_rgb8(240, 240, 240).with_alpha(19.0 / 255.0));
+    assert!((attached.a - 19.0 / 255.0).abs() < f32::EPSILON);
+}
+
+/// A switch leaves the previous chart on screen so the surface never goes
+/// blank. That chart is real market data from the market the trader just
+/// left, so it has to be covered and named — a corner spinner over live
+/// candles reads as the new selection already streaming.
+#[test]
+fn a_superseded_chart_is_covered_and_named_not_left_looking_current() {
+    let switching =
+        chart_surface_notice(ChartState::Loading, true, true, "Loading 5m market history")
+            .expect("a switch in flight is announced");
+    assert_eq!(switching.placement, ChartNoticePlacement::Center);
+    assert_eq!(
+        switching.detail.as_deref(),
+        Some("Loading 5m market history")
+    );
+
+    // A repair behind the chart the trader is actually looking at is
+    // different: it stays out of the way.
+    let repairing = chart_surface_notice(ChartState::Loading, true, false, "repairing coverage")
+        .expect("a repair is announced");
+    assert_eq!(repairing.placement, ChartNoticePlacement::BottomRight);
+}
+
+#[test]
+fn engine_switch_keeps_partial_replacement_covered_until_handoff_is_current() {
+    assert!(!switch_requires_chart_cover(
+        false,
+        RithmicSwitchState::Pending
+    ));
+    assert!(!switch_requires_chart_cover(true, RithmicSwitchState::Idle));
+    assert!(switch_requires_chart_cover(
+        true,
+        RithmicSwitchState::Pending
+    ));
+    assert!(switch_requires_chart_cover(
+        true,
+        RithmicSwitchState::Swapping
+    ));
+    assert!(switch_requires_chart_cover(
+        true,
+        RithmicSwitchState::Initializing
+    ));
+}
+
+#[test]
+fn old_ready_cannot_cancel_a_pending_symbol_or_timeframe_switch() {
+    assert!(ready_state_can_complete_switch(RithmicSwitchState::Idle));
+    assert!(!ready_state_can_complete_switch(
+        RithmicSwitchState::Pending
+    ));
+    assert!(!ready_state_can_complete_switch(
+        RithmicSwitchState::Swapping
+    ));
+    assert!(ready_state_can_complete_switch(
+        RithmicSwitchState::Initializing
+    ));
+}
+
+#[test]
+fn worker_stop_preserves_a_concrete_startup_error() {
+    assert_eq!(
+        stopped_worker_chart_detail(
+            ChartState::Error,
+            "provider instrument selection is stale",
+            "Hyperliquid market worker stopped",
+        ),
+        "provider instrument selection is stale"
+    );
+    assert_eq!(
+        stopped_worker_chart_detail(
+            ChartState::Loading,
+            "Loading Hyperliquid history",
+            "Hyperliquid market worker stopped",
+        ),
+        "Hyperliquid market worker stopped"
+    );
+}
+
+#[test]
+fn connection_indicator_is_transport_only() {
+    let live = connection_presentation(
+        TerminalProvider::Rithmic,
+        FeedConnectionState::Streaming,
+        None,
+    );
+    assert_eq!(live.provider, "Rithmic");
+    assert_eq!(live.status, "Live");
+    assert_eq!(live.latency, "Measuring…");
+
+    let recovering = connection_presentation(
+        TerminalProvider::Rithmic,
+        FeedConnectionState::Recovering,
+        Some(18_000_000),
+    );
+    assert_eq!(recovering.status, "Reconnecting");
+    assert_eq!(recovering.latency, "Measuring…");
+
+    let offline = connection_presentation(
+        TerminalProvider::Rithmic,
+        FeedConnectionState::Disconnected,
+        Some(18_000_000),
+    );
+    assert_eq!(offline.status, "Offline");
+    assert_eq!(offline.latency, "Measuring…");
+}
+
+#[test]
+fn reconnect_retry_states_do_not_flicker_back_to_offline() {
+    assert_eq!(
+        stabilized_connection_state(
+            Some(FeedConnectionState::Streaming),
+            FeedConnectionState::Disconnected,
+        ),
+        FeedConnectionState::Disconnected
+    );
+    assert_eq!(
+        stabilized_connection_state(
+            Some(FeedConnectionState::Disconnected),
+            FeedConnectionState::Discovering,
+        ),
+        FeedConnectionState::Recovering
+    );
+    assert_eq!(
+        stabilized_connection_state(
+            Some(FeedConnectionState::Recovering),
+            FeedConnectionState::Disconnected,
+        ),
+        FeedConnectionState::Recovering
+    );
+    assert_eq!(
+        stabilized_connection_state(
+            Some(FeedConnectionState::Recovering),
+            FeedConnectionState::Streaming,
+        ),
+        FeedConnectionState::Streaming
+    );
+    assert_eq!(
+        stable_connection_message(
+            FeedConnectionState::Recovering,
+            "Rithmic realtime disconnected".to_string(),
+        ),
+        "Reconnecting market data"
+    );
+    assert_eq!(
+        connectivity_chart_state(ChartState::Ready, FeedConnectionState::Recovering, true,),
+        ChartState::Recovering
+    );
+    assert_eq!(
+        connectivity_chart_state(ChartState::Error, FeedConnectionState::Disconnected, true,),
+        ChartState::Stale
+    );
+}
+
+#[test]
+fn header_lifecycle_values_are_truthfully_labeled() {
+    let rithmic = connection_presentation(
+        TerminalProvider::Rithmic,
+        FeedConnectionState::Streaming,
+        Some(18_400_000),
+    );
+    assert_eq!(rithmic.provider, "Rithmic");
+    assert_eq!(rithmic.status, "Live");
+    assert_eq!(rithmic.latency, "18.4 ms RTT");
+
+    let hyperliquid = connection_presentation(
+        TerminalProvider::Hyperliquid,
+        FeedConnectionState::Streaming,
+        Some(900_000),
+    );
+    assert_eq!(hyperliquid.provider, "Hyperliquid");
+    assert_eq!(hyperliquid.status, "Live");
+    assert_eq!(hyperliquid.latency, "0.9 ms RTT");
+    let controls = HeaderControls::from_state(true, true).with_chart_controls(true);
+    assert!(controls.enabled(HeaderControls::INSTRUMENT));
+    assert!(controls.enabled(HeaderControls::SERIES));
+    assert!(controls.enabled(HeaderControls::ORDER_BOOK));
+    assert!(controls.enabled(HeaderControls::INDICATOR));
+    assert!(controls.enabled(HeaderControls::CHART_TYPE));
+}
+
+#[test]
+fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
+    let retained_chart_controls = HeaderControls::from_state(true, false).with_chart_controls(true);
+    assert!(retained_chart_controls.enabled(HeaderControls::INDICATOR));
+    assert!(retained_chart_controls.enabled(HeaderControls::CHART_TYPE));
+
+    let empty_chart_controls = HeaderControls::from_state(true, false).with_chart_controls(false);
+    assert!(!empty_chart_controls.enabled(HeaderControls::INDICATOR));
+    assert!(!empty_chart_controls.enabled(HeaderControls::CHART_TYPE));
+}
+
+#[test]
+fn chart_context_menu_stays_inside_the_window() {
+    let overflow =
+        clamp_chart_context_menu_origin(point(px(2000.0), px(2000.0)), size(px(800.0), px(600.0)));
+    assert!(overflow.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+    assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
+    assert_eq!(
+        clamp_chart_context_menu_origin(point(px(-20.0), px(-20.0)), size(px(800.0), px(600.0))),
+        point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
+    );
+}
+
+#[test]
+fn chart_context_remove_actions_use_destructive_color() {
+    assert!(super::ChartContextAction::ClearDrawings.is_destructive());
+    assert!(super::ChartContextAction::ClearIndicators.is_destructive());
+    assert!(!super::ChartContextAction::CopyPrice.is_destructive());
+    assert!(!super::ChartContextAction::Reset.is_destructive());
+    assert!(!super::ChartContextAction::Close.is_destructive());
+    assert!(!super::ChartContextAction::Settings.is_destructive());
+    let items = super::chart_context_menu_items(super::ChartContextMenuState {
+        pane_count: 1,
+        flags: 0,
+    });
+    assert_eq!(items[0].icon, super::HugeIcon::Refresh01Icon);
+    assert_eq!(items[1].icon, super::HugeIcon::Copy01Icon);
+    assert_eq!(items[1].label, "Copy price");
+    assert!(!items[1].enabled);
+    assert_eq!(items[1].action, super::ChartContextAction::CopyPrice);
+    let copy_ready = super::chart_context_menu_items(super::ChartContextMenuState {
+        pane_count: 1,
+        flags: super::ChartContextMenuState::COPY_PRICE,
+    });
+    assert!(copy_ready[1].enabled);
+    let trash = items
+        .into_iter()
+        .filter(|item| item.action.is_destructive())
+        .map(|item| item.icon)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        trash,
+        [super::HugeIcon::DeleteIcon02, super::HugeIcon::DeleteIcon02]
+    );
+}
+
+#[test]
+fn chrome_menus_shrink_to_fit_a_small_viewport() {
+    let chrome_height = 44.0;
+    let roomy = chrome_menu_extent(
+        size(px(1920.0), px(1200.0)),
+        chrome_height,
+        CHROME_MENU_SEARCH_HEIGHT,
+    );
+    assert!((roomy.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
+    assert!((roomy.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
+
+    let cramped = chrome_menu_extent(
+        size(px(800.0), px(600.0)),
+        chrome_height,
+        CHROME_MENU_SEARCH_HEIGHT,
+    );
+    assert!(cramped.width < CHROME_MENU_WIDTH);
+    assert!(cramped.width + OVERLAY_EDGE_MARGIN * 2.0 <= 800.0);
+    assert!(cramped.list_height < CHROME_MENU_LIST_HEIGHT);
+    let drawn = CHROME_MENU_SEARCH_HEIGHT + cramped.list_height + CHROME_MENU_FOOTER_HEIGHT;
+    assert!(drawn + chrome_height + OVERLAY_EDGE_MARGIN * 2.0 <= 600.0);
+    assert!(drawn <= CHROME_MENU_MAX_HEIGHT);
+}
+
+#[test]
+fn chrome_menus_never_exceed_a_tiny_viewport() {
+    let tiny = chrome_menu_extent(size(px(240.0), px(180.0)), 44.0, CHROME_MENU_SEARCH_HEIGHT);
+    assert!(tiny.width <= 240.0);
+    assert!(tiny.list_height >= 0.0);
+    assert!(
+        CHROME_MENU_SEARCH_HEIGHT + tiny.list_height + CHROME_MENU_FOOTER_HEIGHT <= 180.0 - 44.0
+    );
+}
+
+#[test]
+fn header_history_controls_gate_on_their_own_half_of_the_stack() {
+    use super::{DrawingHistoryControl, DrawingHistoryState};
+
+    let empty = DrawingHistoryState::default();
+    assert!(!DrawingHistoryControl::Undo.enabled(empty));
+    assert!(!DrawingHistoryControl::Redo.enabled(empty));
+
+    let undo_only = DrawingHistoryState {
+        can_undo: true,
+        can_redo: false,
+    };
+    assert!(DrawingHistoryControl::Undo.enabled(undo_only));
+    assert!(
+        !DrawingHistoryControl::Redo.enabled(undo_only),
+        "redo must stay disabled while nothing has been reversed"
+    );
+
+    assert_ne!(
+        DrawingHistoryControl::Undo.id(),
+        DrawingHistoryControl::Redo.id()
+    );
+    assert_eq!(DrawingHistoryControl::Undo.icon(), super::HugeIcon::Undo03);
+    assert_eq!(DrawingHistoryControl::Redo.icon(), super::HugeIcon::Redo01);
+}
+
+#[test]
+fn anchored_menus_slide_back_inside_the_window() {
+    let viewport = size(px(800.0), px(600.0));
+    let flush_right = clamp_anchored_menu_left(px(760.0), viewport, TIMEFRAME_MENU_WIDTH);
+    assert!(
+        flush_right + px(TIMEFRAME_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN),
+        "a trigger near the right edge must not push the panel off-screen"
+    );
+    assert_eq!(
+        clamp_anchored_menu_left(px(120.0), viewport, TIMEFRAME_MENU_WIDTH),
+        px(120.0),
+        "a panel that already fits keeps its anchored position"
+    );
+    assert_eq!(
+        clamp_anchored_menu_left(px(40.0), size(px(100.0), px(600.0)), TIMEFRAME_MENU_WIDTH),
+        px(0.0),
+        "a panel wider than the window pins to the left edge rather than going negative"
+    );
+}
+
+#[test]
+fn price_axis_menu_stays_inside_the_window() {
+    let overflow = clamp_price_axis_menu_origin(
+        point(px(2000.0), px(2000.0)),
+        size(px(800.0), px(600.0)),
+        false,
+    );
+    assert!(overflow.x >= px(OVERLAY_EDGE_MARGIN));
+    assert!(overflow.y >= px(OVERLAY_EDGE_MARGIN));
+    assert!(overflow.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+    assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
+}
+
+#[test]
+fn price_axis_menu_opens_into_the_chart() {
+    let right_axis = clamp_price_axis_menu_origin(
+        point(px(780.0), px(200.0)),
+        size(px(800.0), px(600.0)),
+        false,
+    );
+    assert!(right_axis.x + px(CHART_CONTEXT_MENU_WIDTH) + px(PRICE_AXIS_MENU_GAP) <= px(780.0));
+    assert!(right_axis.x >= px(OVERLAY_EDGE_MARGIN));
+
+    let left_axis =
+        clamp_price_axis_menu_origin(point(px(24.0), px(200.0)), size(px(800.0), px(600.0)), true);
+    assert!(left_axis.x >= px(24.0) + px(PRICE_AXIS_MENU_GAP));
+    assert!(left_axis.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+}
+
+#[test]
+fn price_axis_menu_compacts_labels_and_lines_into_flyouts() {
+    let state = PriceAxisMenuState {
+        flags: PriceAxisMenuState::PRICE_LINE
+            | PriceAxisMenuState::LAST_VALUE
+            | PriceAxisMenuState::TITLE
+            | PriceAxisMenuState::COUNTDOWN
+            | PriceAxisMenuState::INDICATOR_NAMES
+            | PriceAxisMenuState::INDICATOR_VALUES
+            | PriceAxisMenuState::INDICATOR_PRICE_LINES
+            | PriceAxisMenuState::AUTO_SCALE
+            | PriceAxisMenuState::ALIGN_LABELS,
+        mode: 0,
+        left: false,
+        precision: None,
+    };
+    assert_eq!(
+        price_axis_root_rows(PriceAxisMenuFlyout::None, state).map(PriceAxisMenuRow::label),
+        [
+            "Labels",
+            "Lines",
+            "Auto scale",
+            "Invert scale",
+            "Scale mode",
+            "Y-axis",
+            "Precision",
+        ]
+    );
+    let labels = price_axis_flyout_rows(PriceAxisMenuFlyout::Labels, state);
+    assert_eq!(
+        labels
+            .iter()
+            .copied()
+            .map(PriceAxisMenuRow::label)
+            .collect::<Vec<_>>(),
+        [
+            "Symbol name label",
+            "Symbol last price label",
+            "Symbol previous day close price label",
+            "Pre/post/night market price label",
+            "High and low price labels",
+            "Bid and ask labels",
+            "Indicators and financials name labels",
+            "Indicators and financials value labels",
+            "Countdown to bar close",
+            "No overlapping labels",
+        ]
+    );
+    assert!(labels.iter().all(|row| {
+        ![
+            "Symbol previous day close price label",
+            "Pre/post/night market price label",
+            "High and low price labels",
+        ]
+        .contains(&row.label())
+            || !row.enabled()
+    }));
+    let lines = price_axis_flyout_rows(PriceAxisMenuFlyout::Lines, state);
+    assert_eq!(
+        lines
+            .iter()
+            .copied()
+            .map(PriceAxisMenuRow::label)
+            .collect::<Vec<_>>(),
+        [
+            "Price line",
+            "Previous day close price line",
+            "Pre/post/night market price line",
+            "High and low price lines",
+            "Bid and ask lines",
+            "Indicators and financials price lines",
+        ]
+    );
+    assert!(lines.iter().all(|row| {
+        ![
+            "Previous day close price line",
+            "Pre/post/night market price line",
+            "High and low price lines",
+        ]
+        .contains(&row.label())
+            || !row.enabled()
+    }));
+}
+
+#[test]
+fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
+    assert_eq!(SidePanel::OrderBook.toggle_label(), "Order Book");
+    assert_eq!(SidePanel::OrderBook.title(), "Order Book");
+    assert_eq!(
+        SidePanel::OrderBook.toggle_tooltip(),
+        "Toggle read-only order book"
+    );
+}
+
+#[test]
+fn chart_notice_distinguishes_empty_loading_from_retained_recovery() {
+    let loading = chart_surface_notice(
+        ChartState::Loading,
+        false,
+        false,
+        "discovering Rithmic Test systems",
+    )
+    .expect("loading notice");
+    assert_eq!(loading.label, "Loading chart");
+    assert_eq!(
+        loading.detail.as_deref(),
+        Some("discovering Rithmic Test systems")
+    );
+    assert_eq!(loading.placement, ChartNoticePlacement::Center);
+    assert_eq!(loading.tone, ChartNoticeTone::Muted);
+
+    let recovery = chart_surface_notice(
+        ChartState::Recovering,
+        true,
+        false,
+        "Rithmic Test session will retry",
+    )
+    .expect("recovery notice");
+    assert_eq!(recovery.label, "Reconnecting chart");
+    assert_eq!(recovery.placement, ChartNoticePlacement::BottomRight);
+    assert_eq!(recovery.tone, ChartNoticeTone::Warning);
+    assert!(chart_surface_notice(ChartState::Ready, true, false, "current").is_none());
+}
+
+#[test]
+fn chart_error_and_stale_notices_use_truthful_severity() {
+    let stale = chart_surface_notice(ChartState::Stale, true, false, "trade stream is silent")
+        .expect("stale notice");
+    assert_eq!(stale.label, "Chart stale");
+    assert_eq!(stale.tone, ChartNoticeTone::Warning);
+
+    let error = chart_surface_notice(
+        ChartState::Error,
+        false,
+        false,
+        "Rithmic Test authentication was rejected",
+    )
+    .expect("error notice");
+    assert_eq!(error.label, "Chart unavailable");
+    assert_eq!(
+        error.detail.as_deref(),
+        Some("Rithmic Test authentication was rejected")
+    );
+    assert_eq!(error.placement, ChartNoticePlacement::Center);
+    assert_eq!(error.tone, ChartNoticeTone::Loss);
+}
+
+#[test]
+fn contextual_labels_keep_contract_and_pending_series_truthful() {
+    assert_eq!(instrument_selector_label(None, false), "Contract");
+    assert_eq!(
+        instrument_selector_label(Some(("MNQU6", "CME")), false),
+        "MNQU6 / CME"
+    );
+    assert_eq!(
+        instrument_selector_label(Some(("MNQU6", "CME")), true),
+        "MNQU6 / CME"
+    );
+    assert_eq!(series_selector_label(ChartInterval::Minute1), "1m");
+    assert_eq!(series_selector_label(ChartInterval::Minute5), "5m");
+    assert_eq!(series_selector_label(ChartInterval::Hour4), "4h");
+}
+
+#[test]
+fn chart_detail_prefers_connection_context_until_streaming() {
+    assert_eq!(
+        chart_status_detail(
+            ChartState::Loading,
+            FeedConnectionState::Authenticating,
+            "waiting for chart",
+            Some("Rithmic Test agreements require attention"),
+        ),
+        "Rithmic Test agreements require attention"
+    );
+    assert_eq!(
+        chart_status_detail(
+            ChartState::Recovering,
+            FeedConnectionState::Streaming,
+            "history is covering a gap",
+            Some("feed is streaming"),
+        ),
+        "history is covering a gap"
+    );
+}
+
+#[test]
+fn chart_detail_is_bounded_and_suppresses_generic_duplicates() {
+    assert_eq!(
+        bounded_status_detail(" Chart unavailable ", "Chart unavailable"),
+        None
+    );
+    let detail = bounded_status_detail(&"x".repeat(200), "Chart unavailable")
+        .expect("long detail remains visible");
+    assert_eq!(detail.chars().count(), 161);
+    assert!(detail.ends_with('…'));
+}

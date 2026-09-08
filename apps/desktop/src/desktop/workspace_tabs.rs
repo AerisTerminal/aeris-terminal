@@ -1,0 +1,1465 @@
+//! Workspace tabs.
+
+use super::*;
+
+impl TerminalApp {
+    pub(super) fn new(
+        init: TerminalShellInit,
+        lifecycle: DesktopLifecycle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut workspaces = init.workspaces;
+        let market_frame_wake = UiWake::default();
+        for (index, workspace) in workspaces.iter_mut().enumerate() {
+            workspace.focus = workspace
+                .focus
+                .clone()
+                .tab_index(isize::try_from(index.saturating_mul(2)).unwrap_or(isize::MAX))
+                .tab_stop(true);
+        }
+        for workspace in &workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.set_market_message_wake(market_frame_wake.callback());
+                });
+                cx.observe(&pane.surface, |_, _, cx| cx.notify()).detach();
+            }
+        }
+        let active = init
+            .active_workspace_id
+            .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
+            .unwrap_or(0);
+        for (index, workspace) in workspaces.iter().enumerate() {
+            let resource_class = if index == active {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            };
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.set_market_resource_class(resource_class);
+                });
+            }
+        }
+        let workspace_persistence = (init.workspace_shell == WorkspaceShellKind::Tabs)
+            .then(|| {
+                WorkspaceLayoutPersistence::new(init.workspace_revision, init.layout_generation)
+            })
+            .transpose()
+            .unwrap_or_else(|error| {
+                eprintln!("Axiusflow workspace persistence could not start: {error}");
+                None
+            });
+        let persisted_layout = workspace_layout_tabs(&workspaces, cx);
+        let persisted_active_workspace_id = workspaces[active].id;
+        Self {
+            workspaces,
+            active,
+            theme: AxiusflowTheme::dark(),
+            drawing_toolbar: DrawingToolbarVisibility::Expanded,
+            window_active: true,
+            frame_poll_gate: frame_poll_gate::FramePollGate::default(),
+            market_frame_wake,
+            market_wake_listener_started: None,
+            chrome_focus: cx.focus_handle().tab_stop(true),
+            lifecycle,
+            workspace_factory: init.workspace_factory,
+            workspace_persistence,
+            persisted_layout,
+            persisted_active_workspace_id,
+            workspace_error: None,
+            workspace_drag: None,
+            chart_context_menu: None,
+            chart_settings_menu: None,
+            account_menu_open: false,
+            account_menu_anchor: None,
+            profile_refresh_on_activation: false,
+            about_dialog_open: false,
+            updater: DesktopUpdater::new()
+                .map_err(|error| eprintln!("Axiusflow update UI degraded: {error}"))
+                .ok(),
+            chart_chrome: init.chart_chrome,
+            window_move_pending: false,
+            closing: false,
+        }
+    }
+
+    pub(super) fn active_surface(&self) -> Entity<WorkspaceSurface> {
+        let workspace = &self.workspaces[self.active];
+        workspace.panes[workspace.active_pane].surface.clone()
+    }
+
+    fn chart_chrome_for_new_surface(&self, cx: &App) -> chart_chrome::ChartChromePreferences {
+        let mut preferences = self.chart_chrome;
+        preferences.chart_type = self.active_surface().read(cx).chart_type(cx);
+        preferences
+    }
+
+    fn set_workspace_resource_class(
+        &self,
+        workspace_index: usize,
+        resource_class: ConsumerResourceClass,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspaces.get(workspace_index) {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.set_market_resource_class(resource_class);
+                });
+            }
+        }
+    }
+
+    fn refresh_workspace_focus_order(&mut self) {
+        for (index, workspace) in self.workspaces.iter_mut().enumerate() {
+            workspace.focus = workspace
+                .focus
+                .clone()
+                .tab_index(isize::try_from(index.saturating_mul(2)).unwrap_or(isize::MAX))
+                .tab_stop(true);
+        }
+    }
+
+    pub(super) fn select_pane(&mut self, workspace_id: u64, pane_id: u64, cx: &mut Context<Self>) {
+        let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        let Some(index) = workspace.panes.iter().position(|pane| pane.id == pane_id) else {
+            return;
+        };
+        if workspace.active_pane != index {
+            workspace.active_pane = index;
+            workspace.generation = workspace.generation.saturating_add(1);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn absorb_pane_activate_requests(&mut self, cx: &mut Context<Self>) {
+        let mut requested = None;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                let activate = pane.surface.update(cx, |surface, _| {
+                    let pending = surface.pending_pane_activate == PaneActivationRequest::Pending;
+                    surface.pending_pane_activate = PaneActivationRequest::None;
+                    pending
+                });
+                if activate {
+                    requested = Some((workspace.id, pane.id));
+                }
+            }
+        }
+        if let Some((workspace_id, pane_id)) = requested {
+            self.select_pane(workspace_id, pane_id, cx);
+        }
+    }
+
+    pub(super) fn select_drawing_tool_on_active_workspace(
+        &mut self,
+        tool: ChartDrawingTool,
+        cx: &mut Context<Self>,
+    ) {
+        let panes: Vec<_> = self.workspaces[self.active]
+            .panes
+            .iter()
+            .map(|pane| pane.surface.clone())
+            .collect();
+        for surface in panes {
+            surface.update(cx, |surface, surface_cx| {
+                surface.select_drawing_tool(tool, surface_cx);
+            });
+        }
+    }
+
+    pub(super) fn absorb_chart_context_menu_requests(&mut self, cx: &mut Context<Self>) {
+        let mut requested = None;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                let request = pane
+                    .surface
+                    .update(cx, |surface, _| surface.pending_chart_context_menu.take());
+                if let Some(request) = request {
+                    requested = Some(ChartContextMenu {
+                        workspace_id: workspace.id,
+                        pane_id: pane.id,
+                        position: request.position,
+                        kind: request.kind,
+                        flyout: PriceAxisMenuFlyout::None,
+                        copy_price: request.copy_price,
+                    });
+                }
+            }
+        }
+        if let Some(menu) = requested {
+            self.open_chart_context_menu(menu, cx);
+        }
+    }
+
+    pub(super) fn open_chart_context_menu(
+        &mut self,
+        menu: ChartContextMenu,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        self.chart_settings_menu = None;
+        self.chart_context_menu = Some(menu);
+        cx.notify();
+    }
+
+    pub(super) fn close_chart_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.chart_context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
+        if self.chart_settings_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Opens the account dropdown under the avatar click point, or closes it
+    /// when already open. The stored anchor keeps the panel glued to the
+    /// avatar's rendered position instead of a fixed screen corner.
+    pub(super) fn toggle_account_menu_at(
+        &mut self,
+        anchor: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.account_menu_open {
+            self.account_menu_open = false;
+            self.account_menu_anchor = None;
+        } else {
+            self.account_menu_open = true;
+            self.account_menu_anchor = Some(anchor);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn close_account_menu(&mut self, cx: &mut Context<Self>) {
+        if self.account_menu_open {
+            self.account_menu_open = false;
+            self.account_menu_anchor = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn arm_profile_refresh_after_browser(&mut self) {
+        self.profile_refresh_on_activation = true;
+    }
+
+    pub(super) fn open_about_dialog(&mut self, cx: &mut Context<Self>) {
+        self.account_menu_open = false;
+        self.account_menu_anchor = None;
+        self.about_dialog_open = true;
+        if let Some(updater) = self.updater.as_mut()
+            && let Err(error) = updater.request_check()
+        {
+            eprintln!("Axiusflow update check degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn close_about_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.about_dialog_open {
+            self.about_dialog_open = false;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn retry_update_check(&mut self, cx: &mut Context<Self>) {
+        if let Some(updater) = self.updater.as_mut()
+            && let Err(error) = updater.request_check()
+        {
+            eprintln!("Axiusflow update check degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn update_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(updater) = self.updater.as_mut()
+            && let Err(error) = updater.request_restart()
+        {
+            eprintln!("Axiusflow update restart degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn update_presentation(&self) -> Option<&UpdatePresentation> {
+        self.updater.as_ref().map(DesktopUpdater::presentation)
+    }
+
+    pub(super) fn account_menu_overlay(
+        &self,
+        terminal: &Entity<Self>,
+        viewport: gpui::Size<Pixels>,
+    ) -> Option<AnyElement> {
+        if !self.account_menu_open {
+            return None;
+        }
+        let account = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            axiusflow_desktop::account::unavailable_menu_state,
+            |account| account.menu_state(),
+        );
+        Some(account_menu_layer(
+            terminal,
+            &account,
+            self.account_menu_anchor,
+            viewport,
+            &self.theme,
+        ))
+    }
+
+    pub(super) fn finish_chart_context_menu(
+        &mut self,
+        menu: ChartContextMenu,
+        action: ChartContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_context_menu = None;
+        self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        match action {
+            ChartContextAction::CopyPrice => {
+                if let Some(price) = menu.copy_price.as_deref() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(price.to_string()));
+                }
+            }
+            ChartContextAction::Reset => {
+                self.update_context_menu_pane(&menu, WorkspaceSurface::reset_chart_view, cx);
+            }
+            ChartContextAction::ClearDrawings => {
+                self.update_context_menu_pane(&menu, WorkspaceSurface::clear_drawings, cx);
+            }
+            ChartContextAction::ClearIndicators => {
+                self.update_context_menu_pane(&menu, WorkspaceSurface::clear_indicators, cx);
+            }
+            ChartContextAction::Split(direction) => {
+                self.split_active_pane(direction, window, cx);
+            }
+            ChartContextAction::Close => {
+                self.close_active_pane(&ClosePane, window, cx);
+            }
+            ChartContextAction::Settings => {
+                self.chart_settings_menu = Some(menu);
+            }
+        }
+        cx.notify();
+    }
+
+    fn update_context_menu_pane(
+        &self,
+        menu: &ChartContextMenu,
+        update: impl FnOnce(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            && let Some(pane) = workspace.panes.iter().find(|pane| pane.id == menu.pane_id)
+        {
+            pane.surface.update(cx, update);
+        }
+    }
+
+    fn context_menu_chart_objects(&self, menu: &ChartContextMenu, cx: &App) -> (bool, bool) {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .and_then(|pane| pane.surface.read(cx).chart.as_ref())
+            .map_or((false, false), |chart| {
+                let chart = chart.read(cx);
+                (chart.drawing_count() > 0, chart.has_indicators())
+            })
+    }
+
+    fn context_menu_price_axis_state(
+        &self,
+        menu: &ChartContextMenu,
+        pane: usize,
+        left: bool,
+        cx: &App,
+    ) -> Option<PriceAxisMenuState> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .and_then(|pane| pane.surface.read(cx).chart.as_ref())
+            .and_then(|chart| chart.read(cx).price_axis_menu_state(pane, left))
+    }
+
+    pub(super) fn apply_price_axis_menu(
+        &mut self,
+        menu: &ChartContextMenu,
+        action: PriceAxisMenuAction,
+        cx: &mut Context<Self>,
+    ) {
+        let ChartContextKind::PriceAxis { pane, left } = menu.kind else {
+            return;
+        };
+        self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        self.update_context_menu_pane(
+            menu,
+            |surface, surface_cx| {
+                if let Some(chart) = &surface.chart {
+                    chart.update(surface_cx, |chart, chart_cx| {
+                        chart.apply_price_axis_menu_action(pane, left, action);
+                        chart_cx.notify();
+                    });
+                }
+            },
+            cx,
+        );
+        if matches!(
+            action,
+            PriceAxisMenuAction::ToggleIndicatorNameLabels
+                | PriceAxisMenuAction::ToggleIndicatorValueLabels
+                | PriceAxisMenuAction::ToggleIndicatorPriceLines
+        ) {
+            self.broadcast_indicator_chrome(menu, cx);
+        }
+        if let PriceAxisMenuAction::SetLeft(next_left) = action
+            && let Some(open) = &mut self.chart_context_menu
+            && let ChartContextKind::PriceAxis {
+                left: open_left, ..
+            } = &mut open.kind
+        {
+            *open_left = next_left;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_price_axis_flyout(
+        &mut self,
+        flyout: PriceAxisMenuFlyout,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(menu) = &mut self.chart_context_menu {
+            menu.flyout = if menu.flyout == flyout {
+                PriceAxisMenuFlyout::None
+            } else {
+                flyout
+            };
+            cx.notify();
+        }
+    }
+
+    fn broadcast_indicator_chrome(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {
+        let (names, values, price_lines) = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .and_then(|pane| pane.surface.read(cx).chart.clone())
+            .map_or(
+                (
+                    self.chart_chrome.indicator_name_labels_visible,
+                    self.chart_chrome.indicator_value_labels_visible,
+                    self.chart_chrome.indicator_price_lines_visible,
+                ),
+                |chart| {
+                    let chart = chart.read(cx);
+                    (
+                        chart.indicator_name_labels_visible(),
+                        chart.indicator_value_labels_visible(),
+                        chart.indicator_price_lines_visible(),
+                    )
+                },
+            );
+        self.chart_chrome.indicator_name_labels_visible = names;
+        self.chart_chrome.indicator_value_labels_visible = values;
+        self.chart_chrome.indicator_price_lines_visible = price_lines;
+        self.chart_chrome.chart_type = self.active_surface().read(cx).chart_type(cx);
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.apply_indicator_chrome_preferences(
+                        names,
+                        values,
+                        price_lines,
+                        surface_cx,
+                    );
+                });
+            }
+        }
+        let preferences = self.chart_chrome;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = chart_chrome::save_chart_chrome_preferences(preferences) {
+                    eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                }
+            })
+            .detach();
+    }
+
+    pub(super) fn resize_workspace_split(
+        &mut self,
+        workspace_id: u64,
+        left_pane_id: u64,
+        right_pane_id: u64,
+        ratio: f64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        let current = workspace.layout.layout();
+        if current
+            .boundary_ratio_for_panes(left_pane_id, right_pane_id)
+            .is_some_and(|current| (current - ratio).abs() < 0.0001)
+        {
+            return;
+        }
+        if workspace
+            .layout
+            .resize_between(left_pane_id, right_pane_id, ratio)
+            .is_err()
+        {
+            return;
+        }
+        workspace.generation = workspace.generation.saturating_add(1);
+        cx.notify();
+    }
+
+    fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
+        let Some(persistence) = self.workspace_persistence.as_ref() else {
+            return;
+        };
+        let layout = workspace_layout_tabs(&self.workspaces, cx);
+        let active_workspace_id = self.workspaces[self.active].id;
+        if layout == self.persisted_layout
+            && active_workspace_id == self.persisted_active_workspace_id
+        {
+            return;
+        }
+        if let Err(error) = persistence.request(active_workspace_id, layout.clone()) {
+            self.workspace_error = Some(error);
+            return;
+        }
+        self.persisted_layout = layout;
+        self.persisted_active_workspace_id = active_workspace_id;
+    }
+
+    fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
+        let Some((previous, next)) = workspace_switch(self.active, next, self.workspaces.len())
+        else {
+            return;
+        };
+        self.set_workspace_resource_class(previous, ConsumerResourceClass::Background, cx);
+        self.set_workspace_resource_class(next, ConsumerResourceClass::Foreground, cx);
+        self.active = next;
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    pub(super) fn select_workspace_id(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == tab_id)
+        {
+            self.select_workspace(index, cx);
+        }
+    }
+
+    pub(super) fn select_and_focus_workspace(
+        &mut self,
+        next: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if next >= self.workspaces.len() {
+            return;
+        }
+        self.select_workspace(next, cx);
+        self.workspaces[next].focus.focus(window, cx);
+    }
+
+    pub(super) fn select_relative_workspace(
+        &mut self,
+        current: usize,
+        direction: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(next) = wrapped_workspace_index(current, self.workspaces.len(), direction) {
+            self.select_and_focus_workspace(next, window, cx);
+        }
+    }
+
+    pub(super) fn select_next_workspace(
+        &mut self,
+        _: &SelectNextWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_relative_workspace(self.active, 1, window, cx);
+    }
+
+    pub(super) fn select_previous_workspace(
+        &mut self,
+        _: &SelectPreviousWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_relative_workspace(self.active, -1, window, cx);
+    }
+
+    fn move_active_workspace(
+        &mut self,
+        direction: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(destination) = self.active.checked_add_signed(direction) else {
+            return;
+        };
+        if destination >= self.workspaces.len() {
+            return;
+        }
+        let active_id = self.workspaces[self.active].id;
+        if self.reorder_workspace(active_id, destination, cx) {
+            self.workspaces[self.active].focus.focus(window, cx);
+        }
+    }
+
+    pub(super) fn move_workspace_left(
+        &mut self,
+        _: &MoveWorkspaceLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_workspace(-1, window, cx);
+    }
+
+    pub(super) fn move_workspace_right(
+        &mut self,
+        _: &MoveWorkspaceRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_workspace(1, window, cx);
+    }
+
+    pub(super) fn close_active_workspace(
+        &mut self,
+        _: &CloseWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = self.workspaces[self.active].id;
+        self.close_workspace(tab_id, window, cx);
+    }
+
+    fn reorder_workspace(
+        &mut self,
+        dragged_id: u64,
+        destination_index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let active_id = self.workspaces[self.active].id;
+        let mut ids = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        if !reorder_workspace_ids(&mut ids, dragged_id, destination_index) {
+            return false;
+        }
+        self.workspaces.sort_by_key(|workspace| {
+            ids.iter()
+                .position(|id| *id == workspace.id)
+                .unwrap_or(usize::MAX)
+        });
+        self.active = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == active_id)
+            .unwrap_or(0);
+        self.refresh_workspace_focus_order();
+        cx.notify();
+        true
+    }
+
+    pub(super) fn begin_workspace_drag(
+        &mut self,
+        tab_id: u64,
+        cursor_offset_x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == tab_id)
+        {
+            self.workspace_drag = Some(WorkspaceDragState {
+                tab_id,
+                cursor_offset_x: if cursor_offset_x.is_finite() {
+                    cursor_offset_x.clamp(0.0, WORKSPACE_TAB_WIDTH)
+                } else {
+                    WORKSPACE_TAB_WIDTH / 2.0
+                },
+                pointer_x: None,
+                strip_left: 0.0,
+            });
+            cx.notify();
+        }
+    }
+
+    pub(super) fn move_workspace_drag(
+        &mut self,
+        tab_id: u64,
+        pointer_x: f32,
+        strip_left: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self
+            .workspace_drag
+            .as_mut()
+            .filter(|drag| drag.tab_id == tab_id)
+        else {
+            return;
+        };
+        let cursor_offset_x = drag.cursor_offset_x;
+        drag.pointer_x = Some(pointer_x);
+        drag.strip_left = strip_left;
+        let Some(destination_index) = workspace_drag_destination(
+            pointer_x,
+            strip_left,
+            cursor_offset_x,
+            self.workspaces.len(),
+        ) else {
+            return;
+        };
+        if !self.reorder_workspace(tab_id, destination_index, cx) {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn end_workspace_drag(&mut self, cx: &mut Context<Self>) {
+        if self.workspace_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn close_workspace(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        let active_id = self.workspaces[self.active].id;
+        if ids.len() == 1 && ids[0] == tab_id {
+            self.retire_workspaces(cx);
+            window.remove_window();
+            return;
+        }
+        let Some(next_active_id) = active_workspace_after_close(&ids, active_id, tab_id) else {
+            return;
+        };
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == tab_id)
+        else {
+            return;
+        };
+        let removed = self.workspaces.remove(index);
+        let focus_next_tab = active_id == tab_id || removed.focus.is_focused(window);
+        if self
+            .workspace_drag
+            .is_some_and(|drag| drag.tab_id == tab_id)
+        {
+            self.workspace_drag = None;
+            cx.stop_active_drag(window);
+        }
+        for pane in removed.panes {
+            pane.surface.update(cx, |workspace, workspace_cx| {
+                workspace.set_market_resource_class(ConsumerResourceClass::Detached);
+                workspace.retire_market_worker(workspace_cx);
+            });
+        }
+        self.active = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == next_active_id)
+            .unwrap_or(0);
+        self.refresh_workspace_focus_order();
+        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Foreground, cx);
+        if focus_next_tab {
+            self.workspaces[self.active].focus.focus(window, cx);
+        }
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    pub(super) fn add_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let maximum = current_plan_limits().workspaces;
+        if self.workspaces.len() >= maximum {
+            self.workspace_error = Some(format!(
+                "Your plan supports at most {maximum} open workspaces"
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(factory) = self.workspace_factory.clone() else {
+            return;
+        };
+        let active = self.active_surface();
+        let (product, interval) = {
+            let active = active.read(cx);
+            let Some(product) = active.product.clone() else {
+                self.workspace_error =
+                    Some("The active workspace has no market to copy".to_string());
+                cx.notify();
+                return;
+            };
+            (product, active.interval)
+        };
+        let pane = match factory.create_workspace(product, interval) {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.workspace_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let workspace_id = pane.workspace_id;
+        let pane_id = pane.pane_id;
+        let consumer_id = pane.consumer_id;
+        let surface = workspace_surface_entity(
+            pane.startup,
+            pane.worker,
+            &self.lifecycle,
+            self.chart_chrome_for_new_surface(cx),
+            window,
+            cx,
+        );
+        surface.update(cx, |workspace, workspace_cx| {
+            workspace.apply_theme(&self.theme, workspace_cx);
+            workspace.set_market_message_wake(self.market_frame_wake.callback());
+            let _ = workspace_cx;
+        });
+        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+        self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
+        self.workspaces.push(WorkspaceTab {
+            id: workspace_id,
+            label: format!("Workspace {workspace_id}"),
+            panes: vec![WorkspacePane {
+                id: pane_id,
+                consumer_id,
+                surface,
+                focus: cx.focus_handle(),
+            }],
+            active_pane: 0,
+            layout: NucleusWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE),
+            generation: 1,
+            focus: cx.focus_handle(),
+        });
+        self.refresh_workspace_focus_order();
+        self.active = self.workspaces.len() - 1;
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    pub(super) fn new_workspace(
+        &mut self,
+        _: &NewWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_workspace(window, cx);
+    }
+
+    fn split_active_pane(
+        &mut self,
+        split_direction: ChartSplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(factory) = self.workspace_factory.clone() else {
+            self.workspace_error = Some("This window cannot open another chart pane".to_string());
+            cx.notify();
+            return;
+        };
+        let workspace = &self.workspaces[self.active];
+        let maximum = current_plan_limits().panes_per_workspace;
+        if workspace.panes.len() >= maximum {
+            self.workspace_error = Some(format!(
+                "Your plan supports at most {maximum} charts per workspace"
+            ));
+            cx.notify();
+            return;
+        }
+        let (product, interval, drawing_tool) = {
+            let source = workspace.panes[workspace.active_pane].surface.read(cx);
+            let Some(product) = source.product.clone() else {
+                self.workspace_error = Some("The active pane has no market to copy".to_string());
+                cx.notify();
+                return;
+            };
+            (
+                product,
+                source.interval,
+                source.drawing_toolbar_state(cx).active_tool,
+            )
+        };
+        let workspace_id = workspace.id;
+        let insertion_index = workspace.active_pane.saturating_add(1);
+        let pane = match factory.create_pane(workspace_id, product, interval) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.workspace_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let surface = workspace_surface_entity(
+            pane.startup,
+            pane.worker,
+            &self.lifecycle,
+            self.chart_chrome_for_new_surface(cx),
+            window,
+            cx,
+        );
+        surface.update(cx, |surface, surface_cx| {
+            surface.apply_theme(&self.theme, surface_cx);
+            surface.set_market_resource_class(ConsumerResourceClass::Foreground);
+            surface.set_market_message_wake(self.market_frame_wake.callback());
+            surface.select_drawing_tool(drawing_tool, surface_cx);
+        });
+        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+        let workspace = &mut self.workspaces[self.active];
+        let source_pane_id = workspace.panes[workspace.active_pane].id;
+        if let Err(error) = workspace
+            .layout
+            .split(source_pane_id, split_direction, pane.pane_id)
+        {
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_market_resource_class(ConsumerResourceClass::Detached);
+                surface.retire_market_worker(surface_cx);
+            });
+            self.workspace_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        workspace.panes.insert(
+            insertion_index,
+            WorkspacePane {
+                id: pane.pane_id,
+                consumer_id: pane.consumer_id,
+                surface,
+                focus: cx.focus_handle(),
+            },
+        );
+        workspace.active_pane = insertion_index;
+        workspace.generation = workspace.generation.saturating_add(1);
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    pub(super) fn split_pane_horizontal(
+        &mut self,
+        _: &SplitPaneHorizontal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_active_pane(ChartSplitDirection::Horizontal, window, cx);
+    }
+
+    pub(super) fn split_pane_vertical(
+        &mut self,
+        _: &SplitPaneVertical,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_active_pane(ChartSplitDirection::Vertical, window, cx);
+    }
+
+    pub(super) fn close_active_pane(
+        &mut self,
+        _: &ClosePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = &mut self.workspaces[self.active];
+        if workspace.panes.len() == 1 {
+            return;
+        }
+        let removed_pane_id = workspace.panes[workspace.active_pane].id;
+        if let Err(error) = workspace.layout.remove(removed_pane_id) {
+            self.workspace_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        let removed = workspace.panes.remove(workspace.active_pane);
+        let pane_order = workspace.layout.layout().pane_ids();
+        let recipient_id = pane_order
+            .get(
+                workspace
+                    .active_pane
+                    .min(pane_order.len().saturating_sub(1)),
+            )
+            .copied()
+            .unwrap_or(workspace.panes[0].id);
+        let recipient = workspace
+            .panes
+            .iter()
+            .position(|pane| pane.id == recipient_id)
+            .unwrap_or(0);
+        workspace.active_pane = recipient;
+        workspace.generation = workspace.generation.saturating_add(1);
+        removed.surface.update(cx, |surface, surface_cx| {
+            surface.set_market_resource_class(ConsumerResourceClass::Detached);
+            surface.retire_market_worker(surface_cx);
+        });
+        workspace.panes[recipient].focus.focus(window, cx);
+        self.workspace_error = None;
+        cx.notify();
+    }
+
+    pub(super) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme = self.theme.toggled();
+        window.refresh();
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |workspace, workspace_cx| {
+                    workspace.apply_theme(&self.theme, workspace_cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_lifetime_mode(&mut self, mode: DesktopLifetimeMode, cx: &mut Context<Self>) {
+        let current = self.lifecycle.presentation();
+        if current.pending || current.mode == mode {
+            return;
+        }
+        if mode == DesktopLifetimeMode::KeepMarketsLive && !current.markets_live_permitted {
+            return;
+        }
+        self.request_lifecycle_preferences(
+            LifecyclePreferenceRequest {
+                mode,
+                autostart_enabled: current.autostart_enabled,
+                markets_live_permitted: current.markets_live_permitted,
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn toggle_engine_autostart(&mut self, cx: &mut Context<Self>) {
+        let current = self.lifecycle.presentation();
+        let request = LifecyclePreferenceRequest {
+            mode: current.mode,
+            autostart_enabled: !current.autostart_enabled,
+            markets_live_permitted: current.markets_live_permitted,
+        };
+        self.request_lifecycle_preferences(request, cx);
+    }
+
+    pub(super) fn request_sign_in(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.request_sign_in(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow sign-in degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn sign_out(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.request_sign_out(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow sign-out degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reopen_browser_page(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.reopen_browser(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow browser reopen degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn cancel_sign_in(cx: &mut Context<Self>) {
+        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+            || Err("sign-in is unavailable".to_string()),
+            |account| account.request_cancel(),
+        );
+        if let Err(error) = result {
+            eprintln!("Axiusflow sign-in cancellation degraded: {error}");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_markets_live_permission(&mut self, cx: &mut Context<Self>) {
+        let current = self.lifecycle.presentation();
+        let permitted = !current.markets_live_permitted;
+        let request = LifecyclePreferenceRequest {
+            mode: if !permitted && current.mode == DesktopLifetimeMode::KeepMarketsLive {
+                DesktopLifetimeMode::KeepEngineWarm
+            } else {
+                current.mode
+            },
+            autostart_enabled: current.autostart_enabled,
+            markets_live_permitted: permitted,
+        };
+        self.request_lifecycle_preferences(request, cx);
+    }
+
+    fn request_lifecycle_preferences(
+        &mut self,
+        request: LifecyclePreferenceRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.lifecycle.request_preferences(request) {
+            self.lifecycle.set_preference_error(error);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_drawing_toolbar(&mut self, cx: &mut Context<Self>) {
+        self.drawing_toolbar.toggle();
+        cx.notify();
+    }
+
+    fn retire_workspaces<C: gpui::AppContext>(&mut self, cx: &mut C) {
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |workspace, workspace_cx| {
+                    workspace.retire_market_worker(workspace_cx);
+                });
+            }
+        }
+    }
+
+    pub(super) fn claim_close(&mut self, cx: &mut impl gpui::AppContext) -> bool {
+        if !claim_once(&mut self.closing) {
+            return false;
+        }
+        self.retire_workspaces(cx);
+        true
+    }
+
+    pub(super) fn close_window(
+        &mut self,
+        _: &CloseWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.claim_close(cx) {
+            window.remove_window();
+        }
+    }
+
+    pub(super) fn on_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.about_dialog_open {
+            self.close_about_dialog(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.key.as_str() == "tab" {
+            if event.keystroke.modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.key.as_str() == "escape"
+            && (self.chart_context_menu.is_some() || self.chart_settings_menu.is_some())
+        {
+            self.close_chart_context_menu(cx);
+            self.close_chart_settings_menu(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.workspace_drag.is_some() && event.keystroke.key.as_str() == "escape" {
+            cx.stop_active_drag(window);
+            self.end_workspace_drag(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.chart_context_menu.is_some() || self.chart_settings_menu.is_some() {
+            return;
+        }
+        let handled = self.active_surface().update(cx, |workspace, workspace_cx| {
+            workspace.on_terminal_key_down(event, window, workspace_cx)
+        });
+        if handled {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+    }
+
+    pub(super) fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let window_active = window.is_window_active();
+        let became_active = window_active && !self.window_active;
+        self.window_active = window_active;
+        if !window_active {
+            self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
+            for workspace in &self.workspaces {
+                for pane in &workspace.panes {
+                    pane.surface
+                        .update(cx, |surface, _| surface.end_side_panel_resize());
+                }
+            }
+            if self.workspace_drag.is_some() {
+                cx.stop_active_drag(window);
+                self.end_workspace_drag(cx);
+            }
+        }
+        if became_active {
+            if self.profile_refresh_on_activation {
+                self.profile_refresh_on_activation = false;
+                if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                    && let Err(error) = account.request_profile_refresh()
+                {
+                    eprintln!("Axiusflow profile refresh degraded: {error}");
+                }
+            }
+            self.schedule_market_frame(window, cx);
+        }
+    }
+
+    pub(super) fn handle_window_move_gesture(
+        &mut self,
+        event: WindowMoveGestureEvent,
+        window: &mut Window,
+    ) {
+        let transition = window_move_gesture_transition(self.window_move_pending, event);
+        self.window_move_pending = transition.pending;
+        if transition.start_move {
+            window.start_window_move();
+        }
+    }
+
+    pub(super) fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.frame_poll_gate.try_schedule() {
+            return;
+        }
+        let terminal = cx.entity();
+        window.on_next_frame(move |window, cx| {
+            let diagnostics = terminal.update(cx, |terminal, cx| {
+                terminal.frame_poll_gate.complete();
+                if terminal.lifecycle.poll_preferences()
+                    || terminal.lifecycle.presentation().pending
+                {
+                    cx.notify();
+                }
+                if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                    && account.poll()
+                {
+                    cx.notify();
+                }
+                if terminal
+                    .workspace_persistence
+                    .as_ref()
+                    .is_some_and(WorkspaceLayoutPersistence::poll)
+                {
+                    terminal.workspace_error = terminal
+                        .workspace_persistence
+                        .as_ref()
+                        .and_then(WorkspaceLayoutPersistence::error);
+                    cx.notify();
+                }
+                let authenticated = axiusflow_desktop::account::DesktopAccount::shared()
+                    .is_some_and(|account| account.authenticated());
+                let mut diagnostics = Vec::new();
+                for workspace in &terminal.workspaces {
+                    for pane in &workspace.panes {
+                        let surface = pane.surface.clone();
+                        let pending = surface.update(cx, |workspace, workspace_cx| {
+                            if authenticated && workspace.should_poll_market() {
+                                workspace.poll_market_worker(workspace_cx);
+                            }
+                            workspace.pending_ui_diagnostics.take()
+                        });
+                        if let Some(pending) = pending {
+                            diagnostics.push((surface, pending));
+                        }
+                    }
+                }
+                terminal.persist_workspace_layout_if_changed(cx);
+                diagnostics
+            });
+            if !diagnostics.is_empty() {
+                window.on_next_frame(move |_, cx| {
+                    for (workspace, mut diagnostics) in diagnostics {
+                        diagnostics.mark_frame_submit();
+                        workspace.update(cx, |workspace, _| {
+                            workspace
+                                .market_worker
+                                .send_ui_diagnostics(diagnostics.into_presented());
+                        });
+                    }
+                });
+            }
+        });
+    }
+}
+
+impl TerminalApp {
+    pub(super) fn start_market_wake_listener(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.market_wake_listener_started.is_some() {
+            return;
+        }
+        self.market_wake_listener_started = Some(());
+        // Authentication must progress even when a suspended provider has
+        // no events to wake this window. Poll only account presentation;
+        // a changed view schedules a frame that also drains retained data.
+        cx.spawn_in(window, async move |terminal, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if terminal
+                    .update_in(cx, |terminal, window, terminal_cx| {
+                        if let Some(updater) = terminal.updater.as_mut() {
+                            let update = updater.poll();
+                            if update.changed {
+                                terminal_cx.notify();
+                            }
+                            if update.restart_prepared {
+                                if updater.commit_restart().is_ok() {
+                                    terminal.about_dialog_open = false;
+                                    terminal.lifecycle.quit_after_shutdown(terminal_cx);
+                                } else {
+                                    terminal_cx.notify();
+                                }
+                                return;
+                            }
+                        }
+                        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                            && account.poll()
+                        {
+                            terminal.schedule_market_frame(window, terminal_cx);
+                            terminal_cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let wake = self.market_frame_wake.clone();
+        cx.spawn_in(window, async move |terminal, cx| {
+            loop {
+                wake.notified().await;
+                if terminal
+                    .update_in(cx, |terminal, window, terminal_cx| {
+                        terminal.schedule_market_frame(window, terminal_cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn chart_surface_menus(
+        &self,
+        terminal: &Entity<Self>,
+        pane_count: usize,
+        chart_has_market_data: bool,
+        viewport: gpui::Size<Pixels>,
+        cx: &App,
+    ) -> (Option<AnyElement>, Option<AnyElement>) {
+        let context_menu = self.chart_context_menu.clone().map(|menu| {
+            if let ChartContextKind::PriceAxis { pane, left } = menu.kind {
+                let state = self
+                    .context_menu_price_axis_state(&menu, pane, left, cx)
+                    .unwrap_or(PriceAxisMenuState {
+                        flags: PriceAxisMenuState::PRICE_LINE
+                            | PriceAxisMenuState::LAST_VALUE
+                            | PriceAxisMenuState::TITLE
+                            | PriceAxisMenuState::COUNTDOWN
+                            | PriceAxisMenuState::INDICATOR_NAMES
+                            | PriceAxisMenuState::INDICATOR_VALUES
+                            | PriceAxisMenuState::INDICATOR_PRICE_LINES
+                            | PriceAxisMenuState::AUTO_SCALE
+                            | PriceAxisMenuState::ALIGN_LABELS,
+                        mode: 0,
+                        left,
+                        precision: None,
+                    });
+                return price_axis_menu_layer(terminal, &menu, state, viewport, &self.theme);
+            }
+            let (has_drawings, has_indicators) = self.context_menu_chart_objects(&menu, cx);
+            let mut flags = 0;
+            if menu.copy_price.is_some() {
+                flags |= ChartContextMenuState::COPY_PRICE;
+            }
+            if chart_has_market_data {
+                flags |= ChartContextMenuState::READY;
+            }
+            if self.workspace_factory.is_some() && pane_count < MAXIMUM_PANES_PER_WORKSPACE {
+                flags |= ChartContextMenuState::SPLIT;
+            }
+            if has_drawings {
+                flags |= ChartContextMenuState::DRAWINGS;
+            }
+            if has_indicators {
+                flags |= ChartContextMenuState::INDICATORS;
+            }
+            chart_context_menu_layer(
+                terminal,
+                &menu,
+                ChartContextMenuState { pane_count, flags },
+                viewport,
+                &self.theme,
+            )
+        });
+        let preference_error = self.lifecycle.preference_error();
+        let settings_menu = self.chart_settings_menu.clone().map(|menu| {
+            chart_settings_menu_layer(
+                terminal,
+                &menu,
+                self.lifecycle.presentation(),
+                preference_error.as_deref(),
+                viewport,
+                &self.theme,
+            )
+        });
+        (context_menu, settings_menu)
+    }
+}

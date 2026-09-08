@@ -64,7 +64,7 @@ pub fn post_info(
         .build()
         .header("Content-Type", "application/json")
         .send(raw)
-        .map_err(|_| "hyperliquid info request failed".to_string())?;
+        .map_err(info_request_error)?;
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -76,6 +76,22 @@ pub fn post_info(
         return Err("hyperliquid info response exceeds the bound".to_string());
     }
     Ok(bytes)
+}
+
+fn info_request_error(error: ureq::Error) -> String {
+    // Preserve actionable transport/status classes without forwarding response bodies,
+    // URLs, proxy configuration, or arbitrary provider text into engine diagnostics.
+    match error {
+        ureq::Error::StatusCode(status) => {
+            format!("hyperliquid info request failed: HTTP {status}")
+        }
+        ureq::Error::Timeout(_) => "hyperliquid info request timed out".to_string(),
+        ureq::Error::HostNotFound => "hyperliquid info host could not be resolved".to_string(),
+        ureq::Error::Io(error) => format!("hyperliquid info transport failed: {:?}", error.kind()),
+        ureq::Error::ConnectionFailed => "hyperliquid info connection failed".to_string(),
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => "hyperliquid info TLS failed".to_string(),
+        _ => "hyperliquid info request failed".to_string(),
+    }
 }
 
 fn parse_info_bytes(bytes: &[u8]) -> Result<serde_json::Value, String> {
@@ -299,6 +315,26 @@ pub fn fetch_candle_snapshot(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn request_failures_preserve_status_without_forwarding_transport_text() {
+        assert_eq!(
+            info_request_error(ureq::Error::StatusCode(429)),
+            "hyperliquid info request failed: HTTP 429"
+        );
+        let error = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "private proxy configuration",
+        );
+        assert_eq!(
+            info_request_error(ureq::Error::Io(error)),
+            "hyperliquid info transport failed: ConnectionReset"
+        );
+        assert_eq!(
+            info_request_error(ureq::Error::BadUri("private URL".to_string())),
+            "hyperliquid info request failed"
+        );
+    }
 
     #[test]
     fn dex_names_accept_live_objects_and_plain_strings() {

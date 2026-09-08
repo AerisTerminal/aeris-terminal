@@ -192,6 +192,9 @@ mod tests {
     }
 
     fn production_prefix(contents: &str) -> &str {
+        if contents.starts_with("#![cfg(test)]") {
+            return "";
+        }
         for (index, _) in contents.match_indices("#[cfg(test)]") {
             let after_attribute = &contents[index + "#[cfg(test)]".len()..];
             let declaration = after_attribute
@@ -378,7 +381,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "5bfddf5a9e1ef7e5803ac00e88bfdbaae148fbc6";
+        let expected_revision = "cf047d861bd8236c2795559430d07a773344bb46";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_render",
@@ -649,6 +652,8 @@ mod tests {
         }
 
         let main = manifest("apps/desktop/src/main.rs");
+        assert!(main.contains("desktop::run()"));
+        assert!(!main.contains("struct WorkspaceSurface"));
         let production = production_prefix(&main);
         for rendering_primitive in [
             "impl Render for",
@@ -663,6 +668,60 @@ mod tests {
                 !production.contains(rendering_primitive),
                 "desktop main must compose component modules instead of rendering {rendering_primitive} inline"
             );
+        }
+    }
+
+    #[test]
+    fn ci_cargo_packages_and_targets_exist_in_the_workspace() {
+        // Validate executable targets as well as artifact names: an obsolete package
+        // must fail here before a self-hosted lane reaches its performance step.
+        let manifests = workspace_manifests();
+        for workflow in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/live_market_gates.yml",
+        ] {
+            let source = manifest(workflow);
+            for line in source.lines().filter(|line| line.contains("cargo ")) {
+                let words: Vec<_> = line.split_whitespace().collect();
+                let Some(package_index) = words
+                    .iter()
+                    .position(|word| matches!(*word, "-p" | "--package"))
+                else {
+                    continue;
+                };
+                let package = words.get(package_index + 1).expect("package argument");
+                let package_manifest = manifests
+                    .iter()
+                    .find(|path| {
+                        fs::read_to_string(path)
+                            .expect("manifest")
+                            .lines()
+                            .any(|line| line.trim() == format!("name = \"{package}\""))
+                    })
+                    .unwrap_or_else(|| panic!("{workflow} references absent package {package}"));
+                let directory = package_manifest.parent().expect("package directory");
+                for (flag, folder) in [
+                    ("--example", "examples"),
+                    ("--test", "tests"),
+                    ("--bin", "src/bin"),
+                ] {
+                    if let Some(index) = words.iter().position(|word| *word == flag) {
+                        let target = words.get(index + 1).expect("target argument");
+                        assert!(
+                            directory
+                                .join(folder)
+                                .join(format!("{target}.rs"))
+                                .is_file()
+                                || directory
+                                    .join(folder)
+                                    .join(target)
+                                    .join("main.rs")
+                                    .is_file(),
+                            "{workflow} references absent {flag} {target} in {package}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1287,7 +1346,8 @@ mod tests {
             messages.contains("15, 17, 18"),
             "retired envelope tag 16 must remain permanently unused"
         );
-        let client = manifest("crates/local_engine_client/src/lib.rs");
+        let client = manifest("crates/local_engine_client/src/lib.rs")
+            + &manifest("crates/local_engine_client/src/framing.rs");
         for contract in [
             "protocol_socket_name_tracks_the_active_version",
             "reached_endpoint_is_retried_without_spawning_another_engine",
@@ -1367,7 +1427,7 @@ mod tests {
                 "stable launcher lost {contract}"
             );
         }
-        let desktop = manifest("apps/desktop/src/main.rs");
+        let desktop = manifest("apps/desktop/src/desktop.rs");
         for contract in [
             "connect_or_start_engine(&engine)",
             "client.restore_workspace()",
@@ -1419,7 +1479,7 @@ mod tests {
             );
         }
         assert!(
-            manifest("apps/desktop/src/main.rs")
+            manifest("apps/desktop/src/desktop.rs")
                 .contains("cx.set_app_identity(\"com.axiusflow.desktop\", \"Axiusflow\")"),
             "desktop lost its stable Windows taskbar identity"
         );
@@ -1579,9 +1639,9 @@ mod tests {
         );
         for gate in [
             "cargo fmt --all -- --check",
-            "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-            "cargo build --workspace --all-targets --all-features",
-            "cargo test --workspace --all-features",
+            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+            "cargo build --workspace --all-targets --all-features --locked",
+            "cargo test --workspace --all-features --locked",
         ] {
             assert_eq!(
                 workflow.matches(gate).count(),
@@ -1687,7 +1747,7 @@ mod tests {
         // desktop never implemented. The command, its producer module, and
         // the tool invocation are pinned together so they cannot drift
         // apart again.
-        let desktop = manifest("apps/desktop/src/main.rs");
+        let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(
             desktop.contains("--capture-native-transitions")
                 && desktop.contains("transition_capture::run_transition_capture_command"),

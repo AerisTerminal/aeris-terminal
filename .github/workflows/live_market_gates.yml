@@ -47,7 +47,7 @@ jobs:
         env:
           AXIUSFLOW_SOAK_SECONDS: "600"
         run: >-
-          cargo test -p axiusflow_engine --test live_market_soak --
+          cargo test -p axiusflow_engine --test live_market_soak --locked --
           --ignored --nocapture live_hyperliquid_streams_across_markets_and_timeframe_switches
       - name: Upload the recorded gate
         if: always()
@@ -119,7 +119,7 @@ jobs:
         env:
           AXIUSFLOW_SOAK_SECONDS: "600"
         run: >-
-          cargo test -p axiusflow_engine --test live_market_soak --
+          cargo test -p axiusflow_engine --test live_market_soak --locked --
           --ignored --nocapture live_rithmic_streams_across_timeframe_and_instrument_switches
       - name: Upload the recorded gate
         if: always()

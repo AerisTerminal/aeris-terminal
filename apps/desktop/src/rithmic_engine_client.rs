@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     rithmic_engine_history::{
         OrderBookIdentity, demand_error_message, engine_series, live_tail,
         order_book_from_snapshot, snapshot_bootstrap, validate_engine_instrument,
@@ -25,7 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::engine_supervisor::EngineSupervisor;
+use crate::desktop::engine_supervisor::EngineSupervisor;
 
 const MESSAGE_CAPACITY: usize = 32;
 const COMMAND_CAPACITY: usize = 8;
@@ -727,7 +727,7 @@ impl EngineCatalogSession {
     fn receive(
         &mut self,
         timeout: Duration,
-    ) -> Result<crate::engine_supervisor::SupervisedEvent, String> {
+    ) -> Result<crate::desktop::engine_supervisor::SupervisedEvent, String> {
         self.client
             .receive_market_event_for(self.consumer_id, timeout)
     }
