@@ -730,6 +730,13 @@ impl Coordinator<'_> {
         if demand.generation != Some(generation) {
             return Ok(());
         }
+        if !demand.resource_class.retains_subscription() {
+            // Viewport intent may still be queued when a consumer is demoted to
+            // Warm/Detached. The demand registry owns that lifecycle: once the
+            // consumer no longer retains an upstream subscription, stale
+            // presentation commands must not schedule cache or provider work.
+            return Ok(());
+        }
         let Some(series) = demand.series.clone() else {
             return Ok(());
         };
@@ -767,11 +774,10 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
     ) -> Option<HistoryRange> {
         let snapshot = self.engine.series_snapshot(series)?;
-        self.events
-            .keys()
-            .filter_map(|consumer_id| self.engine.current_demand(*consumer_id))
-            .filter(|demand| demand.series.as_ref() == Some(series))
-            .filter_map(|demand| demand.viewport)
+        self.engine
+            .retained_viewports(series)
+            .into_iter()
+            .map(|(_, _, viewport)| viewport)
             .filter_map(|viewport| viewport_history_range(series, &snapshot, viewport))
             .reduce(merge_history_ranges)
     }
@@ -985,18 +991,7 @@ impl Coordinator<'_> {
         self.pending.remove(series);
         self.series_live_if_ready(series);
         if range.is_none() {
-            let viewport_demands = self
-                .events
-                .keys()
-                .filter_map(|consumer_id| {
-                    let demand = self.engine.current_demand(*consumer_id)?;
-                    (demand.series.as_ref() == Some(series)).then_some((
-                        *consumer_id,
-                        demand.generation?,
-                        demand.viewport?,
-                    ))
-                })
-                .collect::<Vec<_>>();
+            let viewport_demands = self.engine.retained_viewports(series);
             for (consumer_id, consumer_generation, viewport) in viewport_demands {
                 let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
             }
@@ -1354,8 +1349,6 @@ impl Coordinator<'_> {
                     .and_then(|status| status.generation)
                     == Some(*generation)
         });
-        self.deferred_publications
-            .retain(|series| self.engine.has_subscription(series));
     }
 }
 

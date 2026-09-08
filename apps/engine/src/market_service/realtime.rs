@@ -5,13 +5,12 @@ use super::{
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication,
     MAXIMUM_TRADED_VOLUME_LEVELS, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
-    OrderBookApplyOutcome, Ordering, PersistenceState, ProviderConnectionState, ProviderGeneration,
-    ProviderHealth, ProviderOrderBook, ResourceMode, RithmicCalendarPeriod,
-    RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff,
-    RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState,
-    TopOfBookQuote, VecDeque, chart_stream_requirements, envelope, hyperliquid_interval_for_period,
-    id, ipc_series, merge_live_candle, order_flow_payload, series_state_with_persistence,
-    series_update_message,
+    OrderBookApplyOutcome, Ordering, PersistenceState, ProviderGeneration, ProviderHealth,
+    ProviderOrderBook, ResourceMode, RithmicCalendarPeriod, RithmicExchangeCalendar,
+    RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff, RithmicRealtimeControl,
+    RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState, TopOfBookQuote, VecDeque,
+    chart_stream_requirements, envelope, hyperliquid_interval_for_period, id, ipc_series,
+    merge_live_candle, order_flow_payload, series_state_with_persistence, series_update_message,
 };
 use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
 
@@ -728,7 +727,12 @@ impl Coordinator<'_> {
                     quotes: false,
                     order_book: false,
                 });
-            demand.trades |= streams.contains(MarketStream::Trades);
+            // Rithmic bars are constructed from trades. Provider transport
+            // therefore needs the trade feed for bar continuity even when no
+            // consumer requested downstream order-flow publications.
+            demand.trades |= streams.contains(MarketStream::Bars)
+                || streams.contains(MarketStream::Trades)
+                || streams.contains(MarketStream::Depth);
             demand.quotes |= streams.contains(MarketStream::Quotes);
             demand.order_book |= streams.contains(MarketStream::Depth);
         }
@@ -782,12 +786,6 @@ impl Coordinator<'_> {
         self.engine
             .verify_provider_stream_requirements(&series.provider_id, streams)
             .map_err(|error| error.to_string())?;
-        if !streams.contains(MarketStream::Trades)
-            && !streams.contains(MarketStream::Quotes)
-            && !streams.contains(MarketStream::Depth)
-        {
-            return Ok(());
-        }
         if series.provider_id == "rithmic" {
             if !self.rithmic_live.contains_key(series) {
                 let venue_id = self
@@ -895,12 +893,7 @@ impl Coordinator<'_> {
                     self.rithmic_pending_demand = None;
                     if let Ok(generation) = id(generation).map(ProviderGeneration) {
                         let _ = self.engine.end_provider_session("rithmic", generation);
-                        self.broadcast_provider_for(
-                            "rithmic",
-                            ProviderConnectionState::Disconnected,
-                            generation,
-                            None,
-                        );
+                        self.broadcast_provider_for("rithmic", None);
                     }
                     return;
                 }
@@ -977,12 +970,7 @@ impl Coordinator<'_> {
                     self.hyperliquid_demand_dirty = false;
                     if let Ok(generation) = id(generation).map(ProviderGeneration) {
                         let _ = self.engine.end_provider_session("hyperliquid", generation);
-                        self.broadcast_provider_for(
-                            "hyperliquid",
-                            ProviderConnectionState::Disconnected,
-                            generation,
-                            None,
-                        );
+                        self.broadcast_provider_for("hyperliquid", None);
                     }
                     return;
                 }
@@ -1038,12 +1026,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for(
-            "hyperliquid",
-            ProviderConnectionState::Connecting,
-            generation,
-            None,
-        );
+        self.broadcast_provider_for("hyperliquid", None);
     }
 
     pub(super) fn hyperliquid_online(&mut self, generation: u64) {
@@ -1065,12 +1048,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for(
-            "hyperliquid",
-            ProviderConnectionState::Online,
-            generation,
-            None,
-        );
+        self.broadcast_provider_for("hyperliquid", None);
         let missing = self
             .hyperliquid_live
             .iter_mut()
@@ -1173,6 +1151,12 @@ impl Coordinator<'_> {
             .filter(|series| {
                 series.instrument_id == trade.metadata.instrument_id
                     && series.entitlement_id == trade.metadata.entitlement_id
+                    && self
+                        .engine
+                        .subscription_status(series)
+                        .is_some_and(|subscription| {
+                            subscription.streams.contains(MarketStream::Trades)
+                        })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1237,12 +1221,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for(
-            "hyperliquid",
-            ProviderConnectionState::Recovering,
-            generation,
-            Some(detail),
-        );
+        self.broadcast_provider_for("hyperliquid", Some(detail));
         for live in self.hyperliquid_live.values_mut() {
             live.connected = false;
         }
@@ -1307,12 +1286,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for(
-            "rithmic",
-            ProviderConnectionState::Connecting,
-            generation,
-            None,
-        );
+        self.broadcast_provider_for("rithmic", None);
     }
 
     pub(super) fn rithmic_online(&mut self, generation: u64) {
@@ -1334,7 +1308,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for("rithmic", ProviderConnectionState::Online, generation, None);
+        self.broadcast_provider_for("rithmic", None);
         let missing = self
             .rithmic_live
             .iter_mut()
@@ -1396,6 +1370,12 @@ impl Coordinator<'_> {
             .filter(|series| {
                 series.instrument_id == trade.metadata.instrument_id
                     && series.entitlement_id == trade.metadata.entitlement_id
+                    && self
+                        .engine
+                        .subscription_status(series)
+                        .is_some_and(|subscription| {
+                            subscription.streams.contains(MarketStream::Trades)
+                        })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1549,12 +1529,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for(
-            "rithmic",
-            ProviderConnectionState::Recovering,
-            generation,
-            Some(detail),
-        );
+        self.broadcast_provider_for("rithmic", Some(detail));
         for live in self.rithmic_live.values_mut() {
             live.connected = false;
         }
@@ -1592,12 +1567,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        self.broadcast_provider_for(
-            "rithmic",
-            ProviderConnectionState::Failed,
-            generation,
-            Some(detail),
-        );
+        self.broadcast_provider_for("rithmic", Some(detail));
         for live in self.rithmic_live.values_mut() {
             live.connected = false;
         }

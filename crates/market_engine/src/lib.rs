@@ -511,6 +511,27 @@ impl MarketEngine {
         self.demands.set_viewport(consumer_id, generation, viewport)
     }
 
+    /// Returns the bounded retained viewport intents for one canonical series.
+    ///
+    /// Foreground and background consumers retain provider demand; warm and
+    /// detached consumers do not drive provider backfill until they reattach.
+    #[must_use]
+    pub fn retained_viewports(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Vec<(ConsumerId, GenerationId, Viewport)> {
+        self.demands.retained_viewports(series)
+    }
+
+    /// Returns the complete bounded shared upstream subscription set.
+    ///
+    /// This is the authoritative provider-work view derived from consumer
+    /// demand. Presentation/event sinks must not be used as a proxy for it.
+    #[must_use]
+    pub fn subscriptions(&self) -> Vec<(BarSeriesKey, SubscriptionStatus)> {
+        self.subscriptions.all()
+    }
+
     /// Updates resource priority without recreating market state.
     ///
     /// # Errors
@@ -1686,6 +1707,44 @@ mod tests {
         assert_eq!(engine.detach_client(ClientId(nonzero(1))), vec![id(1)]);
         assert!(!engine.has_subscription(&eth));
         assert!(engine.current_demand(id(3)).is_some());
+    }
+
+    #[test]
+    fn retained_viewports_follow_subscription_ownership_not_presentation_visibility() {
+        let mut engine = engine(3, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        for consumer in 1..=3 {
+            register(&mut engine, consumer, 1);
+            engine
+                .set_series_demand(id(consumer), generation(1), &btc)
+                .expect("shared demand installs");
+        }
+        engine
+            .set_resource_class(id(2), ConsumerResourceClass::Background)
+            .expect("second consumer becomes background");
+        engine
+            .set_resource_class(id(3), ConsumerResourceClass::Warm)
+            .expect("third consumer releases upstream work");
+        for (consumer, start) in [(1, 0), (2, 100), (3, 200)] {
+            engine
+                .set_viewport(
+                    id(consumer),
+                    generation(1),
+                    Viewport::try_new(start, start + 50).expect("viewport"),
+                )
+                .expect("viewport installs");
+        }
+
+        let retained = engine.retained_viewports(&btc);
+        assert_eq!(
+            retained
+                .iter()
+                .map(|(consumer, _, viewport)| (consumer.0.get(), viewport.start_unix_nanos))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (2, 100)]
+        );
+        assert_eq!(engine.subscriptions().len(), 1);
+        assert_eq!(engine.subscriptions()[0].1.consumer_count, 2);
     }
 
     #[test]

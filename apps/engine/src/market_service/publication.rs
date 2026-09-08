@@ -5,10 +5,9 @@ use super::{
     IpcOrderBookSnapshot, IpcOrderBookState, IpcOrderFlowLevel, IpcOrderFlowSnapshot,
     IpcOrderFlowTrade, IpcOrderFlowUpdate, IpcSeriesSnapshot, MAXIMUM_PUBLISHED_DEPTH_LEVELS,
     NonZeroU64, OrderBookRecoveryReason, OrderFlowAggressor, OrderFlowPublicationKind,
-    PersistenceState, ProviderConnectionState, ProviderGeneration, ProviderOrderBook,
-    ProviderState, REALTIME_DRAIN_BUDGET, Reply, SeriesKey, SeriesLoadState, SeriesState,
-    SeriesTailOperation, SeriesUpdateOperation, SyncSender, TrySendError, authorize_consumer,
-    envelope, ipc_bar, ipc_series,
+    PersistenceState, ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply,
+    SeriesKey, SeriesLoadState, SeriesState, SeriesTailOperation, SeriesUpdateOperation,
+    SyncSender, TrySendError, authorize_consumer, envelope, ipc_bar, ipc_series,
 };
 
 pub(super) fn fail_waiters(
@@ -117,6 +116,28 @@ pub(super) fn publish_ready(
         persistence,
         detail.as_deref(),
     );
+}
+
+fn retained_series_state(
+    events: &ConsumerEvents,
+    consumer_id: ConsumerId,
+    generation: GenerationId,
+    series: &BarSeriesKey,
+) -> Option<(SeriesLoadState, PersistenceState, Option<String>)> {
+    let envelope::Payload::SeriesState(state) = events.series_state.as_ref()? else {
+        return None;
+    };
+    if state.consumer_id != consumer_id.0.get()
+        || state.generation != generation.0.get()
+        || state.series.as_ref() != Some(&ipc_series(series))
+    {
+        return None;
+    }
+    Some((
+        SeriesLoadState::try_from(state.state).ok()?,
+        PersistenceState::try_from(state.persistence).unwrap_or(PersistenceState::NotRequested),
+        state.detail.clone(),
+    ))
 }
 
 pub(super) fn publish_state(
@@ -521,6 +542,60 @@ impl ConsumerEvents {
 }
 
 impl Coordinator<'_> {
+    pub(super) fn canonical_series_load_state(
+        &self,
+        consumer_id: ConsumerId,
+        series: &BarSeriesKey,
+    ) -> SeriesLoadState {
+        let current_provider_generation = self
+            .engine
+            .provider_status(&series.provider_id)
+            .and_then(|status| status.generation)
+            .unwrap_or(ProviderGeneration(NonZeroU64::MIN));
+        if self
+            .local_loaded
+            .contains(&(series.clone(), current_provider_generation))
+        {
+            SeriesLoadState::Partial
+        } else if self
+            .rithmic_live
+            .get(series)
+            .is_some_and(|live| live.connected && live.history_ready)
+            || self
+                .hyperliquid_live
+                .get(series)
+                .is_some_and(|live| live.connected && live.history_ready)
+        {
+            SeriesLoadState::Live
+        } else if self.engine.has_publication(consumer_id) {
+            SeriesLoadState::Ready
+        } else {
+            SeriesLoadState::Resolving
+        }
+    }
+
+    pub(super) fn publish_current_snapshot(
+        &mut self,
+        publication: &axiusflow_market_engine::ConsumerPublication,
+    ) {
+        let state =
+            self.canonical_series_load_state(publication.consumer_id, &publication.snapshot.series);
+        let Some(events) = self.events.get_mut(&publication.consumer_id) else {
+            return;
+        };
+        let (persistence, detail) = retained_series_state(
+            events,
+            publication.consumer_id,
+            publication.generation,
+            &publication.snapshot.series,
+        )
+        .map_or(
+            (PersistenceState::NotRequested, None),
+            |(_, persistence, detail)| (persistence, detail),
+        );
+        publish_state(events, publication, state, persistence, detail.as_deref());
+    }
+
     pub(super) fn handle_attach(
         &mut self,
         client_id: ClientId,
@@ -668,17 +743,9 @@ impl Coordinator<'_> {
         persistence: PersistenceState,
         detail: Option<&str>,
     ) {
-        let current_provider_generation = self
-            .engine
-            .provider_status(&selected.provider_id)
-            .and_then(|status| status.generation)
-            .unwrap_or(ProviderGeneration(NonZeroU64::MIN));
-        let local_loaded = &self.local_loaded;
-        let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
-        let engine = &self.engine;
-        for (consumer_id, events) in &mut self.events {
-            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+        let consumer_ids = self.events.keys().copied().collect::<Vec<_>>();
+        for consumer_id in consumer_ids {
+            let Some(demand) = self.engine.current_demand(consumer_id) else {
                 continue;
             };
             let (Some(generation), Some(series)) = (demand.generation, demand.series.as_ref())
@@ -686,29 +753,20 @@ impl Coordinator<'_> {
                 continue;
             };
             if series == selected {
-                let state = if local_loaded.contains(&(series.clone(), current_provider_generation))
-                {
-                    SeriesLoadState::Partial
-                } else if rithmic_live
-                    .get(series)
-                    .is_some_and(|live| live.connected && live.history_ready)
-                    || hyperliquid_live
-                        .get(series)
-                        .is_some_and(|live| live.connected && live.history_ready)
-                {
-                    SeriesLoadState::Live
-                } else if engine.has_publication(*consumer_id) {
-                    SeriesLoadState::Ready
-                } else {
-                    SeriesLoadState::Resolving
+                let fallback = self.canonical_series_load_state(consumer_id, series);
+                let Some(events) = self.events.get_mut(&consumer_id) else {
+                    continue;
                 };
+                let retained = retained_series_state(events, consumer_id, generation, series);
+                let state = retained.as_ref().map_or(fallback, |(state, _, _)| *state);
+                let retained_detail = retained.and_then(|(_, _, detail)| detail);
                 events.series_state = Some(series_state_with_persistence(
-                    *consumer_id,
+                    consumer_id,
                     generation,
                     ipc_series(series),
                     state,
                     persistence,
-                    detail.map(str::to_string),
+                    retained_detail.or_else(|| detail.map(str::to_string)),
                 ));
             }
         }
@@ -867,21 +925,14 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn broadcast_provider_for(
-        &mut self,
-        provider: &str,
-        state: ProviderConnectionState,
-        generation: ProviderGeneration,
-        detail: Option<&str>,
-    ) {
-        let transport_rtt_nanos = self.providers.transport_rtt_nanos(provider);
-        let payload = envelope::Payload::ProviderState(ProviderState {
-            provider: provider.to_string(),
-            state: state as i32,
-            generation: generation.0.get(),
-            detail: detail.map(str::to_string),
-            transport_rtt_nanos,
-        });
+    pub(super) fn broadcast_provider_for(&mut self, provider: &str, detail: Option<&str>) {
+        let Some(mut state) = self.provider_state(provider) else {
+            return;
+        };
+        if let Some(detail) = detail {
+            state.detail = Some(detail.to_string());
+        }
+        let payload = envelope::Payload::ProviderState(state);
         for (consumer_id, events) in &mut self.events {
             if self
                 .engine

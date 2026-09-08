@@ -71,6 +71,13 @@ impl SubscriptionRegistry {
         })
     }
 
+    pub(crate) fn all(&self) -> Vec<(BarSeriesKey, SubscriptionStatus)> {
+        self.subscriptions
+            .keys()
+            .filter_map(|series| self.status(series).map(|status| (series.clone(), status)))
+            .collect()
+    }
+
     pub(crate) fn contains(&self, series: &BarSeriesKey) -> bool {
         self.subscriptions.contains_key(series)
     }

@@ -88,9 +88,7 @@ pub(super) fn try_send_hyperliquid_catalog(
 }
 
 pub(super) fn chart_stream_requirements(_series: &BarSeriesKey) -> StreamRequirements {
-    StreamRequirements::BARS
-        .with(MarketStream::Trades)
-        .with(MarketStream::Depth)
+    StreamRequirements::BARS.with(MarketStream::Depth)
 }
 
 pub(super) fn validate_provider_instrument(

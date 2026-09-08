@@ -544,7 +544,6 @@ fn resume_test_coordinator<'a>(
         history_deferred: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
         suspended_history: BTreeSet::new(),
-        deferred_publications: BTreeSet::new(),
         pending_empty_repairs: BTreeMap::new(),
         empty_repair_retry_at: Instant::now(),
         history_retries: BTreeMap::new(),
@@ -1098,6 +1097,13 @@ fn rithmic_catalog_and_history_survive_multi_instrument_session_advance() {
         demand
             .instruments
             .iter()
+            .all(|item| item.trades && item.order_book),
+        "bar/depth chart demand keeps Rithmic trade transport without requesting downstream order flow"
+    );
+    assert!(
+        demand
+            .instruments
+            .iter()
             .any(|item| { item.instrument.instrument_id == mnq.instrument_id })
     );
     assert!(
@@ -1131,6 +1137,17 @@ fn rithmic_catalog_and_history_survive_multi_instrument_session_advance() {
             ))
             .is_err(),
         "a callback older than the current provider session is retired even with a larger selection counter"
+    );
+}
+
+#[test]
+fn chart_streams_do_not_request_discarded_order_flow() {
+    let streams = chart_stream_requirements(&hyperliquid_series());
+    assert!(streams.contains(MarketStream::Bars));
+    assert!(streams.contains(MarketStream::Depth));
+    assert!(
+        !streams.contains(MarketStream::Trades),
+        "order flow is a consumer feature, not an implicit chart transport dependency"
     );
 }
 
@@ -1175,6 +1192,66 @@ fn viewport_backfill_uses_local_range_before_provider_history() {
     assert!(
         coordinator.history_inflight.is_empty(),
         "provider fetch starts only after the local range result is usable"
+    );
+}
+
+#[test]
+fn retired_viewport_command_does_not_schedule_backend_history() {
+    let (client_id, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (engine, provider_generation) = hyperliquid_demand_engine(
+        identity,
+        consumer_id,
+        demand_generation,
+        vec![
+            hyperliquid_bar(1, 120_000_000_000, 10_100),
+            hyperliquid_bar(2, 180_000_000_000, 10_200),
+        ],
+    );
+    let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
+    let (storage_tx, storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::from([(
+            "hyperliquid",
+            ProviderDispatchRecord {
+                history: &history_tx,
+                lifecycle: None,
+                realtime: ProviderRealtimeDispatch::Disabled,
+                catalog: ProviderCatalogDispatch::Disabled,
+            },
+        )]),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.consumer_clients.insert(consumer_id, client_id);
+    coordinator
+        .install_provider_instrument(&hyperliquid_instrument(provider_generation.0.get()))
+        .expect("instrument installs");
+
+    let (resource_reply_tx, resource_reply_rx) = mpsc::sync_channel(1);
+    coordinator.handle_consumer_command(Command::ResourceClass(
+        client_id,
+        consumer_id,
+        ConsumerResourceClass::Warm,
+        resource_reply_tx,
+    ));
+    assert_eq!(resource_reply_rx.recv().expect("resource reply"), Ok(()));
+
+    let viewport = Viewport::try_new(0, 240_000_000_000).expect("viewport");
+    let (viewport_reply_tx, viewport_reply_rx) = mpsc::sync_channel(1);
+    coordinator.handle_consumer_command(Command::Viewport(
+        client_id,
+        consumer_id,
+        demand_generation,
+        viewport,
+        viewport_reply_tx,
+    ));
+    assert_eq!(viewport_reply_rx.recv().expect("viewport reply"), Ok(()));
+    assert!(
+        storage_rx.try_recv().is_err(),
+        "Warm/Detached viewport intent must not issue a local-history read"
+    );
+    assert!(
+        history_rx.try_recv().is_err(),
+        "Warm/Detached viewport intent must not fall through to provider history"
     );
 }
 
@@ -1267,6 +1344,74 @@ fn rapid_viewport_change_waits_for_cache_then_reads_latest_range() {
             if request.series == series
                 && request.range == Some(first_range)
     ));
+}
+
+#[test]
+fn shared_viewport_union_is_owned_by_market_engine_not_event_sinks() {
+    let series = hyperliquid_series();
+    let (client_id, first, demand_generation, identity) = resume_test_identity();
+    let (mut engine, _) = hyperliquid_demand_engine(
+        identity,
+        first,
+        demand_generation,
+        vec![
+            hyperliquid_bar(1, 300_000_000_000, 10_100),
+            hyperliquid_bar(2, 360_000_000_000, 10_200),
+        ],
+    );
+    let second = ConsumerId(NonZeroU64::new(2).expect("second consumer"));
+    engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id,
+                workspace_id: WorkspaceId(NonZeroU64::new(2).expect("second workspace")),
+                consumer_id: second,
+            },
+            true,
+        )
+        .expect("second consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            second,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("second shared demand installs");
+    engine
+        .set_resource_class(second, ConsumerResourceClass::Background)
+        .expect("second workspace stays subscribed while hidden");
+    engine
+        .set_viewport(
+            first,
+            demand_generation,
+            Viewport::try_new(120_000_000_000, 420_000_000_000).expect("first viewport"),
+        )
+        .expect("first viewport installs");
+    engine
+        .set_viewport(
+            second,
+            demand_generation,
+            Viewport::try_new(60_000_000_000, 420_000_000_000).expect("second viewport"),
+        )
+        .expect("second viewport installs");
+
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    // The coordinator fixture intentionally owns an event sink only for the
+    // first consumer. Backend history planning must still see the background
+    // consumer because MarketEngine, not the sink map, owns demand.
+    let coordinator = resume_test_coordinator(engine, providers, &storage_tx, first);
+
+    assert_eq!(
+        coordinator.current_viewport_history_range(&series),
+        Some(HistoryRange {
+            start_unix_nanos: 60_000_000_000,
+            end_unix_nanos: 300_000_000_000,
+        })
+    );
 }
 
 #[test]
@@ -1683,6 +1828,92 @@ fn cached_demand_preserves_shared_pending_and_degraded_persistence() {
 }
 
 #[test]
+fn foreground_restore_preserves_shared_live_readiness() {
+    let series = hyperliquid_series();
+    let (client_id, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (engine, provider_generation) = hyperliquid_demand_engine(
+        identity,
+        consumer_id,
+        demand_generation,
+        vec![hyperliquid_bar(1, 60_000_000_000, 10_100)],
+    );
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.consumer_clients.insert(consumer_id, client_id);
+    let mut live = hyperliquid_handoff();
+    live.generation = provider_generation;
+    live.connected = true;
+    live.history_ready = true;
+    coordinator.hyperliquid_live.insert(series.clone(), live);
+    assert!(coordinator.series_live_if_ready(&series));
+
+    for resource_class in [
+        ConsumerResourceClass::Background,
+        ConsumerResourceClass::Foreground,
+    ] {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        coordinator.handle_consumer_command(Command::ResourceClass(
+            client_id,
+            consumer_id,
+            resource_class,
+            reply_tx,
+        ));
+        assert_eq!(reply_rx.recv().expect("resource reply"), Ok(()));
+    }
+
+    assert!(
+        matches!(
+            coordinator.events[&consumer_id].series_state.as_ref(),
+            Some(envelope::Payload::SeriesState(state))
+                if SeriesLoadState::try_from(state.state) == Ok(SeriesLoadState::Live)
+        ),
+        "foregrounding an already-live shared series must not downgrade it to Ready"
+    );
+}
+
+#[test]
+fn persistence_update_preserves_existing_recovery_readiness_and_detail() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (engine, _) =
+        hyperliquid_demand_engine(identity, consumer_id, demand_generation, Vec::new());
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator
+        .events
+        .get_mut(&consumer_id)
+        .expect("events")
+        .series_state = Some(series_state_with_persistence(
+        consumer_id,
+        demand_generation,
+        ipc_series(&series),
+        SeriesLoadState::Resolving,
+        PersistenceState::Pending,
+        Some("provider history recovery remains authoritative".to_string()),
+    ));
+
+    coordinator.broadcast_persistence_for(
+        &series,
+        PersistenceState::Degraded,
+        Some("local storage is degraded"),
+    );
+
+    assert!(matches!(
+        coordinator.events[&consumer_id].series_state.as_ref(),
+        Some(envelope::Payload::SeriesState(state))
+            if SeriesLoadState::try_from(state.state) == Ok(SeriesLoadState::Resolving)
+                && PersistenceState::try_from(state.persistence) == Ok(PersistenceState::Degraded)
+                && state.detail.as_deref() == Some("provider history recovery remains authoritative")
+    ));
+}
+
+#[test]
 fn cache_completion_retries_buffered_persistence_when_capacity_returns() {
     let series = hyperliquid_series();
     let (_, consumer_id, demand_generation, identity) = resume_test_identity();
@@ -1730,15 +1961,52 @@ fn cache_completion_retries_buffered_persistence_when_capacity_returns() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn persistence_backlog_precedes_chained_viewport_cache_read() {
     let series = hyperliquid_series();
-    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
-    let (engine, provider_generation) = hyperliquid_demand_engine(
+    let (client_id, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (mut engine, provider_generation) = hyperliquid_demand_engine(
         identity,
         consumer_id,
         demand_generation,
         vec![hyperliquid_bar(1, 300_000_000_000, 10_100)],
     );
+    let background_consumer = ConsumerId(NonZeroU64::new(2).expect("background consumer"));
+    engine
+        .register_consumer(
+            ConsumerIdentity {
+                client_id,
+                workspace_id: WorkspaceId(NonZeroU64::new(2).expect("background workspace")),
+                consumer_id: background_consumer,
+            },
+            true,
+        )
+        .expect("background consumer registers");
+    engine
+        .set_series_demand_with_streams(
+            background_consumer,
+            demand_generation,
+            &series,
+            chart_stream_requirements(&series),
+        )
+        .expect("shared background demand installs");
+    engine
+        .set_resource_class(background_consumer, ConsumerResourceClass::Background)
+        .expect("second pane remains a retained subscription");
+    engine
+        .set_viewport(
+            consumer_id,
+            demand_generation,
+            Viewport::try_new(120_000_000_000, 420_000_000_000).expect("foreground viewport"),
+        )
+        .expect("foreground viewport installs");
+    engine
+        .set_viewport(
+            background_consumer,
+            demand_generation,
+            Viewport::try_new(60_000_000_000, 420_000_000_000).expect("background viewport"),
+        )
+        .expect("background viewport installs");
     let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
     let (storage_tx, storage_rx) = mpsc::sync_channel(1);
     let providers = ProviderDispatch {
@@ -1760,11 +2028,6 @@ fn persistence_backlog_precedes_chained_viewport_cache_read() {
         start_unix_nanos: 120_000_000_000,
         end_unix_nanos: 300_000_000_000,
     };
-    let latest_viewport = Viewport::try_new(60_000_000_000, 420_000_000_000).expect("viewport");
-    coordinator
-        .engine
-        .set_viewport(consumer_id, demand_generation, latest_viewport)
-        .expect("latest viewport installs");
     coordinator.local_history_deadlines.insert(
         (series.clone(), provider_generation),
         PendingLocalHistoryRead {
@@ -1806,8 +2069,16 @@ fn persistence_backlog_precedes_chained_viewport_cache_read() {
             if requested == series && generation == provider_generation
     ));
     assert!(
-        history_rx.try_recv().is_ok(),
-        "the newest viewport falls back to provider history when durable persistence owns the freed storage slot"
+        matches!(
+            history_rx.try_recv(),
+            Ok(request)
+                if request.series == series
+                    && request.range == Some(HistoryRange {
+                        start_unix_nanos: 60_000_000_000,
+                        end_unix_nanos: 300_000_000_000,
+                    })
+        ),
+        "both foreground and hidden-pane viewport intent survives storage pressure while durable persistence owns the freed slot"
     );
 }
 
@@ -2270,7 +2541,7 @@ fn restarted_hyperliquid_trade_ordinal_resets_only_order_flow() {
             consumer_id,
             demand_generation,
             &series,
-            chart_stream_requirements(&series),
+            chart_stream_requirements(&series).with(MarketStream::Trades),
         )
         .expect("demand installs");
 
@@ -2316,6 +2587,33 @@ fn restarted_hyperliquid_trade_ordinal_resets_only_order_flow() {
             .provider_status("hyperliquid")
             .map(|status| status.health),
         Some(ProviderHealth::Online)
+    );
+}
+
+#[test]
+fn default_chart_trade_does_not_build_order_flow_the_desktop_discards() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let provider_generation = ProviderGeneration(NonZeroU64::MIN);
+    let (engine, _) =
+        hyperliquid_demand_engine(identity, consumer_id, demand_generation, Vec::new());
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator
+        .hyperliquid_live
+        .insert(series.clone(), hyperliquid_handoff());
+
+    coordinator.hyperliquid_trade(
+        provider_generation.0.get(),
+        &hyperliquid_trade(1, 1_800_000_000_000_000_000, 10_000, 2),
+    );
+
+    assert!(
+        coordinator.events[&consumer_id].order_flow.is_none(),
+        "standard chart demand must not construct an order-flow IPC publication that desktop drops"
     );
 }
 

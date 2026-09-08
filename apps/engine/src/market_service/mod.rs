@@ -750,8 +750,8 @@ fn configured_engine() -> Result<MarketEngine, String> {
 
 mod publication;
 use publication::{
-    engine_install_failure_stage, fail_waiters, order_flow_payload, publish_ready, publish_state,
-    series_state, series_state_with_persistence, series_update_message,
+    engine_install_failure_stage, fail_waiters, order_flow_payload, publish_state, series_state,
+    series_state_with_persistence, series_update_message,
 };
 
 mod instrument_selection;

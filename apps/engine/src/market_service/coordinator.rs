@@ -9,7 +9,7 @@ use super::{
     RecvTimeoutError, Reply, ResourceMode, ResourcePolicyDecision, ResourcePolicyInput,
     RithmicLiveHandoff, RithmicRealtimeDemand, StorageRequest, StoredHistory, SyncSender, VecDeque,
     WarmSeries, authorize_consumer, chart_stream_requirements, decide_resource_policy, envelope,
-    publish_ready, resource_policy_mode, thread,
+    resource_policy_mode, thread,
 };
 
 pub(super) struct OwnedCoordinatorChannels {
@@ -85,7 +85,6 @@ fn run_coordinator(
         history_deferred: BTreeMap::new(),
         history_cancellations: BTreeMap::new(),
         suspended_history: BTreeSet::new(),
-        deferred_publications: BTreeSet::new(),
         pending_empty_repairs: BTreeMap::new(),
         empty_repair_retry_at: Instant::now(),
         history_retries: BTreeMap::new(),
@@ -209,7 +208,6 @@ pub(super) struct Coordinator<'a> {
     /// Requests canceled by account/lifecycle suspension. Their response may be
     /// internally valid but belongs to retired market access and cannot install.
     pub(super) suspended_history: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
-    pub(super) deferred_publications: BTreeSet<BarSeriesKey>,
     pub(super) pending_empty_repairs: BTreeMap<BarSeriesKey, HistoryRange>,
     pub(super) empty_repair_retry_at: Instant,
     pub(super) history_retries:
@@ -374,18 +372,18 @@ impl Coordinator<'_> {
                             .engine
                             .set_resource_class(consumer_id, resource_class)
                             .map_err(|error| error.to_string())?;
-                        if let Some(events) = self.events.get_mut(&consumer_id) {
-                            if let Some(publication) = publication {
-                                publish_ready(events, &publication);
-                            }
-                            if !resource_class.publishes_ui() {
-                                // A full snapshot queued just before a pane hid
-                                // must not leak through after the class change.
-                                // Canonical depth remains engine-owned and will
-                                // be republished from its latest revision on
-                                // Foreground restore below.
-                                events.order_book = None;
-                            }
+                        if let Some(publication) = publication {
+                            self.publish_current_snapshot(&publication);
+                        }
+                        if let Some(events) = self.events.get_mut(&consumer_id)
+                            && !resource_class.publishes_ui()
+                        {
+                            // A full snapshot queued just before a pane hid
+                            // must not leak through after the class change.
+                            // Canonical depth remains engine-owned and will
+                            // be republished from its latest revision on
+                            // Foreground restore below.
+                            events.order_book = None;
                         }
                         Ok(())
                     });
@@ -492,11 +490,10 @@ impl Coordinator<'_> {
     /// authoritative record of the charts the user still has open.
     fn reconcile_authorized_demands(&mut self) -> Result<(), String> {
         let demanded = self
-            .events
-            .keys()
-            .filter_map(|consumer_id| self.engine.current_demand(*consumer_id))
-            .filter_map(|demand| demand.series.clone())
-            .filter(|series| self.engine.has_subscription(series))
+            .engine
+            .subscriptions()
+            .into_iter()
+            .map(|(series, _)| series)
             .collect::<BTreeSet<_>>();
         let mut failures = Vec::new();
         for series in demanded {
@@ -594,17 +591,8 @@ impl Coordinator<'_> {
     pub(super) fn reconcile_order_books(&mut self) {
         let mut required_identities = BTreeSet::new();
         if self.resource_mode != ResourceMode::OfflineSuspended {
-            for consumer_id in self.events.keys() {
-                let Some(demand) = self.engine.current_demand(*consumer_id) else {
-                    continue;
-                };
-                let Some(series) = demand.series.as_ref() else {
-                    continue;
-                };
-                if demand.streams.is_some_and(|streams| {
-                    streams.contains(MarketStream::Depth)
-                        && demand.resource_class.retains_subscription()
-                }) {
+            for (series, subscription) in self.engine.subscriptions() {
+                if subscription.streams.contains(MarketStream::Depth) {
                     required_identities.insert((
                         series.provider_id.clone(),
                         series.instrument_id.clone(),
@@ -671,10 +659,10 @@ impl Coordinator<'_> {
             events.clear_series();
         }
         let demanded = self
-            .events
-            .keys()
-            .filter_map(|consumer_id| self.engine.current_demand(*consumer_id))
-            .filter_map(|demand| demand.series.clone())
+            .engine
+            .subscriptions()
+            .into_iter()
+            .map(|(series, _)| series)
             .collect::<BTreeSet<_>>();
         for series in demanded {
             self.broadcast_series_recovery_for(
