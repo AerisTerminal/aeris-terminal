@@ -1180,6 +1180,15 @@ mod tests {
                 .join("crates/platform_runtime/src/background_service.rs")
                 .exists()
         );
+        let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
+        let release_script = manifest("tools/publish_release.ps1");
+        assert!(
+            publisher.contains("--minimum-version")
+                && publisher.contains("config.minimum_version.clone()")
+                && release_script.contains("MinimumLauncherVersion")
+                && release_script.contains("--minimum-version $MinimumLauncherVersion"),
+            "release compatibility floor must be explicit and independent of the new app version"
+        );
 
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(

@@ -3,6 +3,8 @@ param(
     [ValidateRange(1, [UInt64]::MaxValue)]
     [UInt64]$Generation,
 
+    [string]$MinimumLauncherVersion = "0.2.0",
+
     [string]$SigningKeyFile = (Join-Path $env:LOCALAPPDATA "Axiusflow\release-signing-key.b64"),
 
     [ValidatePattern('^[A-Za-z0-9._-]{1,32}$')]
@@ -72,6 +74,7 @@ try {
         --signing-key-file $SigningKeyFile `
         --release-identity $identity `
         --generation $Generation `
+        --minimum-version $MinimumLauncherVersion `
         --base-url $baseUrl `
         --published-at $publishedAt `
         --channel $Channel `

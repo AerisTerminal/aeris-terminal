@@ -39,6 +39,7 @@ struct PublisherConfig {
     signing_key_file: PathBuf,
     release_identity: String,
     generation: u64,
+    minimum_version: String,
     base_url: String,
     published_at: String,
     channel: String,
@@ -53,6 +54,7 @@ impl PublisherConfig {
         let mut signing_key_file = None;
         let mut release_identity = None;
         let mut generation = None;
+        let mut minimum_version = None;
         let mut base_url = None;
         let mut published_at = None;
         let mut channel = DEFAULT_CHANNEL.to_string();
@@ -84,6 +86,9 @@ impl PublisherConfig {
                             })?,
                     );
                 }
+                "--minimum-version" => {
+                    minimum_version = Some(required_argument(&mut arguments, &flag)?);
+                }
                 "--base-url" => base_url = Some(required_argument(&mut arguments, &flag)?),
                 "--published-at" => published_at = Some(required_argument(&mut arguments, &flag)?),
                 "--channel" => channel = required_argument(&mut arguments, &flag)?,
@@ -104,6 +109,7 @@ impl PublisherConfig {
             signing_key_file: signing_key_file.ok_or_else(usage)?,
             release_identity: release_identity.ok_or_else(usage)?,
             generation: generation.ok_or_else(usage)?,
+            minimum_version: minimum_version.ok_or_else(usage)?,
             base_url: normalize_base_url(&base_url.ok_or_else(usage)?)?,
             published_at: published_at.ok_or_else(usage)?,
             channel,
@@ -115,15 +121,19 @@ impl PublisherConfig {
         if !valid_release_identity(&config.release_identity)
             || !valid_identifier(&config.channel, 32)
             || !valid_published_at(&config.published_at)
+            || semver::Version::parse(&config.minimum_version).is_err()
         {
-            return Err("release identity, channel, or publish time is invalid".to_string());
+            return Err(
+                "release identity, minimum version, channel, or publish time is invalid"
+                    .to_string(),
+            );
         }
         Ok(config)
     }
 }
 
 fn usage() -> String {
-    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> --release-identity <git-head> --generation <n> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>]".to_string()
+    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> --release-identity <git-head> --generation <n> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>]".to_string()
 }
 
 fn required_argument(
@@ -462,7 +472,7 @@ fn package_release(
         release_identity: config.release_identity.clone(),
         install_generation: config.generation,
         channel: config.channel.clone(),
-        minimum_version: env!("CARGO_PKG_VERSION").to_string(),
+        minimum_version: config.minimum_version.clone(),
         platform: platform.to_string(),
         architecture: architecture.to_string(),
         files,
@@ -1010,6 +1020,16 @@ mod tests {
         root
     }
 
+    fn previous_compatible_launcher_policy() -> ReleasePolicy {
+        ReleasePolicy {
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            current_version: "0.2.0".to_string(),
+            minimum_install_generation: 18,
+            maximum_release_bytes: u64::MAX,
+        }
+    }
+
     #[test]
     fn package_emits_signed_manifest_with_versioned_launcher_and_matching_channel() {
         let root = temporary_root("package");
@@ -1026,6 +1046,7 @@ mod tests {
             signing_key_file: root.join("unused"),
             release_identity: "0123456789abcdef0123456789abcdef01234567".to_string(),
             generation: 41,
+            minimum_version: "0.2.0".to_string(),
             base_url: "https://auth.axiusflow.test/releases".to_string(),
             published_at: "2026-09-07T00:00:00Z".to_string(),
             channel: "stable".to_string(),
@@ -1040,8 +1061,13 @@ mod tests {
             &fs::read(&published.manifest_path).expect("signed manifest bytes"),
         )
         .expect("signed manifest");
-        verify_release_manifest(&signed, &key.verifying_key(), &ReleasePolicy::native(0))
-            .expect("signed release verifies");
+        assert_eq!(signed.manifest.minimum_version, "0.2.0");
+        verify_release_manifest(
+            &signed,
+            &key.verifying_key(),
+            &previous_compatible_launcher_policy(),
+        )
+        .expect("previous compatible launcher accepts the signed release");
         assert_eq!(signed.manifest.files.len(), 2);
         assert!(
             signed
