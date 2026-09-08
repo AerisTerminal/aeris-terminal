@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_engine_protocol::{EngineLifetimeMode, ResourceMode};
+use axiusflow_engine_protocol::{EngineLifetimeMode, HotSeries, ResourceMode};
 
 use crate::{EngineShutdown, EngineState, MarketService};
 
@@ -15,6 +15,7 @@ struct AccountMarketGateState {
     pending_mode: ResourceMode,
     retry_at: Instant,
     retry_delay: Duration,
+    startup_hot_set_restored: bool,
 }
 
 impl AccountMarketGateState {
@@ -24,7 +25,16 @@ impl AccountMarketGateState {
             pending_mode: applied_mode,
             retry_at: now,
             retry_delay: ACCOUNT_MARKET_GATE_POLL,
+            startup_hot_set_restored: false,
         }
+    }
+
+    fn should_restore_startup_hot_set(&self, desired: ResourceMode) -> bool {
+        desired != ResourceMode::OfflineSuspended && !self.startup_hot_set_restored
+    }
+
+    fn startup_hot_set_restored(&mut self) {
+        self.startup_hot_set_restored = true;
     }
 
     fn should_apply(&mut self, desired: ResourceMode, now: Instant) -> bool {
@@ -41,8 +51,12 @@ impl AccountMarketGateState {
     }
 
     fn acknowledge(&mut self, applied: ResourceMode, now: Instant) {
-        self.applied_mode = applied;
+        self.record_applied(applied, now);
         self.pending_mode = applied;
+    }
+
+    fn record_applied(&mut self, applied: ResourceMode, now: Instant) {
+        self.applied_mode = applied;
         self.retry_at = now;
         self.retry_delay = ACCOUNT_MARKET_GATE_POLL;
     }
@@ -65,6 +79,7 @@ pub fn start_account_market_gate(
     state: &EngineState,
     market: &MarketService,
     shutdown: &EngineShutdown,
+    startup_hot_series: Vec<HotSeries>,
 ) -> Result<thread::JoinHandle<()>, String> {
     let state = state.clone();
     let market = market.clone();
@@ -78,10 +93,25 @@ pub fn start_account_market_gate(
                 let desired = account_market_resource_mode(&state);
                 let now = Instant::now();
                 if gate.should_apply(desired, now) {
+                    if gate.should_restore_startup_hot_set(desired) {
+                        if let Err(error) = market.restore_hot_set(&startup_hot_series) {
+                            eprintln!("Axiusflow account market hot-set restore degraded: {error}");
+                            gate.retry(now);
+                            thread::sleep(ACCOUNT_MARKET_GATE_POLL);
+                            continue;
+                        }
+                        gate.startup_hot_set_restored();
+                    }
                     if let Err(error) = market.set_resource_mode(desired) {
                         eprintln!("Axiusflow account market gate degraded: {error}");
                         gate.retry(now);
                     } else {
+                        // The coordinator accepted this exact target, so keep
+                        // the gate's applied-mode truth synchronized before
+                        // re-reading account/lifecycle state. If the target
+                        // changed while the command was in flight, the next
+                        // loop must actively undo this now-stale mode.
+                        gate.record_applied(desired, now);
                         let current = account_market_resource_mode(&state);
                         if current == desired {
                             state.set_resource_mode(desired);
@@ -166,5 +196,35 @@ mod tests {
             ResourceMode::OfflineSuspended,
             started + Duration::from_secs(10)
         ));
+    }
+
+    #[test]
+    fn successful_stale_resume_is_followed_by_explicit_resuspension() {
+        let started = Instant::now();
+        let mut gate = AccountMarketGateState::new(ResourceMode::OfflineSuspended, started);
+
+        assert!(gate.should_apply(ResourceMode::Warm, started));
+        gate.record_applied(ResourceMode::Warm, started);
+        gate.pending_mode = ResourceMode::OfflineSuspended;
+        gate.retry_at = started;
+
+        assert!(
+            gate.should_apply(ResourceMode::OfflineSuspended, started),
+            "a sign-out racing a successful resume must send an explicit suspension"
+        );
+    }
+
+    #[test]
+    fn startup_hot_set_restores_once_and_only_after_market_access_is_authorized() {
+        let started = Instant::now();
+        let mut gate = AccountMarketGateState::new(ResourceMode::OfflineSuspended, started);
+
+        assert!(!gate.should_restore_startup_hot_set(ResourceMode::OfflineSuspended));
+        assert!(gate.should_restore_startup_hot_set(ResourceMode::Warm));
+        assert!(gate.should_restore_startup_hot_set(ResourceMode::MarketsLive));
+
+        gate.startup_hot_set_restored();
+        assert!(!gate.should_restore_startup_hot_set(ResourceMode::Warm));
+        assert!(!gate.should_restore_startup_hot_set(ResourceMode::MarketsLive));
     }
 }

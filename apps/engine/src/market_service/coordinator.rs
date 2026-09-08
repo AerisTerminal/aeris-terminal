@@ -94,7 +94,7 @@ fn run_coordinator(
         persistence_degraded: BTreeSet::new(),
         persistence_backlog: VecDeque::new(),
         local_loaded: BTreeSet::new(),
-        warming: BTreeSet::new(),
+        warm_reads: BTreeSet::new(),
         warm_series: BTreeMap::new(),
         warm_priority: Vec::new(),
         retained_history: BTreeMap::new(),
@@ -220,7 +220,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) persistence_degraded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     pub(super) persistence_backlog: VecDeque<StorageRequest>,
     pub(super) local_loaded: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
-    pub(super) warming: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
+    pub(super) warm_reads: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     pub(super) warm_series: BTreeMap<BarSeriesKey, WarmSeries>,
     pub(super) warm_priority: Vec<BarSeriesKey>,
     pub(super) retained_history: BTreeMap<BarSeriesKey, StoredHistory>,
@@ -284,19 +284,30 @@ impl Coordinator<'_> {
                 self.history_completed(&series, generation, range, result);
             }
             Command::LocalHistoryCompleted(series, generation, result) => {
+                self.retry_persistence_backlog();
                 self.local_history_completed(&series, generation, result);
+                self.schedule_warm_local_history();
             }
             Command::LocalHistoryRangeCompleted(series, generation, range, result) => {
+                // Persistence accepted into the coordinator backlog gets first
+                // use of capacity freed by a storage completion. A chained
+                // viewport cache read may fall back to provider history rather
+                // than indefinitely starving durable writes.
+                self.retry_persistence_backlog();
                 self.local_history_range_completed(&series, generation, range, result);
+                self.schedule_warm_local_history();
             }
             Command::PersistenceCompleted(series, generation, result, elapsed_millis) => {
                 self.persistence_completed(&series, generation, result, elapsed_millis);
+                self.schedule_warm_local_history();
             }
             Command::ConfirmedEmptyResolved(series, range, result) => {
+                self.retry_persistence_backlog();
                 if result.is_err() {
                     self.remember_pending_empty_repair(&series, range);
                     self.empty_repair_retry_at = Instant::now() + EMPTY_REPAIR_RETRY_DELAY;
                 }
+                self.schedule_warm_local_history();
             }
             command @ (Command::RestoreHotSet(..)
             | Command::SetResourceMode(..)
@@ -455,6 +466,7 @@ impl Coordinator<'_> {
         let previous_mode = self.resource_mode;
         self.resource_mode = mode;
         self.refresh_resource_policy();
+        self.schedule_warm_local_history();
         if mode == ResourceMode::OfflineSuspended {
             self.suspend_provider_work();
         } else if mode == ResourceMode::MarketsLive {

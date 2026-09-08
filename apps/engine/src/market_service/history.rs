@@ -309,26 +309,52 @@ impl Coordinator<'_> {
         }
     }
     pub(super) fn restore_hot_series(&mut self, series: Vec<WarmSeries>) {
-        for (index, warm) in series
+        self.hot_set_priority_count = series.len().min(MAXIMUM_SERIES);
+        for warm in series
             .into_iter()
             .filter(|warm| {
                 warm.series.provider_id == "rithmic" || warm.series.provider_id == "hyperliquid"
             })
             .take(MAXIMUM_SERIES)
-            .enumerate()
         {
+            if !self.warm_series.contains_key(&warm.series) {
+                self.warm_priority.push(warm.series.clone());
+            }
+            self.warm_series.insert(warm.series.clone(), warm.clone());
+        }
+        self.schedule_warm_local_history();
+    }
+
+    pub(super) fn schedule_warm_local_history(&mut self) {
+        if self.resource_mode == ResourceMode::OfflineSuspended {
+            return;
+        }
+        let candidates = self
+            .warm_priority
+            .iter()
+            .take(self.resource_policy.maximum_cached_series)
+            .filter_map(|series| self.warm_series.get(series))
+            .cloned()
+            .collect::<Vec<_>>();
+        for warm in candidates {
             let generation = ProviderGeneration(
                 NonZeroU64::new(warm.provider_watermark.max(1)).unwrap_or(NonZeroU64::MIN),
             );
-            self.warm_priority.push(warm.series.clone());
-            self.warm_series.insert(warm.series.clone(), warm.clone());
-            if index < self.resource_policy.maximum_cached_series
-                && self
-                    .storage
-                    .try_send(StorageRequest::Read(warm.series.clone(), generation))
-                    .is_ok()
+            let key = (warm.series.clone(), generation);
+            if self.warm_reads.contains(&key)
+                || self.retained_history.contains_key(&warm.series)
+                || self.prewarmed.contains(&warm.series)
             {
-                self.warming.insert((warm.series, generation));
+                continue;
+            }
+            match self
+                .storage
+                .try_send(StorageRequest::Read(warm.series.clone(), generation))
+            {
+                Ok(()) => {
+                    self.warm_reads.insert(key);
+                }
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => break,
             }
         }
     }

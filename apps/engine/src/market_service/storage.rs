@@ -325,7 +325,7 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         result: Result<Option<StoredHistory>, String>,
     ) {
-        if self.warming.remove(&(series.clone(), generation)) {
+        if self.warm_reads.contains(&(series.clone(), generation)) {
             self.install_warm_local_history(series, generation, result);
             return;
         }
@@ -405,10 +405,16 @@ impl Coordinator<'_> {
         let key = (series.clone(), generation);
         let expected = self
             .local_history_deadlines
-            .remove(&key)
+            .get(&key)
             .is_some_and(|pending| pending.range == Some(range));
-        if !expected
-            || !self.engine.has_subscription(series)
+        if !expected {
+            return;
+        }
+        // This completion owns the currently tracked range, so retire only
+        // its exact deadline even if the consumer was removed or the provider
+        // generation moved on while the storage worker was reading it.
+        self.local_history_deadlines.remove(&key);
+        if !self.engine.has_subscription(series)
             || self
                 .engine
                 .provider_status(&series.provider_id)

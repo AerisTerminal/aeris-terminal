@@ -87,16 +87,14 @@ fn run() -> Result<(), String> {
     install_background_service(&state, workspace.autostart_enabled)?;
     // Never restore hot demand or allow provider activity before the account
     // service has verified an online session or a valid offline lease.
-    let mut gated_workspace = workspace.clone();
-    gated_workspace.hot_series.clear();
-    gated_workspace.resource_mode = ResourceMode::OfflineSuspended as i32;
+    let (gated_workspace, startup_hot_series) = gated_market_startup(&workspace)?;
     let market = MarketService::start(&gated_workspace)?;
     market.set_resource_mode(ResourceMode::OfflineSuspended)?;
     state.set_resource_mode(ResourceMode::OfflineSuspended);
     let active_clients = Arc::new(AtomicUsize::new(0));
     let pairer = SessionPairer::new();
     let shutdown = EngineShutdown::default();
-    let account_gate = start_account_market_gate(&state, &market, &shutdown)?;
+    let account_gate = start_account_market_gate(&state, &market, &shutdown, startup_hot_series)?;
     let session_shutdown = match start_session_shutdown_monitor(shutdown.clone()) {
         Ok(runtime) => Some(runtime),
         Err(error) => {
@@ -163,6 +161,22 @@ fn run() -> Result<(), String> {
         ACCEPT_POLL_INTERVAL,
         Instant::now() + ENGINE_SHUTDOWN_DEADLINE,
     )
+}
+
+fn gated_market_startup(
+    workspace: &axiusflow_engine_protocol::WorkspaceState,
+) -> Result<
+    (
+        axiusflow_engine_protocol::WorkspaceState,
+        Vec<axiusflow_engine_protocol::HotSeries>,
+    ),
+    String,
+> {
+    let startup_hot_series = MarketService::retained_hot_set(workspace)?;
+    let mut gated_workspace = workspace.clone();
+    gated_workspace.hot_series.clear();
+    gated_workspace.resource_mode = ResourceMode::OfflineSuspended as i32;
+    Ok((gated_workspace, startup_hot_series))
 }
 
 fn finish_shutdown(
@@ -299,7 +313,7 @@ fn finish_named_worker(
 mod tests {
     use std::ffi::OsString;
 
-    use super::{EngineCommand, parse_command};
+    use super::{EngineCommand, EngineState, ResourceMode, gated_market_startup, parse_command};
 
     #[test]
     fn lifecycle_command_line_accepts_only_run_or_complete_shutdown() {
@@ -316,5 +330,17 @@ mod tests {
             parse_command(vec![OsString::from("--shutdown"), OsString::from("extra")].into_iter())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn startup_preserves_retained_hot_set_outside_the_account_gated_workspace() {
+        let workspace = EngineState::default().workspace();
+        let (gated, retained) =
+            gated_market_startup(&workspace).expect("startup hot set classifies");
+
+        assert!(gated.hot_series.is_empty());
+        assert_eq!(gated.resource_mode, ResourceMode::OfflineSuspended as i32);
+        assert_eq!(retained.len(), workspace.hot_series.len());
+        assert!(!retained.is_empty());
     }
 }

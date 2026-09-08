@@ -736,12 +736,21 @@ impl ProviderDispatch<'_> {
 }
 
 impl MarketService {
+    /// Classifies the persisted workspace hot set using the same bounded memory
+    /// policy used by normal market-service startup.
+    ///
+    /// # Errors
+    /// Returns an error when persisted hot-set metadata is invalid.
+    pub fn retained_hot_set(workspace: &WorkspaceState) -> Result<Vec<HotSeries>, String> {
+        retained_hot_series(workspace, available_memory_bytes())
+    }
+
     /// Starts the process-owned market coordinator and its bounded provider-history worker.
     ///
     /// # Errors
     /// Returns an error when provider configuration or either bounded worker cannot start.
     pub fn start(workspace: &WorkspaceState) -> Result<Self, String> {
-        let hot_series = retained_hot_series(workspace, available_memory_bytes())?;
+        let hot_series = Self::retained_hot_set(workspace)?;
         let storage = LocalHistoryStore::open(
             &crate::default_engine_state_root()?
                 .join("market-history")
@@ -919,7 +928,7 @@ impl MarketService {
         self.request(|reply| Ok(Command::SetResourceMode(mode, reply)))
     }
 
-    fn restore_hot_set(&self, hot_series: &[HotSeries]) -> Result<(), String> {
+    pub(crate) fn restore_hot_set(&self, hot_series: &[HotSeries]) -> Result<(), String> {
         let restored = hot_series
             .iter()
             .filter_map(|series| {

@@ -553,7 +553,7 @@ fn resume_test_coordinator<'a>(
         persistence_degraded: BTreeSet::new(),
         persistence_backlog: VecDeque::new(),
         local_loaded: BTreeSet::new(),
-        warming: BTreeSet::new(),
+        warm_reads: BTreeSet::new(),
         warm_series: BTreeMap::new(),
         warm_priority: Vec::new(),
         retained_history: BTreeMap::new(),
@@ -695,12 +695,56 @@ fn warm_restore_keeps_markets_live_metadata_beyond_the_warm_cache_budget() {
 
     assert_eq!(coordinator.warm_priority.len(), 12);
     assert_eq!(coordinator.warm_series.len(), 12);
-    assert_eq!(coordinator.warming.len(), 8);
+    assert_eq!(coordinator.warm_reads.len(), 8);
     assert_eq!(storage_rx.try_iter().count(), 8);
 
     coordinator.resource_mode = ResourceMode::MarketsLive;
     coordinator.refresh_resource_policy();
     assert_eq!(coordinator.resource_policy.maximum_derived_series, 12);
+}
+
+#[test]
+fn account_gated_hot_restore_warms_local_cache_after_authorization() {
+    let (_, consumer_id, _, _) = resume_test_identity();
+    let engine = configured_engine().expect("test engine configures");
+    let (storage_tx, storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.resource_mode = ResourceMode::OfflineSuspended;
+    coordinator.refresh_resource_policy();
+    let series = hyperliquid_series();
+    let restored = vec![WarmSeries {
+        instrument: hyperliquid_instrument(1),
+        series: series.clone(),
+        provider_watermark: 1,
+    }];
+
+    coordinator.restore_hot_series(restored);
+    assert!(storage_rx.try_recv().is_err());
+    assert!(coordinator.warm_reads.is_empty());
+
+    coordinator
+        .apply_resource_mode(ResourceMode::Warm)
+        .expect("authorized warm mode applies");
+    assert!(matches!(
+        storage_rx.try_recv(),
+        Ok(StorageRequest::Read(requested, generation))
+            if requested == series && generation.0.get() == 1
+    ));
+    assert_eq!(coordinator.warm_reads.len(), 1);
+
+    coordinator.handle_command(Command::LocalHistoryCompleted(
+        series,
+        ProviderGeneration(NonZeroU64::MIN),
+        Ok(None),
+    ));
+    assert!(
+        storage_rx.try_recv().is_err(),
+        "an empty warm-cache read is terminal for that series generation"
+    );
+    assert_eq!(coordinator.warm_reads.len(), 1);
 }
 
 #[test]
@@ -1226,6 +1270,79 @@ fn rapid_viewport_change_waits_for_cache_then_reads_latest_range() {
 }
 
 #[test]
+fn late_local_range_completion_cannot_retire_newer_pending_read() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (engine, provider_generation) =
+        hyperliquid_demand_engine(identity, consumer_id, demand_generation, Vec::new());
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    let old_range = HistoryRange {
+        start_unix_nanos: 0,
+        end_unix_nanos: 120_000_000_000,
+    };
+    let newer_range = HistoryRange {
+        start_unix_nanos: 120_000_000_000,
+        end_unix_nanos: 300_000_000_000,
+    };
+    let key = (series.clone(), provider_generation);
+    coordinator.local_history_deadlines.insert(
+        key.clone(),
+        PendingLocalHistoryRead {
+            deadline: Instant::now() + LOCAL_HISTORY_READ_TIMEOUT,
+            range: Some(newer_range),
+        },
+    );
+
+    coordinator.local_history_range_completed(&series, provider_generation, old_range, Ok(None));
+
+    assert_eq!(
+        coordinator
+            .local_history_deadlines
+            .get(&key)
+            .and_then(|pending| pending.range),
+        Some(newer_range),
+        "a stale cache response must not erase tracking for the newer read"
+    );
+}
+
+#[test]
+fn matching_local_range_completion_retires_tracking_after_unsubscribe() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (mut engine, provider_generation) =
+        hyperliquid_demand_engine(identity, consumer_id, demand_generation, Vec::new());
+    engine.remove_consumer(consumer_id);
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    let range = HistoryRange {
+        start_unix_nanos: 0,
+        end_unix_nanos: 120_000_000_000,
+    };
+    let key = (series.clone(), provider_generation);
+    coordinator.local_history_deadlines.insert(
+        key.clone(),
+        PendingLocalHistoryRead {
+            deadline: Instant::now() + LOCAL_HISTORY_READ_TIMEOUT,
+            range: Some(range),
+        },
+    );
+
+    coordinator.local_history_range_completed(&series, provider_generation, range, Ok(None));
+
+    assert!(
+        !coordinator.local_history_deadlines.contains_key(&key),
+        "the matching retired completion owns and clears only its own deadline"
+    );
+}
+
+#[test]
 fn timed_out_local_viewport_read_falls_back_over_latest_suppressed_range() {
     let series = hyperliquid_series();
     let (_, consumer_id, demand_generation, identity) = resume_test_identity();
@@ -1566,7 +1683,7 @@ fn cached_demand_preserves_shared_pending_and_degraded_persistence() {
 }
 
 #[test]
-fn full_storage_channel_buffers_persistence_until_capacity_returns() {
+fn cache_completion_retries_buffered_persistence_when_capacity_returns() {
     let series = hyperliquid_series();
     let (_, consumer_id, demand_generation, identity) = resume_test_identity();
     let (engine, provider_generation) =
@@ -1599,13 +1716,99 @@ fn full_storage_channel_buffers_persistence_until_capacity_returns() {
         storage_rx.try_recv(),
         Ok(StorageRequest::Read(..))
     ));
-    coordinator.retry_persistence_backlog();
+    coordinator.handle_command(Command::LocalHistoryCompleted(
+        series.clone(),
+        provider_generation,
+        Ok(None),
+    ));
     assert!(coordinator.persistence_backlog.is_empty());
     assert!(matches!(
         storage_rx.try_recv(),
         Ok(StorageRequest::Persist(requested, generation, ..))
             if requested == series && generation == provider_generation
     ));
+}
+
+#[test]
+fn persistence_backlog_precedes_chained_viewport_cache_read() {
+    let series = hyperliquid_series();
+    let (_, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (engine, provider_generation) = hyperliquid_demand_engine(
+        identity,
+        consumer_id,
+        demand_generation,
+        vec![hyperliquid_bar(1, 300_000_000_000, 10_100)],
+    );
+    let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
+    let (storage_tx, storage_rx) = mpsc::sync_channel(1);
+    let providers = ProviderDispatch {
+        records: BTreeMap::from([(
+            "hyperliquid",
+            ProviderDispatchRecord {
+                history: &history_tx,
+                lifecycle: None,
+                realtime: ProviderRealtimeDispatch::Disabled,
+                catalog: ProviderCatalogDispatch::Disabled,
+            },
+        )]),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator
+        .install_provider_instrument(&hyperliquid_instrument(provider_generation.0.get()))
+        .expect("instrument installs");
+    let old_range = HistoryRange {
+        start_unix_nanos: 120_000_000_000,
+        end_unix_nanos: 300_000_000_000,
+    };
+    let latest_viewport = Viewport::try_new(60_000_000_000, 420_000_000_000).expect("viewport");
+    coordinator
+        .engine
+        .set_viewport(consumer_id, demand_generation, latest_viewport)
+        .expect("latest viewport installs");
+    coordinator.local_history_deadlines.insert(
+        (series.clone(), provider_generation),
+        PendingLocalHistoryRead {
+            deadline: Instant::now() + LOCAL_HISTORY_READ_TIMEOUT,
+            range: Some(old_range),
+        },
+    );
+    storage_tx
+        .send(StorageRequest::ReadRange(
+            series.clone(),
+            provider_generation,
+            old_range,
+        ))
+        .expect("fixture fills storage lane");
+    coordinator.enqueue_persistence(
+        &series,
+        provider_generation,
+        vec![hyperliquid_bar(2, 360_000_000_000, 10_200)],
+        false,
+        "fixture persistence unavailable",
+    );
+    assert_eq!(coordinator.persistence_backlog.len(), 1);
+    assert!(matches!(
+        storage_rx.try_recv(),
+        Ok(StorageRequest::ReadRange(..))
+    ));
+
+    coordinator.handle_command(Command::LocalHistoryRangeCompleted(
+        series.clone(),
+        provider_generation,
+        old_range,
+        Ok(None),
+    ));
+
+    assert!(coordinator.persistence_backlog.is_empty());
+    assert!(matches!(
+        storage_rx.try_recv(),
+        Ok(StorageRequest::Persist(requested, generation, ..))
+            if requested == series && generation == provider_generation
+    ));
+    assert!(
+        history_rx.try_recv().is_ok(),
+        "the newest viewport falls back to provider history when durable persistence owns the freed storage slot"
+    );
 }
 
 #[test]
