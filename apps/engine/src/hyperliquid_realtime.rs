@@ -31,7 +31,7 @@ use axiusflow_hyperliquid_market_adapter::{
     HyperliquidSocket, SocketEvent, WsClientEvent, decode_book_snapshot, decode_live_candle,
     decode_trades_batch, fetch_meta_bundle, is_read_timeout, parse_ws_frame,
 };
-use axiusflow_market_data::{DepthSnapshot, MarketTrade};
+use axiusflow_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 
 use crate::market_service::ProviderCoordinatorWake;
 
@@ -123,6 +123,7 @@ pub(crate) enum HyperliquidRealtimeEvent {
     Connected(u64),
     Candle(u64, String, String, HyperliquidLiveCandle),
     Trades(u64, Vec<MarketTrade>),
+    Quote(u64, TopOfBookQuote),
     Depth(u64, DepthSnapshot),
     Heartbeat(u64, Option<u64>),
     Recovering(u64),
@@ -134,6 +135,7 @@ pub(crate) enum HyperliquidRealtimeEvent {
 enum SubscriptionKey {
     Candle { coin: String, interval: String },
     Trades { coin: String },
+    Bbo { coin: String },
     Book { coin: String },
 }
 
@@ -856,6 +858,13 @@ fn reconcile_subscriptions(
     {
         insert_subscription(
             &mut desired,
+            SubscriptionKey::Bbo {
+                coin: book.wire_coin.clone(),
+            },
+            axiusflow_hyperliquid_market_adapter::build_bbo_subscription(&book.wire_coin),
+        );
+        insert_subscription(
+            &mut desired,
             SubscriptionKey::Book {
                 coin: book.wire_coin.clone(),
             },
@@ -926,12 +935,10 @@ fn handle_frame(
         } => frame.candle(&coin, &interval, &candles),
         WsClientEvent::Trades { coin, trades } => frame.trades(&coin, &trades),
         WsClientEvent::Book { coin, book } => frame.book(&coin, &book),
-        // Control acknowledgements need no action. BBO, context, and mids
-        // have no demanding consumer in this milestone; the L2 snapshots
-        // already carry top-of-book. They are dropped here rather than
-        // misrouted into another feed.
+        WsClientEvent::Bbo { coin, bbo } => frame.bbo(&coin, &bbo),
+        // Control acknowledgements, context, and mids have no demanding
+        // consumer in this milestone and are dropped rather than misrouted.
         WsClientEvent::Subscribed { .. }
-        | WsClientEvent::Bbo { .. }
         | WsClientEvent::Context { .. }
         | WsClientEvent::AllMids { .. } => Ok(()),
         WsClientEvent::Pong => unreachable!("application pong handled above"),
@@ -977,6 +984,45 @@ enum FrameError {
 }
 
 impl FrameDecoder<'_> {
+    fn bbo(&mut self, coin: &str, bbo: &serde_json::value::RawValue) -> Result<(), FrameError> {
+        let Some(mapping) = self.instruments.get(coin) else {
+            return Err(FrameError::Malformed);
+        };
+        let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
+        let Ok((bid, ask)) = axiusflow_hyperliquid_market_adapter::decode_bbo_levels(bbo) else {
+            return Err(FrameError::Malformed);
+        };
+        let exchange_unix_nanos = serde_json::from_str::<serde_json::Value>(bbo.get())
+            .ok()
+            .and_then(|value| value.get("time").and_then(serde_json::Value::as_i64))
+            .and_then(|millis| millis.checked_mul(1_000_000));
+        self.book_sequences
+            .insert(coin.to_string(), sequence.saturating_add(1).max(1));
+        let quote = TopOfBookQuote {
+            metadata: axiusflow_market_data::EventMetadata {
+                provider_id: "hyperliquid".to_string(),
+                instrument_id: mapping.instrument_id.clone(),
+                entitlement_id: mapping.entitlement_id.clone(),
+                source_sequence: sequence,
+                session_generation: self.generation,
+                timestamps: axiusflow_market_data::QualifiedTimestamp {
+                    exchange_unix_nanos,
+                    provider_unix_nanos: None,
+                    received_unix_nanos: unix_nanos_now(),
+                },
+            },
+            bid,
+            ask,
+        };
+        if self
+            .sink
+            .send(HyperliquidRealtimeEvent::Quote(self.generation, quote))
+        {
+            return Err(FrameError::Abort(FrameOutcome::Closed));
+        }
+        Ok(())
+    }
+
     fn candle(
         &mut self,
         coin: &str,
@@ -1180,6 +1226,40 @@ mod tests {
         format!(
             r#"{{"channel":"trades","data":[{{"coin":"{coin}","px":"10","sz":"1","side":"B","time":{time},"tid":{tid}}}]}}"#
         )
+    }
+
+    #[test]
+    fn bbo_frames_enter_the_canonical_quote_path() {
+        let instruments = demand();
+        let (events, received) = std::sync::mpsc::sync_channel(8);
+        let mut failures = 0;
+        let mut trades = 1;
+        let mut books = BTreeMap::new();
+        handle(
+            r#"{"channel":"bbo","data":{"coin":"BTC","time":1700000000000,"bbo":[{"px":"10.0","sz":"2.0","n":1},{"px":"10.5","sz":"3.0","n":2}]}}"#,
+            &instruments,
+            &mut failures,
+            &mut trades,
+            &mut books,
+            &events,
+        )
+        .expect("bbo frame accepted");
+
+        let quote = received
+            .try_iter()
+            .find_map(|event| match event {
+                HyperliquidRealtimeEvent::Quote(_, quote) => Some(quote),
+                _ => None,
+            })
+            .expect("bbo publishes a quote event");
+        assert_eq!(quote.metadata.provider_id, "hyperliquid");
+        assert_eq!(quote.metadata.instrument_id, "instrument:hyperliquid:BTC");
+        assert_eq!(
+            quote.metadata.timestamps.exchange_unix_nanos,
+            Some(1_700_000_000_000_000_000)
+        );
+        assert_eq!(quote.bid.map(|level| level.price), Some(1_000_000_000));
+        assert_eq!(quote.ask.map(|level| level.price), Some(1_050_000_000));
     }
 
     #[test]

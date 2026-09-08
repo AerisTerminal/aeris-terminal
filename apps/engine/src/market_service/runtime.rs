@@ -603,6 +603,7 @@ impl ProviderDispatch<'_> {
                     HyperliquidRealtimeEvent::Connected(generation)
                     | HyperliquidRealtimeEvent::Candle(generation, ..)
                     | HyperliquidRealtimeEvent::Trades(generation, _)
+                    | HyperliquidRealtimeEvent::Quote(generation, _)
                     | HyperliquidRealtimeEvent::Depth(generation, _) => (*generation, false, None),
                 };
                 self.observe_generation("hyperliquid", generation, reconnecting);

@@ -917,6 +917,7 @@ impl Coordinator<'_> {
             | HyperliquidRealtimeEvent::Connected(generation)
             | HyperliquidRealtimeEvent::Candle(generation, ..)
             | HyperliquidRealtimeEvent::Trades(generation, _)
+            | HyperliquidRealtimeEvent::Quote(generation, _)
             | HyperliquidRealtimeEvent::Depth(generation, _)
             | HyperliquidRealtimeEvent::Recovering(generation)
             | HyperliquidRealtimeEvent::Disconnected(generation)
@@ -944,6 +945,9 @@ impl Coordinator<'_> {
                 for trade in &trades {
                     self.hyperliquid_trade(generation, trade);
                 }
+            }
+            HyperliquidRealtimeEvent::Quote(generation, quote) => {
+                self.provider_quote("hyperliquid", generation, &quote);
             }
             HyperliquidRealtimeEvent::Depth(generation, snapshot) => {
                 self.provider_depth("hyperliquid", generation, &snapshot);

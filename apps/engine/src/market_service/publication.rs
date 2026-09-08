@@ -280,10 +280,10 @@ pub(super) fn order_book_snapshot(
         publication.best_ask = quote.ask;
         publication.bbo_source_watermark = quote.metadata.source_sequence;
     } else {
-        // Providers without a separate BBO stream (Hyperliquid today) still
-        // have an authoritative best price in the complete L2 snapshot. Expose
-        // that top level as BBO metadata without fabricating any additional
-        // depth. Explicit provider BBO always wins when present.
+        // Providers without a separate BBO update retained yet still have an
+        // authoritative best price in the complete L2 snapshot. Expose that
+        // top level as BBO metadata without fabricating any additional depth.
+        // Explicit provider BBO always wins when present.
         publication.best_bid = publication.bids.first().copied();
         publication.best_ask = publication.asks.first().copied();
         publication.bbo_source_watermark = publication.source_watermark;
