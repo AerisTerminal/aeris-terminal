@@ -29,6 +29,7 @@ pub use lifecycle::{
     ReleasePolicy, RolloutMetadata, SignedReleaseManifest, UninstallOutcome, UpdateOutcome,
     VaultEntry, native_data_root, native_install_root, native_installation_inventory,
     sign_release_manifest, verify_release_file, verify_release_manifest,
+    verify_release_manifest_signature,
 };
 pub use network_notifications::{
     NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,

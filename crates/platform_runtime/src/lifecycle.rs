@@ -318,6 +318,29 @@ pub fn verify_release_manifest(
     Ok(())
 }
 
+/// Verifies only the cryptographic signature over a release manifest.
+///
+/// This is intentionally narrower than [`verify_release_manifest`]. Release
+/// publication uses it only to authenticate an already-published predecessor
+/// whose inventory may belong to a retired architecture. New candidates must
+/// still pass the full current manifest-shape and policy validation.
+///
+/// # Errors
+/// Returns an error when the canonical manifest cannot be serialized or the
+/// signature is malformed or does not match the supplied key.
+pub fn verify_release_manifest_signature(
+    signed: &SignedReleaseManifest,
+    key: &VerifyingKey,
+) -> Result<(), LifecycleError> {
+    let canonical = canonical_manifest(&signed.manifest)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(&signed.signature)
+        .map_err(|_| LifecycleError::InvalidSignature)?;
+    let signature = Signature::from_slice(&bytes).map_err(|_| LifecycleError::InvalidSignature)?;
+    key.verify(&canonical, &signature)
+        .map_err(|_| LifecycleError::InvalidSignature)
+}
+
 fn canonical_manifest(manifest: &ReleaseManifest) -> Result<Vec<u8>, LifecycleError> {
     let bytes = serde_json::to_vec(manifest).map_err(|_| LifecycleError::InvalidManifest)?;
     if bytes.len() > MAXIMUM_MANIFEST_BYTES {
@@ -1547,6 +1570,37 @@ mod tests {
             Err(LifecycleError::VerificationFailed)
         );
         assert_eq!(installer.active_release().expect("active state"), None);
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn legacy_engine_manifest_signature_can_be_authenticated_without_reaccepting_its_shape() {
+        let root = temporary_root("legacy-signature");
+        let (signed, key, _bundle) = release(&root, 1);
+        let mut manifest = signed.manifest;
+        manifest.files.insert(
+            1,
+            ReleaseFile {
+                role: ReleaseFileRole::Engine,
+                path: "axiusflow_engine".to_string(),
+                url: "https://releases.axiusflow.test/1/axiusflow_engine".to_string(),
+                size: 6,
+                sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(b"engine")),
+                executable: true,
+            },
+        );
+        let canonical = canonical_manifest(&manifest).expect("legacy canonical manifest");
+        let legacy = SignedReleaseManifest {
+            manifest,
+            signature: URL_SAFE_NO_PAD.encode(key.sign(&canonical).to_bytes()),
+        };
+
+        assert_eq!(
+            verify_release_manifest(&legacy, &key.verifying_key(), &ReleasePolicy::native(0)),
+            Err(LifecycleError::InvalidManifest)
+        );
+        verify_release_manifest_signature(&legacy, &key.verifying_key())
+            .expect("legacy predecessor signature verifies cryptographically");
         let _ = remove_owned_path(&root);
     }
 

@@ -14,8 +14,8 @@ use std::{
 
 use axiusflow_platform_runtime::{
     RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseChannelPointer,
-    ReleaseFile, ReleaseFileRole, ReleaseInstallerMetadata, ReleaseManifest, ReleasePolicy,
-    RolloutMetadata, sign_release_manifest, verify_release_manifest,
+    ReleaseFile, ReleaseFileRole, ReleaseInstallerMetadata, ReleaseManifest, RolloutMetadata,
+    sign_release_manifest, verify_release_manifest_signature,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -818,12 +818,8 @@ fn verify_remote_channel_progression(
                 .map_err(|_| "existing stable channel could not be read".to_string())?,
         )
         .map_err(|_| "existing stable channel is malformed".to_string())?;
-        verify_release_manifest(
-            &channel.signed_release,
-            verifying_key,
-            &ReleasePolicy::native(0),
-        )
-        .map_err(|_| "existing stable channel signature cannot be verified".to_string())?;
+        verify_release_manifest_signature(&channel.signed_release, verifying_key)
+            .map_err(|_| "existing stable channel signature cannot be verified".to_string())?;
         if channel.channel != config.channel
             || channel.platform != std::env::consts::OS
             || channel.architecture != std::env::consts::ARCH
