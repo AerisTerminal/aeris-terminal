@@ -865,7 +865,7 @@ pub(super) fn account_avatar_button(
                     .justify_center()
                     .child(account_avatar_face(account, theme)),
             )
-            .caret(header_icon(HugeIcon::ChevronDown)),
+            .child(header_icon(HugeIcon::ChevronDown).with_size(px(14.0))),
         theme,
     )
 }
@@ -1012,13 +1012,6 @@ fn account_menu_header(
                 .flex_col()
                 .px_3()
                 .py_3()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child("Profile"),
-                )
                 .child(
                     div()
                         .flex()
@@ -1210,9 +1203,9 @@ fn account_menu_row(
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let icon = match spec.click {
-        AccountMenuClick::ManageProfile => HugeIcon::Settings01,
-        AccountMenuClick::About => HugeIcon::View,
-        AccountMenuClick::SignOut => HugeIcon::ArrowLeftIcon01,
+        AccountMenuClick::ManageProfile => HugeIcon::User,
+        AccountMenuClick::About => HugeIcon::Info,
+        AccountMenuClick::SignOut => HugeIcon::SignOut,
         AccountMenuClick::SignIn => HugeIcon::ArrowRightIcon01,
         AccountMenuClick::Reopen => HugeIcon::ArrowRightDouble,
         AccountMenuClick::Cancel => HugeIcon::CancelIcon01,

@@ -4,7 +4,6 @@ fn active_header_state(
     workspace: &WorkspaceSurface,
     theme: &AxiusflowTheme,
     chart_has_market_data: bool,
-    fullscreen: bool,
     cx: &App,
 ) -> HeaderState {
     HeaderState {
@@ -40,12 +39,6 @@ fn active_header_state(
             .unwrap_or(FeedConnectionState::Disconnected),
         transport_rtt_nanos: workspace.provider_transport_rtt_nanos,
         instrument_scroll: workspace.scrolls.instrument.clone(),
-        account: fullscreen.then(|| {
-            axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
-                axiusflow_desktop::account::unavailable_menu_state,
-                |account| account.menu_state(),
-            )
-        }),
     }
 }
 
@@ -83,7 +76,6 @@ impl TerminalApp {
         &self,
         terminal: &Entity<Self>,
         surface: &Entity<WorkspaceSurface>,
-        fullscreen: bool,
         cx: &App,
     ) -> impl IntoElement + use<> {
         let workspace = surface.read(cx);
@@ -94,7 +86,7 @@ impl TerminalApp {
         terminal_header(
             terminal,
             surface,
-            active_header_state(workspace, &self.theme, has_data, fullscreen, cx),
+            active_header_state(workspace, &self.theme, has_data, cx),
         )
     }
 }
@@ -146,7 +138,7 @@ impl Render for TerminalApp {
         let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
         let about_dialog = self.rendered_about_dialog(&terminal);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
-        let header = self.rendered_header(&terminal, &active, fullscreen, cx);
+        let header = self.rendered_header(&terminal, &active, cx);
         let market = workspace_market_area(
             &terminal,
             &self.workspaces[self.active],

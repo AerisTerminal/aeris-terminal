@@ -39,10 +39,13 @@ pub enum UiIcon {
     WindowMinimize,
     WindowRestore,
     Loader,
+    Info,
+    SignOut,
+    User,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 33] = [
         Self::AddIcon01,
         Self::AnalyticsUpIcon,
         Self::ArrowLeftIcon01,
@@ -73,6 +76,9 @@ impl UiIcon {
         Self::WindowMinimize,
         Self::WindowRestore,
         Self::Loader,
+        Self::Info,
+        Self::SignOut,
+        Self::User,
     ];
 
     #[must_use]
@@ -108,6 +114,9 @@ impl UiIcon {
             Self::WindowMinimize => "window-minimize.svg",
             Self::WindowRestore => "window-restore.svg",
             Self::Loader => "loader.svg",
+            Self::Info => "info.svg",
+            Self::SignOut => "signout.svg",
+            Self::User => "user.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -328,6 +337,9 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "window-minimize.svg" => include_bytes!("../assets/icons/ui/window-minimize.svg"),
         "window-restore.svg" => include_bytes!("../assets/icons/ui/window-restore.svg"),
         "loader.svg" => include_bytes!("../assets/icons/ui/loader.svg"),
+        "info.svg" => include_bytes!("../assets/icons/ui/info.svg"),
+        "signout.svg" => include_bytes!("../assets/icons/ui/signout.svg"),
+        "user.svg" => include_bytes!("../assets/icons/ui/user.svg"),
         _ => return None,
     })
 }

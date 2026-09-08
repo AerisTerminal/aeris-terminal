@@ -601,7 +601,7 @@ pub(super) fn header_controls(
             &state.theme,
         ))
         .child(order_book_toggle);
-    let global_controls = header_global_controls(terminal, state.account.as_ref(), &state.theme);
+    let global_controls = header_global_controls(terminal, &state.theme);
 
     div()
         .w_full()
@@ -616,13 +616,10 @@ pub(super) fn header_controls(
 
 fn header_global_controls(
     terminal: &Entity<TerminalApp>,
-    account: Option<&axiusflow_desktop::account::AccountMenuState>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     div()
-        .w(px(
-            HEADER_GLOBAL_CONTROLS_WIDTH + if account.is_some() { 64.0 } else { 0.0 }
-        ))
+        .w(px(HEADER_GLOBAL_CONTROLS_WIDTH))
         .h_full()
         .flex_none()
         .flex()
@@ -631,7 +628,6 @@ fn header_global_controls(
         .gap_2()
         .pl_2()
         .child(theme_toggle(terminal.clone(), theme))
-        .children(account.map(|account| account_avatar_button(terminal, account, theme)))
 }
 
 pub(super) fn side_panel_toggle(

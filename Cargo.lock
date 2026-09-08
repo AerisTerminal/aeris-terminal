@@ -4187,7 +4187,7 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_core"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=cf047d861bd8236c2795559430d07a773344bb46#cf047d861bd8236c2795559430d07a773344bb46"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=1acf3abab0156e15ee09fea28aa8df9538b55e09#1acf3abab0156e15ee09fea28aa8df9538b55e09"
 dependencies = [
  "serde",
  "serde_json",
@@ -4196,7 +4196,7 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_engine"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=cf047d861bd8236c2795559430d07a773344bb46#cf047d861bd8236c2795559430d07a773344bb46"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=1acf3abab0156e15ee09fea28aa8df9538b55e09#1acf3abab0156e15ee09fea28aa8df9538b55e09"
 dependencies = [
  "nucleuscharts_core",
  "nucleuscharts_indicators",
@@ -4208,12 +4208,12 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_indicators"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=cf047d861bd8236c2795559430d07a773344bb46#cf047d861bd8236c2795559430d07a773344bb46"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=1acf3abab0156e15ee09fea28aa8df9538b55e09#1acf3abab0156e15ee09fea28aa8df9538b55e09"
 
 [[package]]
 name = "nucleuscharts_render"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=cf047d861bd8236c2795559430d07a773344bb46#cf047d861bd8236c2795559430d07a773344bb46"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=1acf3abab0156e15ee09fea28aa8df9538b55e09#1acf3abab0156e15ee09fea28aa8df9538b55e09"
 dependencies = [
  "nucleuscharts_core",
 ]
@@ -4221,7 +4221,7 @@ dependencies = [
 [[package]]
 name = "nucleuscharts_render_gpui"
 version = "0.1.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=cf047d861bd8236c2795559430d07a773344bb46#cf047d861bd8236c2795559430d07a773344bb46"
+source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=1acf3abab0156e15ee09fea28aa8df9538b55e09#1acf3abab0156e15ee09fea28aa8df9538b55e09"
 dependencies = [
  "gpui",
  "image",
