@@ -6,6 +6,33 @@ Axiusflow is a local-first Rust/GPUI trading terminal. The desktop is a presenta
 the resident engine owns provider sessions, canonical market state, history, account runtime, and
 durable lifecycle behavior.
 
+## Non-negotiable core principles
+
+Every change must satisfy all five principles below. They are mandatory acceptance criteria for
+features, fixes, refactors, dependency upgrades, tests, tooling, and releases. Never compromise them
+for speed, convenience, a temporary workaround, or a passing check.
+
+1. **Proper architecture:** Keep behavior and state at their authoritative ownership boundary.
+   Preserve dependency direction, single ownership, and every architecture invariant in this file
+   and `tools/naming_check`. Never bypass the owner with duplicate state or parallel implementations.
+2. **Clean code:** Use clear names, cohesive responsibilities, explicit errors, and the smallest
+   complete implementation. Remove superseded code when replacing it; do not leave dead paths,
+   speculative abstractions, or lint suppressions that hide defects.
+3. **Scalable:** Keep work, memory, queues, caches, and retries bounded. Share provider sessions and
+   canonical state, handle overload and cancellation explicitly, and verify relevant workloads.
+   Never claim scalability or performance that has not been measured.
+4. **Maintainable:** Make ownership, interfaces, data flow, and failure behavior easy to understand
+   and test. Reuse existing boundaries and shared definitions; avoid hidden coupling and changes
+   that require unrelated components to know implementation details.
+5. **Built for the long run:** Preserve correctness, durable state, recovery, compatibility, and
+   reproducible verification across restarts, upgrades, and sustained use. Prefer durable fixes at
+   the responsible component over shortcuts that transfer complexity or risk to future work.
+
+Evaluate every proposed implementation against all five principles before editing and again before
+delivery. If an approach violates any principle, revise the approach; do not weaken the principle or
+its checks. Existing violations are not permission to introduce or extend them. Report unresolved
+violations and missing verification explicitly, and never describe them as satisfied or complete.
+
 ## Branch and Git workflow
 
 - Work on `main` only. Do not create, switch to, or leave work on feature/continuity/scratch branches
