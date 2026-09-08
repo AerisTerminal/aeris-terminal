@@ -458,15 +458,55 @@ mod tests {
         socket
             .send_text(&crate::build_l2_subscription("BTC").expect("subscription encodes"))
             .expect("book subscription sends");
+        socket
+            .send_text(&crate::build_bbo_subscription("BTC").expect("subscription encodes"))
+            .expect("BBO subscription sends");
         let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
+        let mut books = 0;
+        let mut quotes = 0;
+        let mut sequence = 1;
+        while books < 3 || quotes < 3 {
             assert!(Instant::now() < deadline, "live Hyperliquid book timed out");
             match socket.read_event(Instant::now() + Duration::from_secs(5)) {
-                Ok(SocketEvent::Text(text)) if text.contains("\"channel\":\"l2Book\"") => break,
+                Ok(SocketEvent::Text(text)) => {
+                    match crate::parse_ws_frame(&text).expect("provider frame") {
+                        crate::WsClientEvent::Book { coin, book } => {
+                            let decoded = crate::decode_book_snapshot(
+                                &book,
+                                &coin,
+                                "hyperliquid:perp:BTC",
+                                "hyperliquid:public",
+                                1,
+                                sequence,
+                                1,
+                            )
+                            .expect("valid live depth");
+                            assert_eq!(decoded.snapshot.bids.len(), 5);
+                            assert_eq!(decoded.snapshot.asks.len(), 5);
+                            books += 1;
+                        }
+                        crate::WsClientEvent::Bbo { coin, bbo } => {
+                            crate::decode_bbo_quote(
+                                &bbo,
+                                &coin,
+                                "hyperliquid:perp:BTC",
+                                "hyperliquid:public",
+                                1,
+                                sequence,
+                                1,
+                            )
+                            .expect("valid live quote");
+                            quotes += 1;
+                        }
+                        _ => {}
+                    }
+                    sequence += 1;
+                }
                 Ok(_) => {}
                 Err(error) if is_read_timeout(&error) => {}
                 Err(error) => panic!("live Hyperliquid socket failed: {error}"),
             }
         }
+        eprintln!("received {books} fast five-level books and {quotes} validated BBO updates");
     }
 }

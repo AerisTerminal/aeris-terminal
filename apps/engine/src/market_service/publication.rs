@@ -275,7 +275,16 @@ pub(super) fn order_book_snapshot(
     order_book: &ProviderOrderBook,
 ) -> envelope::Payload {
     let mut publication = order_book.book.publication();
-    if let Some(quote) = order_book.top_of_book.as_ref() {
+    let provider_generation = if publication.session_generation == 0 {
+        order_book.instrument.session_generation
+    } else {
+        publication.session_generation
+    };
+    if let Some(quote) = order_book
+        .top_of_book
+        .as_ref()
+        .filter(|quote| quote.metadata.session_generation == provider_generation)
+    {
         publication.best_bid = quote.bid;
         publication.best_ask = quote.ask;
         publication.bbo_source_watermark = quote.metadata.source_sequence;
@@ -283,16 +292,11 @@ pub(super) fn order_book_snapshot(
         // Providers without a separate BBO update retained yet still have an
         // authoritative best price in the complete L2 snapshot. Expose that
         // top level as BBO metadata without fabricating any additional depth.
-        // Explicit provider BBO always wins when present.
+        // A quote from another provider session cannot override this image.
         publication.best_bid = publication.bids.first().copied();
         publication.best_ask = publication.asks.first().copied();
         publication.bbo_source_watermark = publication.source_watermark;
     }
-    let provider_generation = if publication.session_generation == 0 {
-        order_book.instrument.session_generation
-    } else {
-        publication.session_generation
-    };
     envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
         consumer_id: consumer_id.0.get(),
         generation: generation.0.get(),

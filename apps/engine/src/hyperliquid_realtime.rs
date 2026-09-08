@@ -989,31 +989,21 @@ impl FrameDecoder<'_> {
             return Err(FrameError::Malformed);
         };
         let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
-        let Ok((bid, ask)) = axiusflow_hyperliquid_market_adapter::decode_bbo_levels(bbo) else {
+        let Ok(quote) = axiusflow_hyperliquid_market_adapter::decode_bbo_quote(
+            bbo,
+            coin,
+            &mapping.instrument_id,
+            &mapping.entitlement_id,
+            self.generation,
+            sequence,
+            unix_nanos_now(),
+        ) else {
             return Err(FrameError::Malformed);
         };
-        let exchange_unix_nanos = serde_json::from_str::<serde_json::Value>(bbo.get())
-            .ok()
-            .and_then(|value| value.get("time").and_then(serde_json::Value::as_i64))
-            .and_then(|millis| millis.checked_mul(1_000_000));
-        self.book_sequences
-            .insert(coin.to_string(), sequence.saturating_add(1).max(1));
-        let quote = TopOfBookQuote {
-            metadata: axiusflow_market_data::EventMetadata {
-                provider_id: "hyperliquid".to_string(),
-                instrument_id: mapping.instrument_id.clone(),
-                entitlement_id: mapping.entitlement_id.clone(),
-                source_sequence: sequence,
-                session_generation: self.generation,
-                timestamps: axiusflow_market_data::QualifiedTimestamp {
-                    exchange_unix_nanos,
-                    provider_unix_nanos: None,
-                    received_unix_nanos: unix_nanos_now(),
-                },
-            },
-            bid,
-            ask,
-        };
+        let next = sequence
+            .checked_add(1)
+            .ok_or(FrameError::Abort(FrameOutcome::Reconnect))?;
+        self.book_sequences.insert(coin.to_string(), next);
         if self
             .sink
             .send(HyperliquidRealtimeEvent::Quote(self.generation, quote))
@@ -1103,8 +1093,10 @@ impl FrameDecoder<'_> {
         ) else {
             return Err(FrameError::Malformed);
         };
-        self.book_sequences
-            .insert(coin.to_string(), sequence.saturating_add(1).max(1));
+        let next = sequence
+            .checked_add(1)
+            .ok_or(FrameError::Abort(FrameOutcome::Reconnect))?;
+        self.book_sequences.insert(coin.to_string(), next);
         if self.sink.send(HyperliquidRealtimeEvent::Depth(
             self.generation,
             decoded.snapshot,
@@ -1260,6 +1252,34 @@ mod tests {
         );
         assert_eq!(quote.bid.map(|level| level.price), Some(1_000_000_000));
         assert_eq!(quote.ask.map(|level| level.price), Some(1_050_000_000));
+    }
+
+    #[test]
+    fn book_ingestion_sequence_exhaustion_reconnects_without_publishing_duplicates() {
+        let (instruments, mut failures, mut trades, mut books, _) = harness();
+        let (events, received) = std::sync::mpsc::sync_channel(8);
+        for frame in [
+            r#"{"channel":"bbo","data":{"coin":"BTC","time":1,"bbo":[null,null]}}"#,
+            r#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[],[]]}}"#,
+        ] {
+            books.insert("BTC".to_string(), u64::MAX);
+            assert!(matches!(
+                handle(
+                    frame,
+                    &instruments,
+                    &mut failures,
+                    &mut trades,
+                    &mut books,
+                    &events
+                ),
+                Err(FrameOutcome::Reconnect)
+            ));
+            assert_eq!(
+                failures, 0,
+                "local exhaustion is not malformed provider data"
+            );
+            assert!(received.try_recv().is_err());
+        }
     }
 
     #[test]

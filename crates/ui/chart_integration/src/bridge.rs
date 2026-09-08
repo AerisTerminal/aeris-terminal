@@ -367,6 +367,9 @@ impl ChartDataBridge {
             self.pending_resnapshot.map(|command| command.reason),
         ) {
             self.rejected_stale_snapshots = self.rejected_stale_snapshots.saturating_add(1);
+            // The worker has consumed this response. Re-arm the bounded
+            // recovery instead of waiting forever for a second response to it.
+            self.mark_recovery_failed(request_id);
             return Ok(false);
         }
         self.install_snapshot_state(snapshot)?;
@@ -513,7 +516,9 @@ pub(crate) fn snapshot_advances(
     snapshot.evidence().session_generation > current_session_generation
         || (snapshot.evidence().session_generation == current_session_generation
             && snapshot.evidence().publication_generation >= current_publication_generation
-            && snapshot.evidence().last_sequence > current_last_sequence)
+            && snapshot.evidence().last_sequence >= current_last_sequence
+            && (snapshot.evidence().publication_generation > current_publication_generation
+                || snapshot.evidence().last_sequence > current_last_sequence))
 }
 
 fn snapshot_may_replace(
@@ -536,7 +541,9 @@ fn snapshot_may_replace(
     if !same_series {
         return true;
     }
-    if transition_reason == Some(ResnapshotReason::TransportReset)
+    // A correlated authoritative snapshot can repair local queue/model state
+    // without waiting for another candle. Neither accepted watermark may rewind.
+    if transition_reason.is_some()
         && snapshot.evidence().publication_generation == current_publication_generation
         && snapshot.evidence().last_sequence == current_last_sequence
     {
@@ -558,4 +565,112 @@ fn delta_matches_snapshot(
     let evidence = snapshot.evidence();
     provenance.session_generation == evidence.session_generation
         && provenance.schema_version == evidence.schema_version
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
+
+    fn snapshot() -> ReplaySnapshot {
+        EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+            .expect("replay fixture")
+    }
+
+    fn dispatch(bridge: &mut ChartDataBridge) -> u64 {
+        let mut id = None;
+        assert!(
+            bridge
+                .try_dispatch_recovery(|command| {
+                    id = Some(command.request_id);
+                    Ok::<(), ()>(())
+                })
+                .expect("dispatch")
+        );
+        id.expect("request")
+    }
+
+    #[test]
+    fn covering_recovery_does_not_require_another_completed_candle() {
+        let baseline = snapshot();
+        for reason in [
+            ResnapshotReason::QueueOverflow,
+            ResnapshotReason::SequenceGap,
+            ResnapshotReason::TransportReset,
+        ] {
+            for publication in [
+                baseline.evidence().publication_generation,
+                baseline.evidence().publication_generation + 1,
+            ] {
+                let mut bridge =
+                    ChartDataBridge::try_new(NonZeroUsize::MIN, &baseline).expect("bridge");
+                bridge.mark_stream_invalid_for(reason);
+                let request = dispatch(&mut bridge);
+                let covering = baseline
+                    .clone()
+                    .try_with_publication_generation(publication)
+                    .expect("covering snapshot");
+                assert!(
+                    bridge
+                        .install_recovery_snapshot(request, &covering)
+                        .expect("recovery")
+                );
+                assert!(!bridge.requires_snapshot());
+                assert!(!bridge.metrics().recovery_pending);
+                assert_eq!(bridge.metrics().completed_recoveries, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn stale_correlated_response_rearms_bounded_recovery_but_unrelated_response_does_not() {
+        let stale = snapshot();
+        let current = stale
+            .clone()
+            .try_with_publication_generation(stale.evidence().publication_generation + 1)
+            .expect("new publication");
+        let mut bridge = ChartDataBridge::try_new(NonZeroUsize::MIN, &current).expect("bridge");
+        bridge.mark_stream_invalid();
+        for attempt in 1..=MAX_RECOVERY_DISPATCH_ATTEMPTS {
+            let request = dispatch(&mut bridge);
+            assert!(
+                !bridge
+                    .install_recovery_snapshot(request + 1, &current)
+                    .expect("unrelated")
+            );
+            assert!(bridge.metrics().recovery_dispatched);
+            assert!(
+                !bridge
+                    .install_recovery_snapshot(request, &stale)
+                    .expect("stale")
+            );
+            assert!(!bridge.metrics().recovery_dispatched);
+            assert_eq!(
+                bridge.metrics().recovery_pending,
+                attempt < MAX_RECOVERY_DISPATCH_ATTEMPTS
+            );
+            assert_eq!(
+                bridge.accepted_publication_generation,
+                current.evidence().publication_generation
+            );
+        }
+        assert!(bridge.requires_snapshot());
+        assert_eq!(bridge.metrics().failed_recoveries, 3);
+    }
+
+    #[test]
+    fn ordinary_snapshot_accepts_new_forming_revision_but_not_duplicate_or_rewind() {
+        let baseline = snapshot();
+        let mut bridge = ChartDataBridge::try_new(NonZeroUsize::MIN, &baseline).expect("bridge");
+        assert!(bridge.install_snapshot(&baseline).is_err());
+        let revision = baseline
+            .clone()
+            .try_with_publication_generation(baseline.evidence().publication_generation + 1)
+            .expect("new publication");
+        bridge
+            .install_snapshot(&revision)
+            .expect("forming revision advances");
+        assert!(bridge.install_snapshot(&baseline).is_err());
+    }
 }

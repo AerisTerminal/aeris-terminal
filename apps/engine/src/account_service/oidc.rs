@@ -267,6 +267,13 @@ pub fn exchange_code(
     })
 }
 
+/// Sanitized refresh failure: only an explicit rejected grant proves expiry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefreshGrantError {
+    Rejected,
+    Unavailable,
+}
+
 /// Refreshes one token set with a vault refresh token.
 ///
 /// The refreshed ID token carries no nonce (none was requested in this
@@ -281,7 +288,7 @@ pub fn refresh_grant(
     agent: &ureq::Agent,
     client_id: &str,
     refresh_token: &str,
-) -> Result<VerifiedTokens, String> {
+) -> Result<VerifiedTokens, RefreshGrantError> {
     let body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",
         url_encode(refresh_token),
@@ -289,18 +296,39 @@ pub fn refresh_grant(
     );
     let mut response = agent
         .post(&endpoints.token_endpoint)
+        .config()
+        .http_status_as_error(false)
+        .build()
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
         .send(body)
-        .map_err(|_| "session refresh failed".to_string())?;
+        .map_err(|_| RefreshGrantError::Unavailable)?;
+    if !response.status().is_success() {
+        #[derive(Deserialize)]
+        struct OAuthError {
+            error: String,
+        }
+        let status = response.status().as_u16();
+        let rejected = response
+            .body_mut()
+            .with_config()
+            .limit(4096)
+            .read_json::<OAuthError>()
+            .is_ok_and(|body| status == 400 && body.error == "invalid_grant");
+        return Err(if rejected {
+            RefreshGrantError::Rejected
+        } else {
+            RefreshGrantError::Unavailable
+        });
+    }
     let token: TokenResponse = response
         .body_mut()
         .with_config()
         .limit(65_536)
         .read_json()
-        .map_err(|_| "session refresh failed".to_string())?;
+        .map_err(|_| RefreshGrantError::Unavailable)?;
     if token.identity.is_empty() || token.identity.len() > 16_384 {
-        return Err("session refresh failed".to_string());
+        return Err(RefreshGrantError::Unavailable);
     }
     let subject = verify_id_token(
         &endpoints.issuer,
@@ -309,7 +337,8 @@ pub fn refresh_grant(
         agent,
         &endpoints.jwks_uri,
         &token.identity,
-    )?;
+    )
+    .map_err(|_| RefreshGrantError::Unavailable)?;
     Ok(VerifiedTokens {
         subject,
         access: token.bearer.clone(),
@@ -594,6 +623,50 @@ mod tests {
             revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke".to_string(),
             link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
             lease_endpoint: "https://auth.axiusflow.com/api/axiusflow/lease".to_string(),
+        }
+    }
+
+    #[test]
+    fn refresh_http_errors_distinguish_rejected_grants_from_unavailability() {
+        use super::RefreshGrantError::{Rejected, Unavailable};
+        use std::io::{Read as _, Write as _};
+        for (status, body, expected) in [
+            (400, r#"{"error":"invalid_grant"}"#, Rejected),
+            (400, r#"{"error":"invalid_client"}"#, Unavailable),
+            (429, r#"{"error":"invalid_grant"}"#, Unavailable),
+            (503, r#"{"error":"server_error"}"#, Unavailable),
+            (200, r#"{"id_token":"not-a-signed-token"}"#, Unavailable),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fixture listener");
+            let mut endpoints = endpoints();
+            endpoints.token_endpoint =
+                format!("http://{}/token", listener.local_addr().expect("address"));
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("request");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("timeout");
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"client_id=fixture-client") {
+                    let mut chunk = [0; 1024];
+                    let count = stream.read(&mut chunk).expect("request bytes");
+                    assert!(count > 0 && bytes.len() + count <= 4096);
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("response");
+            });
+            let result = super::refresh_grant(
+                &endpoints,
+                &super::oidc_agent(),
+                "fixture-client",
+                "fixture-refresh",
+            );
+            assert!(
+                matches!(result, Err(error) if error == expected),
+                "status {status}: {:?}",
+                result.err()
+            );
+            server.join().expect("fixture server");
         }
     }
 

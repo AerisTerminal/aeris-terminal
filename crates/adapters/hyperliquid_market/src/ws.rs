@@ -85,7 +85,7 @@ pub fn build_trades_subscription(coin: &str) -> Result<String, String> {
     .to_string())
 }
 
-/// Builds an L2 book subscription frame for a coin.
+/// Builds a fast five-level L2 book subscription frame for a coin.
 ///
 /// # Errors
 ///
@@ -94,7 +94,7 @@ pub fn build_l2_subscription(coin: &str) -> Result<String, String> {
     checked_coin(coin)?;
     Ok(serde_json::json!({
         "method": "subscribe",
-        "subscription": {"type": "l2Book", "coin": coin},
+        "subscription": {"type": "l2Book", "coin": coin, "fast": true},
     })
     .to_string())
 }
@@ -303,7 +303,12 @@ mod tests {
         let trades = build_trades_subscription("@5").expect("trades");
         assert!(trades.contains("\"trades\""));
         let book = build_l2_subscription("BTC").expect("book");
-        assert!(book.contains("l2Book"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&book).expect("subscription JSON"),
+            serde_json::json!({"method": "subscribe", "subscription": {
+                "type": "l2Book", "coin": "BTC", "fast": true
+            }})
+        );
         assert!(build_candle_subscription("", "1m").is_err());
     }
 

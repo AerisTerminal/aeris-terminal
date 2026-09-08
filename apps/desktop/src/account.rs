@@ -437,6 +437,13 @@ impl DesktopAccount {
     #[must_use]
     pub fn verification_pending(&self) -> bool {
         !self.shared.initial_status_resolved.load(Ordering::Acquire)
+            || self.shared.view.lock().is_ok_and(|view| {
+                // Generation zero is engine startup restoration, not a new
+                // browser transaction. The first IPC reply can arrive before
+                // refresh/link verification finishes.
+                view.request_generation == 0
+                    && view.state == AccountSessionState::Authorizing as i32
+            })
     }
 
     fn spawn(client_id: u64) -> Result<Self, String> {
@@ -1404,6 +1411,46 @@ mod tests {
             session.error().is_some()
         });
         assert!(session.verification_pending());
+    }
+
+    #[test]
+    fn startup_restore_stays_in_verification_until_engine_resolves_it() {
+        use super::{AccountResponse, apply_account_response};
+        let session = DesktopAccount::spawn_with(32, inert_engine).expect("session");
+        let mut restoring = view(AccountSessionState::Authorizing);
+        restoring.request_generation = 0;
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: restoring,
+                seq: 1,
+                epoch: 0,
+            },
+        );
+        assert!(session.verification_pending());
+        assert!(!session.authenticated());
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: view(AccountSessionState::Active),
+                seq: 1,
+                epoch: 0,
+            },
+        );
+        assert!(!session.verification_pending());
+        assert!(session.authenticated());
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: view(AccountSessionState::Authorizing),
+                seq: 1,
+                epoch: 0,
+            },
+        );
+        assert!(
+            !session.verification_pending(),
+            "interactive login has its own presentation"
+        );
     }
 
     #[test]

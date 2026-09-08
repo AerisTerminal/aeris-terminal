@@ -285,6 +285,68 @@ fn rithmic_bbo_clear_replaces_the_retained_side_instead_of_freezing_it() {
 }
 
 #[test]
+fn order_book_publication_never_overlays_a_quote_from_another_session() {
+    let mut book = ProviderOrderBook::new(hyperliquid_instrument(1));
+    let metadata = |session_generation, source_sequence| axiusflow_market_data::EventMetadata {
+        provider_id: book.instrument.provider.clone(),
+        instrument_id: book.instrument.instrument_id.clone(),
+        entitlement_id: book.instrument.entitlement_id.clone(),
+        session_generation,
+        source_sequence,
+        timestamps: axiusflow_market_data::QualifiedTimestamp {
+            exchange_unix_nanos: Some(100),
+            provider_unix_nanos: None,
+            received_unix_nanos: 101,
+        },
+    };
+    let level = |price| DepthLevel {
+        price,
+        quantity: 1,
+        order_count: Some(1),
+    };
+    let mut depth = DepthSnapshot {
+        metadata: metadata(1, 1),
+        bids: vec![level(100)],
+        asks: vec![level(110)],
+    };
+    let mut quote = TopOfBookQuote {
+        metadata: metadata(1, 2),
+        bid: Some(level(101)),
+        ask: Some(level(109)),
+    };
+    book.book.install_snapshot(&depth).expect("initial depth");
+    assert!(book.install_top_of_book(&quote));
+    let publish = |book: &ProviderOrderBook| {
+        let envelope::Payload::OrderBookSnapshot(snapshot) = publication::order_book_snapshot(
+            ConsumerId(NonZeroU64::MIN),
+            GenerationId(NonZeroU64::MIN),
+            book,
+        ) else {
+            panic!("book publication")
+        };
+        snapshot
+    };
+    assert_eq!(publish(&book).best_bid.expect("quote bid").price, 101);
+    depth.metadata.session_generation = 2;
+    book.book
+        .install_snapshot(&depth)
+        .expect("reconnected depth");
+    let reconnected = publish(&book);
+    assert_eq!(reconnected.provider_generation, 2);
+    assert_eq!(reconnected.best_bid.expect("depth bid").price, 100);
+    quote.metadata.session_generation = 2;
+    assert!(book.install_top_of_book(&quote));
+    assert_eq!(publish(&book).best_bid.expect("fresh quote").price, 101);
+    quote.metadata.session_generation = 3;
+    assert!(book.install_top_of_book(&quote));
+    assert_eq!(
+        publish(&book).best_bid.expect("depth bid").price,
+        100,
+        "future-session quote cannot be labeled as current-session depth"
+    );
+}
+
+#[test]
 fn restored_hot_series_requires_the_rithmic_scope() {
     let hot = HotSeries {
         provider: "rithmic".to_string(),

@@ -2713,7 +2713,16 @@ impl WorkspaceSurface {
                 self.chart_state_message = "market snapshot is current".to_string();
                 cx.notify();
             }
-            Ok(false) => eprintln!("ignored stale fixture recovery response {request_id}"),
+            Ok(false) => {
+                let metrics = chart.read(cx).replay_bridge_metrics();
+                if metrics.snapshot_required && !metrics.recovery_pending {
+                    self.set_chart_state(
+                        ChartState::Error,
+                        "chart recovery exhausted its snapshot retry budget".to_string(),
+                        cx,
+                    );
+                }
+            }
             Err(error) => {
                 chart.update(cx, |chart, chart_cx| {
                     chart.mark_replay_recovery_failed(request_id);

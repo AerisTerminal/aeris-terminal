@@ -3716,6 +3716,40 @@ mod tests {
     }
 
     #[test]
+    fn covering_forming_snapshot_recovers_the_nucleus_view_without_a_new_candle() {
+        let baseline = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+            .expect("replay");
+        let mut chart = NucleusChartView::with_replay(&baseline);
+        chart.mark_replay_stream_invalid();
+        let mut request_id = 0;
+        assert!(
+            chart
+                .try_dispatch_replay_recovery(|request| {
+                    request_id = request.request_id;
+                    Ok::<(), ()>(())
+                })
+                .expect("dispatch")
+        );
+        let fresh = baseline
+            .clone()
+            .try_with_publication_generation(baseline.evidence().publication_generation + 1)
+            .expect("forming revision");
+        assert!(
+            chart
+                .install_replay_recovery(request_id, &fresh)
+                .expect("install")
+        );
+        assert!(!chart.replay_bridge_metrics().recovery_pending);
+        assert!(!chart.replay_bridge_metrics().snapshot_required);
+        assert_eq!(
+            chart.expected_replay_sequence(),
+            fresh.evidence().last_sequence.checked_add(1)
+        );
+        assert_eq!(chart.engine.series_data(0).len(), 2);
+    }
+
+    #[test]
     fn host_chart_type_survives_snapshot_install() {
         let replay = EmbeddedReplaySource
             .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })

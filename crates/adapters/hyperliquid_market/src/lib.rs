@@ -9,7 +9,7 @@
 //! Market data only: no orders, wallet signing, execution, or paper trading.
 //! Supported markets are core perpetuals, spot pairs, and builder-deployed
 //! (HIP-3) perpetual namespaces. Depth is the documented public snapshot
-//! (at most 20 levels per side, periodically published); the adapter exposes
+//! (five levels per side on the fast WebSocket feed); the adapter exposes
 //! available depth honestly and never advertises full-depth or order-level
 //! data.
 
@@ -26,7 +26,7 @@ mod trades;
 mod ws;
 
 pub use book::{
-    DecodedBook, MAXIMUM_HYPERLIQUID_BOOK_LEVELS, decode_bbo_levels, decode_book_snapshot,
+    DecodedBook, MAXIMUM_HYPERLIQUID_BOOK_LEVELS, decode_bbo_quote, decode_book_snapshot,
 };
 pub use candles::{
     HyperliquidCandlePage, HyperliquidLiveCandle, MAXIMUM_HYPERLIQUID_CANDLES, decode_candle_page,

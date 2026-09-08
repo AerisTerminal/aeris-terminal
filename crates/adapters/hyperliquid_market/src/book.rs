@@ -6,7 +6,9 @@
 //! are legal (one-sided markets) and surface as an empty level list with a
 //! valid sequence.
 
-use axiusflow_market_data::{DepthLevel, DepthSnapshot, EventMetadata, QualifiedTimestamp};
+use axiusflow_market_data::{
+    DepthLevel, DepthSnapshot, EventMetadata, QualifiedTimestamp, TopOfBookQuote,
+};
 use serde::Deserialize;
 
 use crate::decimal::{NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE, parse_decimal_to_fixed};
@@ -16,19 +18,14 @@ pub const MAXIMUM_HYPERLIQUID_BOOK_LEVELS: usize = 20;
 
 #[derive(Debug, Deserialize)]
 struct WireLevel {
-    #[serde(default)]
     px: String,
-    #[serde(default)]
     sz: String,
-    #[serde(default)]
     n: u32,
 }
 
 #[derive(Debug, Deserialize)]
 struct WireBook {
-    #[serde(default)]
     coin: String,
-    #[serde(default)]
     time: i64,
     #[serde(default)]
     levels: Option<Box<serde_json::value::RawValue>>,
@@ -144,39 +141,56 @@ fn decode_side(levels: &[WireLevel], is_bid: bool) -> Result<Vec<DepthLevel>, St
     Ok(decoded)
 }
 
-/// Decodes one `bbo` payload into best-bid/best-ask levels.
+/// Decodes the documented `bbo` channel envelope with validated identity and time.
 ///
-/// Accepts the documented channel envelope (`{"coin", "time", "bbo": [bid,
-/// ask]}` with `null` for a missing side) or the bare `[bid, ask]` pair.
-/// Returns `(bid, ask)` with `None` for a missing side; absent sides are
-/// never fabricated.
+/// Missing sides remain absent. The sequence is local ingestion order, not
+/// exchange continuity evidence.
 ///
 /// # Errors
 ///
 /// Returns an error for malformed payloads or invalid level values.
-pub fn decode_bbo_levels(
+pub fn decode_bbo_quote(
     payload: &serde_json::value::RawValue,
-) -> Result<(Option<DepthLevel>, Option<DepthLevel>), String> {
+    wire_coin: &str,
+    instrument_id: &str,
+    entitlement_id: &str,
+    session_generation: u64,
+    source_sequence: u64,
+    received_unix_nanos: i64,
+) -> Result<TopOfBookQuote, String> {
     #[derive(Deserialize)]
     struct WireBboEnvelope {
-        #[serde(default)]
-        bbo: Option<(Option<WireLevel>, Option<WireLevel>)>,
+        coin: String,
+        time: i64,
+        bbo: (Option<WireLevel>, Option<WireLevel>),
     }
-    if let Ok(envelope) = serde_json::from_str::<WireBboEnvelope>(payload.get())
-        && let Some((bid, ask)) = envelope.bbo
-    {
-        return Ok((
-            decode_bbo_side(bid.as_ref())?,
-            decode_bbo_side(ask.as_ref())?,
-        ));
-    }
-    // Bare `[bid, ask]` pair with null for a missing side.
-    let (bid, ask): (Option<WireLevel>, Option<WireLevel>) = serde_json::from_str(payload.get())
+    let envelope: WireBboEnvelope = serde_json::from_str(payload.get())
         .map_err(|_| "hyperliquid bbo is malformed".to_string())?;
-    Ok((
-        decode_bbo_side(bid.as_ref())?,
-        decode_bbo_side(ask.as_ref())?,
-    ))
+    if envelope.coin != wire_coin || envelope.time < 0 {
+        return Err("hyperliquid bbo identity or timestamp is invalid".to_string());
+    }
+    let exchange_unix_nanos = envelope
+        .time
+        .checked_mul(1_000_000)
+        .ok_or_else(|| "hyperliquid bbo timestamp overflowed".to_string())?;
+    let quote = TopOfBookQuote {
+        metadata: EventMetadata {
+            provider_id: "hyperliquid".to_string(),
+            instrument_id: instrument_id.to_string(),
+            entitlement_id: entitlement_id.to_string(),
+            source_sequence,
+            session_generation,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: Some(exchange_unix_nanos),
+                provider_unix_nanos: None,
+                received_unix_nanos,
+            },
+        },
+        bid: decode_bbo_side(envelope.bbo.0.as_ref())?,
+        ask: decode_bbo_side(envelope.bbo.1.as_ref())?,
+    };
+    quote.validate().map_err(|error| error.to_string())?;
+    Ok(quote)
 }
 
 fn decode_bbo_side(level: Option<&WireLevel>) -> Result<Option<DepthLevel>, String> {
@@ -267,31 +281,49 @@ mod tests {
     }
 
     #[test]
-    fn bbo_accepts_the_documented_envelope_and_bare_pair() {
+    fn bbo_validates_the_documented_envelope_and_missing_sides() {
         // Documented channel form: the whole `WsBbo` object with a
         // two-element `bbo` array, `null` for a missing side.
-        let (bid, ask) = decode_bbo_levels(&raw(&json!({
+        let decode = |value: serde_json::Value| {
+            decode_bbo_quote(
+                &raw(&value),
+                "BTC",
+                "hyperliquid:perp:BTC",
+                "hyperliquid:public",
+                1,
+                2,
+                3,
+            )
+        };
+        let quote = decode(json!({
             "coin": "BTC", "time": 1_700_000_000_000_i64,
             "bbo": [{"px": "1.0", "sz": "2.0", "n": 1},
                     {"px": "1.5", "sz": "1.0", "n": 1}],
-        })))
+        }))
         .expect("envelope bbo");
-        assert!(bid.is_some() && ask.is_some());
+        assert!(quote.bid.is_some() && quote.ask.is_some());
+        assert_eq!(
+            quote.metadata.timestamps.exchange_unix_nanos,
+            Some(1_700_000_000_000_000_000)
+        );
         // One-sided envelope update never fabricates the absent side.
-        let (bid, ask) = decode_bbo_levels(&raw(&json!({
+        let quote = decode(json!({
             "coin": "BTC", "time": 1_700_000_000_000_i64,
             "bbo": [null, {"px": "1.5", "sz": "1.0", "n": 1}],
-        })))
+        }))
         .expect("one-sided bbo");
-        assert!(bid.is_none() && ask.is_some());
-        // Bare pair form decodes identically.
-        let (bid, ask) = decode_bbo_levels(&raw(&json!([
-            {"px": "1.0", "sz": "2.0", "n": 1},
-            {"px": "1.5", "sz": "1.0", "n": 1},
-        ])))
-        .expect("bare bbo");
-        assert!(bid.is_some() && ask.is_some());
-        assert!(decode_bbo_levels(&raw(&json!({"coin": "BTC"}))).is_err());
+        assert!(quote.bid.is_none() && quote.ask.is_some());
+        for invalid in [
+            json!({"coin": "BTC", "bbo": [null, null]}),
+            json!({"coin": "ETH", "time": 1, "bbo": [null, null]}),
+            json!({"coin": "BTC", "time": -1, "bbo": [null, null]}),
+            json!({"coin": "BTC", "time": i64::MAX, "bbo": [null, null]}),
+            json!({"coin": "BTC", "time": 1, "bbo": [{"px": "1", "sz": "1"}, null]}),
+            json!({"coin": "BTC", "time": 1, "bbo": [{"px": "2", "sz": "1", "n": 1},
+                {"px": "1", "sz": "1", "n": 1}]}),
+        ] {
+            assert!(decode(invalid).is_err());
+        }
     }
 
     #[test]

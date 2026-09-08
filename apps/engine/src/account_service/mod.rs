@@ -201,15 +201,19 @@ impl AccountService {
             return;
         };
         let agent = oidc_agent();
-        let outcome = self.oidc_endpoints().and_then(|endpoints| {
-            refresh_grant(&endpoints, &agent, &self.config.client_id, &refresh_token).and_then(
-                |tokens| {
-                    link_subject(&endpoints, &agent, &tokens.id_token, &tokens.subject)
-                        .map(|(account, plan, profile)| (account, plan, profile, tokens))
-                },
-            )
-        });
-        let Some((account_id, tokens)) = self.apply_online_restore(&vault, outcome) else {
+        let endpoints = self.retry_restore_lookup(|| self.oidc_endpoints());
+        let outcome = endpoints
+            .as_ref()
+            .map_err(|_| oidc::RefreshGrantError::Unavailable)
+            .and_then(|endpoints| {
+                refresh_grant(endpoints, &agent, &self.config.client_id, &refresh_token)
+            });
+        let Some((account_id, tokens)) = self.apply_online_restore(&vault, outcome, |tokens| {
+            let endpoints = endpoints.as_ref().map_err(Clone::clone)?;
+            self.retry_restore_lookup(|| {
+                link_subject(endpoints, &agent, &tokens.id_token, &tokens.subject)
+            })
+        }) else {
             return;
         };
         self.refresh_lease_once(0, &tokens, &account_id, &agent, &vault);
@@ -223,19 +227,33 @@ impl AccountService {
     fn apply_online_restore<V>(
         &self,
         vault: &V,
-        outcome: Result<(AccountId, PlanId, AccountProfile, oidc::VerifiedTokens), String>,
+        outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
+        link: impl FnOnce(&oidc::VerifiedTokens) -> Result<(AccountId, PlanId, AccountProfile), String>,
     ) -> Option<(AccountId, oidc::VerifiedTokens)>
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let Ok((account_id, plan, profile, tokens)) = outcome else {
-            self.complete_restore_without_session(
-                AccountSessionState::ReauthenticationRequired,
-                "saved sign-in expired; sign in again",
-            );
-            return None;
+        let tokens = match outcome {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                let (state, detail) = match error {
+                    oidc::RefreshGrantError::Rejected => (
+                        AccountSessionState::ReauthenticationRequired,
+                        "saved sign-in expired; sign in again",
+                    ),
+                    oidc::RefreshGrantError::Unavailable => (
+                        AccountSessionState::TerminalError,
+                        "saved sign-in could not be verified; check your connection and retry sign-in",
+                    ),
+                };
+                self.complete_restore_without_session(state, detail);
+                return None;
+            }
         };
+        // A refresh grant may invalidate the previous token immediately. Persist
+        // its verified replacement before another fallible network operation.
+        // Hold the lifecycle fence while writing so sign-out cannot be undone.
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
@@ -253,6 +271,20 @@ impl AccountService {
                 );
                 return None;
             }
+        }
+        drop(state);
+        let Ok((account_id, plan, profile)) = link(&tokens) else {
+            self.complete_restore_without_session(
+                AccountSessionState::TerminalError,
+                "saved sign-in account lookup failed; check your connection and retry sign-in",
+            );
+            return None;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return None;
         }
         state.restore_allowed = false;
         state.view = AccountView {
@@ -275,6 +307,28 @@ impl AccountService {
         if state.last_generation == 0 && state.pending.is_none() && state.restore_allowed {
             state.restore_allowed = false;
             state.view = cleared_view(target, 0, detail);
+        }
+    }
+
+    // Retry only repeatable discovery/link lookups. Replaying an ambiguous
+    // refresh POST can revoke the rotating grant, so it must not use this path.
+    fn retry_restore_lookup<T>(
+        &self,
+        mut lookup: impl FnMut() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut attempt = 0;
+        loop {
+            if !self.state.lock().is_ok_and(|state| {
+                state.last_generation == 0 && state.pending.is_none() && state.restore_allowed
+            }) {
+                return Err("saved sign-in restore was retired".to_string());
+            }
+            let result = lookup();
+            if result.is_ok() || attempt == 2 {
+                return result;
+            }
+            std::thread::sleep(Duration::from_millis(250 << attempt));
+            attempt += 1;
         }
     }
 
@@ -1336,7 +1390,7 @@ mod tests {
     use super::{
         AccountService, AccountServiceConfig, LOGIN_TIMEOUT, REFRESH_VAULT_KEY, UnavailableVault,
         claim_profile_refresh,
-        oidc::{AccountProfile, VerifiedTokens},
+        oidc::{self, AccountProfile, VerifiedTokens},
     };
     use axiusflow_account::{AccountId, PlanId};
     use axiusflow_engine_protocol::{AccountSessionState, AccountView};
@@ -1544,10 +1598,16 @@ mod tests {
     fn verified_online_restore_rotates_vault_material_before_activating() {
         let service = service();
         let vault = MemoryVault::default();
-        let restored = service.apply_online_restore(
-            &vault,
-            Ok(verified_restore("acct_restore", Some("rotated-refresh"))),
-        );
+        let (account, plan, profile, tokens) =
+            verified_restore("acct_restore", Some("rotated-refresh"));
+        let restored = service.apply_online_restore(&vault, Ok(tokens), |_| {
+            assert_eq!(
+                vault.load(REFRESH_VAULT_KEY).expect("vault"),
+                Some(b"rotated-refresh".to_vec())
+            );
+            assert!(!service.is_authenticated());
+            Ok((account, plan, profile))
+        });
 
         assert!(restored.is_some());
         assert!(service.is_authenticated());
@@ -1567,7 +1627,9 @@ mod tests {
         let vault = MemoryVault::default();
         assert!(
             failed
-                .apply_online_restore(&vault, Err("redacted refresh failure".to_string()))
+                .apply_online_restore(&vault, Err(oidc::RefreshGrantError::Rejected), |_| panic!(
+                    "no link after rejection"
+                ))
                 .is_none()
         );
         assert!(!failed.is_authenticated());
@@ -1581,7 +1643,8 @@ mod tests {
             unavailable
                 .apply_online_restore(
                     &UnavailableVault,
-                    Ok(verified_restore("acct_unstored", Some("rotated-refresh"))),
+                    Ok(verified_restore("acct_unstored", Some("rotated-refresh")).3),
+                    |_| panic!("no link without durable token"),
                 )
                 .is_none()
         );
@@ -1602,7 +1665,8 @@ mod tests {
             retired
                 .apply_online_restore(
                     &vault,
-                    Ok(verified_restore("acct_retired", Some("stale-refresh"))),
+                    Ok(verified_restore("acct_retired", Some("stale-refresh")).3),
+                    |_| panic!("no link for retired restore"),
                 )
                 .is_none()
         );
@@ -1615,6 +1679,108 @@ mod tests {
                 .is_none(),
             "a retired restore cannot rotate current vault material"
         );
+    }
+
+    #[test]
+    fn online_restore_preserves_rotation_when_account_link_fails() {
+        let service = service();
+        let vault = MemoryVault::default();
+        vault
+            .store(REFRESH_VAULT_KEY, b"old-refresh")
+            .expect("vault");
+        assert!(
+            service
+                .apply_online_restore(
+                    &vault,
+                    Ok(verified_restore("acct_restore", Some("rotated-refresh")).3),
+                    |_| Err("unavailable".to_string())
+                )
+                .is_none()
+        );
+        assert_eq!(
+            vault.load(REFRESH_VAULT_KEY).expect("vault"),
+            Some(b"rotated-refresh".to_vec())
+        );
+        assert!(!service.is_authenticated());
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError as i32
+        );
+    }
+
+    #[test]
+    fn restore_lookup_retries_are_bounded_and_cancel_when_retired() {
+        let service = service();
+        let mut calls = 0;
+        assert_eq!(
+            service.retry_restore_lookup(|| {
+                calls += 1;
+                if calls < 3 {
+                    Err("temporary".to_string())
+                } else {
+                    Ok(7)
+                }
+            }),
+            Ok(7)
+        );
+        assert_eq!(calls, 3);
+        calls = 0;
+        assert!(
+            service
+                .retry_restore_lookup::<()>(|| {
+                    calls += 1;
+                    Err("unavailable".to_string())
+                })
+                .is_err()
+        );
+        assert_eq!(calls, 3);
+        calls = 0;
+        assert!(
+            service
+                .retry_restore_lookup::<()>(|| {
+                    calls += 1;
+                    service.state.lock().expect("state").restore_allowed = false;
+                    Err("retired during lookup".to_string())
+                })
+                .is_err()
+        );
+        assert_eq!(calls, 1);
+        assert!(!service.is_authenticated());
+    }
+
+    #[test]
+    fn online_restore_unavailability_is_not_expiry_and_late_link_cannot_authenticate() {
+        let unavailable = service();
+        let vault = MemoryVault::default();
+        assert!(
+            unavailable
+                .apply_online_restore(
+                    &vault,
+                    Err(oidc::RefreshGrantError::Unavailable),
+                    |_| panic!("no link without verification")
+                )
+                .is_none()
+        );
+        assert_eq!(
+            unavailable.account_status().state,
+            AccountSessionState::TerminalError as i32
+        );
+        let retired = service();
+        let (account, plan, profile, tokens) = verified_restore("acct_restore", None);
+        assert!(
+            retired
+                .apply_online_restore(&vault, Ok(tokens), |_| {
+                    let mut state = retired.state.lock().expect("state");
+                    state.last_generation = 7;
+                    state.restore_allowed = false;
+                    state.view =
+                        super::cleared_view(AccountSessionState::SignedOut, 7, "signed out");
+                    Ok((account, plan, profile))
+                })
+                .is_none()
+        );
+        assert!(!retired.is_authenticated());
+        assert_eq!(retired.account_status().request_generation, 7);
     }
 
     #[test]
