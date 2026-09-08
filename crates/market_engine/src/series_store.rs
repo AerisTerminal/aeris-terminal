@@ -124,10 +124,9 @@ impl SeriesStore {
         bars: &[MarketBar],
         mode: InstallMode,
     ) -> Result<Arc<SeriesSnapshot>, EngineError> {
-        let (forming, realtime, repair) = match mode {
-            InstallMode::History => (false, false, false),
-            InstallMode::Repair => (false, false, true),
-            InstallMode::Realtime { forming } => (forming, true, false),
+        let (forming, realtime) = match mode {
+            InstallMode::History | InstallMode::Repair => (false, false),
+            InstallMode::Realtime { forming } => (forming, true),
         };
         series.validate()?;
         if price_scale > 18 || quantity_scale > 18 {
@@ -150,14 +149,14 @@ impl SeriesStore {
                 maximum: self.maximum_series,
             });
         }
-        let retained_tail = repair
-            .then(|| current.and_then(|current| current.tail))
-            .flatten()
-            .filter(|tail| {
-                bars.last().is_some_and(|bar| {
-                    bar.exchange_timestamp_unix_nanos <= tail.bar.exchange_timestamp_unix_nanos
-                })
-            });
+        let retained_tail = retained_history_tail(
+            current,
+            mode,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bars,
+        );
         let tail_overlaps_last = retained_tail.is_some_and(|tail| {
             bars.last().is_some_and(|bar| {
                 bar.exchange_timestamp_unix_nanos == tail.bar.exchange_timestamp_unix_nanos
@@ -559,6 +558,32 @@ fn stored_series(
             operation: SeriesTailOperation::Revise,
             bar: *tail,
         }),
+    })
+}
+
+fn retained_history_tail(
+    current: Option<&StoredSeries>,
+    mode: InstallMode,
+    generation: ProviderGeneration,
+    price_scale: u8,
+    quantity_scale: u8,
+    bars: &[MarketBar],
+) -> Option<SeriesTail> {
+    if matches!(mode, InstallMode::Realtime { .. }) {
+        return None;
+    }
+    // Completed history cannot erase a newer forming candle. Preserve its
+    // sequence fence until history reaches it, within the same session/scale.
+    current.and_then(|current| current.tail).filter(|tail| {
+        tail.provider_generation == generation
+            && tail.price_scale == price_scale
+            && tail.quantity_scale == quantity_scale
+            && bars.last().is_some_and(|bar| {
+                bar.exchange_timestamp_unix_nanos < tail.bar.exchange_timestamp_unix_nanos
+                    || matches!(mode, InstallMode::Repair)
+                        && bar.exchange_timestamp_unix_nanos
+                            == tail.bar.exchange_timestamp_unix_nanos
+            })
     })
 }
 

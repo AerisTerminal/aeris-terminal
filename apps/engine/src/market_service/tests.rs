@@ -2913,3 +2913,85 @@ fn rithmic_completed_stop_resumes_on_next_generation_and_gate_retry() {
     assert_eq!(request.provider_generation, new_generation);
     assert_eq!(request.series, series);
 }
+
+#[test]
+fn catalog_refresh_preserves_live_order_book_revision() {
+    let series = hyperliquid_series();
+    let (_client_id, consumer_id, demand_generation, identity) = resume_test_identity();
+    let (engine, provider_generation) =
+        hyperliquid_demand_engine(identity, consumer_id, demand_generation, Vec::new());
+    let (storage_tx, _storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
+    let providers = ProviderDispatch {
+        records: BTreeMap::new(),
+    };
+    let mut coordinator = resume_test_coordinator(engine, providers, &storage_tx, consumer_id);
+    coordinator.resource_mode = ResourceMode::Warm;
+    coordinator
+        .install_provider_instrument(&hyperliquid_instrument(provider_generation.0.get()))
+        .expect("instrument installs");
+    coordinator.reconcile_order_books();
+
+    let snapshot = DepthSnapshot {
+        metadata: axiusflow_market_data::EventMetadata {
+            provider_id: series.provider_id.clone(),
+            instrument_id: series.instrument_id.clone(),
+            entitlement_id: series.entitlement_id.clone(),
+            source_sequence: 10,
+            session_generation: provider_generation.0.get(),
+            timestamps: axiusflow_market_data::QualifiedTimestamp {
+                exchange_unix_nanos: None,
+                provider_unix_nanos: None,
+                received_unix_nanos: 1,
+            },
+        },
+        bids: vec![DepthLevel {
+            price: 100,
+            quantity: 5,
+            order_count: None,
+        }],
+        asks: vec![DepthLevel {
+            price: 101,
+            quantity: 6,
+            order_count: None,
+        }],
+    };
+    coordinator.provider_depth("hyperliquid", provider_generation.0.get(), &snapshot);
+    let visible_revision = coordinator
+        .order_books
+        .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+        .expect("foreground book is engine-owned")
+        .book
+        .publication()
+        .revision;
+    assert!(visible_revision > 0);
+    let mut refreshed = hyperliquid_instrument(provider_generation.0.get());
+    refreshed.selection_generation += 1;
+    coordinator
+        .install_provider_instrument(&refreshed)
+        .expect("same instrument refresh");
+    let refreshed_book = coordinator
+        .order_books
+        .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+        .expect("book retained");
+    assert_eq!(
+        refreshed_book.book.publication().revision,
+        visible_revision,
+        "catalog selection metadata must not reset a healthy canonical book"
+    );
+    let mut next = snapshot;
+    next.metadata.source_sequence += 1;
+    next.bids[0].quantity += 1;
+    coordinator.provider_depth("hyperliquid", provider_generation.0.get(), &next);
+    let envelope::Payload::OrderBookSnapshot(published) = coordinator
+        .events
+        .get_mut(&consumer_id)
+        .expect("consumer events")
+        .order_book
+        .take()
+        .expect("book published")
+    else {
+        panic!("expected depth publication");
+    };
+    assert!(published.revision > visible_revision);
+    assert_eq!(published.bids[0].quantity, next.bids[0].quantity);
+}

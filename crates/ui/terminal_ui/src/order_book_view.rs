@@ -200,11 +200,9 @@ impl ReadOnlyOrderBookView {
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        let had_frame = self.frame.take().is_some() || self.pending_frame.take().is_some();
+        let had_frames = self.discard_frames();
         let was_unavailable = std::mem::replace(&mut self.unavailable, false);
-        self.last_presented = None;
-        self.presentation_task = None;
-        if had_frame || was_unavailable {
+        if had_frames || was_unavailable {
             cx.notify();
         }
     }
@@ -214,13 +212,19 @@ impl ReadOnlyOrderBookView {
     /// book is never presented as live. Any later frame or demand clears it,
     /// so the panel returns to loading and then data on recovery.
     pub fn mark_unavailable(&mut self, cx: &mut Context<Self>) {
-        let had_frame = self.frame.take().is_some() || self.pending_frame.take().is_some();
-        if !self.unavailable || had_frame {
+        let had_frames = self.discard_frames();
+        if !self.unavailable || had_frames {
             self.unavailable = true;
-            self.last_presented = None;
-            self.presentation_task = None;
             cx.notify();
         }
+    }
+
+    fn discard_frames(&mut self) -> bool {
+        let had_frame = self.frame.take().is_some();
+        let had_pending_frame = self.pending_frame.take().is_some();
+        self.last_presented = None;
+        self.presentation_task = None;
+        had_frame || had_pending_frame
     }
 
     /// Updates the connectivity banner without discarding the last valid book.
@@ -817,6 +821,19 @@ mod tests {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    #[test]
+    fn retiring_a_book_discards_both_displayed_and_scheduled_frames() {
+        let mut view = ReadOnlyOrderBookView::new(AxiusflowTheme::dark());
+        view.frame = Some(frame(1, 8, 40, OrderBookState::Ready, true));
+        view.pending_frame = Some(frame(1, 8, 41, OrderBookState::Ready, true));
+        view.last_presented = Some(Instant::now());
+        assert!(view.discard_frames());
+        assert!(view.frame.is_none());
+        assert!(view.pending_frame.is_none());
+        assert!(view.last_presented.is_none());
+        assert!(!view.discard_frames());
     }
 
     #[test]

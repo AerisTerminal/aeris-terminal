@@ -949,13 +949,19 @@ impl WorkspaceSurface {
         let bootstrap = match result {
             Ok(bootstrap) => bootstrap,
             Err(error) => {
-                if let Some(chart) = &self.chart {
+                let current = self.chart.as_ref().is_some_and(|chart| {
                     chart.update(cx, |chart, chart_cx| {
-                        chart.mark_replay_recovery_failed(request_id);
-                        chart_cx.notify();
-                    });
+                        let current = chart.mark_replay_recovery_failed(request_id);
+                        if current {
+                            chart_cx.notify();
+                        }
+                        current
+                    })
+                });
+                if !current {
+                    return;
                 }
-                self.set_chart_state(ChartState::Error, error.clone(), cx);
+                self.apply_market_state_message(ChartState::Error, error.clone(), cx);
                 eprintln!("fixture recovery {request_id} failed: {error}");
                 return;
             }
@@ -980,14 +986,16 @@ impl WorkspaceSurface {
                     &bootstrap.subscription_id,
                     MarketPublicationGeneration::from_generation(&bootstrap.generation),
                 );
-                self.chart_state = ChartState::Ready;
-                self.chart_state_message = "market snapshot is current".to_string();
-                cx.notify();
+                self.apply_market_state_message(
+                    ChartState::Ready,
+                    "market snapshot is current".to_string(),
+                    cx,
+                );
             }
             Ok(false) => {
                 let metrics = chart.read(cx).replay_bridge_metrics();
                 if metrics.snapshot_required && !metrics.recovery_pending {
-                    self.set_chart_state(
+                    self.apply_market_state_message(
                         ChartState::Error,
                         "chart recovery exhausted its snapshot retry budget".to_string(),
                         cx,
@@ -999,6 +1007,7 @@ impl WorkspaceSurface {
                     chart.mark_replay_recovery_failed(request_id);
                     chart_cx.notify();
                 });
+                self.apply_market_state_message(ChartState::Error, error.to_string(), cx);
                 eprintln!("fixture recovery {request_id} was rejected: {error}");
             }
         }

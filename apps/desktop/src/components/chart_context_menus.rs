@@ -830,7 +830,7 @@ pub(super) fn account_avatar_button(
     let tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
         format!("Account — {}", presentation.display_name)
     } else if account.signed_in() {
-        format!("Account — {} · {}", presentation.state, presentation.plan)
+        "Account".to_string()
     } else {
         "Account — Sign in".to_string()
     };
@@ -838,28 +838,34 @@ pub(super) fn account_avatar_button(
     chrome_tooltip(
         "account_avatar",
         tooltip,
-        div()
-            .id("account_avatar")
-            .relative()
-            .size(px(28.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .border_1()
-            .border_color(gpui_color(colors.border_secondary))
+        Button::new("account_avatar")
+            .theme(theme)
+            .h(px(32.0))
+            .w(px(56.0))
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
             .bg(gpui_color(colors.surface_secondary))
             .cursor_pointer()
-            .hover(|button| button.border_color(gpui_color(colors.border)))
-            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                let anchor = event.position;
+            .aria_label("Profile menu")
+            .hover(|button| button.bg(gpui_color(colors.surface)))
+            .on_click(move |event, _, cx| {
+                let anchor = event.position();
                 toggle_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.toggle_account_menu_at(anchor, terminal_cx);
                 });
                 cx.stop_propagation();
             })
-            .child(account_avatar_face(account, theme)),
+            .leading(
+                div()
+                    .size(px(26.0))
+                    .flex_none()
+                    .rounded_full()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(account_avatar_face(account, theme)),
+            )
+            .caret(header_icon(HugeIcon::ChevronDown)),
         theme,
     )
 }
@@ -920,8 +926,8 @@ fn account_avatar_face(
 /// Account dropdown anchored under the header avatar. The panel opens below
 /// the avatar's actual click point with a small gap and clamps into the
 /// viewport, so resize, scaling, and fullscreen never push it off-screen.
-/// Signed-out status and plan metadata stay hidden. Authorizing keeps both
-/// recovery exits; authenticated sessions name status and plan. Global
+/// Authorizing keeps both recovery exits; authenticated sessions show the
+/// verified profile name without billing or email metadata. Global
 /// profile/About actions use the same compact menu primitives as chart menus.
 pub(super) fn account_menu_layer(
     terminal: &Entity<TerminalApp>,
@@ -935,15 +941,9 @@ pub(super) fn account_menu_layer(
     let action_terminal = terminal.clone();
     let header = account_menu_header(account, theme);
     let has_header = header.is_some();
-    let header_bottom = theme.dimensions.app_header_height.logical_pixels + ACCOUNT_MENU_GAP;
+    let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + ACCOUNT_MENU_GAP;
     let anchor = anchor.unwrap_or(point(px(OVERLAY_EDGE_MARGIN), px(header_bottom)));
-    let header_rows = if account.signed_in() {
-        3.0
-    } else if has_header {
-        2.0
-    } else {
-        0.0
-    };
+    let header_rows = if has_header { 2.0 } else { 0.0 };
     let action_rows = if account.signed_in() || account.authorizing() {
         3.0
     } else {
@@ -951,7 +951,10 @@ pub(super) fn account_menu_layer(
     };
     let separators = 1.0 + if has_header { 1.0 } else { 0.0 };
     let origin = clamp_overlay_origin(
-        point(anchor.x, px(header_bottom)),
+        point(
+            anchor.x,
+            anchor.y.max(px(header_bottom)) + px(ACCOUNT_MENU_GAP),
+        ),
         viewport,
         CHART_SETTINGS_MENU_WIDTH,
         action_rows + header_rows,
@@ -989,8 +992,7 @@ pub(super) fn account_menu_layer(
 }
 
 /// Dropdown header for the account panel. Signed-in sessions show the
-/// verified name, email, and plan (with an offline marker on a cached
-/// lease); other visible states name themselves with their detail. A plain
+/// verified name and avatar; other visible states name themselves with their detail. A plain
 /// signed-out session shows no identity header.
 fn account_menu_header(
     account: &axiusflow_desktop::account::AccountMenuState,
@@ -1004,36 +1006,39 @@ fn account_menu_header(
         } else {
             presentation.display_name.clone()
         };
-        let plan = if account.offline() {
-            format!("{} · offline", presentation.plan)
-        } else {
-            presentation.plan.to_string()
-        };
         return Some(
             div()
                 .flex()
                 .flex_col()
                 .px_3()
-                .pt_2()
-                .pb_1()
+                .py_3()
+                .gap_2()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(gpui_color(colors.text_primary))
-                        .child(name),
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child("Profile"),
                 )
-                .children((!presentation.email.is_empty()).then(|| {
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(presentation.email.clone())
-                }))
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(plan),
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size(px(28.0))
+                                .flex_none()
+                                .rounded_full()
+                                .overflow_hidden()
+                                .child(account_avatar_face(account, theme)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(gpui_color(colors.text_primary))
+                                .child(name),
+                        ),
                 )
                 .into_any_element(),
         );
@@ -1043,11 +1048,7 @@ fn account_menu_header(
     }
     // The state names the session; the action rows below own the verbs.
     // Showing the action twice read as two sign-in buttons.
-    let subtitle = if presentation.detail.is_empty() {
-        presentation.plan.to_string()
-    } else {
-        presentation.detail.clone()
-    };
+    let subtitle = presentation.detail.clone();
     Some(
         div()
             .flex()
@@ -1208,7 +1209,16 @@ fn account_menu_row(
     spec: AccountMenuRowSpec,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
+    let icon = match spec.click {
+        AccountMenuClick::ManageProfile => HugeIcon::Settings01,
+        AccountMenuClick::About => HugeIcon::View,
+        AccountMenuClick::SignOut => HugeIcon::ArrowLeftIcon01,
+        AccountMenuClick::SignIn => HugeIcon::ArrowRightIcon01,
+        AccountMenuClick::Reopen => HugeIcon::ArrowRightDouble,
+        AccountMenuClick::Cancel => HugeIcon::CancelIcon01,
+    };
     MenuRow::compact(spec.id, spec.label, theme)
+        .leading(header_icon(icon).with_size(px(16.0)))
         .disabled(!spec.enabled)
         .destructive(spec.destructive)
         .flush_in_panel(spec.edges.first, spec.edges.last)

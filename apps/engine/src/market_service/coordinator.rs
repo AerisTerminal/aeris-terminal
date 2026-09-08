@@ -635,7 +635,10 @@ impl Coordinator<'_> {
                     instrument.provider.clone(),
                     instrument.instrument_id.clone(),
                 ) == *identity
-                    && instrument == &book.instrument
+                    && instrument.entitlement_id == book.instrument.entitlement_id
+                    && instrument.price_scale == book.instrument.price_scale
+                    && instrument.quantity_scale == book.instrument.quantity_scale
+                    && instrument.provider_symbol == book.instrument.provider_symbol
             })
         });
         for instrument in required {
@@ -643,11 +646,12 @@ impl Coordinator<'_> {
                 instrument.provider.clone(),
                 instrument.instrument_id.clone(),
             );
-            let replace = self
-                .order_books
-                .get(&identity)
-                .is_none_or(|book| book.instrument != instrument);
-            if replace {
+            if let Some(book) = self.order_books.get_mut(&identity) {
+                // Catalog selection counters describe consumers, not a new book.
+                // Keep canonical revisions monotonic across metadata refreshes;
+                // transport generations are fenced by provider_depth itself.
+                book.instrument = instrument;
+            } else {
                 self.order_books
                     .insert(identity, ProviderOrderBook::new(instrument));
             }

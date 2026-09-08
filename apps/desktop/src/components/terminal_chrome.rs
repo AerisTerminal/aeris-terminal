@@ -234,21 +234,20 @@ pub(super) fn workspace_title_bar(
             .flex_1(),
         terminal,
     );
-    let brand_region = workspace_window_drag_region(
-        div()
-            .id("workspace_window_brand_region")
-            .h_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .pl_4()
-            .pr_2()
-            .gap_2()
-            .text_sm()
-            .child(brand_mark())
-            .child("Axiusflow"),
-        terminal,
+    let account = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+        axiusflow_desktop::account::unavailable_menu_state,
+        |account| account.menu_state(),
     );
+    let profile_region = div()
+        .id("workspace_profile_region")
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .pl_4()
+        .pr_2()
+        .gap_2()
+        .child(account_avatar_button(terminal, &account, &theme));
     div()
         .w_full()
         .h(px(WORKSPACE_TITLE_BAR_HEIGHT))
@@ -267,7 +266,7 @@ pub(super) fn workspace_title_bar(
                 .flex()
                 .items_center()
                 .overflow_x_hidden()
-                .child(brand_region)
+                .child(profile_region)
                 .child(tabs)
                 .child(drag_region),
         )
@@ -513,7 +512,7 @@ pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> D
         .child(controls)
 }
 
-const HEADER_GLOBAL_CONTROLS_WIDTH: f32 = chart_chrome::CHART_CONTROL_SIZE + 8.0 + 28.0 + 8.0;
+const HEADER_GLOBAL_CONTROLS_WIDTH: f32 = chart_chrome::CHART_CONTROL_SIZE + 8.0;
 
 pub(super) fn header_controls(
     terminal: &Entity<TerminalApp>,
@@ -601,7 +600,7 @@ pub(super) fn header_controls(
             &state.theme,
         ))
         .child(order_book_toggle);
-    let global_controls = header_global_controls(terminal, &state.account, &state.theme);
+    let global_controls = header_global_controls(terminal, state.account.as_ref(), &state.theme);
 
     div()
         .w_full()
@@ -616,11 +615,13 @@ pub(super) fn header_controls(
 
 fn header_global_controls(
     terminal: &Entity<TerminalApp>,
-    account: &axiusflow_desktop::account::AccountMenuState,
+    account: Option<&axiusflow_desktop::account::AccountMenuState>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     div()
-        .w(px(HEADER_GLOBAL_CONTROLS_WIDTH))
+        .w(px(
+            HEADER_GLOBAL_CONTROLS_WIDTH + if account.is_some() { 64.0 } else { 0.0 }
+        ))
         .h_full()
         .flex_none()
         .flex()
@@ -629,7 +630,7 @@ fn header_global_controls(
         .gap_2()
         .pl_2()
         .child(theme_toggle(terminal.clone(), theme))
-        .child(account_avatar_button(terminal, account, theme))
+        .children(account.map(|account| account_avatar_button(terminal, account, theme)))
 }
 
 pub(super) fn side_panel_toggle(
@@ -1032,10 +1033,6 @@ pub(super) fn exchange_mark(
             path: logo.path(),
             size: glyph_size,
         })
-}
-
-pub(super) fn brand_mark() -> impl IntoElement {
-    brand_mark_sized(px(28.0))
 }
 
 pub(super) fn brand_mark_sized(size: Pixels) -> impl IntoElement {

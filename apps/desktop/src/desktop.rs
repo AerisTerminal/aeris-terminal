@@ -992,7 +992,7 @@ struct HeaderState {
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
     instrument_scroll: ScrollHandle,
-    account: axiusflow_desktop::account::AccountMenuState,
+    account: Option<axiusflow_desktop::account::AccountMenuState>,
 }
 
 /// Whether the active chart's drawing history has an edit to step back to or forward to.

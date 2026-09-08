@@ -52,11 +52,12 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
     let colors = theme.colors;
     let close_terminal = terminal.clone();
     div()
-        .h(px(64.0))
         .flex()
-        .items_center()
+        .items_start()
         .justify_between()
-        .px_4()
+        .p_4()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
                 .flex()
@@ -73,7 +74,7 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
                                 .text_base()
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(gpui_color(colors.text_primary))
-                                .child("Axiusflow"),
+                                .child("About Axiusflow"),
                         )
                         .child(
                             div()
@@ -86,8 +87,10 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
         .child(
             Button::new("about_dialog_close")
                 .theme(theme)
+                .with_size(px(WORKSPACE_TAB_ICON_HIT))
+                .rounded_full()
                 .resting_fill(colors.surface_secondary)
-                .icon(header_icon(HugeIcon::WindowClose))
+                .icon(header_icon(HugeIcon::CancelIcon01))
                 .aria_label("Close About")
                 .on_click(move |_, _, cx| {
                     close_terminal.update(cx, |terminal, terminal_cx| {
@@ -115,6 +118,7 @@ fn about_dialog_body(
         .flex_col()
         .gap_2()
         .px_4()
+        .pt_3()
         .pb_4()
         .child(about_detail_row(
             "System",

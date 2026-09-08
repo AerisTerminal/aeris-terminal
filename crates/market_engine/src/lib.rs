@@ -1615,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn covering_history_may_replace_only_the_forming_tail() {
+    fn completed_history_preserves_forming_tail_until_it_can_finalize_it() {
         let mut engine = engine(1, 1, 8);
         let btc = series("rithmic:spot:BTC-USD");
         engine
@@ -1626,13 +1626,13 @@ mod tests {
             .expect("forming tail appends");
         let completed = engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
-            .expect("covering history may remove the forming tail");
+            .expect("completed history preserves the live forming tail");
         assert!(completed.is_empty());
         let snapshot = engine
             .series_snapshot(&btc)
             .expect("history remains cached");
-        assert!(!snapshot.forming);
-        assert_eq!(snapshot.bars.len(), 2);
+        assert!(snapshot.forming);
+        assert_eq!(snapshot.bars.len(), 3);
 
         engine
             .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)

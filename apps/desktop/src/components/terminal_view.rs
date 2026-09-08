@@ -4,6 +4,7 @@ fn active_header_state(
     workspace: &WorkspaceSurface,
     theme: &AxiusflowTheme,
     chart_has_market_data: bool,
+    fullscreen: bool,
     cx: &App,
 ) -> HeaderState {
     HeaderState {
@@ -39,10 +40,12 @@ fn active_header_state(
             .unwrap_or(FeedConnectionState::Disconnected),
         transport_rtt_nanos: workspace.provider_transport_rtt_nanos,
         instrument_scroll: workspace.scrolls.instrument.clone(),
-        account: axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
-            axiusflow_desktop::account::unavailable_menu_state,
-            |account| account.menu_state(),
-        ),
+        account: fullscreen.then(|| {
+            axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+                axiusflow_desktop::account::unavailable_menu_state,
+                |account| account.menu_state(),
+            )
+        }),
     }
 }
 
@@ -72,6 +75,25 @@ impl TerminalApp {
     fn rendered_about_dialog(&self, terminal: &Entity<Self>) -> Option<AnyElement> {
         self.about_dialog_open
             .then(|| about_dialog_layer(terminal, self.update_presentation(), &self.theme))
+    }
+
+    fn rendered_header(
+        &self,
+        terminal: &Entity<Self>,
+        surface: &Entity<WorkspaceSurface>,
+        fullscreen: bool,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let workspace = surface.read(cx);
+        let has_data = workspace
+            .chart
+            .as_ref()
+            .is_some_and(|chart| chart.read(cx).has_market_data());
+        terminal_header(
+            terminal,
+            surface,
+            active_header_state(workspace, &self.theme, has_data, fullscreen, cx),
+        )
     }
 }
 
@@ -122,11 +144,7 @@ impl Render for TerminalApp {
         let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
         let about_dialog = self.rendered_about_dialog(&terminal);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen);
-        let header = terminal_header(
-            &terminal,
-            &active,
-            active_header_state(workspace, &self.theme, chart_has_market_data, cx),
-        );
+        let header = self.rendered_header(&terminal, &active, fullscreen, cx);
         let market = workspace_market_area(
             &terminal,
             &self.workspaces[self.active],
