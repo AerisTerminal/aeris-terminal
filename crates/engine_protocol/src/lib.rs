@@ -16,10 +16,10 @@ pub use account::{
 pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
 pub use messages::{
-    EngineFaultCode, Envelope, FailureStage, Fault, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
-    ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-    SeriesLoadState,
+    EngineFaultCode, Envelope, FailureStage, Fault, InstallProviderInstrument,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionState,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, ProviderState,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
     WorkspaceState, WorkspaceTabState, envelope,
 };

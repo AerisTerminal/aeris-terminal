@@ -15,8 +15,8 @@ use std::{
 use crate::MarketRuntimeEvent;
 use axiusflow_engine_protocol::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesLoadState,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
 };
 use axiusflow_hyperliquid_market_adapter::{
     HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
@@ -27,9 +27,9 @@ use axiusflow_market_data::{
 };
 use axiusflow_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
-    MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
-    ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation, StreamRequirements,
-    Viewport, WorkspaceId,
+    MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig,
+    ProviderGeneration, ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation,
+    StreamRequirements, Viewport, WorkspaceId,
 };
 use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
@@ -114,7 +114,13 @@ enum Command {
     Remove(ClientId, ConsumerId, Reply<()>),
     Viewport(ClientId, ConsumerId, GenerationId, Viewport, Reply<()>),
     ResourceClass(ClientId, ConsumerId, ConsumerResourceClass, Reply<()>),
-    Streams(ClientId, ConsumerId, GenerationId, StreamRequirements, Reply<()>),
+    Streams(
+        ClientId,
+        ConsumerId,
+        GenerationId,
+        StreamRequirements,
+        Reply<()>,
+    ),
     Demand(
         ClientId,
         ConsumerId,
@@ -684,7 +690,6 @@ use instrument_selection::{
 
 mod history;
 use history::spawn_history_worker;
-
 
 #[cfg(test)]
 pub(crate) mod tests;

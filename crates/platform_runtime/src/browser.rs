@@ -1,7 +1,7 @@
-//! System-browser opening for engine-supplied authentication URLs.
+//! System-browser opening for account-runtime authentication URLs.
 //!
-//! The desktop sends `BeginLogin` over IPC and the engine replies with an
-//! Axiusflow authentication URL. This boundary opens that URL in the user's
+//! The in-process account runtime returns an Axiusflow authentication URL.
+//! This boundary opens that URL in the user's
 //! system browser. It performs process work, so callers must keep it off the
 //! UI thread on background workers. It never handles credentials or tokens.
 //!

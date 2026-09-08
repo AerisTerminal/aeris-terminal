@@ -23,10 +23,12 @@ try {
         throw "Axiusflow desktop release build failed."
     }
 
-    $identity = (& git rev-parse --short=12 HEAD | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $identity -notmatch '^[0-9a-fA-F]{7,12}$') {
-        throw "Unable to resolve the Git release identity."
+    $metadata = (& cargo metadata --no-deps --format-version 1 | ConvertFrom-Json)
+    $desktopPackage = $metadata.packages | Where-Object { $_.name -eq "axiusflow_desktop" } | Select-Object -First 1
+    if ($null -eq $desktopPackage -or [string]::IsNullOrWhiteSpace([string]$desktopPackage.version)) {
+        throw "Unable to resolve the Axiusflow semantic version."
     }
+    $version = [string]$desktopPackage.version
 
     if (-not $OutputDirectory) {
         $OutputDirectory = Join-Path $repo "target\clean-break-release"
@@ -45,8 +47,6 @@ try {
 
     $setup = Join-Path $output "Axiusflow-Setup.exe"
     Remove-Item -LiteralPath $setup -Force -ErrorAction SilentlyContinue
-    $version = "0.1.0-$identity"
-
     & $iscc `
         "/Qp" `
         "/DAppVersion=$version" `
@@ -66,7 +66,7 @@ try {
     Write-Output "installer=$setup"
     Write-Output "sha256=$hash"
     Write-Output "size=$size"
-    Write-Output "release_identity=$identity"
+    Write-Output "version=$version"
 }
 finally {
     Pop-Location

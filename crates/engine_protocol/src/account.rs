@@ -1,12 +1,12 @@
 //! Bounded versioned account commands, replies, and sanitized views.
 //!
-//! The desktop sends `BeginLogin` over authenticated IPC. The engine owns the
-//! PKCE transaction, loopback callback, token exchange, and vault material,
-//! and the desktop receives only the authorization URL plus sanitized
+//! The in-process account runtime owns the PKCE transaction, loopback callback,
+//! token exchange, and vault material. The desktop receives only the authorization
+//! URL plus sanitized
 //! `AccountView` state. No secret material, contact details, vendor
 //! identifiers, or purchase records cross this boundary.
 
-/// Engine-owned account session state shared by all desktop windows.
+/// Runtime-owned account session state shared by all desktop windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
 #[repr(i32)]
 pub enum AccountSessionState {
@@ -42,7 +42,7 @@ pub struct CancelLogin {
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct GetAccountStatus {}
 
-/// Requests one engine-owned background refresh of the current account
+/// Requests one runtime-owned background refresh of the current account
 /// profile. The command carries no account or provider identity; the engine
 /// derives and generation-fences all identity from its verified session.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
@@ -53,15 +53,15 @@ pub struct RefreshAccountProfile {
     pub request_id: u64,
 }
 
-/// Signs out one engine-owned account session.
+/// Signs out one runtime-owned account session.
 ///
 /// Clears the session state and deletes vault refresh and lease material on
-/// every engine. The device key stays: it identifies the device, not the
+/// the in-process account runtime. The device key stays: it identifies the device, not the
 /// user. Complete uninstall removes it separately.
 #[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
 pub struct SignOut {}
 
-/// Engine-issued browser authorization address for one login transaction.
+/// Runtime-issued browser authorization address for one login transaction.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct LoginAuthorization {
     /// Login-request generation this URL belongs to.

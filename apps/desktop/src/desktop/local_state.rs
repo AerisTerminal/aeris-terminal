@@ -2,9 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use axiusflow_engine_protocol::{
-    Envelope, EnvelopeDecoder, InstallProviderInstrument, PROTOCOL_VERSION, SeriesCadence, SeriesKey,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceTabState, encode_envelope, envelope,
+    Envelope, EnvelopeDecoder, InstallProviderInstrument, PROTOCOL_VERSION, SeriesCadence,
+    SeriesKey, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
 };
 
 const WORKSPACE_FILE: &str = "workspace-state.frame";
@@ -20,15 +20,20 @@ fn load_workspace_result() -> Result<WorkspaceState, String> {
     let path = workspace_path()?;
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(default_workspace()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_workspace());
+        }
         Err(error) => return Err(error.to_string()),
     };
     let mut decoder = EnvelopeDecoder::try_new().map_err(|error| error.to_string())?;
     let envelopes = decoder.push(&bytes).map_err(|error| error.to_string())?;
-    let Some(workspace) = envelopes.into_iter().find_map(|envelope| match envelope.payload {
-        Some(envelope::Payload::WorkspaceState(workspace)) => Some(workspace),
-        _ => None,
-    }) else {
+    let Some(workspace) = envelopes
+        .into_iter()
+        .find_map(|envelope| match envelope.payload {
+            Some(envelope::Payload::WorkspaceState(workspace)) => Some(workspace),
+            _ => None,
+        })
+    else {
         return Err("workspace file does not contain workspace state".to_string());
     };
     Ok(sanitize_workspace(workspace))

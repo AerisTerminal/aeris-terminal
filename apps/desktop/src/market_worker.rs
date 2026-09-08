@@ -55,7 +55,9 @@ impl std::fmt::Display for MarketWorkerSendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Full => formatter.write_str("market presentation mailbox is full"),
-            Self::Disconnected => formatter.write_str("market presentation mailbox is disconnected"),
+            Self::Disconnected => {
+                formatter.write_str("market presentation mailbox is disconnected")
+            }
         }
     }
 }
@@ -406,7 +408,6 @@ impl MarketWorkerSender {
             .len();
         (current, self.mailbox.capacity)
     }
-
 }
 
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
@@ -937,10 +938,7 @@ impl MarketDataWorker {
     /// # Errors
     /// Returns the requested visibility when the bounded worker command lane is
     /// full or disconnected.
-    pub fn try_set_order_book_visible(
-        &self,
-        visible: bool,
-    ) -> Result<(), TrySendError<bool>> {
+    pub fn try_set_order_book_visible(&self, visible: bool) -> Result<(), TrySendError<bool>> {
         if let Some(slot) = &self.depth_visible {
             if self.commands.is_none() {
                 return Err(TrySendError::Disconnected(visible));
@@ -1303,8 +1301,8 @@ mod tests {
     use super::{
         ChartState, ChartViewportUpdate, ConsumerResourceClass, FixtureMarketWorker,
         MarketDataWorker, MarketPublicationGeneration, MarketWorkerCommand, MarketWorkerMessage,
-        MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
-        UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
+        MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
+        ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
     use axiusflow_application::{
         Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,

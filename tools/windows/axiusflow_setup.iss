@@ -10,9 +10,6 @@
 #ifndef DesktopPath
   #error DesktopPath must be supplied by the release publisher
 #endif
-#ifndef EnginePath
-  #error EnginePath must be supplied by the release publisher
-#endif
 #ifndef IconPath
   #error IconPath must be supplied by the release publisher
 #endif
@@ -50,12 +47,20 @@ VersionInfoDescription=Axiusflow Installer
 VersionInfoProductName=Axiusflow
 VersionInfoProductVersion={#AppVersion}
 
+
+[InstallDelete]
+Type: files; Name: "{app}\axiusflow_desktop.exe"
+Type: files; Name: "{app}\axiusflow_engine.exe"
+Type: filesandordirs; Name: "{app}\.release-downloads"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Axiusflow Engine"; Flags: deletevalue
+
 [Files]
 Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "axiusflow_launcher.exe"; Flags: ignoreversion
 Source: "{#ManifestPath}"; DestDir: "{tmp}\AxiusflowRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
 Source: "{#LauncherPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_launcher.exe"; Flags: deleteafterinstall
 Source: "{#DesktopPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_desktop.exe"; Flags: deleteafterinstall
-Source: "{#EnginePath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_engine.exe"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{autoprograms}\Axiusflow\Axiusflow"; Filename: "{app}\axiusflow_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\axiusflow_launcher.exe"; AppUserModelID: "com.axiusflow.desktop"; Comment: "Axiusflow trading terminal"
@@ -84,8 +89,7 @@ var
 begin
   { Desktop binaries live in immutable version directories rather than in the
     installer's direct file list. Register them with Restart Manager so Setup closes the running
-    desktop before the launcher's transactional activation. The launcher still
-    owns graceful resident-engine shutdown. }
+    desktop before the launcher's transactional activation. }
   VersionsRoot := ExpandConstant('{app}\versions');
   if not DirExists(VersionsRoot) then
     exit;

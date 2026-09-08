@@ -12,8 +12,7 @@ use zeroize::Zeroizing;
 /// PKCE code verifier: 32 random bytes, base64url-encoded (43 characters).
 #[derive(Debug)]
 pub struct PkceVerifier {
-    verifier: Zeroizing<Vec<u8>>,
-    encoded: String,
+    encoded: Zeroizing<String>,
 }
 
 impl PkceVerifier {
@@ -30,27 +29,20 @@ impl PkceVerifier {
 
     fn from_bytes(raw: &[u8]) -> Self {
         Self {
-            verifier: Zeroizing::new(raw.to_vec()),
-            encoded: URL_SAFE_NO_PAD.encode(raw),
+            encoded: Zeroizing::new(URL_SAFE_NO_PAD.encode(raw)),
         }
     }
 
     /// Returns the encoded verifier sent to the token endpoint.
     #[must_use]
     pub fn encoded(&self) -> &str {
-        &self.encoded
-    }
-
-    /// Returns the raw verifier bytes for the token request body.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        self.verifier.as_slice()
+        self.encoded.as_str()
     }
 
     /// Returns the `S256` code challenge for the authorization URL.
     #[must_use]
     pub fn challenge(&self) -> String {
-        challenge_for_encoded(&self.encoded)
+        challenge_for_encoded(self.encoded.as_str())
     }
 }
 

@@ -24,8 +24,8 @@ fn about_update_view(
         Some(UpdateState::Current) => {
             ("Axiusflow is up to date.".to_string(), colors.bullish, None)
         }
-        Some(UpdateState::Available { latest_generation }) => (
-            format!("An Axiusflow update is available (build {latest_generation})."),
+        Some(UpdateState::Available { latest_version }) => (
+            format!("Axiusflow {latest_version} is available."),
             colors.bullish,
             Some(AboutAction::Update),
         ),
@@ -108,7 +108,6 @@ fn about_dialog_body(
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let release = axiusflow_platform_runtime::current_release_identity();
     let system_version = update.map_or_else(
         || std::env::consts::OS.to_string(),
         |value| value.system_version.clone(),
@@ -123,12 +122,6 @@ fn about_dialog_body(
         .child(about_detail_row(
             "System",
             system_version,
-            colors.text_primary,
-            theme,
-        ))
-        .child(about_detail_row(
-            "Installed build",
-            release.install_generation.to_string(),
             colors.text_primary,
             theme,
         ))

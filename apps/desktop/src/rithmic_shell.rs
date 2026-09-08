@@ -233,6 +233,7 @@ impl RithmicSymbolBrowser {
         self.selected.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn invalidate_session(&mut self) {
         self.pending_search_id = None;
         self.pending_search_query = None;

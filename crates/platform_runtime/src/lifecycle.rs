@@ -1,7 +1,7 @@
 //! Signed, transactional install/update/uninstall mechanics.
 //!
 //! Packaging supplies the small stable launcher that calls this boundary. The
-//! desktop and resident engine never replace or delete themselves.
+//! desktop never replaces or deletes itself.
 
 #[cfg(target_os = "windows")]
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -168,12 +168,12 @@ pub struct InstallationInventory {
 
 /// Platform operations which cannot be implemented as portable filesystem work.
 pub trait LifecycleHooks {
-    /// Blocks relaunch and stops the exact active desktop/engine identities.
+    /// Blocks relaunch and stops the exact active desktop identity.
     ///
     /// # Errors
     /// Returns a redacted platform error if owned processes cannot be stopped.
     fn prepare_activation(&self, previous: Option<&ActiveRelease>) -> Result<(), String>;
-    /// Performs the bounded desktop/engine IPC and market-readiness probe.
+    /// Performs the bounded desktop in-process runtime readiness probe.
     ///
     /// # Errors
     /// Returns a redacted readiness error for rollback.
@@ -369,7 +369,7 @@ fn validate_manifest_shape(manifest: &ReleaseManifest) -> Result<(), LifecycleEr
             ReleaseFileRole::RuntimeAsset => {}
         }
     }
-    if desktop != 1 || engine != 1 {
+    if desktop != 1 || engine != 0 {
         return Err(LifecycleError::InvalidManifest);
     }
     Ok(())
@@ -905,7 +905,7 @@ fn inventory_roots(inventory: &InstallationInventory) -> Vec<PathBuf> {
     roots
 }
 
-/// Resolves the one native Axiusflow data root used by desktop and engine.
+/// Resolves the one native Axiusflow data root used by the desktop runtime.
 ///
 /// # Errors
 /// Returns an error when the current user's native data directory is unavailable.
@@ -1004,16 +1004,7 @@ pub fn native_installation_inventory(
         }
     };
     let logs = data.join("logs");
-    let registrations = if cfg!(target_os = "windows") {
-        vec![
-            "windows-run:Axiusflow Engine".to_string(),
-            "start-menu:Axiusflow".to_string(),
-        ]
-    } else if cfg!(target_os = "macos") {
-        vec!["launch-agent:com.axiusflow.engine".to_string()]
-    } else {
-        vec!["xdg-autostart:axiusflow-engine.desktop".to_string()]
-    };
+    let registrations = vec!["start-menu:Axiusflow".to_string()];
     Ok(InstallationInventory {
         schema_version: INVENTORY_SCHEMA_VERSION,
         install_root,
@@ -1022,18 +1013,6 @@ pub fn native_installation_inventory(
         log_roots: vec![logs],
         ipc_paths: Vec::new(),
         vault_entries: vec![
-            VaultEntry {
-                service: "com.axiusflow.engine".to_string(),
-                key: "local-ipc-token-v1".to_string(),
-            },
-            VaultEntry {
-                service: "com.axiusflow.engine.history".to_string(),
-                key: "history-catalog-key-v1".to_string(),
-            },
-            VaultEntry {
-                service: "com.axiusflow.engine.history".to_string(),
-                key: "rithmic-public-bars-key-v1".to_string(),
-            },
             VaultEntry {
                 service: "com.axiusflow.terminal".to_string(),
                 key: "provider-rithmic-test-default-v1".to_string(),
@@ -1508,14 +1487,11 @@ mod tests {
         let bundle = root.join(format!("bundle-{generation}"));
         fs::create_dir_all(&bundle).expect("bundle");
         let desktop = format!("desktop-{generation}").into_bytes();
-        let engine = format!("engine-{generation}").into_bytes();
         let launcher = format!("launcher-{generation}").into_bytes();
         fs::write(bundle.join("axiusflow_desktop"), &desktop).expect("desktop");
-        fs::write(bundle.join("axiusflow_engine"), &engine).expect("engine");
         fs::write(bundle.join("axiusflow_launcher"), &launcher).expect("launcher");
         let files = [
             (ReleaseFileRole::Desktop, "axiusflow_desktop", desktop),
-            (ReleaseFileRole::Engine, "axiusflow_engine", engine),
             (
                 ReleaseFileRole::RuntimeAsset,
                 "axiusflow_launcher",
@@ -1561,7 +1537,7 @@ mod tests {
             Err(LifecycleError::InvalidSignature)
         );
         let (signed, key, bundle) = release(&root, 2);
-        fs::write(bundle.join("axiusflow_engine"), b"tampered").expect("tamper bundle");
+        fs::write(bundle.join("axiusflow_desktop"), b"tampered").expect("tamper bundle");
         let install_root = root.join("install");
         let installer =
             ReleaseInstaller::new(&install_root, key.verifying_key(), ReleasePolicy::native(0))
@@ -1584,7 +1560,7 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        fs::remove_file(bundle.join("axiusflow_engine")).expect("drop one bundle file");
+        fs::remove_file(bundle.join("axiusflow_launcher")).expect("drop one bundle file");
         assert_eq!(
             installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::StagingFailed)
@@ -1601,7 +1577,7 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        fs::write(bundle.join("axiusflow_engine"), b"truncated").expect("truncate bundle file");
+        fs::write(bundle.join("axiusflow_desktop"), b"truncated").expect("truncate bundle file");
         assert_eq!(
             installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::VerificationFailed)
@@ -1697,11 +1673,11 @@ mod tests {
             .install(&signed, &bundle, &Hooks::default())
             .expect("install")
             .active;
-        let engine = installer
+        let desktop = installer
             .release_directory(&active)
             .expect("release directory")
-            .join("axiusflow_engine");
-        fs::write(engine, b"post-install mutation").expect("mutate active engine");
+            .join("axiusflow_desktop");
+        fs::write(desktop, b"post-install mutation").expect("mutate active desktop");
         assert_eq!(
             installer.audit_active_release(),
             Err(LifecycleError::VerificationFailed)
@@ -1969,17 +1945,17 @@ mod tests {
             .install(&first, &first_bundle, &Hooks::default())
             .expect("first install")
             .active;
-        let old_engine = installer
+        let old_desktop = installer
             .release_directory(&previous)
             .expect("old release directory")
-            .join("axiusflow_engine");
+            .join("axiusflow_desktop");
         // FILE_SHARE_READ lets the pre-install audit read the old release
         // while still blocking its deletion, mirroring a locked executable.
         let lock = OpenOptions::new()
             .read(true)
             .share_mode(1)
-            .open(&old_engine)
-            .expect("hold old engine without delete sharing");
+            .open(&old_desktop)
+            .expect("hold old desktop without delete sharing");
         let (second, _, second_bundle) = release(&root, 2);
         let second = sign_release_manifest(second.manifest, &key).expect("same key");
         assert_eq!(
@@ -2117,15 +2093,15 @@ mod tests {
             ipc_paths: Vec::new(),
             vault_entries: vec![
                 VaultEntry {
-                    service: "com.axiusflow.engine".to_string(),
-                    key: "local-ipc-token-v1".to_string(),
+                    service: "com.axiusflow.account".to_string(),
+                    key: "account-refresh-default-v1".to_string(),
                 },
                 VaultEntry {
-                    service: "com.axiusflow.engine.history".to_string(),
-                    key: "history-key-v1".to_string(),
+                    service: "com.axiusflow.terminal".to_string(),
+                    key: "provider-rithmic-test-default-v1".to_string(),
                 },
             ],
-            registrations: vec!["engine-autostart".to_string()],
+            registrations: vec!["start-menu:Axiusflow".to_string()],
         };
         let hooks = Hooks::default();
         let outcome = installer.uninstall(&inventory, &hooks).expect("uninstall");

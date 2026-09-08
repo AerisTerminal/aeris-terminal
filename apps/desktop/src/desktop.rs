@@ -22,6 +22,8 @@ mod engine_market_worker;
 mod frame_poll_gate;
 #[path = "components/indicator_menu.rs"]
 mod indicator_menu;
+#[path = "desktop/local_state.rs"]
+mod local_state;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
 #[path = "onboarding.rs"]
@@ -41,8 +43,6 @@ mod terminal_view;
 mod update;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
-#[path = "desktop/local_state.rs"]
-mod local_state;
 
 use about_dialog::about_dialog_layer;
 use assets::UiIcon as HugeIcon;
@@ -1339,25 +1339,20 @@ fn run_desktop_readiness_command(
     if status.providers.is_empty() {
         return Err("candidate market service did not reach readiness".to_string());
     }
-    let account_service = axiusflow_account_runtime::AccountService::new(
+    let _account_service = axiusflow_account_runtime::AccountService::new(
         axiusflow_account_runtime::AccountServiceConfig::from_environment(),
     );
-    let account = axiusflow_desktop::account::fetch_account_status(&account_service)?;
-    axiusflow_desktop::account::verify_account_readiness(&account)?;
     let release = axiusflow_platform_runtime::current_release_identity();
     let report = LifecycleReadinessReport {
-        schema_version: 1,
+        schema_version: 2,
         release_identity: release.release_identity,
         install_generation: release.install_generation,
-        engine_process_id: std::process::id(),
+        desktop_process_id: std::process::id(),
         workspace_revision: workspace.workspace_revision,
         provider_count: status.providers.len(),
-        // Legacy launcher field names. There is no IPC in the desktop runtime;
-        // true now means the direct in-process boundary initialized correctly.
-        authenticated_ipc_ready: true,
         workspace_restored: true,
         market_service_ready: true,
-        account_ipc_ready: true,
+        account_runtime_ready: true,
     };
     market.shutdown(std::time::Duration::from_secs(2))?;
     let mut encoded = serde_json::to_vec(&report)
@@ -1368,20 +1363,18 @@ fn run_desktop_readiness_command(
 }
 
 #[derive(serde::Serialize)]
-// Wire mirror of the launcher readiness JSON: the flat boolean shape is the
-// cross-binary contract, not internal state.
-#[allow(clippy::struct_excessive_bools)]
+// Wire mirror of the launcher readiness JSON: this validates the direct
+// in-process desktop runtime before a release is activated.
 struct LifecycleReadinessReport {
     schema_version: u32,
     release_identity: String,
     install_generation: u64,
-    engine_process_id: u32,
+    desktop_process_id: u32,
     workspace_revision: u64,
     provider_count: usize,
-    authenticated_ipc_ready: bool,
     workspace_restored: bool,
     market_service_ready: bool,
-    account_ipc_ready: bool,
+    account_runtime_ready: bool,
 }
 
 #[cfg(feature = "diagnostics")]
@@ -2055,9 +2048,9 @@ struct ConfiguredLifecycle {
     workspace: WorkspaceState,
 }
 
-fn configure_desktop_state() -> Result<ConfiguredLifecycle, String> {
+fn configure_desktop_state() -> ConfiguredLifecycle {
     let workspace = local_state::load_workspace();
-    Ok(ConfiguredLifecycle { workspace })
+    ConfiguredLifecycle { workspace }
 }
 
 fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
@@ -2066,10 +2059,6 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
     let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
-        if argument == "--desktop-readiness" {
-            run_desktop_readiness_command(arguments)?;
-            return Ok(None);
-        }
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-conformance" {
             run_desktop_conformance_command(arguments).expect("desktop burst conformance passes");
@@ -2085,7 +2074,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
-            let lifecycle = configure_desktop_state()?;
+            let lifecycle = configure_desktop_state();
             (
                 vec![engine_market_worker::start_rithmic_catalog()?],
                 Vec::new(),
@@ -2096,7 +2085,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
                 std::process::exit(2);
             }
-            let lifecycle = configure_desktop_state()?;
+            let lifecycle = configure_desktop_state();
             (
                 engine_market_worker::start_multi_chart()?,
                 Vec::new(),
@@ -2107,7 +2096,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 eprintln!("usage: axiusflow_desktop --workspace-tabs");
                 std::process::exit(2);
             }
-            let lifecycle = configure_desktop_state()?;
+            let lifecycle = configure_desktop_state();
             layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
             workspace_factory = Some(group.factory);
@@ -2117,7 +2106,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             std::process::exit(2);
         }
     } else {
-        let lifecycle = configure_desktop_state()?;
+        let lifecycle = configure_desktop_state();
         let (startup, worker, factory) = engine_market_worker::start()?;
         workspace_factory = Some(factory);
         (vec![(startup, worker)], Vec::new(), lifecycle)
@@ -2133,20 +2122,27 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
 }
 
 pub(super) fn run() {
+    let mut lifecycle_arguments = std::env::args_os().skip(1);
+    if lifecycle_arguments.next().as_deref() == Some(std::ffi::OsStr::new("--desktop-readiness")) {
+        if let Err(error) = run_desktop_readiness_command(lifecycle_arguments) {
+            eprintln!("Axiusflow desktop readiness failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args_os().len() == 1
         && let Err(error) = schedule_versioned_launcher_promotion()
     {
         eprintln!("Axiusflow launcher promotion deferred: {error}");
     }
-    let account =
-        match axiusflow_desktop::account::DesktopAccount::install() {
-            Ok(account) => account,
-            Err(error) => {
-                eprintln!("Axiusflow account client could not start: {error}");
-                run_onboarding();
-                return;
-            }
-        };
+    let account = match axiusflow_desktop::account::DesktopAccount::install() {
+        Ok(account) => account,
+        Err(error) => {
+            eprintln!("Axiusflow account client could not start: {error}");
+            run_onboarding();
+            return;
+        }
+    };
     if !account.authenticated() {
         run_onboarding();
         return;

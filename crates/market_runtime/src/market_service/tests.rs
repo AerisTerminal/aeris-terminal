@@ -96,14 +96,20 @@ fn initial_history_is_small_and_viewport_fetches_are_bounded() {
         period: BarPeriod::time(60).expect("period"),
         definition_version: 1,
     };
-    assert_eq!(history::history_request_bar_limit(&series, None), INITIAL_HISTORY_BARS);
+    assert_eq!(
+        history::history_request_bar_limit(&series, None),
+        INITIAL_HISTORY_BARS
+    );
 
     let minute = 60_i64 * 1_000_000_000;
     let visible = HistoryRange {
         start_unix_nanos: 0,
         end_unix_nanos: 300 * minute,
     };
-    assert_eq!(history::history_request_bar_limit(&series, Some(visible)), 364);
+    assert_eq!(
+        history::history_request_bar_limit(&series, Some(visible)),
+        364
+    );
 
     let enormous = HistoryRange {
         start_unix_nanos: 0,

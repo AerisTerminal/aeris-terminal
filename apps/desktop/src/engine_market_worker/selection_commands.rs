@@ -2,11 +2,11 @@
 
 use super::{
     ChartInterval, ChartState, ConsumerResourceClass, EVENT_WAIT, EndpointRecord,
-    FeedConnectionState, InstallProviderInstrument, Instant, MarketService, MarketWorkerCommand,
-    MarketRuntimeEvent, MarketWorkerMessage, ProviderInstrumentSummary,
-    STARTUP_CATALOG_COMMAND_GENERATION, STARTUP_CATALOG_RESOLUTION_TIMEOUT,
-    SearchProviderInstruments, SelectProviderInstrument, WorkerEndpoint, cancel_pending_recovery,
-    RITHMIC_CATALOG_READY_MESSAGE, chart_streams, provider_display_name, retire_endpoint,
+    FeedConnectionState, InstallProviderInstrument, Instant, MarketRuntimeEvent, MarketService,
+    MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
+    RITHMIC_CATALOG_READY_MESSAGE, STARTUP_CATALOG_COMMAND_GENERATION,
+    STARTUP_CATALOG_RESOLUTION_TIMEOUT, SearchProviderInstruments, SelectProviderInstrument,
+    WorkerEndpoint, cancel_pending_recovery, chart_streams, provider_display_name, retire_endpoint,
     send_recovery, series_key,
 };
 
@@ -41,12 +41,8 @@ pub(super) fn initialize_endpoint(
         transport_rtt_nanos: None,
     });
     market.register_consumer(client_id, workspace_id, endpoint.consumer_id)?;
-    let canonical = install_or_resolve_startup_instrument(
-        market,
-        client_id,
-        endpoint.consumer_id,
-        product,
-    )?;
+    let canonical =
+        install_or_resolve_startup_instrument(market, client_id, endpoint.consumer_id, product)?;
     product.clone_from(&canonical);
     let provider_name = provider_display_name(product.provider.as_str());
     let series = series_key(product, interval)?;
@@ -60,23 +56,25 @@ pub(super) fn initialize_endpoint(
         endpoint.active_generation,
         &series,
         chart_streams(endpoint.depth_visible),
-    )
-    {
+    ) {
         let _ = endpoint.messages.send(MarketWorkerMessage::State {
             state: ChartState::Error,
             message: error,
         });
     }
-    market.search_provider_instruments(client_id, SearchProviderInstruments {
-        consumer_id: endpoint.consumer_id,
-        search_generation: 1,
-        provider: product.provider.clone(),
-        query: String::new(),
-        maximum_results: u32::try_from(
-            crate::desktop::rithmic_shell::MAXIMUM_RITHMIC_SYMBOL_RESULTS,
-        )
-        .unwrap_or(u32::MAX),
-    })?;
+    market.search_provider_instruments(
+        client_id,
+        SearchProviderInstruments {
+            consumer_id: endpoint.consumer_id,
+            search_generation: 1,
+            provider: product.provider.clone(),
+            query: String::new(),
+            maximum_results: u32::try_from(
+                crate::desktop::rithmic_shell::MAXIMUM_RITHMIC_SYMBOL_RESULTS,
+            )
+            .unwrap_or(u32::MAX),
+        },
+    )?;
     Ok(())
 }
 
@@ -139,13 +137,16 @@ fn search_hyperliquid_startup_instrument(
     command_generation: u64,
     deadline: Instant,
 ) -> Result<ProviderInstrumentSummary, String> {
-    market.search_provider_instruments(client_id, SearchProviderInstruments {
-        consumer_id,
-        search_generation: command_generation,
-        provider: requested.provider.clone(),
-        query: requested.provider_symbol.clone(),
-        maximum_results: 32,
-    })?;
+    market.search_provider_instruments(
+        client_id,
+        SearchProviderInstruments {
+            consumer_id,
+            search_generation: command_generation,
+            provider: requested.provider.clone(),
+            query: requested.provider_symbol.clone(),
+            maximum_results: 32,
+        },
+    )?;
     loop {
         let Some(event) = poll_market_event_until(market, client_id, consumer_id, deadline)? else {
             if Instant::now() >= deadline {
@@ -204,15 +205,18 @@ fn select_hyperliquid_startup_instrument(
     command_generation: u64,
     deadline: Instant,
 ) -> Result<InstallProviderInstrument, String> {
-    market.select_provider_instrument(client_id, SelectProviderInstrument {
-        consumer_id,
-        selection_generation: command_generation,
-        search_generation: command_generation,
-        provider: requested.provider.clone(),
-        symbol: summary.symbol,
-        exchange: summary.exchange,
-        entitlement_id: requested.entitlement_id.clone(),
-    })?;
+    market.select_provider_instrument(
+        client_id,
+        SelectProviderInstrument {
+            consumer_id,
+            selection_generation: command_generation,
+            search_generation: command_generation,
+            provider: requested.provider.clone(),
+            symbol: summary.symbol,
+            exchange: summary.exchange,
+            entitlement_id: requested.entitlement_id.clone(),
+        },
+    )?;
 
     loop {
         let Some(event) = poll_market_event_until(market, client_id, consumer_id, deadline)? else {
@@ -314,7 +318,10 @@ pub(super) fn process_command(
                 });
             let _ = endpoint.messages.send(MarketWorkerMessage::State {
                 state: ChartState::Loading,
-                message: format!("Loading {} history", provider_display_name(&request.product.provider)),
+                message: format!(
+                    "Loading {} history",
+                    provider_display_name(&request.product.provider)
+                ),
             });
             endpoint.live = false;
             endpoint.active_generation = request.sequence;

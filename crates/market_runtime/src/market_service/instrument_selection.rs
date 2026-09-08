@@ -1,13 +1,12 @@
 use super::{
-    ClientId, ConsumerId, Coordinator, InstallProviderInstrument,
-    MAXIMUM_CATALOG_FIELD_BYTES, MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64,
-    ProviderCatalogCommand, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderGeneration, ProviderHealth, Reply, RithmicCatalogControl, RithmicCatalogEvent,
-    SearchProviderInstruments,
+    ClientId, ConsumerId, Coordinator, InstallProviderInstrument, MAXIMUM_CATALOG_FIELD_BYTES,
+    MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogRejected,
+    ProviderCatalogRejectionReason, ProviderGeneration, ProviderHealth, Reply,
+    RithmicCatalogControl, RithmicCatalogEvent, SearchProviderInstruments,
     SelectProviderInstrument, SyncSender, TrySendError, authorize_consumer,
 };
-use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
 use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidCatalogEvent};
+use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
 
 pub(super) fn id(value: u64) -> Result<NonZeroU64, String> {
     NonZeroU64::new(value).ok_or_else(|| "market identity must be non-zero".to_string())
@@ -314,7 +313,9 @@ impl Coordinator<'_> {
         &mut self,
         result: axiusflow_engine_protocol::ProviderInstrumentSearchResult,
     ) {
-        if result.consumer_id == 0 { return; }
+        if result.consumer_id == 0 {
+            return;
+        }
         let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
             return;
         };
@@ -324,7 +325,8 @@ impl Coordinator<'_> {
         }
         self.catalog_searches.remove(&key);
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            events.catalog_search = Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
+            events.catalog_search =
+                Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
         }
     }
 
@@ -334,7 +336,9 @@ impl Coordinator<'_> {
         command_generation: u64,
         instrument: InstallProviderInstrument,
     ) {
-        if consumer_id == 0 { return; }
+        if consumer_id == 0 {
+            return;
+        }
         let Ok(id) = id(consumer_id).map(ConsumerId) else {
             return;
         };
@@ -345,11 +349,13 @@ impl Coordinator<'_> {
         }
         self.catalog_selections.remove(&key);
         let publication = match self.install_provider_instrument(&instrument) {
-            Ok(()) => MarketRuntimeEvent::ProviderInstrumentSelection(MarketProviderInstrumentSelection {
-                consumer_id: id,
-                instrument,
-                command_generation,
-            }),
+            Ok(()) => {
+                MarketRuntimeEvent::ProviderInstrumentSelection(MarketProviderInstrumentSelection {
+                    consumer_id: id,
+                    instrument,
+                    command_generation,
+                })
+            }
             Err(_) => MarketRuntimeEvent::ProviderCatalogRejected(ProviderCatalogRejected {
                 consumer_id,
                 provider,
@@ -368,7 +374,9 @@ impl Coordinator<'_> {
         rejection: ProviderCatalogRejected,
         selection: bool,
     ) {
-        if rejection.consumer_id == 0 { return; }
+        if rejection.consumer_id == 0 {
+            return;
+        }
         let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
             return;
         };

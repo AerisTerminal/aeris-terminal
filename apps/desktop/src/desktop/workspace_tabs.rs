@@ -134,6 +134,7 @@ impl TerminalApp {
         if workspace.active_pane != index {
             workspace.active_pane = index;
             workspace.generation = workspace.generation.saturating_add(1);
+            self.persist_workspace_layout_if_changed(cx);
             cx.notify();
         }
     }
@@ -558,6 +559,7 @@ impl TerminalApp {
         self.set_workspace_resource_class(next, ConsumerResourceClass::Foreground, cx);
         self.active = next;
         self.workspace_error = None;
+        self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }
 
@@ -1104,9 +1106,15 @@ impl TerminalApp {
         }
     }
 
-    pub(super) fn claim_close(&mut self, cx: &mut impl gpui::AppContext) -> bool {
+    pub(super) fn claim_close(&mut self, cx: &mut Context<Self>) -> bool {
         if !claim_once(&mut self.closing) {
             return false;
+        }
+        self.persist_workspace_layout_if_changed(cx);
+        if let Some(persistence) = self.workspace_persistence.as_ref()
+            && let Err(error) = persistence.flush(Duration::from_secs(2))
+        {
+            self.workspace_error = Some(error);
         }
         self.retire_workspaces(cx);
         true
@@ -1390,14 +1398,10 @@ impl TerminalApp {
                 &self.theme,
             )
         });
-        let settings_menu = self.chart_settings_menu.clone().map(|menu| {
-            chart_settings_menu_layer(
-                terminal,
-                &menu,
-                viewport,
-                &self.theme,
-            )
-        });
+        let settings_menu = self
+            .chart_settings_menu
+            .clone()
+            .map(|menu| chart_settings_menu_layer(terminal, &menu, viewport, &self.theme));
         (context_menu, settings_menu)
     }
 }

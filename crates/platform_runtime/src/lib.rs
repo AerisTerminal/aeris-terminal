@@ -2,7 +2,6 @@
 //!
 //! Consumers depend on capabilities rather than branching on operating-system names.
 
-mod background_service;
 pub mod browser;
 mod capability;
 mod credential_vault;
@@ -14,7 +13,6 @@ mod power_notifications;
 mod release_identity;
 mod session_shutdown;
 
-pub use background_service::{BackgroundService, BackgroundServiceError};
 pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;
 pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};

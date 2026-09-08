@@ -1,22 +1,20 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarSeriesKey,
     COMMAND_CAPACITY, ClientId, Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
-    Duration, GenerationId,
-    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource, InstallProviderInstrument,
-    Instant, LiveHyperliquidHistory, LiveRithmicHistory, MarketEngine, MarketRuntime, MarketService,
-    MarketServiceStatus, Mutex,
-    Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelSet, ProviderCatalogChannels,
-    ProviderCatalogCommand, ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch,
-    ProviderDispatchRecord, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
-    ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
-    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, RithmicRealtimeControl,
-    RithmicRealtimeEvent, SearchProviderInstruments,
+    Duration, GenerationId, HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource,
+    InstallProviderInstrument, Instant, LiveHyperliquidHistory, LiveRithmicHistory, MarketEngine,
+    MarketRuntime, MarketService, MarketServiceStatus, Mutex, Ordering, OwnedCoordinatorChannels,
+    ProviderCatalogChannelSet, ProviderCatalogChannels, ProviderCatalogCommand,
+    ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
+    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRealtimeDispatch,
+    ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry,
+    ProviderRuntimeSpec, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply,
+    RithmicCatalogControl, RithmicRealtimeControl, RithmicRealtimeEvent, SearchProviderInstruments,
     SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, SyncSender, TrySendError,
     Viewport, WorkspaceId, configured_engine, configured_reconnect_delay, id, mpsc,
-    spawn_coordinator, spawn_history_worker, thread,
-    try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
-    validate_provider_search, validate_provider_selection,
+    spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
+    try_send_rithmic_catalog, validate_provider_instrument, validate_provider_search,
+    validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
 use crate::hyperliquid_realtime::{
@@ -158,9 +156,7 @@ impl ProviderRuntimeRegistry {
             ),
             provider => {
                 started.cancel_and_join();
-                Err(format!(
-                    "market provider is unsupported: {provider}"
-                ))
+                Err(format!("market provider is unsupported: {provider}"))
             }
         }
     }
@@ -743,6 +739,11 @@ impl MarketService {
     /// Market state is intentionally ephemeral. History is requested from the
     /// provider when demanded; no local market-history store or resident hot set
     /// participates in startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the market engine or one of the bounded provider
+    /// runtime workers cannot be initialized.
     pub fn start() -> Result<Self, String> {
         Self::start_composed(vec![
             ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
@@ -750,9 +751,7 @@ impl MarketService {
         ])
     }
 
-    pub(super) fn start_composed(
-        providers: Vec<ProviderRuntimeSpec>,
-    ) -> Result<Self, String> {
+    pub(super) fn start_composed(providers: Vec<ProviderRuntimeSpec>) -> Result<Self, String> {
         let engine = configured_engine()?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1114,9 +1113,7 @@ impl MarketService {
     ) -> Result<Vec<(u64, MarketRuntimeEvent)>, String> {
         let consumer_budgets = consumer_budgets
             .iter()
-            .map(|(consumer_id, maximum)| {
-                Ok((ConsumerId(id(*consumer_id)?), *maximum))
-            })
+            .map(|(consumer_id, maximum)| Ok((ConsumerId(id(*consumer_id)?), *maximum)))
             .collect::<Result<Vec<_>, String>>()?;
         self.request(|reply| {
             Ok(Command::PollClient(

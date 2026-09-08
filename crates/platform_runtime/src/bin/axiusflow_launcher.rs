@@ -15,18 +15,17 @@ use std::{
 };
 
 use axiusflow_platform_runtime::{
-    ActiveRelease, BackgroundService, CredentialVault, InstallationInventory, LifecycleHooks,
-    NativeCredentialVault, RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer, ReleaseFile,
-    ReleaseInstaller, ReleasePolicy, SignedReleaseManifest, VaultEntry, native_install_root,
+    ActiveRelease, CredentialVault, InstallationInventory, LifecycleHooks, NativeCredentialVault,
+    RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer, ReleaseFile, ReleaseInstaller,
+    ReleasePolicy, SignedReleaseManifest, VaultEntry, native_install_root,
     native_installation_inventory, verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
 use sysinfo::{ProcessesToUpdate, System};
 
-// A cold candidate can legitimately spend up to the account request timeout
-// restoring authenticated state before the bounded IPC/readiness checks run.
-// Keep the installer finite while allowing one complete cold-start attempt.
+// Candidate readiness is a bounded in-process runtime probe. Keep activation
+// finite while allowing one complete cold-start attempt on slower machines.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -108,11 +107,6 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             installer.recover(&hooks).map_err(|error| error.to_string())?;
             launch_active(&installer, "axiusflow_desktop")
         }
-        Some("--launch-engine") => {
-            require_no_more(arguments)?;
-            installer.recover(&hooks).map_err(|error| error.to_string())?;
-            launch_active(&installer, "axiusflow_engine")
-        }
         Some("--install") => {
             let manifest_path = required_path(&mut arguments, "signed manifest")?;
             let bundle_root = required_path(&mut arguments, "release bundle")?;
@@ -177,7 +171,7 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             remove_relocated_binary(&staged);
             result
         }
-        _ => Err("usage: axiusflow_launcher <--launch-desktop|--launch-engine|--install <manifest> <bundle>|--update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher>".to_string()),
+        _ => Err("usage: axiusflow_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher>".to_string()),
     }
 }
 
@@ -569,14 +563,22 @@ struct UpdateCheckReport {
     schema_version: u32,
     current_generation: u64,
     latest_generation: u64,
+    current_version: String,
+    latest_version: String,
     update_available: bool,
 }
 
-fn update_check_report(current_generation: u64, latest_generation: u64) -> UpdateCheckReport {
+fn update_check_report(
+    current_generation: u64,
+    latest_generation: u64,
+    latest_version: &str,
+) -> UpdateCheckReport {
     UpdateCheckReport {
-        schema_version: 1,
+        schema_version: 2,
         current_generation,
         latest_generation,
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        latest_version: latest_version.to_string(),
         update_available: latest_generation > current_generation,
     }
 }
@@ -589,7 +591,11 @@ fn check_remote_update(
     let current_generation = active
         .as_ref()
         .map_or(0, |release| release.install_generation);
-    let report = update_check_report(current_generation, channel.install_generation);
+    let report = update_check_report(
+        current_generation,
+        channel.install_generation,
+        &channel.version,
+    );
     let encoded = serde_json::to_string(&report)
         .map_err(|_| "update status could not be encoded".to_string())?;
     println!("{encoded}");
@@ -1152,30 +1158,19 @@ struct NativeHooks {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-// Wire mirror of the desktop readiness JSON: the flat boolean shape is the
-// cross-binary contract, not internal state.
-#[allow(clippy::struct_excessive_bools)]
 struct DesktopReadinessReport {
     schema_version: u32,
     release_identity: String,
     install_generation: u64,
-    engine_process_id: u32,
+    desktop_process_id: u32,
     workspace_revision: u64,
     provider_count: usize,
-    authenticated_ipc_ready: bool,
     workspace_restored: bool,
     market_service_ready: bool,
-    account_ipc_ready: bool,
+    account_runtime_ready: bool,
 }
 
 impl NativeHooks {
-    fn engine(&self, release: &ActiveRelease) -> PathBuf {
-        self.install_root
-            .join("versions")
-            .join(&release.directory_name)
-            .join(format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX))
-    }
-
     fn desktop(&self, release: &ActiveRelease) -> PathBuf {
         self.install_root
             .join("versions")
@@ -1201,34 +1196,16 @@ impl NativeHooks {
             thread::sleep(Duration::from_millis(20));
         }
     }
-
-    fn wait_for_engine_stop(&self, candidate: &ActiveRelease) -> Result<(), String> {
-        let service = BackgroundService::new(self.engine(candidate)).map_err(redacted)?;
-        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-        while service.is_running() {
-            if Instant::now() >= deadline {
-                return Err("candidate engine did not stop after readiness".to_string());
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        Ok(())
-    }
 }
 
 impl LifecycleHooks for NativeHooks {
     fn prepare_activation(&self, previous: Option<&ActiveRelease>) -> Result<(), String> {
         if let Some(previous) = previous {
-            let service = BackgroundService::new(self.engine(previous)).map_err(redacted)?;
-            if service.is_running() {
-                service
-                    .request_shutdown(SHUTDOWN_TIMEOUT)
-                    .map_err(redacted)?;
-            }
             let desktop = self.desktop(previous);
             let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-            while process_is_running(&desktop) || service.is_running() {
+            while process_is_running(&desktop) {
                 if Instant::now() >= deadline {
-                    return Err("active Axiusflow processes must close before update".to_string());
+                    return Err("active Axiusflow desktop must close before update".to_string());
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -1254,20 +1231,19 @@ impl LifecycleHooks for NativeHooks {
                 .map_err(redacted)?;
             Self::wait_for_child(child)?;
             let readiness: DesktopReadinessReport = read_bounded_json(&report)?;
-            if readiness.schema_version != 1
+            if readiness.schema_version != 2
                 || readiness.release_identity != candidate.release_identity
                 || readiness.install_generation != candidate.install_generation
-                || readiness.engine_process_id == 0
+                || readiness.desktop_process_id == 0
                 || readiness.provider_count == 0
-                || !readiness.authenticated_ipc_ready
                 || !readiness.workspace_restored
                 || !readiness.market_service_ready
-                || !readiness.account_ipc_ready
+                || !readiness.account_runtime_ready
             {
                 return Err("candidate desktop readiness report is invalid".to_string());
             }
             let _ = readiness.workspace_revision;
-            self.wait_for_engine_stop(candidate)
+            Ok(())
         })();
         let _ = fs::remove_file(report);
         result
@@ -1279,11 +1255,6 @@ impl LifecycleHooks for NativeHooks {
             .any(|entry| entry == "start-menu:Axiusflow")
         {
             remove_launcher_registration()?;
-        }
-        if let Some(active) = active_from_root(&self.install_root)? {
-            BackgroundService::new(self.engine(&active))
-                .and_then(|service| service.set_autostart(false))
-                .map_err(redacted)?;
         }
         Ok(())
     }
@@ -1344,15 +1315,12 @@ fn process_is_running(executable: &Path) -> bool {
 fn owned_process_is_running(install_root: &Path) -> bool {
     let versions = install_root.join("versions");
     let desktop = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
-    let engine = format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX);
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
     system.processes().values().any(|process| {
         process.exe().is_some_and(|executable| {
             executable.starts_with(&versions)
-                && executable.file_name().is_some_and(|name| {
-                    name == std::ffi::OsStr::new(&desktop) || name == std::ffi::OsStr::new(&engine)
-                })
+                && executable.file_name() == Some(std::ffi::OsStr::new(&desktop))
         })
     })
 }
@@ -1471,24 +1439,14 @@ mod tests {
         );
         let digest = URL_SAFE_NO_PAD.encode([3_u8; 32]);
         let suffix = std::env::consts::EXE_SUFFIX;
-        let files = vec![
-            ReleaseFile {
-                role: ReleaseFileRole::Desktop,
-                path: format!("axiusflow_desktop{suffix}"),
-                url: format!("{release_root}/axiusflow_desktop{suffix}"),
-                size: 10,
-                sha256: digest.clone(),
-                executable: true,
-            },
-            ReleaseFile {
-                role: ReleaseFileRole::Engine,
-                path: format!("axiusflow_engine{suffix}"),
-                url: format!("{release_root}/axiusflow_engine{suffix}"),
-                size: 11,
-                sha256: digest,
-                executable: true,
-            },
-        ];
+        let files = vec![ReleaseFile {
+            role: ReleaseFileRole::Desktop,
+            path: format!("axiusflow_desktop{suffix}"),
+            url: format!("{release_root}/axiusflow_desktop{suffix}"),
+            size: 10,
+            sha256: digest,
+            executable: true,
+        }];
         let manifest = ReleaseManifest {
             schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
             release_identity: identity.to_string(),
@@ -1549,13 +1507,15 @@ mod tests {
     }
 
     #[test]
-    fn update_check_report_uses_generation_not_semver() {
-        let available = update_check_report(7, 8);
+    fn update_check_report_uses_generation_for_ordering_and_semver_for_presentation() {
+        let available = update_check_report(7, 8, "0.3.0");
         assert_eq!(available.current_generation, 7);
         assert_eq!(available.latest_generation, 8);
+        assert_eq!(available.current_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(available.latest_version, "0.3.0");
         assert!(available.update_available);
 
-        let current = update_check_report(8, 8);
+        let current = update_check_report(8, 8, env!("CARGO_PKG_VERSION"));
         assert!(!current.update_available);
     }
 

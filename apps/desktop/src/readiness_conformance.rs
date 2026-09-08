@@ -394,15 +394,13 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
             return Err::<(), Box<dyn Error>>("desktop burst mailbox disconnected".into());
         }
         for message in messages {
-            let MarketWorkerMessage::Update(publication) = message
-            else {
+            let MarketWorkerMessage::Update(publication) = message else {
                 return Err("desktop burst received an unexpected presentation message".into());
             };
             delivered_updates = delivered_updates.saturating_add(1);
-            last_delivered_publication_generation = usize::try_from(
-                publication.generation.publication_generation(),
-            )
-            .unwrap_or(usize::MAX);
+            last_delivered_publication_generation =
+                usize::try_from(publication.generation.publication_generation())
+                    .unwrap_or(usize::MAX);
         }
         Ok(())
     };
@@ -442,11 +440,8 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let (messages, disconnected) = receiver.drain();
     observe(messages, disconnected)?;
 
-    let mut gate = FramePollGate::default();
-    let accepted_frame_requests_while_pending =
-        (0..BURST_UPDATES).filter(|_| gate.try_schedule()).count();
-    gate.complete();
-    let accepted_frame_requests_after_completion = usize::from(gate.try_schedule());
+    let (accepted_frame_requests_while_pending, accepted_frame_requests_after_completion) =
+        frame_gate_evidence();
 
     let bounded_backpressure_delivery = mailbox_high_water_items <= mailbox_capacity
         && mailbox_capacity == capacity.get()
@@ -489,6 +484,13 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
         working_set_within_bound,
         gap_recovery,
     })
+}
+
+fn frame_gate_evidence() -> (usize, usize) {
+    let mut gate = FramePollGate::default();
+    let while_pending = (0..BURST_UPDATES).filter(|_| gate.try_schedule()).count();
+    gate.complete();
+    (while_pending, usize::from(gate.try_schedule()))
 }
 
 fn collect_gap_recovery_evidence() -> Result<DesktopGapRecoveryEvidence, Box<dyn Error>> {
@@ -598,8 +600,8 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
         MarketEvent::DepthSnapshot(snapshot) => snapshot,
         _ => unreachable!(),
     })?;
-    let current_order_book_selection_recovers = project_order_book(&es_selection, &es_book.publication())
-        .is_some_and(|frame| {
+    let current_order_book_selection_recovers =
+        project_order_book(&es_selection, &es_book.publication()).is_some_and(|frame| {
             frame.selection_generation == 2
                 && frame.session_generation == 8
                 && frame.source_watermark == 1
@@ -648,18 +650,26 @@ fn collect_history_gap_evidence() -> Result<HistoryGapRecoveryEvidence, Box<dyn 
 
 fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Error>> {
     let mut order_book = OrderBook::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
-    let MarketEvent::DepthSnapshot(snapshot) = depth_snapshot(10) else { unreachable!() };
+    let MarketEvent::DepthSnapshot(snapshot) = depth_snapshot(10) else {
+        unreachable!()
+    };
     order_book.install_snapshot(&snapshot)?;
-    let MarketEvent::DepthDelta(delta) = depth_delta(11) else { unreachable!() };
+    let MarketEvent::DepthDelta(delta) = depth_delta(11) else {
+        unreachable!()
+    };
     order_book.apply_delta(&delta)?;
-    let MarketEvent::DepthDelta(gap_delta) = depth_delta(13) else { unreachable!() };
+    let MarketEvent::DepthDelta(gap_delta) = depth_delta(13) else {
+        unreachable!()
+    };
     let depth_gap = order_book.apply_delta(&gap_delta);
     let recovering = order_book.publication();
     let depth_gap_clears_book = depth_gap.is_err()
         && recovering.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
         && recovering.bids.is_empty()
         && recovering.asks.is_empty();
-    let MarketEvent::DepthSnapshot(replacement) = depth_snapshot(13) else { unreachable!() };
+    let MarketEvent::DepthSnapshot(replacement) = depth_snapshot(13) else {
+        unreachable!()
+    };
     let depth_covering_snapshot_recovers = matches!(
         order_book.install_snapshot(&replacement)?,
         OrderBookApplyOutcome::Published(publication)
@@ -846,14 +856,13 @@ fn observe_endurance_messages(
         return;
     }
     for message in messages {
-        let MarketWorkerMessage::Update(publication) = message
-        else {
+        let MarketWorkerMessage::Update(publication) = message else {
             counters.stale_or_gapped_publications =
                 counters.stale_or_gapped_publications.saturating_add(1);
             continue;
         };
-        let received = usize::try_from(publication.generation.publication_generation())
-            .unwrap_or(usize::MAX);
+        let received =
+            usize::try_from(publication.generation.publication_generation()).unwrap_or(usize::MAX);
         if received != counters.last_delivered_generation.saturating_add(1) {
             counters.stale_or_gapped_publications =
                 counters.stale_or_gapped_publications.saturating_add(1);

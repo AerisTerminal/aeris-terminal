@@ -327,8 +327,6 @@ fn build_release_binaries(
         "--release",
         "-p",
         "axiusflow_desktop",
-        "-p",
-        "axiusflow_engine",
         "--all-features",
     ]);
     configure_release_build(
@@ -338,7 +336,7 @@ fn build_release_binaries(
         &public_key,
         &generation,
     );
-    run_child(applications, "release desktop/engine build")
+    run_child(applications, "release desktop build")
 }
 
 fn configure_release_build(
@@ -373,7 +371,6 @@ fn run_child(mut command: Command, description: &str) -> Result<(), String> {
 struct ReleaseBinaries {
     launcher: PathBuf,
     desktop: PathBuf,
-    engine: PathBuf,
 }
 
 fn release_binary_paths(repository: &Path) -> ReleaseBinaries {
@@ -396,7 +393,6 @@ fn release_binary_paths(repository: &Path) -> ReleaseBinaries {
             std::env::consts::EXE_SUFFIX
         )),
         desktop: release.join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX)),
-        engine: release.join(format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX)),
     }
 }
 
@@ -438,14 +434,11 @@ fn package_release(
     let setup_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
     let launcher_name = format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX);
     let desktop_name = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
-    let engine_name = format!("axiusflow_engine{}", std::env::consts::EXE_SUFFIX);
     let setup_path = release_directory.join(&setup_name);
     let launcher_path = release_directory.join(&launcher_name);
     let desktop_path = release_directory.join(&desktop_name);
-    let engine_path = release_directory.join(&engine_name);
     copy_release_binary(&binaries.launcher, &launcher_path)?;
     copy_release_binary(&binaries.desktop, &desktop_path)?;
-    copy_release_binary(&binaries.engine, &engine_path)?;
 
     let mut files = vec![
         release_file(
@@ -453,13 +446,6 @@ fn package_release(
             &desktop_path,
             &desktop_name,
             &format!("{release_public_root}/{desktop_name}"),
-            &config.base_url,
-        )?,
-        release_file(
-            ReleaseFileRole::Engine,
-            &engine_path,
-            &engine_name,
-            &format!("{release_public_root}/{engine_name}"),
             &config.base_url,
         )?,
         release_file(
@@ -503,7 +489,6 @@ fn package_release(
                 &launcher_path,
                 &manifest_path,
                 &desktop_path,
-                &engine_path,
                 &setup_path,
             )?;
         }
@@ -562,11 +547,6 @@ fn package_release(
             content_type: executable_content_type,
         },
         UploadObject {
-            local_path: engine_path,
-            object_key: format!("{release_object_root}/{engine_name}"),
-            content_type: executable_content_type,
-        },
-        UploadObject {
             local_path: manifest_path.clone(),
             object_key: format!("{release_object_root}/manifest.json"),
             content_type: "application/json",
@@ -608,7 +588,6 @@ fn compile_windows_installer(
     launcher_path: &Path,
     manifest_path: &Path,
     desktop_path: &Path,
-    engine_path: &Path,
     setup_path: &Path,
 ) -> Result<(), String> {
     let script = repository.join("tools/windows/axiusflow_setup.iss");
@@ -619,7 +598,6 @@ fn compile_windows_installer(
         launcher_path,
         manifest_path,
         desktop_path,
-        engine_path,
     ] {
         let metadata = fs::symlink_metadata(input)
             .map_err(|_| "Windows installer input is unavailable".to_string())?;
@@ -639,7 +617,6 @@ fn compile_windows_installer(
         .arg(format!("/DLauncherPath={}", launcher_path.display()))
         .arg(format!("/DManifestPath={}", manifest_path.display()))
         .arg(format!("/DDesktopPath={}", desktop_path.display()))
-        .arg(format!("/DEnginePath={}", engine_path.display()))
         .arg(format!("/DIconPath={}", icon.display()))
         .arg(format!("/DOutputDir={}", output_dir.display()))
         .arg(&script)
@@ -1046,11 +1023,9 @@ mod tests {
         let binaries = ReleaseBinaries {
             launcher: binaries_root.join(format!("launcher{suffix}")),
             desktop: binaries_root.join(format!("desktop{suffix}")),
-            engine: binaries_root.join(format!("engine{suffix}")),
         };
         fs::write(&binaries.launcher, b"launcher-fixture").expect("launcher fixture");
         fs::write(&binaries.desktop, b"desktop-fixture").expect("desktop fixture");
-        fs::write(&binaries.engine, b"engine-fixture").expect("engine fixture");
         let config = PublisherConfig {
             signing_key_file: root.join("unused"),
             release_identity: "0123456789abcdef0123456789abcdef01234567".to_string(),
@@ -1071,7 +1046,7 @@ mod tests {
         .expect("signed manifest");
         verify_release_manifest(&signed, &key.verifying_key(), &ReleasePolicy::native(0))
             .expect("signed release verifies");
-        assert_eq!(signed.manifest.files.len(), 3);
+        assert_eq!(signed.manifest.files.len(), 2);
         assert!(
             signed
                 .manifest

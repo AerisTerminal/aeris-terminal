@@ -1,15 +1,14 @@
 //! Publications.
 
 use super::{
-    ChartInterval, ChartState, EngineFaultCode, FeedConnectionState,
-    InstallProviderInstrument, MarketDemandError, MarketPublicationGeneration, MarketRuntimeEvent,
-    MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
-    ProviderConnectionState, ProviderState, PushedEventContext, ReplayRecoveryCommand,
-    ReplayStreamUpdate, SeriesLoadState, WorkerEndpoint, chart_streams, demand_error,
-    provider_display_name, replay_runtime_snapshot,
-    replay_runtime_tail_update, runtime_generation_from_snapshot, series_key,
-    runtime_order_book_frame, worker_identity,
+    ChartInterval, ChartState, EngineFaultCode, FeedConnectionState, InstallProviderInstrument,
+    MarketDemandError, MarketPublicationGeneration, MarketRuntimeEvent, MarketSeriesSnapshot,
+    MarketSeriesState, MarketSeriesUpdate, MarketService, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender, ProviderConnectionState,
+    ProviderState, PushedEventContext, ReplayRecoveryCommand, ReplayStreamUpdate, SeriesLoadState,
+    WorkerEndpoint, chart_streams, demand_error, provider_display_name, replay_runtime_snapshot,
+    replay_runtime_tail_update, runtime_generation_from_snapshot, runtime_order_book_frame,
+    series_key, worker_identity,
 };
 
 /// Applies one series-readiness transition, reporting a live handoff to the UI.
@@ -101,18 +100,12 @@ pub(super) fn apply_pushed_event(
         instrument,
     } = context;
     match event {
-        MarketRuntimeEvent::SeriesSnapshot(snapshot) => apply_realtime_snapshot(
-            &snapshot,
-            consumer_id,
-            active_generation,
-            messages,
-        ),
-        MarketRuntimeEvent::SeriesUpdate(update) => apply_realtime_update(
-            &update,
-            consumer_id,
-            active_generation,
-            messages,
-        ),
+        MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
+            apply_realtime_snapshot(&snapshot, consumer_id, active_generation, messages)
+        }
+        MarketRuntimeEvent::SeriesUpdate(update) => {
+            apply_realtime_update(&update, consumer_id, active_generation, messages)
+        }
         MarketRuntimeEvent::ProviderState(state) => {
             apply_provider_state(&state, instrument.provider.as_str(), realtime, messages)?;
             Ok(())
@@ -127,7 +120,8 @@ pub(super) fn apply_pushed_event(
             if snapshot.consumer_id.0.get() != consumer_id {
                 return Err("engine order-book consumer mismatched".to_string());
             }
-            let Some(frame) = runtime_order_book_frame(&snapshot, instrument, active_generation) else {
+            let Some(frame) = runtime_order_book_frame(&snapshot, instrument, active_generation)
+            else {
                 // Depth is an ancillary stream. A stale or malformed book
                 // image must never transition the price chart into a fatal
                 // state; retain the last valid Order Book frame and wait for the next
@@ -431,7 +425,9 @@ pub(super) fn send_publication(
             )
         }
         ReplayStreamUpdate::Delta(_) => {
-            return Err("runtime market worker produced an unexpected delta publication".to_string());
+            return Err(
+                "runtime market worker produced an unexpected delta publication".to_string(),
+            );
         }
     };
     let (subscription_id, worker_label) = worker_identity(provider);

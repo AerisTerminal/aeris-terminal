@@ -4,9 +4,9 @@ use super::{
     AssetClass, BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, DesktopMarketGeneration,
     InstallProviderInstrument, InstrumentId, InstrumentLifecycle, InstrumentPrecision,
     InstrumentRevision, MarketBar, MarketEventProvenance, MarketOrderBookSnapshot,
-    MarketSeriesSnapshot, MarketSeriesUpdate, Provenanced,
-    ReplayProvenance, ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation,
-    now_unix_nanos, provider_display_name,
+    MarketSeriesSnapshot, MarketSeriesUpdate, Provenanced, ReplayProvenance, ReplaySnapshot,
+    ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, now_unix_nanos,
+    provider_display_name,
 };
 use axiusflow_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
@@ -28,7 +28,7 @@ pub(crate) fn replay_runtime_snapshot(
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     };
-    let definition = replay_bar_definition(&series)?;
+    let definition = replay_bar_definition(series)?;
     let received = now_unix_nanos();
     let bars = snapshot
         .bars
@@ -328,12 +328,13 @@ pub(super) fn replay_bar_definition(series: &BarSeriesKey) -> Result<BarDefiniti
                 .ok_or_else(|| "engine calendar-week cadence overflowed".to_string())?;
             (format!("calendar-weeks:{weeks}"), seconds, None, None)
         }
-        BarPeriod::Month { months } => {
-            (format!("calendar-months:{months}"), 0, None, Some(months))
-        }
+        BarPeriod::Month { months } => (format!("calendar-months:{months}"), 0, None, Some(months)),
     };
     Ok(BarDefinition {
-        definition_id: format!("{}:{}:{cadence_id}", series.provider_id, series.instrument_id),
+        definition_id: format!(
+            "{}:{}:{cadence_id}",
+            series.provider_id, series.instrument_id
+        ),
         version: series.definition_version,
         interval_seconds,
         trades_per_bar,

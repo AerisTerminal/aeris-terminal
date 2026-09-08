@@ -1,6 +1,6 @@
 //! Immutable identity shared by desktop and engine binaries from one release.
 
-/// Exact identity embedded by release packaging into one desktop/engine pair.
+/// Exact identity embedded by release packaging into one desktop release.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseIdentity {
     pub release_identity: String,

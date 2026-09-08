@@ -485,10 +485,7 @@ impl MarketEngine {
         let previous_streams = previous
             .streams
             .ok_or(EngineError::ConsumerHasNoSeries(consumer_id))?;
-        if !self
-            .demands
-            .set_streams(consumer_id, generation, streams)?
-        {
+        if !self.demands.set_streams(consumer_id, generation, streams)? {
             return Ok(false);
         }
         if previous.resource_class.retains_subscription() {
@@ -1579,7 +1576,9 @@ mod tests {
             .set_series_demand_with_streams(id(1), generation(7), &btc, StreamRequirements::BARS)
             .expect("bars-only chart demand installs");
         assert_eq!(
-            engine.subscription_status(&btc).map(|status| status.streams),
+            engine
+                .subscription_status(&btc)
+                .map(|status| status.streams),
             Some(StreamRequirements::BARS)
         );
 
@@ -1590,7 +1589,9 @@ mod tests {
                 .expect("opening order book extends current demand")
         );
         assert_eq!(
-            engine.subscription_status(&btc).map(|status| status.streams),
+            engine
+                .subscription_status(&btc)
+                .map(|status| status.streams),
             Some(with_depth)
         );
         assert!(
@@ -1608,11 +1609,15 @@ mod tests {
                 .expect("closing order book removes only depth")
         );
         assert_eq!(
-            engine.subscription_status(&btc).map(|status| status.streams),
+            engine
+                .subscription_status(&btc)
+                .map(|status| status.streams),
             Some(StreamRequirements::BARS)
         );
         assert_eq!(
-            engine.current_demand(id(1)).and_then(|demand| demand.generation),
+            engine
+                .current_demand(id(1))
+                .and_then(|demand| demand.generation),
             Some(generation(7))
         );
     }

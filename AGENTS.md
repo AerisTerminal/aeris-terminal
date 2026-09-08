@@ -2,9 +2,10 @@
 
 Instructions for coding agents working in the Axiusflow native repository.
 
-Axiusflow is a local-first Rust/GPUI trading terminal. The desktop is a presentation/client process;
-the resident engine owns provider sessions, canonical market state, history, account runtime, and
-durable lifecycle behavior.
+Axiusflow is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
+In-process `market_runtime` and `account_runtime` own provider sessions, canonical market/account state,
+and bounded background work; GPUI owns presentation scheduling only. The retired resident IPC engine
+must not return.
 
 ## Non-negotiable core principles
 
@@ -52,22 +53,24 @@ violations and missing verification explicitly, and never describe them as satis
 3. Reuse existing code, `std`, platform facilities, and pinned dependencies before adding anything.
 4. Add deterministic regression coverage for concrete bugs when practical.
 5. Run focused checks while iterating, then broader gates before delivery or release.
-6. For behavior that depends on IPC, persistence, provider lifecycle, rendering, updates, or the
-   installed app, exercise the real path; compilation alone is not proof.
+6. For behavior that depends on persistence, provider lifecycle, rendering, updates, or the installed
+   app, exercise the real path; compilation alone is not proof.
 
 ## Architecture invariants
 
-- `MarketEngine` is the single market-demand owner. Provider sessions are created and owned only by
-  `apps/engine`; never create a session/runtime per chart or UI surface.
+- `MarketEngine` is the single market-demand owner inside `market_runtime`. Provider sessions are
+  created and owned only by that in-process runtime; never create a session/runtime per chart or UI surface.
 - Symbol, timeframe, viewport, tab, and layout changes must not tear down a healthy provider session.
-- The engine is the single owner that merges history and live state. Preserve one canonical forming
-  candle, contiguous completed history, exact generation fencing, and explicit recovery.
+- `market_runtime` is the single owner that merges on-demand history and live state. Preserve one
+  canonical forming candle, contiguous completed history, exact generation fencing, and explicit recovery.
 - Retired clients, generations, selections, sessions, and publications must never mutate current state.
 - Production queues, caches, retries, and background work remain bounded with explicit overflow and
   cancellation behavior.
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
   or canonical candle state.
-- `local_history` is the engine-facing storage boundary. IPC remains bounded and versioned.
+- Market history is loaded on demand and bounded; do not restore market-history persistence or a
+  second desktop-owned market-state model.
+- Do not restore `apps/engine`, `local_engine_client`, resident engine autostart, or market IPC.
 - UI-thread code performs no blocking network, disk, process, or shutdown work. Background workers do
   not mutate GPUI state directly.
 - Workspace-wide `unsafe_code` remains forbidden.
@@ -102,12 +105,12 @@ only the `nucleuscharts_*` revisions required by that update; do not update GPUI
 Authentication is an end-to-end system shared with:
 `C:\Users\devraj\Downloads\Devlopment\axiusflow-website`.
 
-- Native ownership: desktop account presentation/IPC, engine PKCE and loopback callback, token
-  exchange/verification, native vault material, account linking, lease validation, and sanitized IPC.
+- Native ownership: desktop account presentation plus in-process `account_runtime` PKCE, loopback
+  callback, token exchange/verification, native vault material, account linking, and lease validation.
 - Website ownership: `workers/auth` Better Auth/OIDC, browser sign-in/account pages, D1 account and
   billing state, OAuth/email entry points, native link/lease endpoints, checkout/portal, and webhooks.
 - Any auth/profile/subscription/entitlement change must inspect both repositories and verify the full
-  browser -> callback -> engine -> vault -> IPC -> desktop path when relevant.
+  browser -> callback -> account runtime -> vault -> desktop path when relevant.
 - Browser success alone is not native authentication success.
 - Keep OAuth tokens, provider cookies, refresh material, and credentials out of desktop UI and logs.
 
@@ -155,8 +158,8 @@ Only publish/install when the maintainer asks for a release or end-to-end instal
   upload, or public-channel verification steps.
 - After publishing, verify the live stable channel and installer hash before installing.
 - For installed-app validation, verify the active lifecycle pointer, signed manifest, installed binary
-  hashes, stable/versioned launcher byte equality, and that the running desktop/engine paths point at the
-  intended immutable generation.
+  hashes, stable/versioned launcher byte equality, and that the running desktop path points at the intended
+  immutable generation with no resident engine process or engine autostart registration.
 - Never claim live provider, account, or visual behavior was tested unless that exact path was exercised.
 
 ## Rust and documentation conventions

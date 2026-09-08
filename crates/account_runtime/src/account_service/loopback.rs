@@ -41,7 +41,8 @@ impl LoopbackListener {
         Ok(Self { listener, port })
     }
 
-    /// Returns the OS-assigned loopback port for the redirect URI.
+    /// Returns the OS-assigned loopback port for test assertions.
+    #[cfg(test)]
     #[must_use]
     pub const fn port(&self) -> u16 {
         self.port

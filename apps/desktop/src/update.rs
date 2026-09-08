@@ -34,7 +34,7 @@ pub enum UpdateState {
     Idle,
     Checking,
     Current,
-    Available { latest_generation: u64 },
+    Available { latest_version: String },
     Error(String),
     PreparingRestart,
 }
@@ -66,6 +66,8 @@ struct LauncherUpdateCheck {
     schema_version: u32,
     current_generation: u64,
     latest_generation: u64,
+    current_version: String,
+    latest_version: String,
     update_available: bool,
 }
 
@@ -167,7 +169,7 @@ impl DesktopUpdater {
                 self.presentation.system_version = system_version;
                 self.presentation.state = match result {
                     Ok(report) if report.update_available => UpdateState::Available {
-                        latest_generation: report.latest_generation,
+                        latest_version: report.latest_version,
                     },
                     Ok(_) => UpdateState::Current,
                     Err(error) => UpdateState::Error(error),
@@ -366,9 +368,12 @@ fn run_launcher_check() -> Result<LauncherUpdateCheck, String> {
 
 fn validate_launcher_report(report: LauncherUpdateCheck) -> Result<LauncherUpdateCheck, String> {
     let current = axiusflow_platform_runtime::current_release_identity().install_generation;
-    if report.schema_version != 1
+    if report.schema_version != 2
         || report.current_generation != current
         || report.latest_generation < report.current_generation
+        || report.current_version != env!("CARGO_PKG_VERSION")
+        || report.latest_version.is_empty()
+        || report.latest_version.len() > 64
         || report.update_available != (report.latest_generation > report.current_generation)
     {
         return Err("update status was invalid".to_string());
@@ -613,9 +618,11 @@ mod tests {
     fn launcher_report_requires_generation_consistency() {
         let current = axiusflow_platform_runtime::current_release_identity().install_generation;
         let valid = LauncherUpdateCheck {
-            schema_version: 1,
+            schema_version: 2,
             current_generation: current,
             latest_generation: current.saturating_add(1),
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: "0.3.0".to_string(),
             update_available: true,
         };
         assert!(validate_launcher_report(valid.clone()).is_ok());
@@ -629,9 +636,11 @@ mod tests {
 
         assert!(
             validate_launcher_report(LauncherUpdateCheck {
-                schema_version: 1,
+                schema_version: 2,
                 current_generation: current,
                 latest_generation: current,
+                current_version: env!("CARGO_PKG_VERSION").to_string(),
+                latest_version: env!("CARGO_PKG_VERSION").to_string(),
                 update_available: false,
             })
             .is_ok()
@@ -640,9 +649,11 @@ mod tests {
         if current > 0 {
             assert!(
                 validate_launcher_report(LauncherUpdateCheck {
-                    schema_version: 1,
+                    schema_version: 2,
                     current_generation: current,
                     latest_generation: current - 1,
+                    current_version: env!("CARGO_PKG_VERSION").to_string(),
+                    latest_version: env!("CARGO_PKG_VERSION").to_string(),
                     update_available: false,
                 })
                 .is_err()

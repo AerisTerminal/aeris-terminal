@@ -1067,8 +1067,19 @@ fn account_menu_row(
         AccountMenuClick::Reopen => HugeIcon::ArrowRightDouble,
         AccountMenuClick::Cancel => HugeIcon::CancelIcon01,
     };
+    let icon_color = gpui_color(if spec.destructive {
+        if spec.enabled {
+            theme.colors.danger
+        } else {
+            theme.colors.danger.with_alpha(0.55)
+        }
+    } else if spec.enabled {
+        theme.colors.icon
+    } else {
+        theme.colors.text_muted
+    });
     MenuRow::compact(spec.id, spec.label, theme)
-        .leading(header_icon(icon).with_size(px(16.0)))
+        .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .disabled(!spec.enabled)
         .destructive(spec.destructive)
         .flush_in_panel(spec.edges.first, spec.edges.last)

@@ -285,11 +285,38 @@ mod tests {
         assert_eq!(frame.selection_generation, 1);
         assert_eq!(frame.source_watermark, 10);
         assert_eq!(frame.rows.len(), 2);
-        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.price_text.as_str()), Some("200.25"));
-        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.quantity_text.as_str()), Some("12"));
-        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.relative_size_bps), Some(10_000));
-        assert_eq!(frame.rows[0].ask.as_ref().map(|level| level.relative_size_bps), Some(2_500));
-        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.traded_volume), Some(4));
+        assert_eq!(
+            frame.rows[0]
+                .bid
+                .as_ref()
+                .map(|level| level.price_text.as_str()),
+            Some("200.25")
+        );
+        assert_eq!(
+            frame.rows[0]
+                .bid
+                .as_ref()
+                .map(|level| level.quantity_text.as_str()),
+            Some("12")
+        );
+        assert_eq!(
+            frame.rows[0]
+                .bid
+                .as_ref()
+                .map(|level| level.relative_size_bps),
+            Some(10_000)
+        );
+        assert_eq!(
+            frame.rows[0]
+                .ask
+                .as_ref()
+                .map(|level| level.relative_size_bps),
+            Some(2_500)
+        );
+        assert_eq!(
+            frame.rows[0].bid.as_ref().map(|level| level.traded_volume),
+            Some(4)
+        );
         assert!(frame.rows[1].ask.is_none());
     }
 

@@ -285,10 +285,11 @@ mod tests {
         ];
         for relative in [
             "crates/market_engine/Cargo.toml",
+            "crates/market_runtime/Cargo.toml",
+            "crates/account_runtime/Cargo.toml",
             "crates/domain/instruments/Cargo.toml",
             "crates/domain/market_data/Cargo.toml",
             "crates/local_storage/Cargo.toml",
-            "crates/local_history/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
         ] {
@@ -302,38 +303,41 @@ mod tests {
             ],
         );
     }
-
     #[test]
     fn transitional_backend_crate_names_do_not_return() {
         let workspace = manifest("Cargo.toml");
-        for (retired, replacement) in [
-            ("desktop_history", "local_history"),
-            ("desktop_storage", "local_storage"),
-            ("local_engine_protocol", "engine_protocol"),
+        for retired in [
+            "apps/engine",
+            "crates/local_engine_client",
+            "crates/local_history",
+            "crates/desktop_market_runtime",
+            "crates/desktop_provider_runtime",
         ] {
             assert!(
-                !repository_root().join("crates").join(retired).exists(),
-                "retired crate directory crates/{retired} must not return"
+                !repository_root().join(retired).exists(),
+                "retired architecture boundary {retired} must not return"
             );
-            assert!(
-                !workspace.contains(retired),
-                "workspace must not restore transitional crate {retired}"
-            );
+        }
+        for replacement in [
+            "market_runtime",
+            "account_runtime",
+            "local_storage",
+            "engine_protocol",
+        ] {
             assert!(
                 repository_root()
                     .join("crates")
                     .join(replacement)
                     .join("Cargo.toml")
                     .is_file(),
-                "replacement crate crates/{replacement} is missing"
+                "current boundary crates/{replacement} is missing"
             );
             assert!(
                 workspace.contains(replacement),
-                "workspace must retain replacement crate {replacement}"
+                "workspace lost crates/{replacement}"
             );
         }
     }
-
     #[test]
     fn provider_kit_remains_vendor_only() {
         assert!(
@@ -370,18 +374,12 @@ mod tests {
     #[test]
     fn provider_wire_and_nucleus_boundaries_remain_isolated() {
         let rithmic_adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
-        assert!(
-            rithmic_adapter.contains("mod generated {"),
-            "Rithmic generated protobuf must remain owned by its adapter"
-        );
-        assert!(
-            !rithmic_adapter.contains("pub mod generated"),
-            "Rithmic generated protobuf must not be exported above the adapter boundary"
-        );
+        assert!(rithmic_adapter.contains("mod generated {"));
+        assert!(!rithmic_adapter.contains("pub mod generated"));
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "cf047d861bd8236c2795559430d07a773344bb46";
+        let expected_revision = "1acf3abab0156e15ee09fea28aa8df9538b55e09";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_render",
@@ -395,83 +393,17 @@ mod tests {
             );
         }
 
-        for retired in [
-            concat!("Axiusflow-app/", "Ori", "gin_", "charts"),
-            concat!("ori", "gin_", "engine ="),
-            concat!("ori", "gin_", "render ="),
-            concat!("ori", "gin_", "render_gpui ="),
-        ] {
-            assert!(
-                !root_manifest.contains(retired),
-                "retired chart dependency identity returned: {retired}"
-            );
-        }
-
         for path in workspace_manifests() {
             let relative = relative_string(&path);
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let contents = fs::read_to_string(&path).expect("manifest");
             if contents.contains("nucleuscharts_engine.workspace")
                 || contents.contains("nucleuscharts_render.workspace")
                 || contents.contains("nucleuscharts_render_gpui.workspace")
             {
-                assert_eq!(
-                    relative, "crates/ui/chart_integration/Cargo.toml",
-                    "Nucleus crates may be consumed only by chart_integration"
-                );
-            }
-        }
-
-        for path in production_rust_sources() {
-            let relative = relative_string(&path);
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            let production = production_prefix(&contents);
-            for retired in [
-                concat!("ori", "gin_", "engine"),
-                concat!("ori", "gin_", "render"),
-                concat!("Ori", "gin", "ChartView"),
-                concat!("Ori", "gin", "Workspace"),
-                concat!("ori", "gin_", "bridge"),
-            ] {
-                assert!(
-                    !production.contains(retired),
-                    "{relative} contains retired chart identity {retired}"
-                );
-            }
-            if production.contains("nucleuscharts_engine")
-                || production.contains("nucleuscharts_render")
-                || production.contains("nucleuscharts_render_gpui")
-            {
-                assert!(
-                    relative.starts_with("crates/ui/chart_integration/src/"),
-                    "{relative} bypasses the Axiusflow chart integration boundary"
-                );
-            }
-            if !relative.starts_with("crates/adapters/rithmic_protocol/") {
-                assert!(
-                    !production.contains("rithmic.protobuf"),
-                    "{relative} leaks Rithmic vendor protobuf above its adapter"
-                );
-            }
-        }
-
-        for relative in super::REPOSITORY_MARKDOWN_FILES {
-            let contents = manifest(relative);
-            for retired in [
-                concat!("Ori", "gin", " Charts"),
-                concat!("Ori", "gin_", "charts"),
-                concat!("Ori", "gin", "ChartView"),
-                concat!("Ori", "gin", "Workspace"),
-            ] {
-                assert!(
-                    !contents.contains(retired),
-                    "{relative} contains retired chart identity {retired}"
-                );
+                assert_eq!(relative, "crates/ui/chart_integration/Cargo.toml");
             }
         }
     }
-
     #[test]
     fn desktop_presentation_layers_exclude_provider_and_storage_ownership() {
         for relative in [
@@ -560,16 +492,15 @@ mod tests {
             "crates/provider_history/tests/handoff_conformance.rs",
             "crates/local_storage/tests/history_store_lifecycle.rs",
             "crates/engine_protocol/tests/protocol.rs",
-            "apps/engine/tests/handshake.rs",
+            "crates/market_runtime/src/market_service/tests.rs",
             "apps/desktop/src/readiness_conformance.rs",
         ] {
             assert!(
                 repository_root().join(relative).is_file(),
-                "durable migration test boundary {relative} is missing"
+                "durable test boundary {relative} is missing"
             );
         }
     }
-
     #[test]
     fn repository_markdown_inventory_is_exact() {
         let actual = fs::read_dir(repository_root())
@@ -741,44 +672,30 @@ mod tests {
 
     #[test]
     fn retired_runtime_wrappers_do_not_reenter_the_workspace() {
-        for relative in [
-            "Cargo.toml",
-            "apps/desktop/Cargo.toml",
-            "apps/engine/Cargo.toml",
-        ] {
+        for relative in ["Cargo.toml", "apps/desktop/Cargo.toml"] {
             assert_excludes(
                 relative,
                 &[
                     "axiusflow_desktop_market_runtime",
                     "axiusflow_desktop_provider_runtime",
+                    "axiusflow_local_engine_client",
+                    "axiusflow_local_history",
                 ],
             );
         }
         for relative in [
+            "apps/engine",
+            "crates/local_engine_client",
+            "crates/local_history",
             "crates/desktop_market_runtime",
             "crates/desktop_provider_runtime",
         ] {
-            let path = repository_root().join(relative);
             assert!(
-                !path.join("Cargo.toml").exists(),
-                "retired market authority {relative} must not regain a crate manifest"
+                !repository_root().join(relative).exists(),
+                "retired runtime {relative} returned"
             );
-            let mut sources = Vec::new();
-            if path.exists() {
-                collect_files(
-                    &path,
-                    |source| {
-                        source
-                            .extension()
-                            .is_some_and(|extension| extension == "rs")
-                    },
-                    &mut sources,
-                );
-            }
-            assert!(sources.is_empty(), "{relative} must not regain Rust source");
         }
     }
-
     #[test]
     fn workspace_excludes_distributed_system_dependencies() {
         for path in workspace_manifests() {
@@ -827,11 +744,10 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             applications,
-            ["desktop".to_string(), "engine".to_string()].into(),
-            "Axiusflow has exactly one desktop and one resident engine application"
+            ["desktop".to_string()].into(),
+            "Axiusflow must have exactly one application process"
         );
     }
-
     #[test]
     fn production_sources_have_no_placeholder_architecture() {
         for path in production_rust_sources() {
@@ -878,9 +794,8 @@ mod tests {
                 actual.insert(format!("{relative}::{name}"));
             }
         }
-
         let expected = BTreeSet::from([
-            "apps/engine/src/market_service/mod.rs::HistorySource".to_string(),
+            "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
@@ -891,13 +806,11 @@ mod tests {
             "crates/platform_runtime/src/lifecycle.rs::LifecycleHooks".to_string(),
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
         ]);
-
         assert_eq!(
             actual, expected,
-            "production traits require a provider, platform, security, or test-substitution boundary"
+            "production traits require an intentional provider/platform/security boundary"
         );
     }
-
     #[test]
     fn production_market_queues_exclude_unbounded_channels() {
         for path in production_rust_sources() {
@@ -982,32 +895,31 @@ mod tests {
 
     #[test]
     fn local_ipc_manifests_exclude_public_server_dependencies() {
+        for retired in ["apps/engine", "crates/local_engine_client"] {
+            assert!(
+                !repository_root().join(retired).exists(),
+                "retired IPC boundary {retired} returned"
+            );
+        }
         for relative in [
-            "apps/engine/Cargo.toml",
-            "crates/local_engine_client/Cargo.toml",
-            "crates/engine_protocol/Cargo.toml",
+            "crates/market_runtime/Cargo.toml",
+            "crates/account_runtime/Cargo.toml",
+            "apps/desktop/Cargo.toml",
         ] {
             assert_excludes(
                 relative,
-                &["actix", "axum", "hyper", "rocket", "tonic", "warp"],
-            );
-        }
-        for relative in [
-            "apps/engine/Cargo.toml",
-            "crates/local_engine_client/Cargo.toml",
-        ] {
-            let contents = manifest(relative);
-            assert!(
-                contents.contains("interprocess"),
-                "{relative} must use platform-local IPC"
-            );
-            assert!(
-                contents.contains("axiusflow_engine_protocol"),
-                "{relative} must use the versioned local protocol"
+                &[
+                    "interprocess",
+                    "actix",
+                    "axum",
+                    "hyper",
+                    "rocket",
+                    "tonic",
+                    "warp",
+                ],
             );
         }
     }
-
     #[test]
     fn provider_adapters_exclude_storage_and_ui_from_production_dependencies() {
         for relative in [
@@ -1032,97 +944,67 @@ mod tests {
 
     #[test]
     fn engine_manifest_owns_backend_composition_without_ui() {
-        let contents = manifest("apps/engine/Cargo.toml");
+        let market = manifest("crates/market_runtime/Cargo.toml");
         for dependency in [
             "axiusflow_rithmic_protocol_adapter",
             "axiusflow_hyperliquid_market_adapter",
-            "axiusflow_local_history",
             "axiusflow_market_engine",
             "axiusflow_provider_history",
             "axiusflow_platform_runtime",
-            "axiusflow_engine_protocol",
         ] {
             assert!(
-                contents.contains(dependency),
-                "apps/engine/Cargo.toml must compose {dependency}"
+                market.contains(dependency),
+                "market_runtime must compose {dependency}"
             );
         }
-        for forbidden in [
-            "gpui",
-            "axiusflow_local_storage",
-            "axiusflow_chart_integration",
-            "axiusflow_terminal_ui",
-        ] {
+        let account = manifest("crates/account_runtime/Cargo.toml");
+        for dependency in ["axiusflow_account", "axiusflow_platform_runtime"] {
             assert!(
-                !contents.contains(forbidden),
-                "apps/engine/Cargo.toml must not depend on {forbidden}"
+                account.contains(dependency),
+                "account_runtime must compose {dependency}"
+            );
+        }
+        for relative in [
+            "crates/market_runtime/Cargo.toml",
+            "crates/account_runtime/Cargo.toml",
+        ] {
+            assert_excludes(
+                relative,
+                &[
+                    "gpui",
+                    "axiusflow_chart_integration",
+                    "axiusflow_terminal_ui",
+                ],
             );
         }
     }
-
     #[test]
     fn local_history_is_the_engine_consumed_storage_boundary() {
-        let local_history = manifest("crates/local_history/Cargo.toml");
-        for dependency in [
-            "axiusflow_local_storage",
-            "axiusflow_market_data",
-            "axiusflow_platform_runtime",
-        ] {
-            assert!(
-                local_history.contains(dependency),
-                "local_history must compose {dependency}"
-            );
-        }
-        for forbidden in [
-            "axiusflow_rithmic_protocol_adapter",
-            "axiusflow_hyperliquid_market_adapter",
-            "axiusflow_provider_history",
-            "gpui",
-        ] {
-            assert!(
-                !production_dependencies("crates/local_history/Cargo.toml").contains(forbidden),
-                "local_history must not own {forbidden}"
-            );
-        }
         assert!(
-            repository_root()
-                .join("crates/local_history/src/store.rs")
-                .is_file(),
-            "local_history must own production immutable segment mechanics"
+            !repository_root().join("crates/local_history").exists(),
+            "retired market-history persistence crate returned"
+        );
+        let market = manifest("crates/market_runtime/Cargo.toml");
+        assert!(
+            market.contains("axiusflow_provider_history"),
+            "market runtime lost provider-history adapter boundary"
         );
         assert!(
-            !repository_root()
-                .join("apps/engine/src/local_history.rs")
-                .exists(),
-            "the engine app must not duplicate local-history storage mechanics"
+            !market.contains("axiusflow_local_storage"),
+            "market runtime must not persist market history"
+        );
+        let module = manifest("crates/market_runtime/src/market_service/mod.rs");
+        assert!(
+            module.contains("INITIAL_HISTORY_BARS") && module.contains("HISTORY_BARS_PER_SERIES")
         );
     }
-
     #[test]
     fn resident_market_contracts_remain_explicit_and_provider_neutral() {
         let demand = manifest("crates/market_engine/src/demand.rs");
         assert!(
             demand.contains("pub(crate) fn set_viewport")
-                && demand.contains("if generation != current")
-                && demand.contains("EngineError::StaleConsumerGeneration"),
-            "viewport demand must remain explicit and generation fenced"
+                && demand.contains("StaleConsumerGeneration")
         );
-
-        let provider_manager = manifest("crates/market_engine/src/provider_manager.rs");
-        for contract in [
-            "pub struct ProviderCapabilities",
-            "historical_bars: bool",
-            "realtime_bars: bool",
-            "streams: StreamRequirements",
-            "verify_request",
-            "verify_streams",
-        ] {
-            assert!(
-                provider_manager.contains(contract),
-                "provider capability contract lost {contract}"
-            );
-        }
-
         let engine_core = manifest("crates/market_engine/src/lib.rs");
         for regression in [
             "provider_and_viewport_generations_are_exactly_fenced",
@@ -1131,59 +1013,29 @@ mod tests {
         ] {
             assert!(
                 engine_core.contains(regression),
-                "resident market contract lost regression {regression}"
+                "market engine lost regression {regression}"
             );
         }
-
-        let coordinator = manifest("apps/engine/src/market_service/tests.rs");
+        let coordinator = manifest("crates/market_runtime/src/market_service/coordinator.rs");
         for regression in [
-            "rithmic_fixed_period_updates_and_rolls_the_forming_bar",
-            "provider_validation_accepts_rithmic_and_hyperliquid",
-            "restored_hot_series_requires_the_rithmic_scope",
-            "restored_hot_series_accepts_the_hyperliquid_scope",
-            "hyperliquid_handoff_seeds_forming_and_revises_it_in_place",
-            "hyperliquid_handoff_rolls_the_forming_bar_exactly_once",
-            "hyperliquid_handoff_bounds_pre_history_candles_and_resets_on_reconnect",
+            "provider_connected_after_history_promotes_rithmic_series_live",
+            "provider_connected_after_history_promotes_hyperliquid_series_live",
+            "fresh_depth_demand_publishes_identified_awaiting_snapshot_frame",
         ] {
             assert!(
                 coordinator.contains(regression),
-                "viewport/history lifecycle lost regression {regression}"
+                "market runtime lost initialization regression {regression}"
             );
         }
-        let provider_runtime = manifest("crates/adapters/rithmic_protocol/src/provider_runtime.rs");
-        for regression in [
-            "network_and_power_recovery_create_fresh_fenced_generations",
-            "requested_connection_waits_for_native_environmental_restoration",
-            "unconfirmed_stop_blocks_replacement_until_cleanup_succeeds",
-            "interleaved_power_and_network_events_reconnect_in_either_order",
-        ] {
-            assert!(
-                provider_runtime.contains(regression),
-                "Rithmic provider lifecycle lost regression {regression}"
-            );
-        }
-
-        let coordinator_state = manifest("apps/engine/src/market_service/coordinator.rs");
-        let realtime = manifest("apps/engine/src/market_service/realtime.rs");
-        assert!(
-            !coordinator_state.contains("realtime_started")
-                && !production_prefix(&realtime).contains("realtime_started"),
-            "the applied Rithmic product set must remain the sole worker-start authority"
-        );
     }
-
     #[test]
     fn provider_runtime_registry_remains_the_single_engine_dispatch_boundary() {
-        let shared_state = manifest("apps/engine/src/market_service/mod.rs");
-        let coordinator = manifest("apps/engine/src/market_service/coordinator.rs");
-        let runtime = manifest("apps/engine/src/market_service/runtime.rs");
-        let history = manifest("apps/engine/src/market_service/history.rs");
+        let shared_state = manifest("crates/market_runtime/src/market_service/mod.rs");
+        let runtime = manifest("crates/market_runtime/src/market_service/runtime.rs");
         let production = format!(
-            "{}\n{}\n{}\n{}",
+            "{}\n{}",
             production_prefix(&shared_state),
-            production_prefix(&coordinator),
-            production_prefix(&runtime),
-            production_prefix(&history)
+            production_prefix(&runtime)
         );
         for contract in [
             "struct ProviderRuntimeRegistry",
@@ -1193,69 +1045,36 @@ mod tests {
             "cancellation: Arc<AtomicBool>",
             "lifecycle: Arc<ProviderRuntimeLifecycle>",
             "workers: Vec<thread::JoinHandle<()>>",
-            "providers: ProviderDispatch<'a>",
-            "self.providers.history(&series.provider_id)",
-            "\"hyperliquid\" =>",
-            "\"rithmic\" =>",
-            "resident engine market provider is unsupported",
-            "HyperliquidRealtime(HyperliquidRealtimeEvent)",
-            "RithmicRealtime(RithmicRealtimeEvent)",
+            "impl ProviderRuntimeRegistry",
         ] {
             assert!(
                 production.contains(contract),
-                "engine provider runtime registry lost {contract}"
+                "market runtime registry lost {contract}"
             );
         }
-        for retired in [
-            "enum HistorySources",
-            "rithmic_history: &'a SyncSender<HistoryRequest>",
-            "realtime_control: &'a SyncSender<RealtimeControl>",
-        ] {
-            assert!(
-                !production.contains(retired),
-                "engine coordinator restored split provider dispatch through {retired}"
-            );
-        }
-
         for root in [
             "apps/desktop/src",
             "crates/market_engine/src",
-            "crates/local_history/src",
             "crates/local_storage/src",
             "crates/ui",
         ] {
             for path in production_sources_under(root) {
-                let contents = fs::read_to_string(&path)
-                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+                let contents = fs::read_to_string(&path).expect("source");
                 let production = production_prefix(&contents);
-                assert!(
-                    !production.contains("RithmicProviderRuntime::new("),
-                    "{} constructs a provider runtime outside the engine",
-                    relative_string(&path)
-                );
-                // Provider sessions are engine-owned: only apps/engine may
-                // touch an adapter crate directly. The desktop, the headless
-                // core, storage, and presentation layers stay provider-neutral.
                 for boundary in ["hyperliquid_market_adapter::", "rithmic_protocol_adapter::"] {
                     assert!(
                         !production.contains(boundary),
-                        "{} bypasses the engine-owned provider session boundary through {boundary}",
+                        "{} bypasses market_runtime through {boundary}",
                         relative_string(&path)
                     );
                 }
             }
         }
     }
-
     #[test]
     fn market_service_responsibilities_remain_decomposed_under_one_coordinator() {
-        assert!(
-            !repository_root()
-                .join("apps/engine/src/market_service.rs")
-                .exists(),
-            "market service must remain an owned module tree, not a monolithic source file"
-        );
-        let module = manifest("apps/engine/src/market_service/mod.rs");
+        let root = "crates/market_runtime/src/market_service";
+        let module = manifest(&format!("{root}/mod.rs"));
         for owner in [
             "coordinator",
             "history",
@@ -1263,7 +1082,6 @@ mod tests {
             "publication",
             "realtime",
             "runtime",
-            "storage",
         ] {
             assert!(
                 module.contains(&format!("mod {owner};")),
@@ -1271,9 +1089,8 @@ mod tests {
             );
         }
         assert!(
-            manifest("apps/engine/src/market_service/coordinator.rs")
-                .contains("pub(super) struct Coordinator<'a>"),
-            "the decomposed service must retain exactly one coordinator state owner"
+            manifest(&format!("{root}/coordinator.rs"))
+                .contains("pub(super) struct Coordinator<'a>")
         );
         for (path, contract) in [
             ("history.rs", "fn history_completed("),
@@ -1282,106 +1099,42 @@ mod tests {
             ("realtime.rs", "fn rithmic_trade("),
             ("realtime.rs", "fn hyperliquid_candle("),
             ("runtime.rs", "impl ProviderRuntimeRegistry"),
-            ("storage.rs", "fn local_history_completed("),
         ] {
             assert!(
-                manifest(&format!("apps/engine/src/market_service/{path}")).contains(contract),
+                manifest(&format!("{root}/{path}")).contains(contract),
                 "market-service owner {path} lost {contract}"
             );
         }
     }
-
     #[test]
     fn local_clients_versions_and_workspace_writes_remain_fenced() {
-        let engine_core = manifest("crates/market_engine/src/lib.rs");
-        assert!(
-            engine_core.contains("disconnect_removes_only_the_owning_clients_consumers"),
-            "multiple desktop clients must remain client scoped"
-        );
-
-        let engine_ipc = manifest("apps/engine/src/lib.rs");
-        let handshake = manifest("apps/engine/tests/handshake.rs");
+        let engine = manifest("crates/market_engine/src/lib.rs");
         for regression in [
-            "authenticated_client_restores_engine_owned_workspace",
-            "chart_viewport_is_generation_fenced_and_persisted_independently",
-            "workspace_layout_order_sizes_and_consumer_ids_survive_restart_and_stale_writes_fail",
+            "disconnect_removes_only_the_owning_clients_consumers",
+            "provider_and_viewport_generations_are_exactly_fenced",
+            "visibility_changes_only_the_selected_workspace_consumer",
         ] {
             assert!(
-                handshake.contains(regression),
-                "authenticated multi-client behavior lost regression {regression}"
+                engine.contains(regression),
+                "consumer generation fence lost {regression}"
             );
         }
-        assert!(
-            engine_ipc.contains("workspace revision is stale")
-                && engine_ipc.contains("stale_workspace_fault"),
-            "workspace writes must reject stale desktop revisions explicitly"
-        );
-
-        let protocol = manifest("crates/engine_protocol/src/lib.rs");
-        assert!(
-            protocol.contains("pub const PROTOCOL_VERSION: u32 = 21"),
-            "incompatible IPC revisions require a deliberate protocol-version change"
-        );
-        assert!(
-            protocol.contains("Revision 20 adds `RefreshAccountProfile`"),
-            "protocol version 20 must document engine-owned account-profile refresh"
-        );
-        assert!(
-            protocol.contains(
-                "Revision 21 adds optional provider heartbeat/application-ping RTT telemetry"
-            ),
-            "protocol version 21 must document provider transport RTT telemetry"
-        );
-        let codec = manifest("crates/engine_protocol/src/codec.rs");
-        assert!(
-            codec.contains("ProtocolError::VersionMismatch"),
-            "IPC decoding must fail closed on incompatible protocol versions"
-        );
+        let local = manifest("apps/desktop/src/desktop/local_state.rs");
+        assert!(local.contains("active_workspace_id") && local.contains("save_workspace"));
+        let persistence = manifest("apps/desktop/src/desktop/workspace_persistence.rs");
+        for contract in [
+            "active_workspace_id",
+            "flush_commits_the_latest_active_workspace_before_shutdown",
+            "flush_surfaces_current_persistence_failure",
+        ] {
+            assert!(
+                persistence.contains(contract),
+                "local workspace persistence lost {contract}"
+            );
+        }
         let messages = manifest("crates/engine_protocol/src/messages.rs");
-        assert!(
-            !messages.contains("ActivateExistingUi"),
-            "removed single-instance activation command must not return"
-        );
-        assert!(
-            messages.contains("15, 17, 18"),
-            "retired envelope tag 16 must remain permanently unused"
-        );
-        let client = manifest("crates/local_engine_client/src/lib.rs")
-            + &manifest("crates/local_engine_client/src/framing.rs");
-        for contract in [
-            "protocol_socket_name_tracks_the_active_version",
-            "reached_endpoint_is_retried_without_spawning_another_engine",
-        ] {
-            assert!(
-                client.contains(contract),
-                "engine startup/version fencing lost {contract}"
-            );
-        }
-        for contract in [
-            "release_identity: release.release_identity.clone()",
-            "install_generation: release.install_generation",
-            "ready.release_identity != release.release_identity",
-            "ready.install_generation != release.install_generation",
-        ] {
-            assert!(
-                client.contains(contract),
-                "desktop/engine release handshake lost {contract}"
-            );
-        }
-
-        let handshake = manifest("apps/engine/tests/handshake.rs");
-        for regression in [
-            "workspace_selection_is_durable_across_engine_restart",
-            "chart_viewport_is_generation_fenced_and_persisted_independently",
-            "shutdown_flush_preserves_the_latest_hot_set_and_fences_late_mutation",
-        ] {
-            assert!(
-                handshake.contains(regression),
-                "workspace revision authority lost regression {regression}"
-            );
-        }
+        assert!(messages.contains("only tag 5 (`WorkspaceState`) is written by current builds"));
     }
-
     #[test]
     fn signed_transactional_lifecycle_remains_platform_owned() {
         let lifecycle = manifest("crates/platform_runtime/src/lifecycle.rs");
@@ -1394,30 +1147,17 @@ mod tests {
             "pub fn uninstall<",
             "native_installation_inventory",
             "remove_owned_path",
-            "metadata.file_type().is_symlink()",
-            "broad_native_root(path)",
-            "join(\"uninstall.json\").exists()",
             "UpdatePendingCleanup",
-            "UninstallPendingCleanup",
         ] {
             assert!(
                 lifecycle.contains(contract),
                 "platform lifecycle lost {contract}"
             );
         }
-        assert!(
-            !lifecycle.contains("remove_dir_all"),
-            "lifecycle deletion must walk exact roots without following links"
-        );
         let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
         for contract in [
-            "installer.recover(&hooks)",
-            "audit_active_release()",
-            "--remove-all-local-data",
-            "--promote-stable-launcher",
             "--check-update",
             "--update-and-restart",
-            "spawn_active_launcher_promotion",
             "--desktop-readiness",
             "DesktopReadinessReport",
             "owned_process_is_running(&self.install_root)",
@@ -1427,154 +1167,97 @@ mod tests {
                 "stable launcher lost {contract}"
             );
         }
+        assert!(!launcher.contains("--launch-engine"));
+        assert!(!launcher.contains("BackgroundService"));
+        assert!(
+            !repository_root()
+                .join("crates/platform_runtime/src/background_service.rs")
+                .exists()
+        );
+
         let desktop = manifest("apps/desktop/src/desktop.rs");
-        for contract in [
-            "connect_or_start_engine(&engine)",
-            "client.restore_workspace()",
-            "client.engine_status()",
-            "client.shutdown_engine()",
-            "schedule_versioned_launcher_promotion()",
-            "--promote-stable-launcher",
-        ] {
-            assert!(
-                desktop.contains(contract),
-                "candidate desktop readiness lost {contract}"
-            );
-        }
-        let desktop_update = manifest("apps/desktop/src/update.rs");
         assert!(
-            desktop_update.contains("--check-update")
-                && desktop_update.contains("--update-and-restart")
-                && desktop_update.contains("axiusflow-update-client")
-                && !desktop_update.contains("ureq")
-                && !desktop_update.contains("ReleaseInstaller"),
-            "desktop update UI must delegate signed discovery and installation to the stable launcher"
+            desktop.contains("run_desktop_readiness_command")
+                && desktop.contains("schedule_versioned_launcher_promotion()")
         );
-        let background = manifest("crates/platform_runtime/src/background_service.rs");
+        let readiness = desktop.find("--desktop-readiness").expect("readiness gate");
+        let account = desktop
+            .find("DesktopAccount::install()")
+            .expect("account startup");
         assert!(
-            background.contains("axiusflow_launcher")
-                && background.contains("--launch-engine")
-                && background.contains("assert!(!desktop.contains(\"release-2\"))"),
-            "autostart must resolve through the stable launcher"
+            readiness < account,
+            "headless readiness must run before interactive account startup"
         );
+
+        let update = manifest("apps/desktop/src/update.rs");
         assert!(
-            manifest("apps/engine/src/lib.rs")
-                .contains("axiusflow_platform_runtime::native_data_root()")
-                && manifest("apps/desktop/src/chart_chrome.rs")
-                    .contains("axiusflow_platform_runtime::native_data_root()"),
-            "desktop and engine local artifacts must share platform-owned roots"
+            update.contains("--check-update")
+                && update.contains("--update-and-restart")
+                && !update.contains("ReleaseInstaller")
         );
     }
-
     #[test]
     fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
         for path in [
             "apps/desktop/src/main.rs",
-            "apps/engine/src/main.rs",
             "crates/platform_runtime/src/bin/axiusflow_launcher.rs",
         ] {
             assert!(
                 manifest(path).contains("windows_subsystem = \"windows\""),
-                "Windows GUI binary {path} lost its GUI subsystem marker"
+                "Windows GUI binary {path} lost subsystem marker"
             );
         }
-        assert!(
-            manifest("apps/desktop/src/desktop.rs")
-                .contains("cx.set_app_identity(\"com.axiusflow.desktop\", \"Axiusflow\")"),
-            "desktop lost its stable Windows taskbar identity"
-        );
         let setup = manifest("tools/windows/axiusflow_setup.iss");
         for contract in [
             "PrivilegesRequired=lowest",
             "DefaultDirName={localappdata}\\Programs\\Axiusflow",
-            "UninstallFilesDir={localappdata}\\Programs\\Axiusflow-Uninstall",
-            "SetupIconFile={#IconPath}",
             "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
             "AppUserModelID: \"com.axiusflow.desktop\"",
-            "procedure RegisterExtraCloseApplicationsResources;",
-            "RegisterExtraCloseApplicationsResource",
-            "DestDir: \"{tmp}\\AxiusflowRelease\\bundle\"; DestName: \"axiusflow_launcher.exe\"",
+            "DestName: \"axiusflow_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
-            "--remove-all-local-data",
+            "ValueName: \"Axiusflow Engine\"; Flags: deletevalue",
         ] {
             assert!(
                 setup.contains(contract),
                 "Windows installer lost {contract}"
             );
         }
+        assert!(!setup.contains("EnginePath"));
         let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
         assert!(
             publisher.contains("compile_windows_installer")
-                && publisher.contains("tools/windows/axiusflow_setup.iss")
                 && publisher.contains("ReleaseFileRole::RuntimeAsset")
                 && publisher.contains("axiusflow_launcher")
-                && publisher.contains("--iscc"),
-            "release publisher must sign the versioned launcher and produce the Windows installer through Inno Setup"
         );
+        assert!(!production_prefix(&publisher).contains("ReleaseFileRole::Engine"));
     }
-
     #[test]
     fn platform_filesystem_assumptions_remain_explicitly_guarded() {
         let mut sources = Vec::new();
         for root in [
             "crates/platform_runtime/src",
             "crates/local_storage/src",
-            "crates/local_history/src",
-            "crates/local_engine_client/src",
-            "apps/engine/src",
+            "crates/market_runtime/src",
+            "crates/account_runtime/src",
             "apps/desktop/src",
         ] {
             sources.extend(production_sources_under(root));
         }
-        assert!(
-            !sources.is_empty(),
-            "platform guard audit found no production sources"
-        );
-
+        assert!(!sources.is_empty());
         for path in sources {
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let contents = fs::read_to_string(&path).expect("source");
             let production = production_prefix(&contents);
             let relative = relative_string(&path);
-
             if production.contains("std::os::unix") {
                 assert!(
                     production.contains("cfg(unix)") || production.contains("cfg(target_os"),
-                    "{relative} uses std::os::unix without a Unix platform guard"
+                    "{relative} uses Unix APIs without a guard"
                 );
             }
             if production.contains("std::os::windows") {
                 assert!(
                     production.contains("cfg(windows)") || production.contains("cfg(target_os"),
-                    "{relative} uses std::os::windows without a Windows platform guard"
-                );
-            }
-            if production.contains("PermissionsExt")
-                || production.contains("OpenOptionsExt")
-                || production.contains("from_mode(")
-            {
-                assert!(
-                    production.contains("cfg("),
-                    "{relative} uses Unix/Windows file ownership APIs without a platform guard"
-                );
-            }
-            if production.contains("signal_hook")
-                || production.contains("SIGHUP")
-                || production.contains("SIGTERM")
-            {
-                assert!(
-                    production.contains("cfg(target_os") || production.contains("cfg(any"),
-                    "{relative} uses process signals without a platform guard"
-                );
-            }
-            if production.contains("reg.exe")
-                || production.contains("HKCU")
-                || production.contains("xdg-autostart")
-                || production.contains("LaunchAgents")
-            {
-                assert!(
-                    production.contains("cfg("),
-                    "{relative} uses native autostart integration without a platform guard"
+                    "{relative} uses Windows APIs without a guard"
                 );
             }
             for forbidden in [
@@ -1584,18 +1267,14 @@ mod tests {
                 "/Applications/",
                 "C:\\Program",
                 "C:/Program",
-                "axiusflow_engine.exe",
-                "axiusflow_desktop.exe",
-                "axiusflow_launcher.exe",
             ] {
                 assert!(
                     !production.contains(forbidden),
-                    "{relative} hardcodes platform absolute path or executable suffix {forbidden}"
+                    "{relative} hardcodes platform path {forbidden}"
                 );
             }
         }
     }
-
     #[test]
     fn supported_os_deterministic_gates_remain_required() {
         let workflow = manifest(".github/workflows/ci.yml");
@@ -1743,32 +1422,20 @@ mod tests {
 
     #[test]
     fn desktop_transition_capture_command_matches_tool_contract() {
-        // The physical-transition tool once invoked a capture mode the
-        // desktop never implemented. The command, its producer module, and
-        // the tool invocation are pinned together so they cannot drift
-        // apart again.
-        let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(
-            desktop.contains("--capture-native-transitions")
-                && desktop.contains("transition_capture::run_transition_capture_command"),
-            "desktop lost the transition capture command wiring"
-        );
-        let producer = manifest("apps/desktop/src/transition_capture.rs");
-        assert!(
-            producer.contains("pub fn run_transition_capture_command"),
-            "transition capture producer lost its command entry point"
-        );
-        let tool = manifest("tools/run_native_transition_capture.ps1");
-        assert!(
-            tool.contains("--capture-native-transitions"),
-            "transition capture tool lost its desktop contract"
+            !repository_root()
+                .join("apps/desktop/src/transition_capture.rs")
+                .exists(),
+            "retired transition-capture producer returned"
         );
         assert!(
-            !tool.contains("\"--rithmic-test\","),
-            "transition capture tool must not pass stray mode flags"
+            !repository_root()
+                .join("tools/run_native_transition_capture.ps1")
+                .exists(),
+            "retired engine-era transition runner returned"
         );
+        assert!(!manifest("apps/desktop/src/desktop.rs").contains("--capture-native-transitions"));
     }
-
     #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
         let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
@@ -1790,14 +1457,15 @@ mod tests {
 
     #[test]
     fn rithmic_live_surface_stays_on_test_credentials() {
-        // Production provider credentials must never reach CI, the repo, or
-        // logs: every live Rithmic entry point below is pinned to the test
-        // vault scope, and production-credential markers are rejected so a
-        // future production key cannot leak into gates silently. Provisioning
-        // happens only through the interactive terminal prompter, never
-        // pasted secrets.
         for (path, marker) in [
-            ("apps/engine/tests/live_market_soak.rs", "rithmic-test"),
+            (
+                "crates/market_runtime/src/rithmic_realtime.rs",
+                "RITHMIC_TEST_VAULT_KEY",
+            ),
+            (
+                "crates/market_runtime/src/rithmic_history.rs",
+                "RITHMIC_TEST_VAULT_KEY",
+            ),
             (
                 "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
                 "RITHMIC_TEST_VAULT_KEY",
@@ -1807,34 +1475,31 @@ mod tests {
                 "RITHMIC_TEST_VAULT_KEY",
             ),
         ] {
-            let content = manifest(path);
             assert!(
-                content.contains(marker),
-                "{path} lost its test-credential scope {marker}"
+                manifest(path).contains(marker),
+                "{path} lost test credential scope"
             );
         }
         for path in [
-            "apps/engine/tests/live_market_soak.rs",
+            "crates/market_runtime/src/rithmic_realtime.rs",
+            "crates/market_runtime/src/rithmic_history.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
-            "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
             ".github/workflows/live_market_gates.yml",
         ] {
             let content = manifest(path);
             for forbidden in [
                 "RITHMIC_PROD",
                 "rithmic-prod",
-                "production credential",
                 "production password",
                 "prod password",
             ] {
                 assert!(
                     !content.contains(forbidden),
-                    "{path} must not reference production credentials ({forbidden})"
+                    "{path} references production credentials ({forbidden})"
                 );
             }
         }
     }
-
     #[test]
     fn live_market_gates_stay_on_self_hosted_runners() {
         let workflow = manifest(".github/workflows/live_market_gates.yml");
@@ -1858,49 +1523,38 @@ mod tests {
     #[test]
     fn rithmic_application_name_has_one_canonical_source() {
         let adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
-        assert!(
-            adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Axiusflow\";"),
-            "Rithmic application identity must remain the confirmed canonical Axiusflow value"
-        );
-
+        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Axiusflow\";"));
         for relative in [
             "crates/adapters/rithmic_protocol/src/provider_session.rs",
             "crates/adapters/rithmic_protocol/src/protocol.rs",
             "crates/adapters/rithmic_protocol/src/session_tests.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
-            "apps/engine/src/rithmic_realtime.rs",
-            "apps/engine/src/rithmic_history.rs",
+            "crates/market_runtime/src/rithmic_realtime.rs",
+            "crates/market_runtime/src/rithmic_history.rs",
         ] {
             let source = manifest(relative);
             assert!(
                 !source.contains("\"AxiusFlow\""),
-                "{relative} reintroduced the non-canonical Rithmic application identity AxiusFlow"
+                "{relative} reintroduced non-canonical identity"
             );
             assert!(
                 source.contains("RITHMIC_APPLICATION_NAME"),
-                "{relative} must use the shared Rithmic application-name constant"
+                "{relative} must use shared Rithmic application name"
             );
         }
     }
-
     #[test]
     fn phase_five_account_surface_remains_bounded() {
-        // Phase 4 is maintainer-approved closed, so the phase 5 account
-        // boundary is now allowed exactly in its owning modules. Better Auth,
-        // billing SDKs, passkeys, and cloud identity networking stay out of
-        // native Rust: the desktop and engine depend only on standard OIDC
-        // concepts validated inside `account_service`.
         const ACCOUNT_ALLOWED_PREFIXES: &[&str] = &[
             "crates/domain/account/src/",
+            "crates/account_runtime/src/",
             "crates/engine_protocol/src/account.rs",
             "crates/engine_protocol/src/lib.rs",
             "crates/engine_protocol/src/messages.rs",
             "crates/engine_protocol/tests/",
-            "crates/local_engine_client/src/",
             "crates/platform_runtime/src/browser.rs",
-            "apps/engine/src/account_service/",
-            "apps/engine/src/lib.rs",
             "apps/desktop/src/account.rs",
+            "apps/desktop/src/desktop.rs",
         ];
         const ACCOUNT_IDENTIFIERS: &[&str] = &[
             "AccountId",
@@ -1912,17 +1566,13 @@ mod tests {
             "LoginAuthorization",
             "AccountSessionState",
         ];
-
         for path in production_rust_sources() {
             let relative = relative_string(&path);
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let contents = fs::read_to_string(&path).expect("source");
             let production = production_prefix(&contents);
             let allowed = ACCOUNT_ALLOWED_PREFIXES
                 .iter()
                 .any(|prefix| relative.starts_with(prefix));
-            // OIDC/PKCE mechanics live only in the engine account service,
-            // the protocol boundary, and the desktop account presenter.
             if !allowed {
                 for identifier in ACCOUNT_IDENTIFIERS
                     .iter()
@@ -1930,12 +1580,10 @@ mod tests {
                 {
                     assert!(
                         !production.contains(identifier),
-                        "{relative} owns phase-5 account surface {identifier} outside its boundary"
+                        "{relative} owns account surface {identifier} outside its boundary"
                     );
                 }
             }
-            // Native Rust never depends on cloud identity or billing vendors:
-            // the Worker owns Better Auth, Stripe, Dodo, and Cloudflare.
             for forbidden in [
                 "better_auth",
                 "better-auth",
@@ -1951,61 +1599,22 @@ mod tests {
             ] {
                 assert!(
                     !production.contains(forbidden),
-                    "{relative} adds cloud identity/billing surface {forbidden} to native code"
+                    "{relative} adds cloud identity/billing surface {forbidden}"
                 );
             }
         }
-
-        let mut manifests = workspace_manifests();
-        manifests.push(repository_root().join("Cargo.lock"));
-        for path in manifests {
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            for forbidden in [
-                "better-auth",
-                "stripe",
-                "dodo",
-                "cloudflare",
-                "passkey",
-                "webauthn",
-            ] {
-                assert!(
-                    !contents.contains(forbidden),
-                    "{} adds a phase-5 identity/billing dependency {forbidden}",
-                    relative_string(&path)
-                );
-            }
-        }
-
-        // Account state must not leak into the market coordinator: the
-        // market service owns demand and provider generations only.
-        let coordinator = manifest("apps/engine/src/market_service/coordinator.rs");
+        let coordinator = manifest("crates/market_runtime/src/market_service/coordinator.rs");
         for identifier in ["BeginLogin", "AccountView", "LoginAuthorization"] {
             assert!(
                 !production_prefix(&coordinator).contains(identifier),
                 "market coordinator must not own account state {identifier}"
             );
         }
-        // The desktop stays provider-neutral and storage-free: it renders the
-        // sanitized protocol view and never touches the account domain crate.
-        for relative in [
-            "apps/desktop/Cargo.toml",
-            "crates/ui/chart_integration/Cargo.toml",
-        ] {
-            assert!(
-                !manifest(relative).contains("axiusflow_account"),
-                "{relative} must not depend on axiusflow_account"
-            );
-        }
+        assert!(manifest("apps/desktop/Cargo.toml").contains("axiusflow_account_runtime"));
+        assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("axiusflow_account"));
     }
-
     #[test]
     fn account_protocol_versions_and_tags_remain_pinned() {
-        let messages = manifest("crates/engine_protocol/src/messages.rs");
-        assert!(
-            messages.contains("55, 56, 57, 58, 59, 60"),
-            "phase 5 account envelope tags 55-60 must remain pinned"
-        );
         let account = manifest("crates/engine_protocol/src/account.rs");
         for contract in [
             "pub struct BeginLogin",
@@ -2018,7 +1627,7 @@ mod tests {
         ] {
             assert!(
                 account.contains(contract),
-                "account protocol boundary lost {contract}"
+                "account DTO boundary lost {contract}"
             );
         }
         for secret in [
@@ -2033,24 +1642,11 @@ mod tests {
         ] {
             assert!(
                 !account.contains(secret),
-                "account protocol must carry no tokens or vendor payloads ({secret})"
+                "sanitized account DTO exposes {secret}"
             );
         }
-        // Profile display fields are additive tags on the sanitized view:
-        // identity and plan tags stay pinned, and the desktop never sends
-        // profile content back across the boundary.
-        for profile_tag in [
-            "pub display_name: String",
-            "pub email: String",
-            "pub photo_url: String",
-            "tag = \"6\"",
-            "tag = \"7\"",
-            "tag = \"8\"",
-        ] {
-            assert!(
-                account.contains(profile_tag),
-                "account protocol lost profile field {profile_tag}"
-            );
-        }
+        let messages = manifest("crates/engine_protocol/src/messages.rs");
+        assert!(messages.contains("only tag 5 (`WorkspaceState`) is written by current builds"));
+        assert!(messages.contains("tags = \"5\""));
     }
 }

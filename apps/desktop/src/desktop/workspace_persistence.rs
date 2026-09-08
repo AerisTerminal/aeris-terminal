@@ -1,6 +1,7 @@
 //! Coalesced asynchronous workspace layout persistence.
 
 use super::*;
+use std::time::Instant;
 
 #[derive(Clone)]
 struct WorkspaceLayoutRequest {
@@ -111,6 +112,44 @@ impl WorkspaceLayoutPersistence {
     pub(super) fn error(&self) -> Option<String> {
         self.error.borrow().clone()
     }
+
+    /// Waits for the latest coalesced layout request to reach durable local storage.
+    /// Used only during window shutdown so the active workspace cannot be lost
+    /// merely because no market frame happened after the user's last selection.
+    pub(super) fn flush(&self, timeout: Duration) -> Result<(), String> {
+        if !self.pending.get() {
+            return self.error().map_or(Ok(()), Err);
+        }
+        let expected_generation = self.layout_generation.get();
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(completion) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                && completion.request_generation == expected_generation
+            {
+                self.pending.set(false);
+                return match completion.result {
+                    Ok(workspace) => {
+                        self.workspace_revision.set(workspace.workspace_revision);
+                        self.layout_generation.set(workspace.layout_generation);
+                        self.error.borrow_mut().take();
+                        Ok(())
+                    }
+                    Err(error) => {
+                        *self.error.borrow_mut() = Some(error.clone());
+                        Err(error)
+                    }
+                };
+            }
+            if Instant::now() >= deadline {
+                return Err("workspace layout save timed out during shutdown".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 fn run_workspace_layout_persistence(
@@ -216,6 +255,46 @@ mod tests {
         );
         state.request(1, vec![]).expect("retry");
         assert_eq!(state.error(), None);
+    }
+
+    #[test]
+    fn flush_commits_the_latest_active_workspace_before_shutdown() {
+        let (state, _receiver) = persistence();
+        state.request(42, vec![]).expect("request");
+        *state.result.lock().expect("result") = Some(WorkspaceLayoutCompletion {
+            request_generation: 2,
+            result: Ok(WorkspaceState {
+                workspace_revision: 2,
+                layout_generation: 2,
+                active_workspace_id: 42,
+                ..WorkspaceState::default()
+            }),
+        });
+
+        state
+            .flush(Duration::from_millis(20))
+            .expect("latest layout flushes");
+        assert!(!state.pending.get());
+        assert_eq!(state.workspace_revision.get(), 2);
+        assert_eq!(state.layout_generation.get(), 2);
+        assert_eq!(state.error(), None);
+    }
+
+    #[test]
+    fn flush_surfaces_current_persistence_failure() {
+        let (state, _receiver) = persistence();
+        state.request(7, vec![]).expect("request");
+        *state.result.lock().expect("result") = Some(WorkspaceLayoutCompletion {
+            request_generation: 2,
+            result: Err("disk write failed".to_string()),
+        });
+
+        assert_eq!(
+            state.flush(Duration::from_millis(20)),
+            Err("disk write failed".to_string())
+        );
+        assert!(!state.pending.get());
+        assert_eq!(state.error().as_deref(), Some("disk write failed"));
     }
 
     #[test]

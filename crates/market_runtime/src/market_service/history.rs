@@ -1,13 +1,12 @@
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId,
-    Coordinator, DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar, GenerationId,
+    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId, Coordinator,
+    DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar, GenerationId,
     HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED, HISTORY_RETRY_DELAY, HistoryRange,
-    HistoryRequest, HistorySnapshot, HistorySource, HyperliquidHandoffSeed, InstallProviderInstrument,
-    Instant, INITIAL_HISTORY_BARS, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
-    ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed,
-    SeriesLoadState, SeriesSnapshot, SyncSender,
-    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage, fail_waiters,
-    hyperliquid_interval_for_period, publish_state, series_state, thread,
+    HistoryRequest, HistorySnapshot, HistorySource, HyperliquidHandoffSeed, INITIAL_HISTORY_BARS,
+    InstallProviderInstrument, Instant, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
+    ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed, SeriesLoadState,
+    SeriesSnapshot, SyncSender, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
+    fail_waiters, hyperliquid_interval_for_period, publish_state, series_state, thread,
     try_enqueue_history,
 };
 
@@ -92,8 +91,7 @@ pub(super) fn history_request_bar_limit(
             })
             .unwrap_or(INITIAL_HISTORY_BARS)
             .saturating_add(64)
-            .min(HISTORY_BARS_PER_SERIES)
-            .max(1)
+            .clamp(1, HISTORY_BARS_PER_SERIES)
     })
 }
 
@@ -474,7 +472,11 @@ impl Coordinator<'_> {
             Err(error) => Err(error),
         }
     }
-    pub(super) fn history_failed(&mut self, series: &BarSeriesKey, _generation: ProviderGeneration) {
+    pub(super) fn history_failed(
+        &mut self,
+        series: &BarSeriesKey,
+        _generation: ProviderGeneration,
+    ) {
         if self.engine.series_snapshot(series).is_some() {
             self.pending.remove(series);
             self.broadcast_series_resolution_for(
@@ -716,12 +718,7 @@ impl Coordinator<'_> {
     ) {
         for publication in publications {
             if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                publish_state(
-                    events,
-                    publication,
-                    SeriesLoadState::Ready,
-                    None,
-                );
+                publish_state(events, publication, SeriesLoadState::Ready, None);
             }
         }
     }

@@ -24,9 +24,10 @@ impl DesktopLifecycle {
     }
 
     pub(super) fn retire_market_worker(&self, retirement: MarketWorkerRetirement, cx: &App) {
-        self.retirements
-            .borrow_mut()
-            .push(cx.background_executor().spawn(async move { retirement.wait() }));
+        self.retirements.borrow_mut().push(
+            cx.background_executor()
+                .spawn(async move { retirement.wait() }),
+        );
     }
 
     pub(super) fn begin_quit(&self, cx: &mut App) -> Option<Task<Result<(), String>>> {

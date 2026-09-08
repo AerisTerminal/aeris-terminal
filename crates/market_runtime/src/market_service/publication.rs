@@ -1,9 +1,8 @@
 use super::{
-    BTreeMap, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, ClientId, ConsumerEvents,
-    ConsumerId, Coordinator, DemandWaiter, EngineError, EngineFaultCode, FailureStage,
-    GenerationId, MAXIMUM_PUBLISHED_DEPTH_LEVELS,
-    ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply,
-    SeriesLoadState, SeriesTailOperation, authorize_consumer,
+    BTreeMap, BarSeriesKey, CONSUMER_SERIES_QUEUE_CAPACITY, ClientId, ConsumerEvents, ConsumerId,
+    Coordinator, DemandWaiter, EngineError, EngineFaultCode, FailureStage, GenerationId,
+    MAXIMUM_PUBLISHED_DEPTH_LEVELS, ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET,
+    Reply, SeriesLoadState, SeriesTailOperation, authorize_consumer,
 };
 use crate::{MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState};
 
@@ -105,11 +104,19 @@ pub(super) fn order_book_snapshot(
     order_book: &ProviderOrderBook,
 ) -> MarketRuntimeEvent {
     let mut publication = order_book.book.publication();
-    let provider_generation = if publication.session_generation == 0 {
-        order_book.instrument.session_generation
-    } else {
-        publication.session_generation
-    };
+    if publication.provider_id.is_empty() {
+        publication
+            .provider_id
+            .clone_from(&order_book.instrument.provider);
+        publication
+            .instrument_id
+            .clone_from(&order_book.instrument.instrument_id);
+        publication
+            .entitlement_id
+            .clone_from(&order_book.instrument.entitlement_id);
+        publication.session_generation = order_book.instrument.session_generation;
+    }
+    let provider_generation = publication.session_generation;
     if let Some(quote) = order_book
         .top_of_book
         .as_ref()
@@ -224,7 +231,8 @@ impl ConsumerEvents {
             self.series.clear();
             self.series_overflowed = true;
         }
-        self.series.push_back(MarketRuntimeEvent::SeriesUpdate(next));
+        self.series
+            .push_back(MarketRuntimeEvent::SeriesUpdate(next));
     }
 }
 
@@ -263,11 +271,7 @@ impl Coordinator<'_> {
         publish_state(events, publication, state, None);
     }
 
-    pub(super) fn handle_attach(
-        &mut self,
-        client_id: ClientId,
-        reply: &Reply<()>,
-    ) {
+    pub(super) fn handle_attach(&mut self, client_id: ClientId, reply: &Reply<()>) {
         let result = self
             .attached
             .insert(client_id)
@@ -286,9 +290,10 @@ impl Coordinator<'_> {
             let _ = reply.send(Err("market client is not attached".to_string()));
             return;
         }
-        if consumer_budgets.iter().any(|(consumer_id, _)| {
-            self.consumer_clients.get(consumer_id) != Some(&client_id)
-        }) {
+        if consumer_budgets
+            .iter()
+            .any(|(consumer_id, _)| self.consumer_clients.get(consumer_id) != Some(&client_id))
+        {
             let _ = reply.send(Err("market consumer is not owned by client".to_string()));
             return;
         }
@@ -616,7 +621,13 @@ mod tests {
 
         assert_eq!(publication.bids.len(), MAXIMUM_PUBLISHED_DEPTH_LEVELS);
         assert_eq!(publication.asks.len(), MAXIMUM_PUBLISHED_DEPTH_LEVELS);
-        assert_eq!(publication.bids.first().map(|level| level.price), Some(20_000));
-        assert_eq!(publication.asks.first().map(|level| level.price), Some(20_001));
+        assert_eq!(
+            publication.bids.first().map(|level| level.price),
+            Some(20_000)
+        );
+        assert_eq!(
+            publication.asks.first().map(|level| level.price),
+            Some(20_001)
+        );
     }
 }

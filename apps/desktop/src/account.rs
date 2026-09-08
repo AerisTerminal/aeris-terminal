@@ -12,8 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthorization};
 use axiusflow_account_runtime::{AccountService, AccountServiceConfig};
+use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
 pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section=profile";
@@ -37,16 +37,16 @@ pub fn open_manage_profile() -> Result<(), String> {
         .map_err(|_| "profile page could not be opened".to_string())
 }
 
-/// Starts one engine-owned login transaction and opens the returned
+/// Starts one runtime-owned login transaction and opens the returned
 /// authorization URL in the system browser on a background thread.
 ///
-/// Returns the engine authorization reply for expiry display. The browser
+/// Returns the runtime authorization reply for expiry display. The browser
 /// launch runs bounded off-thread: a missing launcher, a nonzero launcher
 /// exit, or a hung launcher is reported, and a hung launcher is killed.
 ///
 /// # Errors
 ///
-/// Returns an error when the IPC transaction fails or no system browser
+/// Returns an error when the account-runtime request fails or no system browser
 /// can be launched.
 pub fn start_login(
     service: &AccountService,
@@ -68,11 +68,11 @@ pub fn start_login(
     Ok(authorization)
 }
 
-/// Returns the current sanitized engine-owned account view.
+/// Returns the current sanitized runtime-owned account view.
 ///
 /// # Errors
 ///
-/// Returns an error when the IPC request fails or the reply is invalid.
+/// Returns an error when the account runtime request fails or the reply is invalid.
 pub fn fetch_account_status(service: &AccountService) -> Result<AccountView, String> {
     Ok(service.account_status())
 }
@@ -293,7 +293,7 @@ pub struct AccountPresentation {
     pub email: String,
     /// Verified photo URL; empty unless signed in with a photo.
     pub photo_url: String,
-    /// Whether an IPC request is in flight.
+    /// Whether an account-runtime request is in flight.
     pub pending: bool,
 }
 
@@ -316,19 +316,18 @@ struct AccountShared {
     /// Sequence of the latest status fetch.
     status_seq: AtomicU64,
     /// False until the first authoritative account-status reply arrives from
-    /// the resident engine. The local default `SignedOut` view is not a real
+    /// the account runtime. The local default `SignedOut` view is not a real
     /// startup authentication result.
     initial_status_resolved: AtomicBool,
-    /// Whether a browser transaction is open. Set when the engine accepts
+    /// Whether a browser transaction is open. Set when the account runtime accepts
     /// the login request, cleared when the view leaves Authorizing.
     login_open: AtomicBool,
     requests: SyncSender<AccountRequest>,
 }
 
-/// Bounds how long one request may stay in flight. The engine answers every
-/// account command in about a second (discovery, bind, and reply are all
-/// bounded); the ten-minute browser wait happens engine-side afterwards.
-/// Anything longer is a wedged transport, never a slow login.
+/// Bounds how long one request may stay in flight. The account runtime answers
+/// each command through a bounded worker path; the browser authorization wait
+/// happens independently. Anything longer is a wedged worker, never a slow login.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn unix_millis() -> u64 {
@@ -362,7 +361,7 @@ static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 /// How often the engine view refreshes while a browser transaction is open.
-/// Fast enough that engine-side completion reaches the UI within a frame
+/// Fast enough that runtime completion reaches the UI within a frame
 /// budget, slow enough to keep one bounded IPC fetch in flight. Idle
 /// sessions poll slowly for restore and expiry.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -371,7 +370,7 @@ const INITIAL_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// completed engine-owned refresh reaches presentation promptly.
 const PROFILE_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PROFILE_REFRESH_POLL_WINDOW: Duration = Duration::from_secs(10);
-/// Idle refresh so restored sessions and engine-side expiry reach the UI.
+/// Idle refresh so restored sessions and runtime expiry reach the UI.
 const IDLE_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 impl DesktopAccount {
@@ -420,14 +419,14 @@ impl DesktopAccount {
         })
     }
 
-    /// Whether startup is still waiting for the resident engine's first
+    /// Whether startup is still waiting for the account runtime's first
     /// authoritative account status.
     #[must_use]
     pub fn verification_pending(&self) -> bool {
         !self.shared.initial_status_resolved.load(Ordering::Acquire)
             || self.shared.view.lock().is_ok_and(|view| {
-                // Generation zero is engine startup restoration, not a new
-                // browser transaction. The first IPC reply can arrive before
+                // Generation zero is startup restoration, not a new
+                // browser transaction. The first runtime reply can arrive before
                 // refresh/link verification finishes.
                 view.request_generation == 0
                     && view.state == AccountSessionState::Authorizing as i32
@@ -439,7 +438,7 @@ impl DesktopAccount {
     }
 
     /// Spawns one isolated session with a scripted worker. Production uses
-    /// [`handle_account_request`]; tests inject a fake engine.
+    /// [`handle_account_request`]; tests inject a fake runtime handler.
     fn spawn_with(
         handle: impl Fn(AccountRequest) -> AccountResponse + Send + 'static,
     ) -> Result<Self, String> {
@@ -451,8 +450,8 @@ impl DesktopAccount {
             .map_err(|_| "desktop account client could not start".to_string())?;
         // Generations seed from the wall clock so a fresh desktop process
         // always supersedes generations from a previous process lifetime.
-        // The resident engine outlives desktop restarts; restarting the
-        // counter at zero would make every first sign-in look retired.
+        // Persisted account generations can survive a desktop restart; restarting
+        // the counter at zero would make the first sign-in look retired.
         let now = Instant::now();
         let shared = Arc::new(AccountShared {
             generation: AtomicU64::new(unix_millis()),
@@ -483,7 +482,7 @@ impl DesktopAccount {
             .map_err(|_| "desktop account client could not start".to_string())?;
         let session = Self { shared };
         // Fetch engine state at startup so a restored session (or an
-        // engine-side expiry) reaches the UI on the first frames.
+        // runtime expiry) reaches the UI on the first frames.
         session.queue_status();
         Ok(session)
     }
@@ -669,7 +668,7 @@ impl DesktopAccount {
         Ok(())
     }
 
-    /// Signs out the shared engine-owned account session.
+    /// Signs out the shared runtime-owned account session.
     ///
     /// # Errors
     ///
@@ -685,8 +684,8 @@ impl DesktopAccount {
         )
     }
 
-    /// Asks the resident engine to refresh the current verified profile on its
-    /// background account worker. The IPC reply is immediate and carries no
+    /// Asks the account runtime to refresh the current verified profile on its
+    /// background worker. The reply is immediate and carries no
     /// secret/provider identity from the desktop.
     ///
     /// # Errors
@@ -718,7 +717,7 @@ impl DesktopAccount {
 
     /// Applies worker results and keeps the engine view fresh. Status
     /// polling runs fast while a browser transaction is open and slowly
-    /// when idle, so restored sessions and engine-side expiry reach the UI
+    /// when idle, so restored sessions and runtime expiry reach the UI
     /// without chatty IPC. Returns whether presentation changed.
     #[must_use]
     pub fn poll(&self) -> bool {
@@ -919,34 +918,26 @@ fn run_account_client_with(
 fn handle_account_request(request: AccountRequest) -> AccountResponse {
     let service = account_service();
     match request {
-        AccountRequest::BeginLogin { generation } => {
-            match start_login(service, generation) {
-                Ok(authorization) => AccountResponse::Authorized(authorization),
-                Err(error) => AccountResponse::Failed(error),
-            }
-        }
-        AccountRequest::CancelLogin { generation } => {
-            match cancel_login(service, generation) {
-                Ok(view) => AccountResponse::Cancelled(view),
-                Err(error) => AccountResponse::Failed(error),
-            }
-        }
-        AccountRequest::RefreshStatus { seq, epoch } => {
-            match fetch_account_status(service) {
-                Ok(view) => AccountResponse::Status { view, seq, epoch },
-                Err(error) => AccountResponse::StatusFailed { seq, epoch, error },
-            }
-        }
-        AccountRequest::RefreshProfile { epoch } => {
-            AccountResponse::ProfileRefreshQueued {
-                view: service.request_profile_refresh(),
-                epoch,
-            }
-        }
+        AccountRequest::BeginLogin { generation } => match start_login(service, generation) {
+            Ok(authorization) => AccountResponse::Authorized(authorization),
+            Err(error) => AccountResponse::Failed(error),
+        },
+        AccountRequest::CancelLogin { generation } => match cancel_login(service, generation) {
+            Ok(view) => AccountResponse::Cancelled(view),
+            Err(error) => AccountResponse::Failed(error),
+        },
+        AccountRequest::RefreshStatus { seq, epoch } => match fetch_account_status(service) {
+            Ok(view) => AccountResponse::Status { view, seq, epoch },
+            Err(error) => AccountResponse::StatusFailed { seq, epoch, error },
+        },
+        AccountRequest::RefreshProfile { epoch } => AccountResponse::ProfileRefreshQueued {
+            view: service.request_profile_refresh(),
+            epoch,
+        },
         AccountRequest::SignOut => match sign_out(service) {
-                Ok(view) => AccountResponse::SignedOut(view),
-                Err(error) => AccountResponse::Failed(error),
-            },
+            Ok(view) => AccountResponse::SignedOut(view),
+            Err(error) => AccountResponse::Failed(error),
+        },
     }
 }
 
@@ -974,7 +965,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    /// Scripted fake engine behind an isolated desktop session. The worker
+    /// Scripted fake runtime behind an isolated desktop session. The worker
     /// thread drives it exactly like production: Begin opens the browser
     /// transaction, status polls serve the current fake view, and the test
     /// flips the view to simulate callback arrival, completion, or expiry.
@@ -1064,7 +1055,7 @@ mod tests {
         }
     }
 
-    /// Spawns one isolated session backed by a scripted fake engine,
+    /// Spawns one isolated session backed by a scripted fake runtime,
     /// returning the session plus the engine state for the test to drive.
     fn scripted_session() -> (DesktopAccount, Arc<Mutex<FakeEngine>>) {
         let engine = Arc::new(Mutex::new(FakeEngine {
@@ -1296,8 +1287,7 @@ mod tests {
 
         // The startup fetch owns seq 1/epoch 0; the inert worker only ever
         // reports failure, so scripted replies arrive in test order.
-        let session =
-            DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
         assert_eq!(session.shared.status_seq.load(Ordering::Acquire), 1);
         let mut active = view(AccountSessionState::Active);
         active.account_id = "acct_01".to_string();
@@ -1337,8 +1327,7 @@ mod tests {
         // Install uses the production worker, so only synchronous local
         // state is asserted here: worker replies race the test thread and
         // are covered by the scripted sessions below.
-        let session = DesktopAccount::install()
-            .expect("account session installs");
+        let session = DesktopAccount::install().expect("account session installs");
         let presentation = session.presentation();
         assert_eq!(presentation.action, "Sign in");
         assert!(!presentation.pending);
@@ -1348,8 +1337,7 @@ mod tests {
 
     #[test]
     fn failed_startup_status_remains_in_verification_state() {
-        let session =
-            DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
         wait_for(&session, "startup status failure", || {
             session.error().is_some()
         });
@@ -1397,12 +1385,12 @@ mod tests {
     }
 
     #[test]
-    fn generations_seed_from_the_wall_clock_for_engine_fencing() {
+    fn generations_seed_from_the_wall_clock_for_runtime_fencing() {
         use super::unix_millis;
         use std::sync::atomic::Ordering;
 
         // A fresh process must supersede generations from a previous process
-        // lifetime: the resident engine outlives desktop restarts, and a
+        // lifetime: persisted account material outlives desktop restarts, and a
         // counter restarted at zero would read as retired.
         assert!(unix_millis() > 0);
         let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
@@ -1460,7 +1448,7 @@ mod tests {
         wait_for(&session, "authorizing view", || {
             session.presentation().action == "Waiting for browser"
         });
-        // The browser callback completes engine-side.
+        // The browser callback completes inside the account runtime.
         engine
             .lock()
             .expect("engine locks")

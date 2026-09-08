@@ -72,10 +72,11 @@ pub enum MarketRuntimeEvent {
     Fault(axiusflow_engine_protocol::Fault),
 }
 
-pub use market_service::{MarketService, MarketServiceStatus};
 pub use axiusflow_market_engine::{
     ConsumerId as MarketConsumerId, ConsumerPublication as MarketSeriesSnapshot,
-    ConsumerResourceClass as MarketConsumerResourceClass, ConsumerSeriesUpdate as MarketSeriesUpdate,
-    GenerationId as MarketGenerationId, MarketStream, ProviderGeneration as MarketProviderGeneration,
+    ConsumerResourceClass as MarketConsumerResourceClass,
+    ConsumerSeriesUpdate as MarketSeriesUpdate, GenerationId as MarketGenerationId, MarketStream,
+    ProviderGeneration as MarketProviderGeneration,
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
+pub use market_service::{MarketService, MarketServiceStatus};

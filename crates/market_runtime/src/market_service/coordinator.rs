@@ -1,12 +1,12 @@
 use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
-    ConsumerEvents, ConsumerId, ConsumerIdentity, DeferredHistoryRequest, DemandWaiter, EngineError,
-    HistoryRange, HyperliquidLiveHandoff, InstallProviderInstrument,
-    Instant, MarketEngine, MarketServiceStatus, MarketStream, Ordering, ProviderConnectionState,
-    ProviderDispatch, ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
-    ProviderRuntimeRegistry, ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver,
-    RecvTimeoutError, Reply, RithmicLiveHandoff, RithmicRealtimeDemand,
-    StreamRequirements, authorize_consumer, thread,
+    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
+    DemandWaiter, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
+    InstallProviderInstrument, Instant, MarketEngine, MarketServiceStatus, MarketStream, Ordering,
+    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
+    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
+    REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
+    RithmicLiveHandoff, RithmicRealtimeDemand, StreamRequirements, authorize_consumer, thread,
 };
 use crate::MarketRuntimeEvent;
 
@@ -25,12 +25,7 @@ pub(super) fn spawn_coordinator(
         .spawn(move || {
             {
                 let providers = channels.providers.dispatch();
-                run_coordinator(
-                    engine,
-                    &channels.commands,
-                    providers,
-                    &shutdown,
-                );
+                run_coordinator(engine, &channels.commands, providers, &shutdown);
             }
             let panicked = channels.providers.cancel_and_join();
             assert!(
@@ -212,7 +207,7 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_command(&mut self, command: Command) {
         match command {
-            Command::ProviderWake => return,
+            Command::ProviderWake => (),
             Command::HistoryCompleted(series, generation, range, result) => {
                 self.history_completed(&series, generation, range, result);
             }
@@ -267,66 +262,10 @@ impl Coordinator<'_> {
                 let _ = reply.send(result);
             }
             Command::ResourceClass(client_id, consumer_id, resource_class, reply) => {
-                let result =
-                    authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
-                        let publication = self
-                            .engine
-                            .set_resource_class(consumer_id, resource_class)
-                            .map_err(|error| error.to_string())?;
-                        if let Some(publication) = publication {
-                            self.publish_current_snapshot(&publication);
-                        }
-                        if let Some(events) = self.events.get_mut(&consumer_id)
-                            && !resource_class.publishes_ui()
-                        {
-                            // A full snapshot queued just before a pane hid
-                            // must not leak through after the class change.
-                            // Canonical depth remains engine-owned and will
-                            // be republished from its latest revision on
-                            // Foreground restore below.
-                            events.order_book = None;
-                        }
-                        Ok(())
-                    });
-                self.reconcile_order_books();
-                if resource_class.publishes_ui() {
-                    self.publish_order_book_to_consumer(consumer_id);
-                }
-                self.release_unused_live_market_data();
-                let _ = reply.send(result);
+                self.handle_resource_class(client_id, consumer_id, resource_class, &reply);
             }
             Command::Streams(client_id, consumer_id, generation, streams, reply) => {
-                let result = authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
-                    let changed = match self
-                        .engine
-                        .set_stream_requirements(consumer_id, generation, streams)
-                    {
-                        Ok(changed) => changed,
-                        Err(EngineError::StaleConsumerGeneration { .. }) => return Ok(()),
-                        Err(error) => return Err(error.to_string()),
-                    };
-                    if !changed {
-                        return Ok(());
-                    }
-                    let series = self
-                        .engine
-                        .current_demand(consumer_id)
-                        .and_then(|demand| demand.series.clone())
-                        .ok_or_else(|| "market consumer has no selected series".to_string())?;
-                    self.reconcile_order_books();
-                    if !streams.contains(MarketStream::Depth)
-                        && let Some(events) = self.events.get_mut(&consumer_id)
-                    {
-                        events.order_book = None;
-                    }
-                    self.ensure_realtime(&series)?;
-                    if streams.contains(MarketStream::Depth) {
-                        self.publish_order_book_to_consumer(consumer_id);
-                    }
-                    Ok(())
-                });
-                self.release_unused_live_market_data();
-                let _ = reply.send(result);
+                self.handle_streams(client_id, consumer_id, generation, streams, &reply);
             }
             Command::Demand(client_id, consumer_id, generation, series, streams, reply) => {
                 self.handle_demand(
@@ -360,6 +299,81 @@ impl Coordinator<'_> {
             | Command::Detach(..)
             | Command::PollClient(..) => unreachable!("command was routed to the wrong dispatcher"),
         }
+    }
+
+    fn handle_resource_class(
+        &mut self,
+        client_id: ClientId,
+        consumer_id: ConsumerId,
+        resource_class: ConsumerResourceClass,
+        reply: &Reply<()>,
+    ) {
+        let result = authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
+            let publication = self
+                .engine
+                .set_resource_class(consumer_id, resource_class)
+                .map_err(|error| error.to_string())?;
+            if let Some(publication) = publication {
+                self.publish_current_snapshot(&publication);
+            }
+            if let Some(events) = self.events.get_mut(&consumer_id)
+                && !resource_class.publishes_ui()
+            {
+                // A full snapshot queued just before a pane hid must not leak
+                // through after the class change. Canonical depth remains
+                // runtime-owned and is republished on Foreground restore.
+                events.order_book = None;
+            }
+            Ok(())
+        });
+        self.reconcile_order_books();
+        if resource_class.publishes_ui() {
+            self.publish_order_book_to_consumer(consumer_id);
+        }
+        self.release_unused_live_market_data();
+        let _ = reply.send(result);
+    }
+
+    fn handle_streams(
+        &mut self,
+        client_id: ClientId,
+        consumer_id: ConsumerId,
+        generation: GenerationId,
+        streams: StreamRequirements,
+        reply: &Reply<()>,
+    ) {
+        let result = authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
+            let changed =
+                match self
+                    .engine
+                    .set_stream_requirements(consumer_id, generation, streams)
+                {
+                    Ok(changed) => changed,
+                    Err(EngineError::StaleConsumerGeneration { .. }) => return Ok(()),
+                    Err(error) => return Err(error.to_string()),
+                };
+            if !changed {
+                return Ok(());
+            }
+            let series = self
+                .engine
+                .current_demand(consumer_id)
+                .and_then(|demand| demand.series.clone())
+                .ok_or_else(|| "market consumer has no selected series".to_string())?;
+            self.reconcile_order_books();
+            if !streams.contains(MarketStream::Depth)
+                && let Some(events) = self.events.get_mut(&consumer_id)
+            {
+                events.order_book = None;
+            }
+            self.ensure_realtime(&series)?;
+            if streams.contains(MarketStream::Depth) {
+                self.publish_order_book_to_consumer(consumer_id);
+            }
+            Ok(())
+        });
+        self.release_unused_live_market_data();
+        let _ = reply.send(result);
     }
 
     pub(super) fn handle_register(&mut self, identity: ConsumerIdentity) -> Result<(), String> {
@@ -611,6 +625,31 @@ mod tests {
         }
     }
 
+    fn hyperliquid_series() -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "hyperliquid".to_string(),
+            instrument_id: "instrument:hyperliquid:BTC".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        }
+    }
+
+    fn hyperliquid_instrument() -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: "hyperliquid".to_string(),
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "instrument:hyperliquid:BTC".to_string(),
+            provider_symbol: "BTC".to_string(),
+            display_symbol: "BTC-PERP".to_string(),
+            venue_id: "Hyperliquid".to_string(),
+            price_scale: 2,
+            quantity_scale: 8,
+            entitlement_id: "hyperliquid-public".to_string(),
+        }
+    }
+
     fn coordinator() -> Coordinator<'static> {
         Coordinator {
             engine: super::super::configured_engine().expect("configured engine"),
@@ -661,7 +700,9 @@ mod tests {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         register(&mut coordinator, consumer);
-        coordinator.events.insert(consumer, ConsumerEvents::default());
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
 
         let mut selected = instrument();
         selected.session_generation = 2;
@@ -734,7 +775,9 @@ mod tests {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         register(&mut coordinator, consumer);
-        coordinator.events.insert(consumer, ConsumerEvents::default());
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
 
         let mut selected = instrument();
         selected.session_generation = 2;
@@ -803,12 +846,144 @@ mod tests {
     }
 
     #[test]
+    fn provider_connected_after_history_promotes_rithmic_series_live() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        let selected = instrument();
+        let selected_series = series();
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(7),
+                &selected_series,
+                StreamRequirements::BARS,
+            )
+            .expect("demand installs");
+        let provider_generation = ProviderGeneration(nonzero(1));
+        let mut live = RithmicLiveHandoff::new(&selected_series, provider_generation, "CME")
+            .expect("live handoff");
+        live.history_ready = true;
+        coordinator.rithmic_live.insert(selected_series, live);
+
+        coordinator.rithmic_online(1);
+
+        assert!(matches!(
+            coordinator
+                .events
+                .get(&consumer)
+                .and_then(|events| events.series_state.as_ref()),
+            Some(MarketRuntimeEvent::SeriesState(state))
+                if state.state == super::super::SeriesLoadState::Live
+        ));
+    }
+
+    #[test]
+    fn provider_connected_after_history_promotes_hyperliquid_series_live() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        let selected = hyperliquid_instrument();
+        let selected_series = hyperliquid_series();
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(7),
+                &selected_series,
+                StreamRequirements::BARS,
+            )
+            .expect("demand installs");
+        let provider_generation = ProviderGeneration(nonzero(1));
+        let mut live = HyperliquidLiveHandoff::new(
+            selected_series.clone(),
+            provider_generation,
+            "BTC".to_string(),
+            "1m".to_string(),
+        );
+        live.history_ready = true;
+        coordinator.hyperliquid_live.insert(selected_series, live);
+
+        coordinator.hyperliquid_online(1);
+
+        assert!(matches!(
+            coordinator
+                .events
+                .get(&consumer)
+                .and_then(|events| events.series_state.as_ref()),
+            Some(MarketRuntimeEvent::SeriesState(state))
+                if state.state == super::super::SeriesLoadState::Live
+        ));
+    }
+
+    #[test]
+    fn fresh_depth_demand_publishes_identified_awaiting_snapshot_frame() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        let selected = instrument();
+        let selected_series = series();
+        coordinator.catalog.insert(
+            (selected.provider.clone(), selected.instrument_id.clone()),
+            selected.clone(),
+        );
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(7),
+                &selected_series,
+                StreamRequirements::BARS.with(MarketStream::Depth),
+            )
+            .expect("depth demand installs");
+        coordinator.reconcile_order_books();
+        coordinator.publish_order_book_to_consumer(consumer);
+
+        assert!(matches!(
+            coordinator
+                .events
+                .get(&consumer)
+                .and_then(|events| events.order_book.as_ref()),
+            Some(MarketRuntimeEvent::OrderBookSnapshot(snapshot))
+                if snapshot.publication.provider_id == selected.provider
+                    && snapshot.publication.instrument_id == selected.instrument_id
+                    && snapshot.publication.entitlement_id == selected.entitlement_id
+                    && snapshot.publication.session_generation == selected.session_generation
+                    && matches!(
+                        snapshot.publication.state,
+                        axiusflow_market_data::OrderBookState::Recovering(
+                            axiusflow_market_data::OrderBookRecoveryReason::AwaitingSnapshot
+                        )
+                    )
+        ));
+    }
+
+    #[test]
     fn depth_book_exists_only_while_at_least_one_foreground_consumer_requires_depth() {
         let mut coordinator = coordinator();
         let series = series();
         let instrument = instrument();
         coordinator.catalog.insert(
-            (instrument.provider.clone(), instrument.instrument_id.clone()),
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
             instrument,
         );
         let first = consumer(1);
@@ -818,12 +993,7 @@ mod tests {
 
         coordinator
             .engine
-            .set_series_demand_with_streams(
-                first,
-                generation(7),
-                &series,
-                StreamRequirements::BARS,
-            )
+            .set_series_demand_with_streams(first, generation(7), &series, StreamRequirements::BARS)
             .expect("bars-only first demand installs");
         coordinator
             .engine
@@ -885,7 +1055,10 @@ mod tests {
         let series = series();
         let instrument = instrument();
         coordinator.catalog.insert(
-            (instrument.provider.clone(), instrument.instrument_id.clone()),
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
             instrument,
         );
         let consumer = consumer(1);
@@ -959,7 +1132,9 @@ mod tests {
             (foreign, second_client),
         ] {
             coordinator.consumer_clients.insert(consumer_id, owner);
-            coordinator.events.insert(consumer_id, ConsumerEvents::default());
+            coordinator
+                .events
+                .insert(consumer_id, ConsumerEvents::default());
         }
         for value in 1..=300 {
             coordinator
@@ -985,7 +1160,10 @@ mod tests {
         let (reply, result) = std::sync::mpsc::sync_channel(1);
         coordinator.handle_poll_client(
             first_client,
-            vec![(first, REALTIME_DRAIN_BUDGET), (second, REALTIME_DRAIN_BUDGET)],
+            vec![
+                (first, REALTIME_DRAIN_BUDGET),
+                (second, REALTIME_DRAIN_BUDGET),
+            ],
             &reply,
         );
         let batch = result
@@ -997,7 +1175,11 @@ mod tests {
         assert_eq!(batch[0].0, first.0.get());
         assert_eq!(batch[1].0, second.0.get());
         assert_eq!(batch[2].0, first.0.get());
-        assert!(batch.iter().all(|(consumer_id, _)| *consumer_id != foreign.0.get()));
+        assert!(
+            batch
+                .iter()
+                .all(|(consumer_id, _)| *consumer_id != foreign.0.get())
+        );
         assert!(
             coordinator
                 .events
@@ -1018,7 +1200,9 @@ mod tests {
         let available = consumer(2);
         for consumer_id in [constrained, available] {
             coordinator.consumer_clients.insert(consumer_id, owner);
-            coordinator.events.insert(consumer_id, ConsumerEvents::default());
+            coordinator
+                .events
+                .insert(consumer_id, ConsumerEvents::default());
             for value in 1..=8 {
                 coordinator
                     .events
@@ -1078,7 +1262,9 @@ mod tests {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         register(&mut coordinator, consumer);
-        coordinator.events.insert(consumer, ConsumerEvents::default());
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
         let key = (consumer, "rithmic".to_string());
         coordinator.catalog_searches.insert(key.clone(), 8);
 
@@ -1124,7 +1310,9 @@ mod tests {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         register(&mut coordinator, consumer);
-        coordinator.events.insert(consumer, ConsumerEvents::default());
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
         let key = (consumer, "rithmic".to_string());
         coordinator.catalog_selections.insert(key.clone(), 12);
 

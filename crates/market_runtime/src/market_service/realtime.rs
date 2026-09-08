@@ -1,16 +1,15 @@
 use super::{
     BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CanonicalOrderBookState, ConsumerId, Coordinator,
-    DepthSnapshot, FailureStage, FormingBar, HyperliquidCandleDemand,
-    HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
+    DepthSnapshot, FailureStage, FormingBar, HyperliquidCandleDemand, HyperliquidDemand,
+    HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
-    LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication,
-    MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
-    OrderBookApplyOutcome, Ordering, ProviderGeneration, ProviderHealth, ProviderOrderBook,
-    RithmicCalendarPeriod, RithmicExchangeCalendar,
-    RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff, RithmicRealtimeControl,
-    RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState, TopOfBookQuote, VecDeque,
-    hyperliquid_interval_for_period, id, merge_live_candle, series_state_payload,
-    series_update_message,
+    LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveSeriesPublication, MarketBar,
+    MarketStream, MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering,
+    ProviderGeneration, ProviderHealth, ProviderOrderBook, RithmicCalendarPeriod,
+    RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff,
+    RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState,
+    TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id, merge_live_candle,
+    series_state_payload, series_update_message,
 };
 use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
 
@@ -590,7 +589,10 @@ impl Coordinator<'_> {
     pub(super) fn rithmic_realtime_demand(&self) -> Result<RithmicRealtimeDemand, String> {
         let mut instruments = BTreeMap::<String, RithmicInstrumentDemand>::new();
         for series in self.rithmic_live.keys() {
-            let Some(streams) = self.engine.subscription_status(series).map(|status| status.streams)
+            let Some(streams) = self
+                .engine
+                .subscription_status(series)
+                .map(|status| status.streams)
             else {
                 continue;
             };
@@ -928,6 +930,7 @@ impl Coordinator<'_> {
             return;
         }
         self.broadcast_provider_for("hyperliquid", None);
+        let mut ready = Vec::new();
         let missing = self
             .hyperliquid_live
             .iter_mut()
@@ -936,9 +939,17 @@ impl Coordinator<'_> {
                     return None;
                 }
                 live.connected = true;
-                (!live.history_ready).then(|| series.clone())
+                if live.history_ready {
+                    ready.push(series.clone());
+                    None
+                } else {
+                    Some(series.clone())
+                }
             })
             .collect::<Vec<_>>();
+        for series in ready {
+            self.series_live_if_ready(&series);
+        }
         for series in missing {
             if !self
                 .history_inflight
@@ -1015,7 +1026,6 @@ impl Coordinator<'_> {
                 live.buffered.clear();
                 live.pending_publications.clear();
             }
-            return;
         }
     }
 
@@ -1148,6 +1158,7 @@ impl Coordinator<'_> {
             return;
         }
         self.broadcast_provider_for("rithmic", None);
+        let mut ready = Vec::new();
         let missing = self
             .rithmic_live
             .iter_mut()
@@ -1156,9 +1167,17 @@ impl Coordinator<'_> {
                     return None;
                 }
                 live.connected = true;
-                (!live.history_ready).then(|| series.clone())
+                if live.history_ready {
+                    ready.push(series.clone());
+                    None
+                } else {
+                    Some(series.clone())
+                }
             })
             .collect::<Vec<_>>();
+        for series in ready {
+            self.series_live_if_ready(&series);
+        }
         for series in missing {
             if !self
                 .history_inflight
@@ -1864,5 +1883,4 @@ mod tests {
         }
         assert!(rithmic_auto_recovers(None));
     }
-
 }

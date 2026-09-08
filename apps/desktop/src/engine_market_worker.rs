@@ -27,9 +27,9 @@ use axiusflow_instruments::{
 };
 use axiusflow_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
 pub(super) use axiusflow_market_runtime::{
-    MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError, MarketOrderBookSnapshot,
-    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
-    MarketStream, SeriesTailOperation, StreamRequirements,
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError,
+    MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState,
+    MarketSeriesUpdate, MarketService, MarketStream, SeriesTailOperation, StreamRequirements,
 };
 use axiusflow_observability::FeedConnectionState;
 
@@ -495,13 +495,13 @@ fn worker_identity(provider: &str) -> (&'static str, &'static str) {
 
 #[path = "engine_market_worker/replay_conversion.rs"]
 mod replay_conversion;
+pub(crate) use replay_conversion::runtime_order_book_frame;
+#[cfg(test)]
+use replay_conversion::{replay_bar_definition, snapshot_instrument};
 use replay_conversion::{
     replay_runtime_snapshot, replay_runtime_tail_update, runtime_generation_from_snapshot,
     series_key,
 };
-pub(crate) use replay_conversion::runtime_order_book_frame;
-#[cfg(test)]
-use replay_conversion::{replay_bar_definition, snapshot_instrument};
 
 fn default_product(product_id: &str) -> InstallProviderInstrument {
     InstallProviderInstrument {
@@ -821,10 +821,7 @@ mod tests {
                     _ => {}
                 }
             }
-            assert!(
-                !disconnected,
-                "Hyperliquid market worker disconnected"
-            );
+            assert!(!disconnected, "Hyperliquid market worker disconnected");
             assert!(
                 Instant::now() < deadline,
                 "Hyperliquid market runtime did not publish a covering snapshot"
@@ -847,17 +844,19 @@ mod tests {
         assert!(
             handle_rithmic_catalog_event(
                 &mut record.endpoint,
-                MarketRuntimeEvent::ProviderInstrumentSearchResult(ProviderInstrumentSearchResult {
-                    consumer_id: 41,
-                    provider: "rithmic".to_string(),
-                    provider_generation: 1,
-                    search_generation: 3,
-                    instruments: vec![ProviderInstrumentSummary {
-                        symbol: "MNQ".to_string(),
-                        exchange: "CME".to_string(),
-                        ..ProviderInstrumentSummary::default()
-                    }],
-                },),
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(
+                    ProviderInstrumentSearchResult {
+                        consumer_id: 41,
+                        provider: "rithmic".to_string(),
+                        provider_generation: 1,
+                        search_generation: 3,
+                        instruments: vec![ProviderInstrumentSummary {
+                            symbol: "MNQ".to_string(),
+                            exchange: "CME".to_string(),
+                            ..ProviderInstrumentSummary::default()
+                        }],
+                    },
+                ),
             )
             .is_none()
         );
@@ -875,11 +874,15 @@ mod tests {
         assert!(
             handle_rithmic_catalog_event(
                 &mut record.endpoint,
-                MarketRuntimeEvent::ProviderInstrumentSelection(MarketProviderInstrumentSelection {
-                    consumer_id: MarketConsumerId(NonZeroU64::new(41).expect("nonzero consumer")),
-                    instrument: selected,
-                    command_generation: 4,
-                }),
+                MarketRuntimeEvent::ProviderInstrumentSelection(
+                    MarketProviderInstrumentSelection {
+                        consumer_id: MarketConsumerId(
+                            NonZeroU64::new(41).expect("nonzero consumer")
+                        ),
+                        instrument: selected,
+                        command_generation: 4,
+                    }
+                ),
             )
             .is_none()
         );
@@ -1791,9 +1794,7 @@ mod tests {
         apply_pushed_event(
             MarketRuntimeEvent::SeriesState(MarketSeriesState {
                 consumer_id: MarketConsumerId(NonZeroU64::MIN),
-                generation: MarketGenerationId(
-                    NonZeroU64::new(7).expect("generation validates"),
-                ),
+                generation: MarketGenerationId(NonZeroU64::new(7).expect("generation validates")),
                 series: None,
                 state: SeriesLoadState::Live,
                 detail: None,
@@ -2002,9 +2003,9 @@ mod tests {
                         },
                     ],
                     best_bid: Some(DepthLevel {
-                    price: 7_798_670,
-                    quantity: 653_408,
-                    order_count: Some(3),
+                        price: 7_798_670,
+                        quantity: 653_408,
+                        order_count: Some(3),
                     }),
                     best_ask: Some(DepthLevel {
                         price: 7_798_671,
@@ -2212,12 +2213,8 @@ mod tests {
         let replay = replay_runtime_snapshot(&snapshot).expect("HL snapshot converts");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
 
-        send_publication(
-            &sender,
-            ReplayStreamUpdate::Snapshot(replay),
-            "hyperliquid",
-        )
-        .expect("publication queues");
+        send_publication(&sender, ReplayStreamUpdate::Snapshot(replay), "hyperliquid")
+            .expect("publication queues");
 
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);

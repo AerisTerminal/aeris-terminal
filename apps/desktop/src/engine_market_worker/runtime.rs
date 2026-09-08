@@ -2,9 +2,10 @@
 
 use super::{
     ChartState, EVENT_WAIT, EndpointRecord, FeedConnectionState, MarketRuntimeEvent, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint, apply_pushed_event,
-    classify_provider_catalog_event, complete_pending_recovery, initialize_catalog_endpoint,
-    initialize_endpoint, mpsc, process_command, set_resource_class, shared_market_runtime, thread,
+    MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
+    apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
+    initialize_catalog_endpoint, initialize_endpoint, mpsc, process_command, set_resource_class,
+    shared_market_runtime, thread,
 };
 
 pub(super) fn run_workers(
@@ -49,18 +50,16 @@ fn run_attached_workers(
         if let Some(receiver) = additions.as_ref() {
             loop {
                 match receiver.try_recv() {
-                    Ok(mut record) => {
-                        match initialize_record(market, client_id, &mut record) {
-                            Ok(()) => endpoints.push(record),
-                            Err(error) => {
-                                let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                                    state: ChartState::Error,
-                                    message: error,
-                                });
-                                retire_endpoint(market, client_id, &mut record.endpoint);
-                            }
+                    Ok(mut record) => match initialize_record(market, client_id, &mut record) {
+                        Ok(()) => endpoints.push(record),
+                        Err(error) => {
+                            let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+                                state: ChartState::Error,
+                                message: error,
+                            });
+                            retire_endpoint(market, client_id, &mut record.endpoint);
                         }
-                    }
+                    },
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
                         additions = None;
@@ -154,8 +153,12 @@ fn process_pending_foreground_selection(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     if let Some(selection) = engine_selection
-        && let Err(error) =
-            process_command(market, client_id, record, MarketWorkerCommand::EngineSelect(selection))
+        && let Err(error) = process_command(
+            market,
+            client_id,
+            record,
+            MarketWorkerCommand::EngineSelect(selection),
+        )
     {
         let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
             state: ChartState::Error,
@@ -181,12 +184,7 @@ fn initialize_record(
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
     if record.catalog_only {
-        initialize_catalog_endpoint(
-            market,
-            client_id,
-            record.workspace_id,
-            &mut record.endpoint,
-        )
+        initialize_catalog_endpoint(market, client_id, record.workspace_id, &mut record.endpoint)
     } else {
         initialize_endpoint(
             market,

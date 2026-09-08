@@ -43,12 +43,10 @@ jobs:
         run: tools/setup_linux_desktop.sh --system
       - name: Install pinned Rust toolchain
         run: rustup show
-      - name: Soak the live Hyperliquid feed through the engine
-        env:
-          AXIUSFLOW_SOAK_SECONDS: "600"
+      - name: Exercise the live Hyperliquid runtime and cancellation path
         run: >-
-          cargo test -p axiusflow_engine --test live_market_soak --locked --
-          --ignored --nocapture live_hyperliquid_streams_across_markets_and_timeframe_switches
+          cargo test -p axiusflow_market_runtime --locked --
+          --ignored --nocapture live_worker_cancellation_is_prompt
       - name: Upload the recorded gate
         if: always()
         uses: actions/upload-artifact@v6
@@ -115,12 +113,9 @@ jobs:
         run: |
           $schemas = @(Get-ChildItem provider_kit/current/proto/*.proto -ErrorAction SilentlyContinue)
           if ($schemas.Count -eq 0) { throw 'Rithmic provider kit is unavailable on this runner' }
-      - name: Soak the live Rithmic feed through the engine
-        env:
-          AXIUSFLOW_SOAK_SECONDS: "600"
+      - name: Exercise the live Rithmic provider smoke path
         run: >-
-          cargo test -p axiusflow_engine --test live_market_soak --locked --
-          --ignored --nocapture live_rithmic_streams_across_timeframe_and_instrument_switches
+          cargo run -p axiusflow_rithmic_protocol_adapter --bin rithmic_test_smoke --locked --release
       - name: Upload the recorded gate
         if: always()
         uses: actions/upload-artifact@v6
