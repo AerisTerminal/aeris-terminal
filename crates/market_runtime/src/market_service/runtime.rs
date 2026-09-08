@@ -1,23 +1,24 @@
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, COMMAND_CAPACITY, ClientId,
-    Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass, Duration, GenerationId,
-    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource, HotSeries,
-    InstallProviderInstrument, Instant, LiveHyperliquidHistory, LiveRithmicHistory,
-    LocalHistoryStore, MarketEngine, MarketRuntime, MarketService, MarketServiceStatus, Mutex,
+    ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarSeriesKey,
+    COMMAND_CAPACITY, ClientId, Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
+    Duration, GenerationId,
+    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource, InstallProviderInstrument,
+    Instant, LiveHyperliquidHistory, LiveRithmicHistory, MarketEngine, MarketRuntime, MarketService,
+    MarketServiceStatus, Mutex,
     Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelSet, ProviderCatalogChannels,
     ProviderCatalogCommand, ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch,
     ProviderDispatchRecord, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
     ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
     ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, ResourceMode, RithmicCatalogControl,
-    RithmicRealtimeControl, RithmicRealtimeEvent, STORAGE_CAPACITY, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesKey, StartedProviderRuntime, SyncSender, TrySendError,
-    Viewport, WorkspaceId, WorkspaceState, available_memory_bytes, configured_engine,
-    configured_reconnect_delay, envelope, id, internal_series, mpsc, retained_hot_series,
-    spawn_coordinator, spawn_history_worker, spawn_storage_worker, thread,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, RithmicRealtimeControl,
+    RithmicRealtimeEvent, SearchProviderInstruments,
+    SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, SyncSender, TrySendError,
+    Viewport, WorkspaceId, configured_engine, configured_reconnect_delay, id, mpsc,
+    spawn_coordinator, spawn_history_worker, thread,
     try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
-    validate_provider_search, validate_provider_selection, warm_series,
+    validate_provider_search, validate_provider_selection,
 };
+use crate::MarketRuntimeEvent;
 use crate::hyperliquid_realtime::{
     HyperliquidCatalogControl, HyperliquidRealtimeControl, HyperliquidRealtimeEvent,
 };
@@ -158,7 +159,7 @@ impl ProviderRuntimeRegistry {
             provider => {
                 started.cancel_and_join();
                 Err(format!(
-                    "resident engine market provider is unsupported: {provider}"
+                    "market provider is unsupported: {provider}"
                 ))
             }
         }
@@ -737,75 +738,39 @@ impl ProviderDispatch<'_> {
 }
 
 impl MarketService {
-    /// Classifies the persisted workspace hot set using the same bounded memory
-    /// policy used by normal market-service startup.
+    /// Starts the desktop-owned in-process market runtime.
     ///
-    /// # Errors
-    /// Returns an error when persisted hot-set metadata is invalid.
-    pub fn retained_hot_set(workspace: &WorkspaceState) -> Result<Vec<HotSeries>, String> {
-        retained_hot_series(workspace, available_memory_bytes())
-    }
-
-    /// Starts the process-owned market coordinator and its bounded provider-history worker.
-    ///
-    /// # Errors
-    /// Returns an error when provider configuration or either bounded worker cannot start.
-    pub fn start(workspace: &WorkspaceState) -> Result<Self, String> {
-        let hot_series = Self::retained_hot_set(workspace)?;
-        let storage = LocalHistoryStore::open(
-            &crate::default_engine_state_root()?
-                .join("market-history")
-                .join("rithmic"),
-        )
-        .map_err(|error| error.to_string());
-        let service = Self::start_composed(
-            vec![
-                ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
-                ProviderRuntimeSpec::hyperliquid(Box::new(LiveHyperliquidHistory), true),
-            ],
-            Some(storage),
-            hot_series.len(),
-        )?;
-        service.restore_hot_set(&hot_series)?;
-        Ok(service)
+    /// Market state is intentionally ephemeral. History is requested from the
+    /// provider when demanded; no local market-history store or resident hot set
+    /// participates in startup.
+    pub fn start() -> Result<Self, String> {
+        Self::start_composed(vec![
+            ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
+            ProviderRuntimeSpec::hyperliquid(Box::new(LiveHyperliquidHistory), true),
+        ])
     }
 
     pub(super) fn start_composed(
         providers: Vec<ProviderRuntimeSpec>,
-        storage: Option<Result<LocalHistoryStore, String>>,
-        hot_set_priority_count: usize,
     ) -> Result<Self, String> {
         let engine = configured_engine()?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (storage_tx, storage_rx) = mpsc::sync_channel(STORAGE_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
-        let available_memory_bytes = available_memory_bytes();
         let provider_registry = ProviderRuntimeRegistry::start(
             providers,
             &command_tx,
             &engine,
             &active_provider_workers,
         )?;
-        let workers = vec![
-            spawn_storage_worker(
-                storage,
-                storage_rx,
-                command_tx.clone(),
-                Arc::clone(&shutdown),
-            )?,
-            spawn_coordinator(
-                engine,
-                OwnedCoordinatorChannels {
-                    commands: command_rx,
-                    storage: storage_tx,
-                    providers: provider_registry,
-                },
-                Arc::clone(&shutdown),
-                available_memory_bytes,
-                hot_set_priority_count,
-            )?,
-        ];
+        let workers = vec![spawn_coordinator(
+            engine,
+            OwnedCoordinatorChannels {
+                commands: command_rx,
+                providers: provider_registry,
+            },
+            Arc::clone(&shutdown),
+        )?];
         let service =
             Self::build_market_service(command_tx, shutdown, active_provider_workers, workers);
         Ok(service)
@@ -827,7 +792,7 @@ impl MarketService {
         }
     }
 
-    /// Cancels provider work, drains accepted persistence, and joins owned workers.
+    /// Cancels provider work, drains accepted provider events, and joins owned workers.
     ///
     /// # Errors
     /// Returns an error when a worker panics or the complete shutdown exceeds `timeout`.
@@ -896,21 +861,7 @@ impl MarketService {
     /// # Errors
     /// Returns an error for zero identity or coordinator failure.
     pub fn attach(&self, client_id: u64) -> Result<(), String> {
-        self.request(|reply| Ok(Command::Attach(id(client_id).map(ClientId)?, None, reply)))
-    }
-
-    pub(crate) fn attach_stream(
-        &self,
-        client_id: u64,
-        events: SyncSender<(u64, envelope::Payload)>,
-    ) -> Result<(), String> {
-        self.request(|reply| {
-            Ok(Command::Attach(
-                id(client_id).map(ClientId)?,
-                Some(events),
-                reply,
-            ))
-        })
+        self.request(|reply| Ok(Command::Attach(id(client_id).map(ClientId)?, reply)))
     }
 
     /// Detaches a client and all of its consumers.
@@ -919,29 +870,6 @@ impl MarketService {
     /// Returns an error for zero identity or coordinator failure.
     pub fn detach(&self, client_id: u64) -> Result<(), String> {
         self.request(|reply| Ok(Command::Detach(id(client_id).map(ClientId)?, reply)))
-    }
-
-    /// Applies the engine-owned background market retention policy.
-    ///
-    /// # Errors
-    /// Returns an error when the coordinator is unavailable.
-    pub fn set_resource_mode(&self, mode: ResourceMode) -> Result<(), String> {
-        self.request(|reply| Ok(Command::SetResourceMode(mode, reply)))
-    }
-
-    pub(crate) fn restore_hot_set(&self, hot_series: &[HotSeries]) -> Result<(), String> {
-        let restored = hot_series
-            .iter()
-            .filter_map(|series| {
-                if let Ok(series) = warm_series(series) {
-                    Some(series)
-                } else {
-                    eprintln!("Axiusflow engine skipped unsupported hot-set metadata");
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        self.request(|reply| Ok(Command::RestoreHotSet(restored, reply)))
     }
 
     /// Returns one bounded coordinator-owned lifecycle and memory snapshot.
@@ -1053,6 +981,30 @@ impl MarketService {
         })
     }
 
+    /// Replaces one consumer's exact upstream stream set without changing its
+    /// selected market generation or restarting history.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, stale selection, unsupported
+    /// streams, or coordinator failure.
+    pub fn set_streams(
+        &self,
+        client_id: u64,
+        consumer_id: u64,
+        generation: u64,
+        streams: StreamRequirements,
+    ) -> Result<(), String> {
+        self.request(|reply| {
+            Ok(Command::Streams(
+                ClientId(id(client_id)?),
+                ConsumerId(id(consumer_id)?),
+                GenerationId(id(generation)?),
+                streams,
+                reply,
+            ))
+        })
+    }
+
     /// Accepts one generation-fenced series demand without waiting for provider I/O.
     ///
     /// # Errors
@@ -1062,14 +1014,16 @@ impl MarketService {
         client_id: u64,
         consumer_id: u64,
         generation: u64,
-        series: &SeriesKey,
+        series: &BarSeriesKey,
+        streams: StreamRequirements,
     ) -> Result<(), String> {
         self.request(|reply| {
             Ok(Command::Demand(
                 ClientId(id(client_id)?),
                 ConsumerId(id(consumer_id)?),
                 GenerationId(id(generation)?),
-                internal_series(series)?,
+                series.clone(),
+                streams,
                 reply,
             ))
         })
@@ -1113,7 +1067,7 @@ impl MarketService {
         })
     }
 
-    /// Installs one bounded adapter-resolved instrument in the engine-owned catalog.
+    /// Installs one bounded adapter-resolved instrument in the runtime catalog.
     ///
     /// # Errors
     /// Returns an error for invalid identity, stale generations, capacity, or coordinator failure.
@@ -1138,11 +1092,36 @@ impl MarketService {
         &self,
         client_id: u64,
         consumer_id: u64,
-    ) -> Result<Option<envelope::Payload>, String> {
+    ) -> Result<Option<MarketRuntimeEvent>, String> {
         self.request(|reply| {
             Ok(Command::Poll(
                 ClientId(id(client_id)?),
                 ConsumerId(id(consumer_id)?),
+                reply,
+            ))
+        })
+    }
+
+    /// Drains one bounded fair batch directly from this client's canonical
+    /// consumer outboxes. No intermediate desktop event queue is created.
+    ///
+    /// # Errors
+    /// Returns an error for an unattached client or coordinator failure.
+    pub fn poll_events(
+        &self,
+        client_id: u64,
+        consumer_budgets: &[(u64, usize)],
+    ) -> Result<Vec<(u64, MarketRuntimeEvent)>, String> {
+        let consumer_budgets = consumer_budgets
+            .iter()
+            .map(|(consumer_id, maximum)| {
+                Ok((ConsumerId(id(*consumer_id)?), *maximum))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.request(|reply| {
+            Ok(Command::PollClient(
+                ClientId(id(client_id)?),
+                consumer_budgets,
                 reply,
             ))
         })

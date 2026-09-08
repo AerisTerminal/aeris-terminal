@@ -1,8 +1,8 @@
-//! Headless desktop burst and frame-conflation evidence.
+//! Headless desktop burst, backpressure, and frame-scheduling evidence.
 //!
 //! Everything measured here is **synthetic**: a fixture worker drives a real
 //! mailbox, frame gate, and client model, with no engine process, no IPC, and no
-//! provider. That makes it a bounds-and-conflation check, not evidence that the
+//! provider. That makes it a bounds-and-backpressure check, not evidence that the
 //! desktop works against a venue. The only thing that can say that is the live
 //! market gate, whose result this report carries verbatim — including
 //! [`LiveMarketGate::NotRun`], which is never reported as a pass.
@@ -14,15 +14,15 @@ use axiusflow_application::{
     ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason,
 };
 use axiusflow_desktop::market_worker::{
-    FixtureMarketWorker, MarketWorkerMessage, MarketWorkerReceiver, MarketWorkerSender,
-    market_worker_channel,
+    FixtureMarketWorker, MarketPublicationGeneration, MarketWorkerMessage, MarketWorkerPublication,
+    MarketWorkerReceiver, MarketWorkerSendError, MarketWorkerSender, market_worker_channel,
 };
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{
-    BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent,
-    OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
+    BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, OrderBook,
+    OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
-use axiusflow_terminal_ui::{OrderBookSelection, OrderBookUpdateOutcome, ReadOnlyOrderBook};
+use axiusflow_terminal_ui::{OrderBookSelection, project_order_book};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::{
@@ -245,13 +245,13 @@ struct DesktopBurstEvidence {
     live_market_gate: LiveMarketGate,
     burst_updates: usize,
     mailbox_capacity: usize,
-    retained_items: usize,
-    retained_selection_generation: usize,
-    retained_series_generation: usize,
+    mailbox_high_water_items: usize,
+    delivered_updates: usize,
+    last_delivered_publication_generation: usize,
     frame_requests_while_pending: usize,
     accepted_frame_requests_while_pending: usize,
     accepted_frame_requests_after_completion: usize,
-    bounded_latest_state_conflation: bool,
+    bounded_backpressure_delivery: bool,
     single_frame_drain_gate: bool,
     working_set_baseline_bytes: u64,
     working_set_current_bytes: u64,
@@ -385,33 +385,62 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let snapshot = fixture.publish_snapshot(2)?.snapshot;
     let capacity = NonZeroUsize::new(32).unwrap_or(NonZeroUsize::MIN);
     let (sender, receiver) = market_worker_channel(capacity);
+    let mut mailbox_high_water_items = 0_usize;
+    let mut delivered_updates = 0_usize;
+    let mut last_delivered_publication_generation = 0_usize;
+
+    let mut observe = |messages: Vec<MarketWorkerMessage>, disconnected: bool| {
+        if disconnected {
+            return Err::<(), Box<dyn Error>>("desktop burst mailbox disconnected".into());
+        }
+        for message in messages {
+            let MarketWorkerMessage::Update(publication) = message
+            else {
+                return Err("desktop burst received an unexpected presentation message".into());
+            };
+            delivered_updates = delivered_updates.saturating_add(1);
+            last_delivered_publication_generation = usize::try_from(
+                publication.generation.publication_generation(),
+            )
+            .unwrap_or(usize::MAX);
+        }
+        Ok(())
+    };
 
     for generation in 1..=BURST_UPDATES {
-        let generation = NonZeroUsize::new(generation).unwrap_or(NonZeroUsize::MIN);
-        sender
-            .send(MarketWorkerMessage::RithmicLive {
-                selection_generation: NonZeroUsize::MIN,
-                series_generation: generation,
+        let publication_generation = u64::try_from(generation).unwrap_or(u64::MAX);
+        loop {
+            match sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
-            })
-            .map_err(|_| "desktop burst mailbox disconnected")?;
-        if generation.get().is_multiple_of(128) {
+                generation: MarketPublicationGeneration::from_tail(
+                    publication_generation,
+                    1,
+                    publication_generation,
+                    publication_generation,
+                ),
+                subscription_id: "readiness_fixture".to_string(),
+                worker_label: "readiness fixture".to_string(),
+                ui_diagnostics: None,
+            })) {
+                Ok(()) => break,
+                Err(MarketWorkerSendError::Full) => {
+                    let (messages, disconnected) = receiver.drain();
+                    observe(messages, disconnected)?;
+                }
+                Err(MarketWorkerSendError::Disconnected) => {
+                    return Err("desktop burst mailbox disconnected".into());
+                }
+            }
+        }
+        mailbox_high_water_items = mailbox_high_water_items.max(sender.occupancy().0);
+        if generation.is_multiple_of(128) {
             memory.sample()?;
         }
     }
 
-    let (retained_items, mailbox_capacity) = sender.occupancy();
+    let (_, mailbox_capacity) = sender.occupancy();
     let (messages, disconnected) = receiver.drain();
-    let (retained_selection_generation, retained_series_generation) = match messages.as_slice() {
-        [
-            MarketWorkerMessage::RithmicLive {
-                selection_generation,
-                series_generation,
-                ..
-            },
-        ] if !disconnected => (selection_generation.get(), series_generation.get()),
-        _ => return Err("desktop burst did not retain exactly one live snapshot".into()),
-    };
+    observe(messages, disconnected)?;
 
     let mut gate = FramePollGate::default();
     let accepted_frame_requests_while_pending =
@@ -419,10 +448,10 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     gate.complete();
     let accepted_frame_requests_after_completion = usize::from(gate.try_schedule());
 
-    let bounded_latest_state_conflation = retained_items == 1
+    let bounded_backpressure_delivery = mailbox_high_water_items <= mailbox_capacity
         && mailbox_capacity == capacity.get()
-        && retained_selection_generation == 1
-        && retained_series_generation == BURST_UPDATES;
+        && delivered_updates == BURST_UPDATES
+        && last_delivered_publication_generation == BURST_UPDATES;
     let single_frame_drain_gate =
         accepted_frame_requests_while_pending == 1 && accepted_frame_requests_after_completion == 1;
     memory.sample()?;
@@ -433,24 +462,24 @@ fn collect_evidence() -> Result<DesktopBurstEvidence, Box<dyn Error>> {
     let working_set_sampled_growth_bytes = memory
         .high_water_bytes
         .saturating_sub(memory.baseline_bytes);
-    if !bounded_latest_state_conflation || !single_frame_drain_gate || !working_set_within_bound {
-        return Err("desktop burst/frame conflation contract failed".into());
+    if !bounded_backpressure_delivery || !single_frame_drain_gate || !working_set_within_bound {
+        return Err("desktop burst/backpressure contract failed".into());
     }
     let gap_recovery = collect_gap_recovery_evidence()?;
 
     Ok(DesktopBurstEvidence {
-        schema_version: 4,
-        evidence_scope: "deterministic_desktop_burst_and_frame_conflation",
+        schema_version: 6,
+        evidence_scope: "deterministic_desktop_burst_backpressure_and_frame_scheduling",
         live_market_gate: live_market_gate(),
         burst_updates: BURST_UPDATES,
         mailbox_capacity,
-        retained_items,
-        retained_selection_generation,
-        retained_series_generation,
+        mailbox_high_water_items,
+        delivered_updates,
+        last_delivered_publication_generation,
         frame_requests_while_pending: BURST_UPDATES,
         accepted_frame_requests_while_pending,
         accepted_frame_requests_after_completion,
-        bounded_latest_state_conflation,
+        bounded_backpressure_delivery,
         single_frame_drain_gate,
         working_set_baseline_bytes: memory.baseline_bytes,
         working_set_current_bytes: memory.current_bytes,
@@ -556,28 +585,26 @@ fn collect_generation_fencing_evidence() -> Result<GenerationFencingEvidence, Bo
     );
 
     let maximum_levels = NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN);
-    let mut order_book = ReadOnlyOrderBook::new(maximum_levels);
-    order_book.select(order_book_selection("mnq", 7, 1)?);
-    order_book.apply_event(&depth_snapshot_for("mnq", 7, 10))?;
-    order_book.select(order_book_selection("es", 8, 2)?);
-    let retired_outcome = order_book.apply_event(&depth_snapshot_for("mnq", 7, 11))?;
-    let retired_frame = order_book
-        .frame()
-        .ok_or("Order Book selection disappeared during generation fencing")?;
-    let retired_order_book_selection_ignored_without_mutation = retired_outcome
-        == OrderBookUpdateOutcome::Ignored
-        && retired_frame.selection_generation == 2
-        && retired_frame.session_generation == 8
-        && retired_frame.source_watermark == 0
-        && retired_frame.rows.is_empty();
-    let current_order_book_selection_recovers = matches!(
-        order_book.apply_event(&depth_snapshot_for("es", 8, 1))?,
-        OrderBookUpdateOutcome::Published(frame)
-            if frame.selection_generation == 2
+    let mut mnq_book = OrderBook::new(maximum_levels);
+    mnq_book.install_snapshot(match &depth_snapshot_for("mnq", 7, 10) {
+        MarketEvent::DepthSnapshot(snapshot) => snapshot,
+        _ => unreachable!(),
+    })?;
+    let es_selection = order_book_selection("es", 8, 2)?;
+    let retired_order_book_selection_ignored_without_mutation =
+        project_order_book(&es_selection, &mnq_book.publication()).is_none();
+    let mut es_book = OrderBook::new(maximum_levels);
+    es_book.install_snapshot(match &depth_snapshot_for("es", 8, 1) {
+        MarketEvent::DepthSnapshot(snapshot) => snapshot,
+        _ => unreachable!(),
+    })?;
+    let current_order_book_selection_recovers = project_order_book(&es_selection, &es_book.publication())
+        .is_some_and(|frame| {
+            frame.selection_generation == 2
                 && frame.session_generation == 8
                 && frame.source_watermark == 1
                 && !frame.rows.is_empty()
-    );
+        });
 
     Ok(GenerationFencingEvidence {
         chart: ChartGenerationFencingEvidence {
@@ -620,28 +647,23 @@ fn collect_history_gap_evidence() -> Result<HistoryGapRecoveryEvidence, Box<dyn 
 }
 
 fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Error>> {
-    let mut order_book = ReadOnlyOrderBook::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
-    order_book.select(OrderBookSelection {
-        provider_id: "rithmic".to_string(),
-        instrument_id: "mnq".to_string(),
-        entitlement_id: "test".to_string(),
-        session_generation: 7,
-        selection_generation: 1,
-        precision: InstrumentPrecision::try_new(2, 0)?,
-    });
-    order_book.apply_event(&depth_snapshot(10))?;
-    order_book.apply_event(&depth_delta(11))?;
-    let depth_gap = order_book.apply_event(&depth_delta(13));
-    let recovering = order_book
-        .frame()
-        .ok_or("Order Book selection disappeared during recovery")?;
+    let mut order_book = OrderBook::new(NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN));
+    let MarketEvent::DepthSnapshot(snapshot) = depth_snapshot(10) else { unreachable!() };
+    order_book.install_snapshot(&snapshot)?;
+    let MarketEvent::DepthDelta(delta) = depth_delta(11) else { unreachable!() };
+    order_book.apply_delta(&delta)?;
+    let MarketEvent::DepthDelta(gap_delta) = depth_delta(13) else { unreachable!() };
+    let depth_gap = order_book.apply_delta(&gap_delta);
+    let recovering = order_book.publication();
     let depth_gap_clears_book = depth_gap.is_err()
         && recovering.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
-        && recovering.rows.is_empty();
+        && recovering.bids.is_empty()
+        && recovering.asks.is_empty();
+    let MarketEvent::DepthSnapshot(replacement) = depth_snapshot(13) else { unreachable!() };
     let depth_covering_snapshot_recovers = matches!(
-        order_book.apply_event(&depth_snapshot(13))?,
-        OrderBookUpdateOutcome::Published(frame)
-            if frame.state == OrderBookState::Ready && frame.source_watermark == 13
+        order_book.install_snapshot(&replacement)?,
+        OrderBookApplyOutcome::Published(publication)
+            if publication.state == OrderBookState::Ready && publication.source_watermark == 13
     );
     Ok(DepthGapRecoveryEvidence {
         depth_gap_clears_book,
@@ -726,10 +748,10 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     encoded.push(b'\n');
     fs::write(report_path, encoded)?;
     println!(
-        "desktop_burst_conformance=deterministic_passed live_market_gate={} updates={} retained={} frame_schedules={} report={}",
+        "desktop_burst_conformance=deterministic_passed live_market_gate={} updates={} mailbox_high_water={} frame_schedules={} report={}",
         live_gate_label(report.live_market_gate),
         report.burst_updates,
-        report.retained_items,
+        report.mailbox_high_water_items,
         report.accepted_frame_requests_while_pending,
         report_path.display()
     );
@@ -799,6 +821,7 @@ struct EnduranceCounters {
     frame_cycles: u64,
     updates_published: u64,
     last_generation: usize,
+    last_delivered_generation: usize,
     mailbox_high_water_items: usize,
     stale_or_gapped_publications: u64,
 }
@@ -810,6 +833,33 @@ struct EnduranceEvidenceSnapshot<'a> {
     memory: &'a ProcessMemoryProbe,
     working_set_within_bound: bool,
     clean_stop: bool,
+}
+
+fn observe_endurance_messages(
+    messages: Vec<MarketWorkerMessage>,
+    disconnected: bool,
+    counters: &mut EnduranceCounters,
+) {
+    if disconnected {
+        counters.stale_or_gapped_publications =
+            counters.stale_or_gapped_publications.saturating_add(1);
+        return;
+    }
+    for message in messages {
+        let MarketWorkerMessage::Update(publication) = message
+        else {
+            counters.stale_or_gapped_publications =
+                counters.stale_or_gapped_publications.saturating_add(1);
+            continue;
+        };
+        let received = usize::try_from(publication.generation.publication_generation())
+            .unwrap_or(usize::MAX);
+        if received != counters.last_delivered_generation.saturating_add(1) {
+            counters.stale_or_gapped_publications =
+                counters.stale_or_gapped_publications.saturating_add(1);
+        }
+        counters.last_delivered_generation = received;
+    }
 }
 
 fn run_endurance_frame(
@@ -833,35 +883,42 @@ fn run_endurance_frame(
             .last_generation
             .checked_add(1)
             .ok_or("desktop endurance generation overflowed")?;
-        let generation = NonZeroUsize::new(counters.last_generation).unwrap_or(NonZeroUsize::MIN);
-        sender
-            .send(MarketWorkerMessage::RithmicLive {
-                selection_generation: NonZeroUsize::MIN,
-                series_generation: generation,
+        let publication_generation = u64::try_from(counters.last_generation).unwrap_or(u64::MAX);
+        loop {
+            match sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
-            })
-            .map_err(|_| "desktop endurance mailbox disconnected")?;
-        counters.updates_published = counters.updates_published.saturating_add(1);
+                generation: MarketPublicationGeneration::from_tail(
+                    publication_generation,
+                    1,
+                    publication_generation,
+                    publication_generation,
+                ),
+                subscription_id: "endurance_fixture".to_string(),
+                worker_label: "endurance fixture".to_string(),
+                ui_diagnostics: None,
+            })) {
+                Ok(()) => {
+                    counters.updates_published = counters.updates_published.saturating_add(1);
+                    break;
+                }
+                Err(MarketWorkerSendError::Full) => {
+                    let (messages, disconnected) = receiver.drain();
+                    observe_endurance_messages(messages, disconnected, counters);
+                }
+                Err(MarketWorkerSendError::Disconnected) => {
+                    return Err("desktop endurance mailbox disconnected".into());
+                }
+            }
+        }
+        counters.mailbox_high_water_items =
+            counters.mailbox_high_water_items.max(sender.occupancy().0);
     }
-    counters.mailbox_high_water_items = counters.mailbox_high_water_items.max(sender.occupancy().0);
     if !gate.try_schedule() {
         return Err("desktop endurance frame gate rejected an idle frame".into());
     }
     let (messages, disconnected) = receiver.drain();
     gate.complete();
-    if !matches!(
-        messages.as_slice(),
-        [MarketWorkerMessage::RithmicLive {
-            selection_generation,
-            series_generation,
-            ..
-        }] if !disconnected
-            && selection_generation.get() == 1
-            && series_generation.get() == counters.last_generation
-    ) {
-        counters.stale_or_gapped_publications =
-            counters.stale_or_gapped_publications.saturating_add(1);
-    }
+    observe_endurance_messages(messages, disconnected, counters);
     Ok(())
 }
 
@@ -929,6 +986,7 @@ fn collect_endurance_with_checkpoints(
         <= MAXIMUM_WORKING_SET_GROWTH_BYTES;
     let clean_stop = counters.stale_or_gapped_publications == 0
         && counters.mailbox_high_water_items <= capacity.get()
+        && counters.last_delivered_generation == counters.last_generation
         && sender.occupancy().0 == 0;
     if !working_set_within_bound || !clean_stop {
         return Err("desktop endurance bounds or continuity failed".into());
@@ -1262,11 +1320,15 @@ mod tests {
     }
 
     #[test]
-    fn burst_retains_only_the_latest_generation() {
+    fn burst_delivery_is_bounded_and_backpressured() {
         let evidence = collect_evidence().expect("burst evidence passes");
-        assert_eq!(evidence.retained_items, 1);
-        assert_eq!(evidence.retained_series_generation, BURST_UPDATES);
-        assert!(evidence.bounded_latest_state_conflation);
+        assert!(evidence.mailbox_high_water_items <= evidence.mailbox_capacity);
+        assert_eq!(evidence.delivered_updates, BURST_UPDATES);
+        assert_eq!(
+            evidence.last_delivered_publication_generation,
+            BURST_UPDATES
+        );
+        assert!(evidence.bounded_backpressure_delivery);
         assert!(evidence.single_frame_drain_gate);
         assert!(evidence.working_set_within_bound);
         assert!(evidence.gap_recovery.chart_ordering_fault_rejected);
@@ -1441,6 +1503,7 @@ mod tests {
             frame_cycles: 1,
             updates_published: 1,
             last_generation: 1,
+            last_delivered_generation: 1,
             mailbox_high_water_items: 1,
             stale_or_gapped_publications: 0,
         };

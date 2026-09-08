@@ -1,10 +1,7 @@
 use axiusflow_instruments::InstrumentPrecision;
 use axiusflow_market_data::{
-    DepthDelta, DepthSnapshot, MarketDataValidationError, MarketEvent, OrderBook,
-    OrderBookApplyOutcome, OrderBookColumnLevel, OrderBookFrame, OrderBookPublication,
-    OrderBookRecoveryReason, OrderBookRow,
+    OrderBookColumnLevel, OrderBookFrame, OrderBookPublication, OrderBookRow,
 };
-use std::num::NonZeroUsize;
 
 /// Identity and display precision for one selected depth stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,171 +14,24 @@ pub struct OrderBookSelection {
     pub precision: InstrumentPrecision,
 }
 
-impl OrderBookSelection {
-    fn matches_snapshot(&self, snapshot: &DepthSnapshot) -> bool {
-        self.matches_metadata(
-            &snapshot.metadata.provider_id,
-            &snapshot.metadata.instrument_id,
-            &snapshot.metadata.entitlement_id,
-            snapshot.metadata.session_generation,
-        )
-    }
-
-    fn matches_delta(&self, delta: &DepthDelta) -> bool {
-        self.matches_metadata(
-            &delta.metadata.provider_id,
-            &delta.metadata.instrument_id,
-            &delta.metadata.entitlement_id,
-            delta.metadata.session_generation,
-        )
-    }
-
-    fn matches_metadata(
-        &self,
-        provider_id: &str,
-        instrument_id: &str,
-        entitlement_id: &str,
-        session_generation: u64,
-    ) -> bool {
-        self.provider_id == provider_id
-            && self.instrument_id == instrument_id
-            && self.entitlement_id == entitlement_id
-            && self.session_generation == session_generation
-    }
-}
-
-/// Result of offering a canonical event to the selected Order Book runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OrderBookUpdateOutcome {
-    Published(OrderBookFrame),
-    RecoveryRequired(OrderBookFrame, OrderBookRecoveryReason),
-    Ignored,
-}
-
-/// Single-writer, bounded order-book runtime and display projection.
+/// Projects the one authoritative runtime-owned order book into display rows.
 ///
-/// Callers run this outside the UI thread and publish only the latest immutable
-/// [`OrderBookFrame`] on a frame boundary.
-pub struct ReadOnlyOrderBook {
-    maximum_levels: NonZeroUsize,
-    selection: Option<OrderBookSelection>,
-    book: OrderBook,
-}
-
-impl ReadOnlyOrderBook {
-    #[must_use]
-    pub fn new(maximum_levels: NonZeroUsize) -> Self {
-        Self {
-            maximum_levels,
-            selection: None,
-            book: OrderBook::new(maximum_levels),
-        }
-    }
-
-    /// Replaces the selected stream and fences every prior selection immediately.
-    pub fn select(&mut self, selection: OrderBookSelection) {
-        self.selection = Some(selection);
-        self.book = OrderBook::new(self.maximum_levels);
-    }
-
-    /// Clears the selected stream and all retained depth.
-    pub fn clear(&mut self) {
-        self.selection = None;
-        self.book = OrderBook::new(self.maximum_levels);
-    }
-
-    #[must_use]
-    pub const fn selection(&self) -> Option<&OrderBookSelection> {
-        self.selection.as_ref()
-    }
-
-    /// Applies one depth event when it belongs to the exact current selection.
-    ///
-    /// # Errors
-    ///
-    /// Returns canonical validation and gap errors after the book has failed
-    /// closed into recovery.
-    pub fn apply_event(
-        &mut self,
-        event: &MarketEvent,
-    ) -> Result<OrderBookUpdateOutcome, MarketDataValidationError> {
-        let Some(selection) = self.selection.as_ref() else {
-            return Ok(OrderBookUpdateOutcome::Ignored);
-        };
-        let outcome = match event {
-            MarketEvent::DepthSnapshot(snapshot) if selection.matches_snapshot(snapshot) => {
-                self.book.install_snapshot(snapshot)?
-            }
-            MarketEvent::DepthDelta(delta) if selection.matches_delta(delta) => {
-                self.book.apply_delta(delta)?
-            }
-            _ => return Ok(OrderBookUpdateOutcome::Ignored),
-        };
-        Ok(self.project_outcome(outcome))
-    }
-
-    /// Marks depth stale, drops frozen liquidity, and returns the fail-closed frame.
-    #[must_use]
-    pub fn mark_stale(&mut self) -> Option<OrderBookFrame> {
-        self.selection.as_ref()?;
-        self.book.mark_stale();
-        Some(self.project(&self.book.publication()))
-    }
-
-    /// Returns the current frame, including the initial awaiting-snapshot state.
-    #[must_use]
-    pub fn frame(&self) -> Option<OrderBookFrame> {
-        self.selection
-            .as_ref()
-            .map(|_| self.project(&self.book.publication()))
-    }
-
-    /// Projects an authoritative engine-owned book image without reconstructing
-    /// another candidate order book in the desktop process.
-    #[must_use]
-    pub fn project_publication(
-        selection: &OrderBookSelection,
-        publication: &OrderBookPublication,
-    ) -> Option<OrderBookFrame> {
-        if !publication.provider_id.is_empty()
-            && (selection.provider_id != publication.provider_id
-                || selection.instrument_id != publication.instrument_id
-                || selection.entitlement_id != publication.entitlement_id
-                || selection.session_generation != publication.session_generation)
-        {
-            return None;
-        }
-        Some(project_publication(selection, publication))
-    }
-
-    fn project_outcome(&self, outcome: OrderBookApplyOutcome) -> OrderBookUpdateOutcome {
-        match outcome {
-            OrderBookApplyOutcome::Published(publication) => {
-                OrderBookUpdateOutcome::Published(self.project(&publication))
-            }
-            OrderBookApplyOutcome::RecoveryRequired(reason) => {
-                OrderBookUpdateOutcome::RecoveryRequired(
-                    self.project(&self.book.publication()),
-                    reason,
-                )
-            }
-            OrderBookApplyOutcome::IgnoredStale => OrderBookUpdateOutcome::Ignored,
-        }
-    }
-
-    fn project(&self, publication: &OrderBookPublication) -> OrderBookFrame {
-        let selection = self
-            .selection
-            .as_ref()
-            .expect("Order Book projection requires an active selection");
-        project_publication(selection, publication)
-    }
-}
-
-fn project_publication(
+/// This function is intentionally stateless. Sequence handling, snapshot/delta
+/// validation, recovery, and depth ownership all live in `axiusflow_market_data::OrderBook`.
+/// The UI never maintains another candidate book.
+#[must_use]
+pub fn project_order_book(
     selection: &OrderBookSelection,
     publication: &OrderBookPublication,
-) -> OrderBookFrame {
+) -> Option<OrderBookFrame> {
+    if !publication.provider_id.is_empty()
+        && (selection.provider_id != publication.provider_id
+            || selection.instrument_id != publication.instrument_id
+            || selection.entitlement_id != publication.entitlement_id
+            || selection.session_generation != publication.session_generation)
+    {
+        return None;
+    }
     let maximum_quantity = publication
         .bids
         .iter()
@@ -223,7 +73,7 @@ fn project_publication(
             }),
         });
     }
-    OrderBookFrame {
+    Some(OrderBookFrame {
         provider_id: selection.provider_id.clone(),
         instrument_id: selection.instrument_id.clone(),
         entitlement_id: selection.entitlement_id.clone(),
@@ -260,7 +110,7 @@ fn project_publication(
             )
         }),
         rows,
-    }
+    })
 }
 
 fn project_level(
@@ -372,40 +222,39 @@ fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::{
-        AggressorSide, BookSide, DepthLevel, EventMetadata, MarketTrade, OrderBookState,
-        QualifiedTimestamp,
-    };
+    use axiusflow_market_data::{DepthLevel, OrderBookState};
+    use std::collections::BTreeMap;
 
-    fn selection(generation: u64, instrument_id: &str) -> OrderBookSelection {
+    fn selection(instrument_id: &str, selection_generation: u64) -> OrderBookSelection {
         OrderBookSelection {
             provider_id: "rithmic".to_string(),
             instrument_id: instrument_id.to_string(),
             entitlement_id: "test".to_string(),
             session_generation: 7,
-            selection_generation: generation,
+            selection_generation,
             precision: InstrumentPrecision::try_new(2, 0).expect("valid fixture precision"),
         }
     }
 
-    fn metadata(sequence: u64, instrument_id: &str) -> EventMetadata {
-        EventMetadata {
+    fn publication(instrument_id: &str) -> OrderBookPublication {
+        OrderBookPublication {
             provider_id: "rithmic".to_string(),
             instrument_id: instrument_id.to_string(),
             entitlement_id: "test".to_string(),
-            source_sequence: sequence,
             session_generation: 7,
-            timestamps: QualifiedTimestamp {
-                exchange_unix_nanos: Some(1),
-                provider_unix_nanos: Some(2),
-                received_unix_nanos: 3,
-            },
-        }
-    }
-
-    fn snapshot(sequence: u64, instrument_id: &str) -> MarketEvent {
-        MarketEvent::DepthSnapshot(DepthSnapshot {
-            metadata: metadata(sequence, instrument_id),
+            revision: 3,
+            source_watermark: 10,
+            best_bid: Some(DepthLevel {
+                price: 20_025,
+                quantity: 12,
+                order_count: Some(3),
+            }),
+            best_ask: Some(DepthLevel {
+                price: 20_050,
+                quantity: 3,
+                order_count: Some(1),
+            }),
+            bbo_source_watermark: 10,
             bids: vec![
                 DepthLevel {
                     price: 20_025,
@@ -423,162 +272,30 @@ mod tests {
                 quantity: 3,
                 order_count: Some(1),
             }],
-        })
-    }
-
-    fn delta(sequence: u64, side: BookSide, price: i64, quantity: i64) -> MarketEvent {
-        MarketEvent::DepthDelta(DepthDelta {
-            metadata: metadata(sequence, "mnq"),
-            side,
-            level: DepthLevel {
-                price,
-                quantity,
-                order_count: Some(4),
-            },
-        })
+            traded_volumes: BTreeMap::from([(20_025, 4)]),
+            state: OrderBookState::Ready,
+        }
     }
 
     #[test]
-    fn snapshot_projects_bounded_display_rows_and_relative_sizes() {
-        let mut order_book =
-            ReadOnlyOrderBook::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
-        order_book.select(selection(1, "mnq"));
-        let OrderBookUpdateOutcome::Published(frame) = order_book
-            .apply_event(&snapshot(10, "mnq"))
-            .expect("snapshot projects")
-        else {
-            panic!("snapshot must publish");
-        };
+    fn authoritative_publication_projects_display_rows() {
+        let frame = project_order_book(&selection("mnq", 1), &publication("mnq"))
+            .expect("matching publication projects");
         assert_eq!(frame.state, OrderBookState::Ready);
         assert_eq!(frame.selection_generation, 1);
         assert_eq!(frame.source_watermark, 10);
         assert_eq!(frame.rows.len(), 2);
-        assert_eq!(
-            frame.rows[0]
-                .bid
-                .as_ref()
-                .map(|level| level.price_text.as_str()),
-            Some("200.25")
-        );
-        assert_eq!(
-            frame.rows[0]
-                .bid
-                .as_ref()
-                .map(|level| level.quantity_text.as_str()),
-            Some("12")
-        );
-        assert_eq!(
-            frame.rows[0]
-                .bid
-                .as_ref()
-                .map(|level| level.relative_size_bps),
-            Some(10_000)
-        );
-        assert_eq!(
-            frame.rows[0]
-                .ask
-                .as_ref()
-                .map(|level| level.relative_size_bps),
-            Some(2_500)
-        );
+        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.price_text.as_str()), Some("200.25"));
+        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.quantity_text.as_str()), Some("12"));
+        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.relative_size_bps), Some(10_000));
+        assert_eq!(frame.rows[0].ask.as_ref().map(|level| level.relative_size_bps), Some(2_500));
+        assert_eq!(frame.rows[0].bid.as_ref().map(|level| level.traded_volume), Some(4));
         assert!(frame.rows[1].ask.is_none());
     }
 
     #[test]
-    fn ordered_delta_publishes_and_gap_fails_closed_until_covering_snapshot() {
-        let mut order_book =
-            ReadOnlyOrderBook::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
-        order_book.select(selection(1, "mnq"));
-        order_book
-            .apply_event(&snapshot(10, "mnq"))
-            .expect("snapshot");
-        let OrderBookUpdateOutcome::Published(updated) = order_book
-            .apply_event(&delta(11, BookSide::Ask, 20_050, 9))
-            .expect("ordered delta")
-        else {
-            panic!("ordered delta must publish");
-        };
-        assert_eq!(updated.source_watermark, 11);
-        assert_eq!(
-            updated.rows[0].ask.as_ref().map(|level| level.quantity),
-            Some(9)
-        );
-
-        assert!(matches!(
-            order_book.apply_event(&delta(13, BookSide::Bid, 20_025, 1)),
-            Err(MarketDataValidationError::DepthGap {
-                expected: 12,
-                actual: 13
-            })
-        ));
-        let recovering = order_book.frame().expect("recovery frame");
-        assert_eq!(
-            recovering.state,
-            OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
-        );
-        assert!(recovering.rows.is_empty());
-        assert_eq!(
-            order_book
-                .apply_event(&snapshot(12, "mnq"))
-                .expect("stale snapshot"),
-            OrderBookUpdateOutcome::Ignored
-        );
-        assert!(matches!(
-            order_book.apply_event(&snapshot(13, "mnq")),
-            Ok(OrderBookUpdateOutcome::Published(_))
-        ));
-    }
-
-    #[test]
-    fn selection_replacement_fences_late_depth_and_resets_book() {
-        let mut order_book =
-            ReadOnlyOrderBook::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        order_book.select(selection(1, "mnq"));
-        order_book
-            .apply_event(&snapshot(10, "mnq"))
-            .expect("snapshot");
-        order_book.select(selection(2, "es"));
-        let reset = order_book.frame().expect("selected frame");
-        assert_eq!(reset.selection_generation, 2);
-        assert_eq!(
-            reset.state,
-            OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot)
-        );
-        assert!(reset.rows.is_empty());
-        assert_eq!(
-            order_book
-                .apply_event(&delta(11, BookSide::Bid, 20_025, 4))
-                .expect("late event ignored"),
-            OrderBookUpdateOutcome::Ignored
-        );
-        assert!(matches!(
-            order_book.apply_event(&snapshot(1, "es")),
-            Ok(OrderBookUpdateOutcome::Published(_))
-        ));
-    }
-
-    #[test]
-    fn non_depth_events_are_ignored_and_stale_drops_frozen_rows() {
-        let mut order_book =
-            ReadOnlyOrderBook::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
-        order_book.select(selection(1, "mnq"));
-        let trade = MarketEvent::Trade(MarketTrade {
-            metadata: metadata(1, "mnq"),
-            trade_id: "trade-1".to_string(),
-            price: 20_025,
-            quantity: 1,
-            aggressor: AggressorSide::Unknown,
-        });
-        assert_eq!(
-            order_book.apply_event(&trade).expect("trade ignored"),
-            OrderBookUpdateOutcome::Ignored
-        );
-        order_book
-            .apply_event(&snapshot(10, "mnq"))
-            .expect("snapshot");
-        let stale = order_book.mark_stale().expect("stale frame");
-        assert_eq!(stale.state, OrderBookState::Stale);
-        assert!(stale.rows.is_empty());
+    fn stale_selection_cannot_project_another_instrument() {
+        assert!(project_order_book(&selection("es", 2), &publication("mnq")).is_none());
     }
 
     #[test]

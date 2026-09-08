@@ -14,18 +14,13 @@ fn active_header_state(
         chart_type: workspace.chart_type(cx),
         chart_type_label: workspace.chart_type(cx).label().to_string(),
         instruments: workspace.instrument_entries(cx),
-        selected_series: workspace
-            .series_browser
-            .selected()
-            .map(|request| request.series),
         symbol_input: workspace.symbol_input.clone(),
         indicator_input: workspace.indicator_input.clone(),
         indicator_message: workspace.indicator_message.clone(),
         series_message: workspace.series_message.clone(),
         pending: HeaderPendingState {
             symbol_selection: workspace.market_state.symbol_selection_pending,
-            series: workspace.series_browser.pending().is_some()
-                || workspace.rithmic_switch.in_progress(),
+            series: workspace.rithmic_switch.in_progress(),
         },
         drawing_history: workspace.drawing_history_state(cx),
         controls: HeaderControls::from_state(

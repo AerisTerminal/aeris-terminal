@@ -4,11 +4,11 @@ use super::{
     CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_FOOTER_HEIGHT,
     CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
     CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
-    ChromeOverlayPhase, DesktopLifetimeMode, HeaderControls, InputEvent, InstrumentMenuEntry,
-    InstrumentMenuSelection, LifecycleToggle, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
+    ChromeOverlayPhase, HeaderControls, InputEvent, InstrumentMenuEntry, InstrumentMenuSelection,
+    OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, RITHMIC_ENTITLEMENT_ID,
-    RITHMIC_INTERVALS, RithmicReadyAction, RithmicReconnectState, RithmicReconnectTarget,
-    RithmicSessionRetirement, RithmicSwitchState, SidePanel, SidePanelResize, SymbolInputAction,
+    ProviderConnectionPresentation, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel,
+    SidePanelResize, SymbolInputAction,
     SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
     TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
     WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
@@ -18,12 +18,12 @@ use super::{
     chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
     connectivity_chart_state, current_instrument_menu_index, default_rithmic_contract_index,
-    durable_workspace_viewport, finish_desktop_shutdown, fullscreen_escape_command, gpui_color,
+    durable_workspace_viewport, fullscreen_escape_command, gpui_color,
     instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
     nucleus_chart_theme, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-    ready_state_can_complete_switch, reconciled_bridge_state, reconnect_contract_index,
-    reorder_workspace_ids, resized_side_panel_width, rithmic_ready_action, series_selector_label,
-    should_finish_chrome_overlay_close, split_lifetime_mode, stabilized_connection_state,
+    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
+    resized_side_panel_width, series_selector_label, should_autoload_rithmic_catalog,
+    should_finish_chrome_overlay_close, stabilized_connection_state,
     stable_connection_message, stopped_worker_chart_detail, switch_requires_chart_cover,
     symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
@@ -37,13 +37,12 @@ use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnos
 use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
 use axiusflow_engine_protocol::{
-    EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejectionReason,
-    ProviderInstrumentSummary, ResourceMode, SeriesCadence, WorkspaceState,
+    InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
+    SeriesCadence,
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
-use std::{cell::Cell, ffi::OsString};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogCommandOrderBookain {
@@ -122,25 +121,6 @@ fn should_apply_rithmic_worker_stop(
             connection_state,
             Some(state) if !matches!(state, FeedConnectionState::Stopped)
         )
-}
-
-impl RithmicReconnectState {
-    fn capture_retired_selection(
-        &mut self,
-        selection: Option<super::rithmic_shell::RithmicSymbolSelection>,
-        series: super::rithmic_history::RithmicSeries,
-    ) -> bool {
-        if *self == Self::Idle
-            && let Some(selection) = selection
-        {
-            *self = Self::AwaitingSearch(super::RithmicReconnectTarget {
-                symbol: selection.instrument.symbol,
-                exchange: selection.instrument.exchange,
-                series,
-            });
-        }
-        *self == Self::Idle
-    }
 }
 
 #[test]
@@ -405,109 +385,6 @@ fn workspace_split_ratio_tracks_the_active_axis_and_clamps_safe_bounds() {
         ),
         None
     );
-}
-
-#[test]
-fn desktop_lifetime_modes_are_explicit_per_launch_policies() {
-    let mut remaining = vec![OsString::from("--multi-chart")].into_iter();
-    let (mode, command) =
-        split_lifetime_mode(Some(OsString::from("--exit-with-desktop")), &mut remaining);
-    assert_eq!(mode, Some(DesktopLifetimeMode::ExitWithDesktop));
-    assert_eq!(command, Some(OsString::from("--multi-chart")));
-
-    let mut remaining = vec![OsString::from("--rithmic-test")].into_iter();
-    let (mode, command) =
-        split_lifetime_mode(Some(OsString::from("--keep-markets-live")), &mut remaining);
-    assert_eq!(mode, Some(DesktopLifetimeMode::KeepMarketsLive));
-    assert_eq!(
-        mode.expect("launch override exists").engine_resource_mode(),
-        ResourceMode::MarketsLive
-    );
-    assert_eq!(command, Some(OsString::from("--rithmic-test")));
-
-    let mut empty = Vec::<OsString>::new().into_iter();
-    let (mode, command) = split_lifetime_mode(None, &mut empty);
-    assert_eq!(mode, None);
-    assert_eq!(command, None);
-}
-
-#[test]
-fn lifecycle_controls_never_enter_markets_live_without_explicit_permission() {
-    assert_eq!(
-        DesktopLifetimeMode::KeepEngineWarm.next(false),
-        DesktopLifetimeMode::ExitWithDesktop
-    );
-    assert_eq!(
-        DesktopLifetimeMode::KeepEngineWarm.next(true),
-        DesktopLifetimeMode::KeepMarketsLive
-    );
-    assert_eq!(
-        DesktopLifetimeMode::KeepMarketsLive.next(true),
-        DesktopLifetimeMode::ExitWithDesktop
-    );
-    assert_eq!(DesktopLifetimeMode::ExitWithDesktop.label(), "Exit fully");
-    assert_eq!(DesktopLifetimeMode::KeepEngineWarm.label(), "Engine warm");
-    assert_eq!(DesktopLifetimeMode::KeepMarketsLive.label(), "Markets live");
-    assert!(
-        DesktopLifetimeMode::ExitWithDesktop
-            .description()
-            .contains("Prices will not keep updating")
-    );
-    assert!(
-        DesktopLifetimeMode::KeepEngineWarm
-            .description()
-            .contains("start faster")
-    );
-    assert!(
-        DesktopLifetimeMode::KeepMarketsLive
-            .description()
-            .contains("internet data")
-    );
-    assert_eq!(LifecycleToggle::AutoStart.label(), "Start automatically");
-    assert!(
-        LifecycleToggle::AutoStart
-            .description()
-            .contains("when you sign in")
-    );
-    assert!(
-        LifecycleToggle::LiveRetention
-            .description()
-            .contains("after you close Axiusflow")
-    );
-
-    for description in [
-        DesktopLifetimeMode::ExitWithDesktop.description(),
-        DesktopLifetimeMode::KeepEngineWarm.description(),
-        DesktopLifetimeMode::KeepMarketsLive.description(),
-        LifecycleToggle::AutoStart.description(),
-        LifecycleToggle::LiveRetention.description(),
-    ] {
-        assert!(!description.contains("resident engine"));
-        assert!(!description.contains("resource mode"));
-    }
-
-    let mut workspace = WorkspaceState {
-        lifetime_mode: EngineLifetimeMode::KeepMarketsLive as i32,
-        markets_live_permitted: false,
-        ..WorkspaceState::default()
-    };
-    assert!(DesktopLifetimeMode::from_workspace(&workspace).is_err());
-    workspace.markets_live_permitted = true;
-    assert_eq!(
-        DesktopLifetimeMode::from_workspace(&workspace),
-        Ok(DesktopLifetimeMode::KeepMarketsLive)
-    );
-}
-
-#[test]
-fn exit_with_desktop_still_requests_engine_shutdown_after_detach_expiry() {
-    let shutdown_called = Cell::new(false);
-    let result = finish_desktop_shutdown(DesktopLifetimeMode::ExitWithDesktop, true, || {
-        shutdown_called.set(true);
-        Ok(())
-    });
-    assert!(shutdown_called.get());
-    assert!(result.is_err());
 }
 
 #[cfg(feature = "diagnostics")]
@@ -964,58 +841,35 @@ fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
 }
 
 #[test]
-fn reconnect_contract_requires_the_exact_symbol_and_exchange() {
-    let result = |exchange: &str| ProviderInstrumentSummary {
-        symbol: "MNQU6".to_string(),
-        exchange: exchange.to_string(),
-        name: None,
-        product_code: Some("MNQ".to_string()),
-        instrument_type: Some("FUTURE".to_string()),
-        expiration_date: Some("20260918".to_string()),
-    };
-    let results = vec![result("CME-Delayed"), result("CME")];
-    let target = RithmicReconnectTarget {
-        symbol: "MNQU6".to_string(),
-        exchange: "CME".to_string(),
-        series: crate::desktop::rithmic_history::RithmicSeries::from(ChartInterval::Minute5),
-    };
-    assert_eq!(reconnect_contract_index(&results, &target), Some(1));
-    let missing = RithmicReconnectTarget {
-        exchange: "CBOT".to_string(),
-        ..target
-    };
-    assert_eq!(reconnect_contract_index(&results, &missing), None);
-}
-
-#[test]
-fn disconnected_session_retires_surfaces_and_keeps_a_stale_chart_notice() {
-    let retirement = RithmicSessionRetirement::from_connection(FeedConnectionState::Disconnected);
-    assert_eq!(retirement, RithmicSessionRetirement::Offline);
-    assert_eq!(retirement.chart_state(true), Some(ChartState::Stale));
-    assert_eq!(retirement.chart_state(false), None);
-    let mut retained_chart_state = retirement
+fn disconnected_provider_keeps_retained_chart_visible_and_stale() {
+    let presentation =
+        ProviderConnectionPresentation::from_connection(FeedConnectionState::Disconnected);
+    assert_eq!(presentation, ProviderConnectionPresentation::Offline);
+    assert_eq!(presentation.chart_state(true), Some(ChartState::Stale));
+    assert_eq!(presentation.chart_state(false), None);
+    let mut retained_chart_state = presentation
         .chart_state(true)
         .expect("offline retained chart becomes stale");
     assert_eq!(retained_chart_state, ChartState::Stale);
     retained_chart_state =
-        RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
+        ProviderConnectionPresentation::from_connection(FeedConnectionState::Recovering)
             .chart_state(true)
             .expect("the same retained chart advances to reconnecting");
     assert_eq!(retained_chart_state, ChartState::Recovering);
     assert_eq!(
-        RithmicSessionRetirement::from_connection(FeedConnectionState::Recovering)
+        ProviderConnectionPresentation::from_connection(FeedConnectionState::Recovering)
             .chart_state(true),
         Some(ChartState::Recovering)
     );
     assert_eq!(
-        RithmicSessionRetirement::from_connection(FeedConnectionState::Streaming),
-        RithmicSessionRetirement::None
+        ProviderConnectionPresentation::from_connection(FeedConnectionState::Streaming),
+        ProviderConnectionPresentation::None
     );
 }
 
 #[test]
 fn terminal_session_stop_is_a_truthful_chart_error_with_or_without_data() {
-    let stopped = RithmicSessionRetirement::from_connection(FeedConnectionState::Stopped);
+    let stopped = ProviderConnectionPresentation::from_connection(FeedConnectionState::Stopped);
     assert_eq!(stopped.chart_state(true), Some(ChartState::Error));
     assert_eq!(stopped.chart_state(false), Some(ChartState::Error));
     assert_eq!(
@@ -1060,57 +914,22 @@ fn dead_rithmic_worker_stop_transition_is_applied_once() {
 }
 
 #[test]
-fn authentication_ready_reselects_the_retired_contract() {
-    let reconnect = RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
-        symbol: "MNQU6".to_string(),
-        exchange: "CME".to_string(),
-        series: crate::desktop::rithmic_history::RithmicSeries::from(ChartInterval::Minute5),
-    });
-    assert_eq!(
-        rithmic_ready_action(
-            FeedConnectionState::Authenticating,
-            "Rithmic Test session is ready for instrument search",
-            &reconnect,
-            true,
-        ),
-        RithmicReadyAction::Reconnect("MNQU6".to_string())
-    );
-    assert_eq!(
-        rithmic_ready_action(
-            FeedConnectionState::Discovering,
-            "discovering Rithmic Test systems",
-            &reconnect,
-            true,
-        ),
-        RithmicReadyAction::None
-    );
-}
-
-#[test]
-fn interrupted_initial_autoload_restarts_after_authentication() {
-    let mut reconnect = RithmicReconnectState::Idle;
-    assert!(reconnect.capture_retired_selection(
-        None,
-        crate::desktop::rithmic_history::RithmicSeries::Minute1,
+fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
+    assert!(should_autoload_rithmic_catalog(
+        FeedConnectionState::Authenticating,
+        "Rithmic Test session is ready for instrument search",
+        false,
     ));
-    assert_eq!(
-        rithmic_ready_action(
-            FeedConnectionState::Authenticating,
-            "Rithmic Test session is ready for instrument search",
-            &reconnect,
-            false,
-        ),
-        RithmicReadyAction::Autoload
-    );
-    assert_eq!(
-        rithmic_ready_action(
-            FeedConnectionState::Authenticating,
-            "Rithmic Test session is ready for instrument search",
-            &RithmicReconnectState::Idle,
-            true,
-        ),
-        RithmicReadyAction::None
-    );
+    assert!(!should_autoload_rithmic_catalog(
+        FeedConnectionState::Authenticating,
+        "Rithmic Test session is ready for instrument search",
+        true,
+    ));
+    assert!(!should_autoload_rithmic_catalog(
+        FeedConnectionState::Recovering,
+        "Rithmic realtime is recovering; retained history remains visible",
+        false,
+    ));
 }
 
 #[test]

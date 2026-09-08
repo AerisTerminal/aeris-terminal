@@ -9,15 +9,16 @@ use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
-    ReplayTailOperation,
 };
 use axiusflow_engine_protocol::{
-    ConsumerResourceClass, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderInstrumentSearchResult, SearchProviderInstruments,
-    SelectProviderInstrument, envelope,
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::OrderBookFrame;
+use axiusflow_market_runtime::{
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketRuntimeEvent,
+};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
 use std::{
@@ -42,6 +43,24 @@ impl std::fmt::Display for MailboxDisconnected {
 }
 
 impl std::error::Error for MailboxDisconnected {}
+
+/// A presentation message could not enter the bounded GPUI mailbox.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketWorkerSendError {
+    Full,
+    Disconnected,
+}
+
+impl std::fmt::Display for MarketWorkerSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => formatter.write_str("market presentation mailbox is full"),
+            Self::Disconnected => formatter.write_str("market presentation mailbox is disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for MarketWorkerSendError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderCommandUnavailable;
@@ -125,61 +144,33 @@ pub enum ProviderCatalogEvent {
 
 #[must_use]
 pub fn classify_provider_catalog_event(
-    event: envelope::Payload,
-    provider: &str,
-    consumer_id: u64,
-) -> (Option<ProviderCatalogEvent>, Option<envelope::Payload>) {
+    event: MarketRuntimeEvent,
+) -> (Option<ProviderCatalogEvent>, Option<MarketRuntimeEvent>) {
     match event {
-        envelope::Payload::ProviderInstrumentSearchResult(result)
-            if result.provider == provider =>
-        {
-            if result.consumer_id == consumer_id {
-                (Some(ProviderCatalogEvent::SearchCompleted(result)), None)
-            } else {
-                (None, None)
-            }
+        // Consumer ownership, provider identity and callback generation are
+        // already fenced before catalog events enter the runtime-owned consumer
+        // outbox. Desktop only translates the accepted callback into its
+        // presentation command shape.
+        MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
+            (Some(ProviderCatalogEvent::SearchCompleted(result)), None)
         }
-        envelope::Payload::ProviderInstrumentSelection(selection) => {
-            let Some(instrument) = selection.instrument else {
-                return (None, None);
-            };
-            if instrument.provider != provider {
-                return (
-                    None,
-                    Some(envelope::Payload::ProviderInstrumentSelection(
-                        axiusflow_engine_protocol::ProviderInstrumentSelection {
-                            consumer_id: selection.consumer_id,
-                            instrument: Some(instrument),
-                            command_generation: selection.command_generation,
-                        },
-                    )),
-                );
-            }
-            if selection.consumer_id == consumer_id {
-                (
-                    Some(ProviderCatalogEvent::SelectionInstalled {
-                        command_generation: selection.command_generation,
-                        instrument,
-                    }),
-                    None,
-                )
-            } else {
-                (None, None)
-            }
+        MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
+            let instrument = selection.instrument;
+            (
+                Some(ProviderCatalogEvent::SelectionInstalled {
+                    command_generation: selection.command_generation,
+                    instrument,
+                }),
+                None,
+            )
         }
-        envelope::Payload::ProviderCatalogRejected(rejection) if rejection.provider == provider => {
-            if rejection.consumer_id == consumer_id {
-                (
-                    Some(ProviderCatalogEvent::CommandRejected {
-                        command: provider_catalog_command(rejection.reason),
-                        rejection,
-                    }),
-                    None,
-                )
-            } else {
-                (None, None)
-            }
-        }
+        MarketRuntimeEvent::ProviderCatalogRejected(rejection) => (
+            Some(ProviderCatalogEvent::CommandRejected {
+                command: provider_catalog_command(rejection.reason),
+                rejection,
+            }),
+            None,
+        ),
         event => (None, Some(event)),
     }
 }
@@ -272,16 +263,6 @@ pub enum MarketWorkerMessage {
         transport_rtt_nanos: Option<u64>,
     },
     ProviderCatalog(ProviderCatalogEvent),
-    RithmicHistory {
-        selection_generation: NonZeroUsize,
-        series_generation: NonZeroUsize,
-        result: Result<Box<MarketWorkerBootstrap>, String>,
-    },
-    RithmicLive {
-        selection_generation: NonZeroUsize,
-        series_generation: NonZeroUsize,
-        update: ReplayStreamUpdate,
-    },
     OrderBook(OrderBookFrame),
     EngineSwitchMarker {
         sequence: u64,
@@ -297,7 +278,6 @@ struct MarketWorkerMailbox {
     capacity: usize,
     sender_count: AtomicUsize,
     receiver_alive: AtomicBool,
-    coalesced_updates: Mutex<GenerationCoalescingQueue>,
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     wake_pending: AtomicBool,
     market_publications_enabled: AtomicBool,
@@ -347,20 +327,23 @@ impl Drop for MarketWorkerSender {
 }
 
 impl MarketWorkerSender {
-    /// Enqueues a worker publication and wakes the consumer.
+    /// Enqueues one presentation message and wakes the consumer.
     ///
     /// # Errors
     ///
-    /// Returns [`MailboxDisconnected`] after the receiving endpoint is dropped.
-    pub fn send(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
+    /// Returns explicit backpressure when the bounded GPUI mailbox is full, or
+    /// a disconnect after the receiving endpoint is dropped. Market runtime
+    /// callers reserve capacity before polling canonical events, so `Full` is an
+    /// invariant violation rather than a signal to discard or reconstruct bars.
+    pub fn send(&self, message: MarketWorkerMessage) -> Result<(), MarketWorkerSendError> {
         self.enqueue(message)?;
         fire_mailbox_wake(&self.mailbox);
         Ok(())
     }
 
-    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), MailboxDisconnected> {
+    fn enqueue(&self, message: MarketWorkerMessage) -> Result<(), MarketWorkerSendError> {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(MailboxDisconnected);
+            return Err(MarketWorkerSendError::Disconnected);
         }
         if !self.accepts_message(&message) {
             return Ok(());
@@ -371,33 +354,39 @@ impl MarketWorkerSender {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
-            return Err(MailboxDisconnected);
+            return Err(MarketWorkerSendError::Disconnected);
         }
-        let Some(message) = self.send_conflated(&mut queue, message) else {
-            return Ok(());
-        };
-        if is_control_message(&message) {
-            self.enqueue_control(&mut queue, message);
-        } else if queue.len() >= self.mailbox.capacity {
+        if matches!(message, MarketWorkerMessage::Diagnostics(_)) {
             if let Some(index) = queue
                 .iter()
                 .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
             {
-                if let Some(diagnostics) = queue.remove(index) {
-                    self.record_coalesced_message(&diagnostics);
-                }
-                queue.push_back(message);
-            } else if queue
-                .iter()
-                .any(|queued| matches!(queued, MarketWorkerMessage::Recovery { .. }))
-            {
-                self.send_while_recovery_queued(&mut queue, message);
-            } else {
-                self.replace_overflowed_queue(&mut queue, message);
+                queue[index] = message;
+                return Ok(());
             }
-        } else {
+            if queue.len() >= self.mailbox.capacity {
+                return Ok(());
+            }
             queue.push_back(message);
+            return Ok(());
         }
+        let limit = if is_market_publication(&message) {
+            self.mailbox.capacity
+        } else {
+            self.mailbox.capacity.saturating_add(CONTROL_RESERVE)
+        };
+        if is_market_publication(&message)
+            && queue.len() >= limit
+            && let Some(index) = queue
+                .iter()
+                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
+        {
+            queue.remove(index);
+        }
+        if queue.len() >= limit {
+            return Err(MarketWorkerSendError::Full);
+        }
+        queue.push_back(message);
         Ok(())
     }
 
@@ -406,262 +395,6 @@ impl MarketWorkerSender {
             .market_publications_enabled
             .load(Ordering::Acquire)
             || !is_market_publication(message)
-    }
-
-    fn send_conflated(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) -> Option<MarketWorkerMessage> {
-        match message {
-            message @ MarketWorkerMessage::Update(MarketWorkerPublication {
-                update: ReplayStreamUpdate::Tail(_),
-                ..
-            }) => {
-                self.send_live_tail(queue, message);
-                None
-            }
-            message @ MarketWorkerMessage::Diagnostics(_) => {
-                self.send_diagnostics(queue, message);
-                None
-            }
-            message @ MarketWorkerMessage::RithmicLive { .. } => {
-                self.send_rithmic_live(queue, message);
-                None
-            }
-            message @ MarketWorkerMessage::OrderBook(_) => {
-                self.send_rithmic_order_book(queue, message);
-                None
-            }
-            message => Some(message),
-        }
-    }
-
-    fn enqueue_control(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        if queue.len() >= self.mailbox.capacity.saturating_add(CONTROL_RESERVE)
-            && let Some(index) = queue.iter().position(is_market_publication)
-            && let Some(discarded) = queue.remove(index)
-        {
-            self.record_coalesced_message(&discarded);
-        }
-        if queue.len() < self.mailbox.capacity.saturating_add(CONTROL_RESERVE) {
-            queue.push_back(message);
-        } else {
-            self.record_coalesced_message(&message);
-        }
-    }
-
-    /// Queues one live tail, folding it into a queued update for the same bar.
-    ///
-    /// Only a tail carrying the *same* bar sequence may replace a queued one:
-    /// those are successive revisions of one forming bucket and the newest is
-    /// complete on its own. Replacing a queued tail that carries a different bar
-    /// drops that bar outright, and the chart's replay bridge reads the gap as
-    /// corruption it can only clear with a covering snapshot.
-    fn send_live_tail(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        let incoming_generation = market_publication_generation(&message);
-        let incoming_sequence = live_tail_sequence(&message);
-        let incoming_operation = tail_operation(&message);
-        if let Some(index) = queue.iter().position(|queued| {
-            live_tail_sequence(queued).is_some()
-                && live_tail_sequence(queued) == incoming_sequence
-                && tail_operation(queued) == incoming_operation
-        }) {
-            if market_publication_generation(&queue[index]) <= incoming_generation {
-                self.record_coalesced_message(&queue[index]);
-                queue[index] = message;
-            }
-            return;
-        }
-        if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue
-                .iter()
-                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-        {
-            queue.remove(index);
-        }
-        if queue.len() < self.mailbox.capacity {
-            queue.push_back(message);
-            return;
-        }
-        // A dropped tail is a missing bar, and a bar the replay bridge never
-        // sees is a hole it cannot detect until the next one fails to continue
-        // the run. The queue collapses to the covering snapshot it already holds
-        // plus an explicit recovery request instead, so the gap is announced
-        // rather than discovered.
-        self.record_coalesced_message(&message);
-        let covering_snapshot = take_covering_snapshot(queue);
-        for queued in queue.iter() {
-            if !is_control_message(queued) {
-                self.record_coalesced_message(queued);
-            }
-        }
-        queue.retain(is_control_message);
-        if let Some(snapshot) = covering_snapshot {
-            self.enqueue_publication(queue, snapshot);
-        }
-        self.enqueue_control(queue, mailbox_overflow_state());
-    }
-
-    /// Queues one Rithmic live publication.
-    ///
-    /// A covering snapshot supersedes everything queued for the same selection,
-    /// so it replaces it. A tail may only replace a queued tail carrying the
-    /// *same* bar: those are successive revisions of one open period. Replacing
-    /// a tail that carries a different bar drops that bar, and the replay bridge
-    /// reads the gap as corruption it can only clear with a resnapshot.
-    fn send_rithmic_live(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        let incoming_generation = rithmic_message_generation(&message);
-        let incoming_sequence = rithmic_live_tail_sequence(&message);
-        let incoming_operation = tail_operation(&message);
-        let replaceable = |queued: &MarketWorkerMessage| match queued {
-            MarketWorkerMessage::RithmicLive { .. } => {
-                incoming_sequence.is_none()
-                    || (rithmic_live_tail_sequence(queued) == incoming_sequence
-                        && tail_operation(queued) == incoming_operation)
-            }
-            _ => false,
-        };
-        if let Some(index) = queue.iter().position(replaceable) {
-            if rithmic_message_generation(&queue[index]) > incoming_generation {
-                return;
-            }
-            self.record_coalesced_message(&queue[index]);
-            queue[index] = message;
-            return;
-        }
-        if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue
-                .iter()
-                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-        {
-            queue.remove(index);
-        }
-        if queue.len() < self.mailbox.capacity {
-            queue.push_back(message);
-            return;
-        }
-        // Same contract as the Rithmic tail: announce the gap rather than let
-        // the bridge discover it.
-        self.record_coalesced_message(&message);
-        for queued in queue.iter() {
-            if !is_control_message(queued) {
-                self.record_coalesced_message(queued);
-            }
-        }
-        queue.retain(is_control_message);
-        self.enqueue_control(queue, mailbox_overflow_state());
-    }
-
-    fn send_rithmic_order_book(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        if let Some(index) = queue
-            .iter()
-            .position(|queued| matches!(queued, MarketWorkerMessage::OrderBook(_)))
-        {
-            let replace = match (&queue[index], &message) {
-                (MarketWorkerMessage::OrderBook(current), MarketWorkerMessage::OrderBook(next)) => {
-                    (
-                        next.session_generation,
-                        next.selection_generation,
-                        next.revision,
-                    ) >= (
-                        current.session_generation,
-                        current.selection_generation,
-                        current.revision,
-                    )
-                }
-                _ => false,
-            };
-            if replace {
-                queue[index] = message;
-            }
-            return;
-        }
-        if queue.len() >= self.mailbox.capacity
-            && let Some(index) = queue
-                .iter()
-                .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-        {
-            queue.remove(index);
-        }
-        if queue.len() < self.mailbox.capacity {
-            queue.push_back(message);
-        }
-    }
-
-    fn send_diagnostics(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        if let Some(index) = queue
-            .iter()
-            .position(|queued| matches!(queued, MarketWorkerMessage::Diagnostics(_)))
-        {
-            self.record_coalesced_message(&queue[index]);
-            queue[index] = message;
-            return;
-        }
-        if queue.len() >= self.mailbox.capacity {
-            self.record_coalesced_message(&message);
-            return;
-        }
-        queue.push_back(message);
-    }
-
-    fn send_while_recovery_queued(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        let coalesced_generation = message_diagnostics_generation(&message);
-        let successful_recovery_queued = queue.iter().any(|queued| {
-            matches!(
-                queued,
-                MarketWorkerMessage::Recovery { result, .. } if result.is_ok()
-            )
-        });
-        let invalidation = match message {
-            MarketWorkerMessage::Update(publication)
-                if matches!(&publication.update, ReplayStreamUpdate::Delta(_))
-                    && successful_recovery_queued =>
-            {
-                Some(mailbox_overflow_state())
-            }
-            message @ MarketWorkerMessage::State {
-                state: ChartState::Stale | ChartState::Recovering,
-                ..
-            } if successful_recovery_queued => Some(message),
-            _ => None,
-        };
-        if let Some(generation) = coalesced_generation {
-            self.record_coalesced_generation(generation, 1);
-        }
-        if let Some(invalidation) = invalidation {
-            for queued in queue.iter() {
-                if !is_control_message(queued) {
-                    self.record_coalesced_message(queued);
-                }
-            }
-            queue.retain(is_control_message);
-            self.enqueue_control(queue, invalidation);
-        }
     }
 
     pub fn occupancy(&self) -> (usize, usize) {
@@ -674,156 +407,13 @@ impl MarketWorkerSender {
         (current, self.mailbox.capacity)
     }
 
-    pub fn try_take_coalesced_update(&self) -> Option<CoalescedUiUpdates> {
-        self.mailbox
-            .coalesced_updates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop_front()
-    }
-
-    fn record_coalesced_message(&self, message: &MarketWorkerMessage) {
-        if let Some(generation) = message_diagnostics_generation(message) {
-            self.record_coalesced_generation(generation, 1);
-        }
-    }
-
-    fn record_coalesced_generation(&self, generation: NonZeroU64, count: u64) {
-        self.mailbox
-            .coalesced_updates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record(generation, count);
-    }
-
-    fn replace_overflowed_queue(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        match message {
-            MarketWorkerMessage::Update(publication)
-                if matches!(&publication.update, ReplayStreamUpdate::Delta(_)) =>
-            {
-                let covering_snapshot = take_covering_snapshot(queue);
-                for queued in queue.iter() {
-                    if !is_control_message(queued) {
-                        self.record_coalesced_message(queued);
-                    }
-                }
-                queue.retain(is_control_message);
-                if let Some(generation) = publication
-                    .ui_diagnostics
-                    .as_ref()
-                    .map(PendingUiDiagnostics::generation)
-                {
-                    self.record_coalesced_generation(generation, 1);
-                }
-                if let Some(snapshot) = covering_snapshot {
-                    self.enqueue_publication(queue, snapshot);
-                }
-                self.enqueue_control(queue, mailbox_overflow_state());
-            }
-            message => {
-                for queued in queue.iter() {
-                    if !is_control_message(queued) {
-                        self.record_coalesced_message(queued);
-                    }
-                }
-                queue.retain(is_control_message);
-                self.enqueue_publication(queue, message);
-            }
-        }
-    }
-
-    fn enqueue_publication(
-        &self,
-        queue: &mut VecDeque<MarketWorkerMessage>,
-        message: MarketWorkerMessage,
-    ) {
-        if queue.len() < self.mailbox.capacity.saturating_add(CONTROL_RESERVE) {
-            queue.push_back(message);
-        } else {
-            self.record_coalesced_message(&message);
-        }
-    }
-}
-
-fn rithmic_message_generation(message: &MarketWorkerMessage) -> Option<(usize, usize)> {
-    match message {
-        MarketWorkerMessage::RithmicHistory {
-            selection_generation,
-            series_generation,
-            ..
-        }
-        | MarketWorkerMessage::RithmicLive {
-            selection_generation,
-            series_generation,
-            ..
-        } => Some((selection_generation.get(), series_generation.get())),
-        _ => None,
-    }
-}
-
-/// The bar sequence carried by a Rithmic live tail, if this is one.
-///
-/// A snapshot or delta returns `None`, because neither is a revision of one bar:
-/// a snapshot supersedes the series outright.
-fn rithmic_live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
-    match message {
-        MarketWorkerMessage::RithmicLive {
-            update: ReplayStreamUpdate::Tail(tail),
-            ..
-        } => Some(tail.item().value().source_sequence),
-        _ => None,
-    }
-}
-
-/// The bar sequence carried by a live tail publication, if this is one.
-fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
-    match message {
-        MarketWorkerMessage::Update(MarketWorkerPublication {
-            update: ReplayStreamUpdate::Tail(tail),
-            ..
-        }) => Some(tail.item().value().source_sequence),
-        _ => None,
-    }
-}
-
-fn tail_operation(message: &MarketWorkerMessage) -> Option<ReplayTailOperation> {
-    match message {
-        MarketWorkerMessage::Update(MarketWorkerPublication {
-            update: ReplayStreamUpdate::Tail(tail),
-            ..
-        })
-        | MarketWorkerMessage::RithmicLive {
-            update: ReplayStreamUpdate::Tail(tail),
-            ..
-        } => Some(tail.operation()),
-        _ => None,
-    }
-}
-
-fn market_publication_generation(message: &MarketWorkerMessage) -> Option<u64> {
-    match message {
-        MarketWorkerMessage::Update(publication) => {
-            Some(publication.generation.publication_generation())
-        }
-        _ => None,
-    }
 }
 
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
-        MarketWorkerMessage::Update(_)
-            | MarketWorkerMessage::RithmicLive { .. }
-            | MarketWorkerMessage::OrderBook(_)
+        MarketWorkerMessage::Update(_) | MarketWorkerMessage::OrderBook(_)
     )
-}
-
-fn is_control_message(message: &MarketWorkerMessage) -> bool {
-    !matches!(message, MarketWorkerMessage::Diagnostics(_)) && !is_market_publication(message)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -861,40 +451,6 @@ impl GenerationCoalescingQueue {
     fn pop_front(&mut self) -> Option<CoalescedUiUpdates> {
         self.counts.pop_front()
     }
-}
-
-fn message_diagnostics_generation(message: &MarketWorkerMessage) -> Option<NonZeroU64> {
-    match message {
-        MarketWorkerMessage::Update(publication) => publication
-            .ui_diagnostics
-            .as_ref()
-            .map(PendingUiDiagnostics::generation),
-        MarketWorkerMessage::Diagnostics(snapshot) => snapshot.session_generation,
-        MarketWorkerMessage::Recovery { .. }
-        | MarketWorkerMessage::State { .. }
-        | MarketWorkerMessage::Connection { .. }
-        | MarketWorkerMessage::ProviderCatalog(_)
-        | MarketWorkerMessage::RithmicHistory { .. }
-        | MarketWorkerMessage::RithmicLive { .. }
-        | MarketWorkerMessage::OrderBook(_)
-        | MarketWorkerMessage::EngineSwitchMarker { .. }
-        | MarketWorkerMessage::ChartViewport { .. } => None,
-    }
-}
-
-fn take_covering_snapshot(
-    queue: &mut VecDeque<MarketWorkerMessage>,
-) -> Option<MarketWorkerMessage> {
-    queue
-        .iter()
-        .rposition(|queued| {
-            matches!(
-                queued,
-                MarketWorkerMessage::Update(publication)
-                    if matches!(publication.update, ReplayStreamUpdate::Snapshot(_))
-            )
-        })
-        .and_then(|index| queue.remove(index))
 }
 
 impl MarketWorkerReceiver {
@@ -1000,7 +556,6 @@ pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, Mar
         capacity: capacity.get(),
         sender_count: AtomicUsize::new(1),
         receiver_alive: AtomicBool::new(true),
-        coalesced_updates: Mutex::new(GenerationCoalescingQueue::new(capacity.get())),
         wake: Mutex::new(None),
         wake_pending: AtomicBool::new(false),
         market_publications_enabled: AtomicBool::new(true),
@@ -1013,21 +568,13 @@ pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, Mar
     )
 }
 
-fn mailbox_overflow_state() -> MarketWorkerMessage {
-    MarketWorkerMessage::State {
-        state: ChartState::Recovering,
-        message: "bounded market UI mailbox overflowed; a covering snapshot is required"
-            .to_string(),
-    }
-}
-
 pub enum MarketWorkerCommand {
     Recovery(ReplayRecoveryCommand),
     ProviderSearch(SearchProviderInstruments),
     ProviderSelect(SelectProviderInstrument),
-    EngineSeries(EngineSeriesRequest),
     EngineSelect(Box<EngineSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
+    DepthVisible(bool),
     ResourceClass(ConsumerResourceClass),
     Shutdown,
 }
@@ -1044,13 +591,6 @@ pub struct ChartViewportUpdate {
     pub start_unix_nanos: i64,
     pub end_unix_nanos: i64,
     pub selection_generation: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EngineSeriesRequest {
-    pub selection_generation: NonZeroUsize,
-    pub series_generation: NonZeroUsize,
-    pub interval: ChartInterval,
 }
 
 pub struct PendingUiDiagnostics {
@@ -1230,6 +770,7 @@ fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> NonZeroU64 {
 pub struct MarketDataWorker {
     commands: Option<SyncSender<MarketWorkerCommand>>,
     resource_class: Option<Arc<Mutex<Option<ConsumerResourceClass>>>>,
+    depth_visible: Option<Arc<Mutex<Option<bool>>>>,
     provider_selection: Option<Arc<Mutex<Option<SelectProviderInstrument>>>>,
     engine_selection: Option<Arc<Mutex<Option<Box<EngineSelectionRequest>>>>>,
     messages: Option<MarketWorkerReceiver>,
@@ -1251,6 +792,7 @@ impl MarketDataWorker {
         Self {
             commands: Some(commands),
             resource_class: None,
+            depth_visible: None,
             provider_selection: None,
             engine_selection: None,
             messages: Some(messages),
@@ -1267,6 +809,12 @@ impl MarketDataWorker {
         resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
     ) -> Self {
         self.resource_class = Some(resource_class);
+        self
+    }
+
+    #[must_use]
+    pub fn with_depth_visibility_slot(mut self, depth_visible: Arc<Mutex<Option<bool>>>) -> Self {
+        self.depth_visible = Some(depth_visible);
         self
     }
 
@@ -1383,6 +931,43 @@ impl MarketDataWorker {
             })
     }
 
+    /// Enables or disables depth demand for the currently selected market
+    /// without changing symbol/timeframe generation.
+    ///
+    /// # Errors
+    /// Returns the requested visibility when the bounded worker command lane is
+    /// full or disconnected.
+    pub fn try_set_order_book_visible(
+        &self,
+        visible: bool,
+    ) -> Result<(), TrySendError<bool>> {
+        if let Some(slot) = &self.depth_visible {
+            if self.commands.is_none() {
+                return Err(TrySendError::Disconnected(visible));
+            }
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(visible);
+            return Ok(());
+        }
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(visible));
+        };
+        commands
+            .try_send(MarketWorkerCommand::DepthVisible(visible))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::DepthVisible(visible)) => {
+                    TrySendError::Full(visible)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::DepthVisible(visible)) => {
+                    TrySendError::Disconnected(visible)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("depth visibility send errors retain the depth command")
+                }
+            })
+    }
+
     /// Updates engine resource priority for a visible or hidden chart consumer.
     ///
     /// # Errors
@@ -1475,18 +1060,18 @@ impl MarketDataWorker {
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
-                    | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
+                    | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
-                    | MarketWorkerCommand::EngineSeries(_)
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
+                    | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
@@ -1530,32 +1115,6 @@ impl MarketDataWorker {
         commands
             .try_send(MarketWorkerCommand::ProviderSelect(selection))
             .map_err(|_| ProviderCommandUnavailable)
-    }
-
-    /// Enqueues a Rithmic history request without blocking.
-    ///
-    /// # Errors
-    /// Returns the request when the command mailbox is full or disconnected.
-    pub fn try_request_engine_series(
-        &self,
-        request: EngineSeriesRequest,
-    ) -> Result<(), TrySendError<EngineSeriesRequest>> {
-        let Some(commands) = self.commands.as_ref() else {
-            return Err(TrySendError::Disconnected(request));
-        };
-        commands
-            .try_send(MarketWorkerCommand::EngineSeries(request))
-            .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::EngineSeries(request)) => {
-                    TrySendError::Full(request)
-                }
-                TrySendError::Disconnected(MarketWorkerCommand::EngineSeries(request)) => {
-                    TrySendError::Disconnected(request)
-                }
-                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    unreachable!("Rithmic history send errors retain the history request")
-                }
-            })
     }
 
     pub fn drain_messages(&mut self) -> (Vec<MarketWorkerMessage>, bool) {
@@ -1742,17 +1301,17 @@ impl FixtureMarketWorker {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, ChartViewportUpdate, EngineSeriesRequest, FixtureMarketWorker,
+        ChartState, ChartViewportUpdate, ConsumerResourceClass, FixtureMarketWorker,
         MarketDataWorker, MarketPublicationGeneration, MarketWorkerCommand, MarketWorkerMessage,
-        MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
-        ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
+        MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
+        UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
     use axiusflow_application::{
         Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
     };
     use axiusflow_engine_protocol::{
-        ConsumerResourceClass, InstallProviderInstrument, ProviderCatalogRejected,
-        ProviderCatalogRejectionReason, SearchProviderInstruments, SelectProviderInstrument,
+        InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+        SearchProviderInstruments, SelectProviderInstrument,
     };
     use axiusflow_market_data::OrderBookFrame;
     use axiusflow_market_data::{ChartInterval, OrderBookRecoveryReason, OrderBookState};
@@ -1767,6 +1326,26 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    fn tail_operation(message: &MarketWorkerMessage) -> Option<ReplayTailOperation> {
+        match message {
+            MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Tail(tail),
+                ..
+            }) => Some(tail.operation()),
+            _ => None,
+        }
+    }
+
+    fn live_tail_sequence(message: &MarketWorkerMessage) -> Option<u64> {
+        match message {
+            MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Tail(tail),
+                ..
+            }) => Some(tail.item().value().source_sequence),
+            _ => None,
+        }
+    }
 
     #[test]
     fn chart_states_have_explicit_user_facing_labels() {
@@ -2045,7 +1624,6 @@ mod tests {
                 }
             ] if first == "loading" && second == "ready"
         ));
-        assert_eq!(sender.try_take_coalesced_update(), None);
     }
 
     #[test]
@@ -2085,13 +1663,6 @@ mod tests {
             messages.as_slice(),
             [MarketWorkerMessage::Diagnostics(_)]
         ));
-        assert_eq!(
-            sender.try_take_coalesced_update(),
-            Some(super::CoalescedUiUpdates {
-                generation: NonZeroU64::MIN,
-                count: 1,
-            })
-        );
     }
 
     #[test]
@@ -2198,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn live_tail_updates_conflate_to_one_frame_wake() {
+    fn live_tail_updates_share_one_frame_wake_until_the_mailbox_is_drained() {
         let wake_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_counter = Arc::clone(&wake_count);
         let (sender, receiver) =
@@ -2214,7 +1785,7 @@ mod tests {
             .last()
             .cloned()
             .expect("tail exists");
-        for publication_generation in 2_u64..=64 {
+        for publication_generation in 2_u64..=9 {
             let mut bar = *source.value();
             bar.close = bar.close.saturating_add(
                 i64::try_from(publication_generation).expect("test generation fits"),
@@ -2245,11 +1816,17 @@ mod tests {
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
-        assert_eq!(messages.len(), 1);
-        let MarketWorkerMessage::Update(publication) = &messages[0] else {
-            panic!("latest tail remains queued");
-        };
-        assert_eq!(publication.generation.publication_generation(), 64);
+        assert_eq!(messages.len(), 8);
+        let generations = messages
+            .iter()
+            .filter_map(|message| match message {
+                MarketWorkerMessage::Update(publication) => {
+                    Some(publication.generation.publication_generation())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generations, (2_u64..=9).collect::<Vec<_>>());
     }
 
     #[test]
@@ -2305,7 +1882,7 @@ mod tests {
         assert!(!disconnected);
         let operations = messages
             .iter()
-            .filter_map(super::tail_operation)
+            .filter_map(tail_operation)
             .collect::<Vec<_>>();
         assert_eq!(
             operations,
@@ -2370,7 +1947,7 @@ mod tests {
         assert!(!disconnected);
         let sequences = messages
             .iter()
-            .filter_map(super::live_tail_sequence)
+            .filter_map(live_tail_sequence)
             .collect::<Vec<_>>();
         assert_eq!(
             sequences,
@@ -2378,15 +1955,8 @@ mod tests {
         );
     }
 
-    /// An overflowed mailbox announces the gap instead of hiding it.
-    ///
-    /// Dropping a tail that will not fit leaves a hole in a strictly sequenced
-    /// run, and the chart cannot see it until the following bar fails to
-    /// continue. The queue collapses to the covering snapshot it already holds
-    /// plus an explicit recovery request, so continuity is restored rather than
-    /// silently broken.
     #[test]
-    fn an_overflowed_mailbox_asks_for_a_covering_snapshot_instead_of_dropping_a_bar() {
+    fn full_market_mailbox_returns_backpressure_without_mutating_queued_bars() {
         let capacity = NonZeroUsize::new(4).expect("capacity is nonzero");
         let (sender, receiver) = market_worker_channel(capacity);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
@@ -2408,9 +1978,7 @@ mod tests {
             }))
             .expect("covering snapshot sends");
 
-        // Far more distinct bars than the mailbox can hold, none of them a
-        // revision of another.
-        for offset in 1_u64..=32 {
+        for offset in 1_u64..=4 {
             let mut bar = *source.value();
             bar.source_sequence = first_sequence.saturating_add(offset);
             bar.exchange_timestamp_seconds = bar
@@ -2428,42 +1996,42 @@ mod tests {
                 ReplayTailOperation::Append,
             )
             .expect("tail validates");
-            sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Tail(tail),
-                    generation: MarketPublicationGeneration::from_tail(
-                        offset.saturating_add(2),
-                        2,
-                        1,
-                        2,
-                    ),
-                    subscription_id: "burst".to_string(),
-                    worker_label: "burst".to_string(),
-                    ui_diagnostics: None,
-                }))
-                .expect("tail sends");
+            let result = sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Tail(tail),
+                generation: MarketPublicationGeneration::from_tail(
+                    offset.saturating_add(2),
+                    2,
+                    1,
+                    2,
+                ),
+                subscription_id: "burst".to_string(),
+                worker_label: "burst".to_string(),
+                ui_diagnostics: None,
+            }));
+            if offset < 4 {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result, Err(super::MarketWorkerSendError::Full));
+            }
         }
 
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
         let sequences = messages
             .iter()
-            .filter_map(super::live_tail_sequence)
+            .filter_map(live_tail_sequence)
             .collect::<Vec<_>>();
-        assert!(
-            sequences.windows(2).all(|pair| pair[0] + 1 == pair[1]),
-            "whatever survives the overflow is still a contiguous run: {sequences:?}"
+        assert_eq!(
+            sequences,
+            vec![first_sequence + 1, first_sequence + 2, first_sequence + 3]
         );
-        assert!(
-            messages.iter().any(|message| matches!(
-                message,
-                MarketWorkerMessage::State {
-                    state: ChartState::Recovering,
-                    ..
-                }
-            )),
-            "the overflow has to be announced so a covering snapshot follows"
-        );
+        assert!(matches!(
+            messages.first(),
+            Some(MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(_),
+                ..
+            }))
+        ));
     }
 
     #[test]
@@ -2521,53 +2089,6 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_overflow_counts_discarded_market_publications_by_generation() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let generation = NonZeroU64::MIN;
-        let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
-        let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
-        let previous_sequence = bootstrap.snapshot.stream().last_sequence();
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
-                    generation: MarketPublicationGeneration::from_generation(
-                        &bootstrap.generation,
-                    ),
-                    subscription_id: bootstrap.subscription_id,
-                    worker_label: bootstrap.worker_label,
-                    ui_diagnostics: Some(PendingUiDiagnostics::new(generation)),
-                }))
-                .is_ok()
-        );
-        let mut delta = worker
-            .publish_delta(previous_sequence)
-            .expect("delta publishes")
-            .expect("fixture contains a delta");
-        delta.ui_diagnostics = Some(PendingUiDiagnostics::new(generation));
-        assert!(sender.send(MarketWorkerMessage::Update(delta)).is_ok());
-
-        assert_eq!(
-            sender.try_take_coalesced_update(),
-            Some(super::CoalescedUiUpdates {
-                generation,
-                count: 1,
-            })
-        );
-        let (messages, _) = receiver.drain();
-        assert!(matches!(
-            messages.as_slice(),
-            [
-                MarketWorkerMessage::Update(_),
-                MarketWorkerMessage::State {
-                    state: ChartState::Recovering,
-                    ..
-                }
-            ]
-        ));
-    }
-
-    #[test]
     fn diagnostics_never_reduce_market_mailbox_capacity() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
@@ -2620,13 +2141,6 @@ mod tests {
                 MarketWorkerMessage::Update(_)
             ]
         ));
-        assert_eq!(
-            sender.try_take_coalesced_update(),
-            Some(super::CoalescedUiUpdates {
-                generation,
-                count: 1,
-            })
-        );
     }
 
     #[test]
@@ -2673,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_delta_overflow_fences_for_one_covering_snapshot() {
+    fn market_publication_waits_behind_a_full_control_queue() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         assert!(
             sender
@@ -2689,31 +2203,24 @@ mod tests {
             .publish_delta(bootstrap.snapshot.stream().last_sequence())
             .expect("delta publishes")
             .expect("fixture has a following delta");
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Update(publication))
-                .is_ok()
+        assert_eq!(
+            sender.send(MarketWorkerMessage::Update(publication)),
+            Err(super::MarketWorkerSendError::Full)
         );
 
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [
-                MarketWorkerMessage::State {
-                    state: ChartState::Ready,
-                    message: ready,
-                },
-                MarketWorkerMessage::State {
-                    state: ChartState::Recovering,
-                    message,
-                }
-            ] if ready == "ready" && message.contains("covering snapshot")
+            [MarketWorkerMessage::State {
+                state: ChartState::Ready,
+                message: ready,
+            }] if ready == "ready"
         ));
     }
 
     #[test]
-    fn ordered_delta_overflow_preserves_a_queued_covering_snapshot() {
+    fn queued_covering_snapshot_is_unchanged_when_next_update_is_backpressured() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
@@ -2735,44 +2242,38 @@ mod tests {
             .publish_delta(previous_sequence)
             .expect("delta publishes")
             .expect("fixture has a following delta");
-        assert!(
-            sender
-                .send(MarketWorkerMessage::Update(publication))
-                .is_ok()
+        assert_eq!(
+            sender.send(MarketWorkerMessage::Update(publication)),
+            Err(super::MarketWorkerSendError::Full)
         );
 
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
         assert!(matches!(
             messages.as_slice(),
-            [
-                MarketWorkerMessage::Update(publication),
-                MarketWorkerMessage::State {
-                    state: ChartState::Recovering,
-                    message,
-                }
-            ] if matches!(publication.update, ReplayStreamUpdate::Snapshot(_))
-                && message.contains("covering snapshot")
+            [MarketWorkerMessage::Update(publication)]
+                if matches!(publication.update, ReplayStreamUpdate::Snapshot(_))
         ));
     }
 
     #[test]
-    fn control_messages_survive_publication_overflow_in_fifo_order() {
+    fn control_messages_remain_fifo_while_market_publication_is_backpressured() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut worker = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = worker.publish_snapshot(2).expect("snapshot publishes");
         sender
             .send(MarketWorkerMessage::EngineSwitchMarker { sequence: 7 })
             .expect("switch marker sends");
-        sender
-            .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+        assert_eq!(
+            sender.send(MarketWorkerMessage::Update(MarketWorkerPublication {
                 update: ReplayStreamUpdate::Snapshot(bootstrap.snapshot),
                 generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
                 subscription_id: bootstrap.subscription_id,
                 worker_label: bootstrap.worker_label,
                 ui_diagnostics: None,
-            }))
-            .expect("publication sends without displacing the marker");
+            })),
+            Err(super::MarketWorkerSendError::Full)
+        );
         sender
             .send(MarketWorkerMessage::State {
                 state: ChartState::Loading,
@@ -2786,10 +2287,6 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::EngineSwitchMarker { sequence: 7 },
-                MarketWorkerMessage::Update(MarketWorkerPublication {
-                    update: ReplayStreamUpdate::Snapshot(_),
-                    ..
-                }),
                 MarketWorkerMessage::State {
                     state: ChartState::Loading,
                     message,
@@ -2863,8 +2360,9 @@ mod tests {
     }
 
     #[test]
-    fn successful_recovery_is_followed_by_newer_stream_invalidations() {
-        let (covered_sender, covered_receiver) = market_worker_channel(NonZeroUsize::MIN);
+    fn successful_recovery_and_newer_stream_update_preserve_fifo_order() {
+        let (covered_sender, covered_receiver) =
+            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture worker validates");
         let bootstrap = fixture.publish_snapshot(2).expect("snapshot publishes");
         let publication = fixture
@@ -2889,11 +2387,8 @@ mod tests {
             messages.as_slice(),
             [
                 MarketWorkerMessage::Recovery { request_id: 8, .. },
-                MarketWorkerMessage::State {
-                    state: ChartState::Recovering,
-                    message,
-                }
-            ] if message.contains("covering snapshot")
+                MarketWorkerMessage::Update(_)
+            ]
         ));
 
         let (stale_sender, stale_receiver) = market_worker_channel(NonZeroUsize::MIN);
@@ -3036,89 +2531,44 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_history_results_preserve_generation_order() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let first = NonZeroUsize::MIN;
-        let latest = NonZeroUsize::new(2).expect("generation is nonzero");
-        assert!(
-            sender
-                .send(MarketWorkerMessage::RithmicHistory {
-                    selection_generation: first,
-                    series_generation: first,
-                    result: Err("first failed".to_string()),
-                })
-                .is_ok()
-        );
-        assert!(
-            sender
-                .send(MarketWorkerMessage::RithmicHistory {
-                    selection_generation: first,
-                    series_generation: latest,
-                    result: Err("latest failed".to_string()),
-                })
-                .is_ok()
-        );
-        let (messages, disconnected) = receiver.drain();
-        assert!(!disconnected);
-        assert!(matches!(
-            messages.as_slice(),
-            [
-                MarketWorkerMessage::RithmicHistory {
-                    series_generation: first_series_generation,
-                    result: Err(first_error),
-                    ..
-                },
-                MarketWorkerMessage::RithmicHistory {
-                    series_generation,
-                    result: Err(error),
-                    ..
-                }
-            ] if *first_series_generation == first
-                && first_error == "first failed"
-                && *series_generation == latest
-                && error == "latest failed"
-        ));
-    }
-
-    #[test]
-    fn stale_live_snapshot_cannot_replace_a_newer_generation() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+    fn mailbox_does_not_filter_publication_generations() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let snapshot = fixture
             .publish_snapshot(2)
             .expect("snapshot publishes")
             .snapshot;
-        let first = NonZeroUsize::MIN;
-        let latest = NonZeroUsize::new(2).expect("generation is nonzero");
-        assert!(
-            sender
-                .send(MarketWorkerMessage::RithmicLive {
-                    selection_generation: first,
-                    series_generation: latest,
-                    update: ReplayStreamUpdate::Snapshot(snapshot.clone()),
-                })
-                .is_ok()
-        );
-        assert!(
-            sender
-                .send(MarketWorkerMessage::RithmicLive {
-                    selection_generation: first,
-                    series_generation: first,
-                    update: ReplayStreamUpdate::Snapshot(snapshot),
-                })
-                .is_ok()
-        );
+        let publication = |generation, snapshot| {
+            MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(snapshot),
+                generation: MarketPublicationGeneration::from_tail(generation, 1, 1, 1),
+                subscription_id: "fixture".to_string(),
+                worker_label: "fixture".to_string(),
+                ui_diagnostics: None,
+            })
+        };
+        sender
+            .send(publication(2, snapshot.clone()))
+            .expect("newer publication queues");
+        sender
+            .send(publication(1, snapshot))
+            .expect("older publication queues behind it");
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::RithmicLive { series_generation, .. }]
-                if *series_generation == latest
+            [
+                MarketWorkerMessage::Update(first),
+                MarketWorkerMessage::Update(second),
+            ] if first.generation.publication_generation() == 2
+                && second.generation.publication_generation() == 1
         ));
     }
 
     #[test]
-    fn order_book_mailbox_retains_latest_complete_frame() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+    fn order_book_mailbox_preserves_runtime_order() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let frame = |revision, state| OrderBookFrame {
             provider_id: "rithmic".to_string(),
             instrument_id: "rithmic:CME:MNQ".to_string(),
@@ -3152,14 +2602,20 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::OrderBook(frame)]
-                if frame.revision == 3 && frame.state == OrderBookState::Ready
+            [
+                MarketWorkerMessage::OrderBook(first),
+                MarketWorkerMessage::OrderBook(second),
+            ] if first.revision == 3
+                && first.state == OrderBookState::Ready
+                && second.revision == 2
+                && second.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
         ));
     }
 
     #[test]
-    fn order_book_mailbox_accepts_new_session_with_lower_revision() {
-        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
+    fn order_book_mailbox_does_not_reinterpret_session_generations() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(3).expect("capacity is nonzero"));
         let frame = |session_generation, selection_generation, revision| OrderBookFrame {
             provider_id: "rithmic".to_string(),
             instrument_id: "rithmic:CME:MNQ".to_string(),
@@ -3187,14 +2643,22 @@ mod tests {
         let (messages, _) = receiver.drain();
         assert!(matches!(
             messages.as_slice(),
-            [MarketWorkerMessage::OrderBook(frame)]
-                if frame.session_generation == 8 && frame.revision == 1
+            [
+                MarketWorkerMessage::OrderBook(first),
+                MarketWorkerMessage::OrderBook(second),
+                MarketWorkerMessage::OrderBook(third),
+            ] if first.session_generation == 7
+                && first.revision == 40
+                && second.session_generation == 8
+                && second.revision == 1
+                && third.session_generation == 7
+                && third.revision == 99
         ));
     }
 
     #[test]
-    fn rithmic_catalog_and_history_commands_use_the_bounded_worker_channel() {
-        let (command_tx, command_rx) = mpsc::sync_channel(3);
+    fn rithmic_catalog_commands_use_the_bounded_worker_channel() {
+        let (command_tx, command_rx) = mpsc::sync_channel(2);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
         let worker =
@@ -3221,13 +2685,6 @@ mod tests {
         worker
             .try_select_provider(selection)
             .expect("selection enters the bounded channel");
-        worker
-            .try_request_engine_series(EngineSeriesRequest {
-                selection_generation: NonZeroUsize::MIN,
-                series_generation: NonZeroUsize::MIN,
-                interval: ChartInterval::Minute1,
-            })
-            .expect("history enters the bounded channel");
         assert!(matches!(
             command_rx.recv(),
             Ok(MarketWorkerCommand::ProviderSearch(_))
@@ -3235,10 +2692,6 @@ mod tests {
         assert!(matches!(
             command_rx.recv(),
             Ok(MarketWorkerCommand::ProviderSelect(_))
-        ));
-        assert!(matches!(
-            command_rx.recv(),
-            Ok(MarketWorkerCommand::EngineSeries(_))
         ));
         let shutdown = thread::spawn(move || {
             assert!(matches!(

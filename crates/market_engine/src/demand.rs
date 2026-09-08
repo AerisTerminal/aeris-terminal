@@ -15,7 +15,6 @@ pub enum MarketStream {
 pub enum ConsumerResourceClass {
     Foreground,
     Background,
-    Warm,
     Detached,
 }
 
@@ -27,7 +26,7 @@ impl ConsumerResourceClass {
 
     #[must_use]
     pub const fn retains_subscription(self) -> bool {
-        matches!(self, Self::Foreground | Self::Background)
+        matches!(self, Self::Foreground)
     }
 }
 
@@ -192,6 +191,36 @@ impl DemandRegistry {
         }
         demand.viewport = Some(viewport);
         Ok(())
+    }
+
+    pub(crate) fn set_streams(
+        &mut self,
+        consumer_id: ConsumerId,
+        generation: GenerationId,
+        streams: StreamRequirements,
+    ) -> Result<bool, EngineError> {
+        if streams.is_empty() {
+            return Err(EngineError::EmptyStreamRequirements);
+        }
+        let demand = self
+            .consumers
+            .get_mut(&consumer_id)
+            .ok_or(EngineError::UnknownConsumer(consumer_id))?;
+        let current = demand
+            .generation
+            .ok_or(EngineError::ConsumerHasNoSeries(consumer_id))?;
+        if generation != current {
+            return Err(EngineError::StaleConsumerGeneration {
+                consumer_id,
+                current,
+                received: generation,
+            });
+        }
+        if demand.streams == Some(streams) {
+            return Ok(false);
+        }
+        demand.streams = Some(streams);
+        Ok(true)
     }
 
     pub(crate) fn set_resource_class(

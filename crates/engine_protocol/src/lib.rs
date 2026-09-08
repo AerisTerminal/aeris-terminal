@@ -1,8 +1,8 @@
-//! Versioned IPC protocol between the resident data-engine process and UI clients.
+//! Shared prost DTOs plus the bounded versioned workspace-persistence codec.
 //!
-//! Wire format: prost-encoded [`Envelope`] carried inside the bounded binary
-//! framing from `axiusflow_transport`. Pure synchronous Rust: no async, no
-//! GPUI, no network, no filesystem.
+//! Market and account runtimes use these DTOs directly in process. [`Envelope`]
+//! remains only for backwards-compatible local workspace files; it is not a
+//! runtime transport boundary.
 
 pub mod account;
 mod codec;
@@ -16,56 +16,17 @@ pub use account::{
 pub use codec::{EnvelopeDecoder, encode_envelope};
 pub use error::ProtocolError;
 pub use messages::{
-    AttachClient, ClientHello, ClientKind, ConsumerResourceClass, DemandError, DetachClient,
-    EngineFaultCode, EngineLifetimeMode, EngineReady, EngineShutdownState, EngineStatus, Envelope,
-    FailureStage, Fault, GetEngineStatus, Goodbye, HotSeries, InstallProviderInstrument, MarketBar,
-    OrderBookLevel, OrderBookSnapshot, OrderBookState, OrderFlowAggressor, OrderFlowLevel,
-    OrderFlowSnapshot, OrderFlowTrade, OrderFlowUpdate, PersistenceState, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentInstalled,
-    ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
-    ProviderState, RegisterConsumer, RemoveConsumer, ResourceMode, RestoreWorkspace,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesDemand, SeriesKey,
-    SeriesLoadState, SeriesSnapshot, SeriesState, SeriesUpdate, SeriesUpdateOperation,
-    SetEngineLifecycle, SetEngineResourceMode, SetSelection, SetViewport, SetWatchlist,
-    SetWorkspaceLayout, ShutdownEngine, StreamRole, ViewportDemand, VisibilityDemand,
+    EngineFaultCode, Envelope, FailureStage, Fault, InstallProviderInstrument, ProviderCatalogRejected,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
+    ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
+    SeriesLoadState,
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
     WorkspaceState, WorkspaceTabState, envelope,
 };
 
-/// Current compatible lifecycle contract revision advertised during readiness.
-pub const LIFECYCLE_CONTRACT_REVISION: u32 = 1;
-
-/// Protocol version carried by every envelope; mismatches are rejected at decode time.
-///
-/// Revision 16 adds the paired-session `session_nonce` and `stream_role` to
-/// `ClientHello`: every session owns a write-only command stream and a
-/// read-only event stream so blocking reads never share a transport handle
-/// with writes.
-///
-/// Revision 17 removes the dormant single-instance `ActivateExistingUi`
-/// command (tag 16, retired permanently): the audit found no producer and no
-/// consumer anywhere in the workspace. Second-desktop behavior stays exactly
-/// as implemented: each desktop attaches as an isolated authenticated client,
-/// and lifecycle transactions block new processes through the update lock.
-///
-/// Revision 18 adds the phase 5 account boundary (tags 55-60): `BeginLogin`,
-/// `CancelLogin`, `GetAccountStatus`, `LoginAuthorization`, the sanitized
-/// `AccountView`, and `SignOut`. The engine owns the PKCE transaction and
-/// vault material; the desktop receives only the browser URL and the
-/// sanitized view.
-///
-/// Revision 19 adds the selection-command generation to
-/// `ProviderInstrumentSelection`. Provider-wide instrument generations remain
-/// independent fencing identities, while the echoed command generation lets a
-/// desktop correlate a completion to the exact symbol-picker request.
-///
-/// Revision 20 adds `RefreshAccountProfile` (tag 61). It is only a bounded
-/// enqueue request: the resident engine owns all refresh-token and control-plane
-/// work and returns the current sanitized `AccountView` immediately.
-///
-/// Revision 21 adds optional provider heartbeat/application-ping RTT telemetry
-/// to `ProviderState`. The value is locally measured monotonic round-trip time;
-/// provider/exchange clock timestamps are deliberately not used as latency.
+/// Existing workspace-file version. Kept at 21 so installed files written by
+/// the former transport envelope remain readable; retired protobuf tags decode
+/// as unknown fields.
 pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Maximum prost payload accepted in one frame (3 MiB).

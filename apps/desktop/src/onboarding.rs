@@ -111,19 +111,7 @@ impl OnboardingApp {
                         screen.loading = false;
                         match configured {
                             Ok(Some(configured)) => {
-                                let lifecycle = match crate::desktop::DesktopLifecycle::new(
-                                    configured.lifetime_mode,
-                                    configured.autostart_enabled,
-                                    configured.markets_live_permitted,
-                                ) {
-                                    Ok(lifecycle) => lifecycle,
-                                    Err(error) => {
-                                        screen.launch_error = Some(error);
-                                        screen.polling = false;
-                                        screen_cx.notify();
-                                        return;
-                                    }
-                                };
+                                let lifecycle = crate::desktop::DesktopLifecycle::new();
                                 // The terminal keeps the same window and account
                                 // client; a sign-out that races this mount is
                                 // observed on the next poll and returns to

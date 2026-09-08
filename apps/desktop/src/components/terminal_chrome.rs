@@ -568,7 +568,6 @@ pub(super) fn header_controls(
         .child(series_selector(
             app.clone(),
             state.series_label,
-            state.selected_series,
             state.series_message,
             state.pending.series,
             &state.theme,
@@ -1056,7 +1055,6 @@ pub(super) fn chrome_tooltip(
 pub(super) fn series_selector(
     app: Entity<WorkspaceSurface>,
     label: String,
-    _selected: Option<rithmic_history::RithmicSeries>,
     _message: String,
     pending: bool,
     theme: &AxiusflowTheme,

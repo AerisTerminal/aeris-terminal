@@ -128,21 +128,14 @@ fn run_workspace_layout_persistence(
             continue;
         };
         let request_generation = request.layout_generation;
-        let completed = axiusflow_local_engine_client::sibling_engine_executable()
-            .and_then(|executable| {
-                axiusflow_local_engine_client::connect_or_start_engine(&executable)
-            })
-            .and_then(|mut client| {
-                let current = client.restore_workspace()?;
-                client.set_workspace_layout(
-                    current.workspace_revision,
-                    request
-                        .layout_generation
-                        .max(current.layout_generation.saturating_add(1)),
-                    request.active_workspace_id,
-                    request.workspace_tabs,
-                )
-            });
+        let mut current = local_state::load_workspace();
+        current.workspace_revision = current.workspace_revision.saturating_add(1);
+        current.layout_generation = request
+            .layout_generation
+            .max(current.layout_generation.saturating_add(1));
+        current.active_workspace_id = request.active_workspace_id;
+        current.workspace_tabs = request.workspace_tabs;
+        let completed = local_state::save_workspace(&current).map(|()| current);
         *result
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutCompletion {

@@ -61,7 +61,7 @@ impl WorkspaceSurface {
             connection_state,
             connection_message,
             provider_transport_rtt_nanos: None,
-            // Both resident-engine providers support the empty catalog query
+            // Both runtime-backed providers support the empty catalog query
             // used to populate the instrument menu. A successful selection
             // consumes its one-shot search authorization, so reopening the
             // menu must be able to issue another empty listing request instead
@@ -72,9 +72,7 @@ impl WorkspaceSurface {
             ),
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
-            series_browser: rithmic_history::RithmicSeriesBrowser::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
-            rithmic_reconnect: RithmicReconnectState::Idle,
             symbol_input,
             indicator_input,
             timeframe_input,
@@ -1110,20 +1108,6 @@ impl WorkspaceSurface {
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
             }
-            MarketWorkerMessage::RithmicHistory {
-                selection_generation,
-                series_generation,
-                result,
-            } => {
-                self.apply_rithmic_history(selection_generation, series_generation, result, cx);
-            }
-            MarketWorkerMessage::RithmicLive {
-                selection_generation,
-                series_generation,
-                update,
-            } => {
-                self.apply_rithmic_live(selection_generation, series_generation, update, cx);
-            }
             MarketWorkerMessage::OrderBook(frame) => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.replace_frame(frame, order_book_cx)
@@ -1413,41 +1397,19 @@ impl WorkspaceSurface {
         if state != FeedConnectionState::Streaming {
             self.provider_transport_rtt_nanos = None;
         }
-        let retirement = RithmicSessionRetirement::from_connection(state);
+        let presentation = ProviderConnectionPresentation::from_connection(state);
         let retained_market_data = self
             .chart
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
-        // The legacy Rithmic session is re-driven from the desktop on
-        // retirement. The resident engine owns Hyperliquid recovery
-        // end to end (reconnect, resubscribe, history refresh), so a
-        // Hyperliquid disconnect must not tear down selections here.
-        let legacy_session = self.provider == TerminalProvider::Rithmic;
-        match retirement {
-            RithmicSessionRetirement::Offline | RithmicSessionRetirement::Recovering
-                if legacy_session =>
-            {
-                self.begin_rithmic_reconnect(cx);
-            }
-            RithmicSessionRetirement::Stopped if legacy_session => {
-                self.rithmic_reconnect = RithmicReconnectState::Idle;
-                self.retire_rithmic_session(cx);
-            }
-            RithmicSessionRetirement::Offline
-            | RithmicSessionRetirement::Recovering
-            | RithmicSessionRetirement::Stopped
-            | RithmicSessionRetirement::None => {}
-        }
-        if let Some(chart_state) = retirement.chart_state(retained_market_data) {
+        if let Some(chart_state) = presentation.chart_state(retained_market_data) {
             self.chart_state = chart_state;
             self.chart_state_message.clone_from(&message);
         }
         self.connection_state = Some(state);
         // Depth follows the same honesty rule as the empty panel: a fresh
         // demand restarts from loading, and only a concrete stop marks the
-        // book unavailable. An engine replacement additionally clears books
-        // from the dead incarnation, whose reset generations would fence
-        // every new frame out forever.
+        // book unavailable. Provider recovery itself is owned by the market runtime.
         match state {
             FeedConnectionState::Disconnected => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
@@ -1461,9 +1423,6 @@ impl WorkspaceSurface {
             | FeedConnectionState::Authenticating
             | FeedConnectionState::Recovering => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
-                    if message == engine_market_worker::ENGINE_RESTARTED_MESSAGE {
-                        order_book.clear(order_book_cx);
-                    }
                     order_book.set_connection_state(
                         axiusflow_terminal_ui::OrderBookConnectionState::Recovering,
                         order_book_cx,
@@ -1484,26 +1443,15 @@ impl WorkspaceSurface {
                 });
             }
         }
-        let ready_action = rithmic_ready_action(
+        let autoload_catalog = should_autoload_rithmic_catalog(
             state,
             &message,
-            &self.rithmic_reconnect,
             self.market_state.rithmic_autoload_started,
         );
         self.connection_message = Some(stable_connection_message(state, message));
-        match ready_action {
-            RithmicReadyAction::Reconnect(symbol) => {
-                if self.search_symbol_query(&symbol, cx)
-                    && let RithmicReconnectState::AwaitingSearch(target) = &self.rithmic_reconnect
-                {
-                    self.rithmic_reconnect = RithmicReconnectState::SearchInFlight(target.clone());
-                }
-            }
-            RithmicReadyAction::Autoload => {
-                self.market_state.rithmic_autoload_started = true;
-                let _ = self.search_symbol_query(DEFAULT_RITHMIC_LISTING_QUERY, cx);
-            }
-            RithmicReadyAction::None => {}
+        if autoload_catalog {
+            self.market_state.rithmic_autoload_started = true;
+            let _ = self.search_symbol_query(DEFAULT_RITHMIC_LISTING_QUERY, cx);
         }
         cx.notify();
     }
@@ -1712,42 +1660,6 @@ impl WorkspaceSurface {
         }
     }
 
-    fn begin_rithmic_reconnect(&mut self, cx: &mut Context<Self>) {
-        let series = self
-            .series_browser
-            .selected()
-            .map_or(rithmic_history::RithmicSeries::Minute1, |request| {
-                request.series
-            });
-        let no_retired_selection = if self.rithmic_reconnect == RithmicReconnectState::Idle {
-            if let Some(selection) = self.symbol_browser.selected().cloned() {
-                self.rithmic_reconnect =
-                    RithmicReconnectState::AwaitingSearch(RithmicReconnectTarget {
-                        symbol: selection.instrument.symbol,
-                        exchange: selection.instrument.exchange,
-                        series,
-                    });
-                false
-            } else {
-                true
-            }
-        } else {
-            false
-        };
-        if no_retired_selection {
-            self.market_state.rithmic_autoload_started = false;
-        }
-        self.retire_rithmic_session(cx);
-    }
-
-    fn retire_rithmic_session(&mut self, cx: &mut Context<Self>) {
-        self.market_state.symbol_selection_pending = false;
-        self.symbol_browser.invalidate_session();
-        self.series_browser.reset();
-        self.order_book
-            .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
-    }
-
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
         let Some(selection) = self.symbol_browser.select(index) else {
             return false;
@@ -1787,8 +1699,6 @@ impl WorkspaceSurface {
         if provider_catalog_event_provider(&event) != terminal_provider_id(self.provider) {
             return;
         }
-        let rithmic = self.provider == TerminalProvider::Rithmic;
-        let hyperliquid = self.provider == TerminalProvider::Hyperliquid;
         match event {
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.apply_search_completed(result, cx);
@@ -1823,7 +1733,7 @@ impl WorkspaceSurface {
                 self.symbol_message = format!("Loading the selected {display} market");
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
-                self.apply_catalog_rejection(&rejection, command, rithmic, hyperliquid, cx);
+                self.apply_catalog_rejection(&rejection, command, cx);
             }
         }
         cx.notify();
@@ -1851,24 +1761,7 @@ impl WorkspaceSurface {
             cx.notify();
             return;
         }
-        // The legacy Rithmic session re-drives selection itself after a
-        // reconnect or autoload; the resident engine owns Hyperliquid
-        // recovery end to end, so Hyperliquid results only need display.
         if self.provider == TerminalProvider::Rithmic
-            && self.rithmic_reconnect != RithmicReconnectState::Idle
-        {
-            if let Some(index) = self
-                .rithmic_reconnect
-                .target()
-                .and_then(|target| reconnect_contract_index(self.symbol_browser.results(), target))
-            {
-                self.select_rithmic_symbol(index, cx);
-            } else {
-                self.rithmic_reconnect = RithmicReconnectState::Idle;
-                self.symbol_message =
-                    "The previous Rithmic contract is unavailable after reconnect".to_string();
-            }
-        } else if self.provider == TerminalProvider::Rithmic
             && self.market_state.rithmic_autoload_started
             && self.symbol_browser.selected().is_none()
             && let Some(index) = default_rithmic_contract_index(self.symbol_browser.results())
@@ -1885,8 +1778,6 @@ impl WorkspaceSurface {
         &mut self,
         rejection: &ProviderCatalogRejected,
         command: ProviderCatalogCommand,
-        rithmic: bool,
-        hyperliquid: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(generation) = usize_generation(rejection.command_generation) else {
@@ -1901,124 +1792,11 @@ impl WorkspaceSurface {
         if !rejected {
             return;
         }
-        if rithmic || hyperliquid || selection {
-            self.market_state.symbol_selection_pending = false;
-        }
+        self.market_state.symbol_selection_pending = false;
         let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
             .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
         self.symbol_message = catalog_rejection_message(reason, command, self.provider).to_string();
-        if rithmic && let Some(target) = self.rithmic_reconnect.target().cloned() {
-            self.rithmic_reconnect = RithmicReconnectState::AwaitingSearch(target);
-            self.retire_rithmic_session(cx);
-        }
         self.dispatch_retained_symbol_search(cx);
-    }
-
-    fn restore_rithmic_series_after_failure(&mut self) {
-        let Some(selected) = self.series_browser.selected() else {
-            return;
-        };
-        let _ = self
-            .market_worker
-            .try_request_engine_series(EngineSeriesRequest {
-                selection_generation: selected.selection_generation,
-                series_generation: selected.series_generation,
-                interval: selected.series.interval(),
-            });
-    }
-
-    fn apply_rithmic_history(
-        &mut self,
-        selection_generation: std::num::NonZeroUsize,
-        series_generation: std::num::NonZeroUsize,
-        result: Result<Box<MarketWorkerBootstrap>, String>,
-        cx: &mut Context<Self>,
-    ) {
-        let bootstrap = match result {
-            Ok(bootstrap) => bootstrap,
-            Err(error) => {
-                if self.series_browser.reject(series_generation) {
-                    let (series_message, chart_message) =
-                        rithmic_engine_history::history_failure_messages(&error);
-                    self.series_message = series_message;
-                    self.set_chart_state(ChartState::Error, chart_message, cx);
-                    // The chart on screen is still the previous series, so its
-                    // demand is restated rather than abandoned: the trader keeps
-                    // a live chart and an actionable error, not an empty surface.
-                    self.restore_rithmic_series_after_failure();
-                }
-                return;
-            }
-        };
-        if !self
-            .series_browser
-            .accept(selection_generation, series_generation)
-        {
-            return;
-        }
-        let replay_label = generation_status(
-            &bootstrap.worker_label,
-            &bootstrap.subscription_id,
-            MarketPublicationGeneration::from_generation(&bootstrap.generation),
-        );
-        let snapshot = bootstrap.snapshot;
-        let visible_bar_count = snapshot.bars().len();
-        let chart_theme = nucleus_chart_theme(self.theme.mode);
-        let chart =
-            cx.new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
-        self.apply_chart_chrome_to_chart(&chart, cx);
-        self.apply_retained_indicators_to_chart(&chart, cx);
-        self.chart = Some(chart);
-        observe_chart(self.chart.as_ref(), cx);
-        self.worker_label = bootstrap.worker_label;
-        self.subscription_id = bootstrap.subscription_id;
-        self.replay_label = replay_label;
-        self.bridge_label = self.chart.as_ref().map_or_else(
-            || "bridge awaiting snapshot".to_string(),
-            |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
-        );
-        self.series_message = format!("{visible_bar_count} visible bars are current");
-        self.set_chart_state(
-            ChartState::Ready,
-            "Rithmic visible history is current".to_string(),
-            cx,
-        );
-    }
-
-    fn apply_rithmic_live(
-        &mut self,
-        selection_generation: std::num::NonZeroUsize,
-        series_generation: std::num::NonZeroUsize,
-        update: axiusflow_application::ReplayStreamUpdate,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(selected) = self.series_browser.selected() else {
-            return;
-        };
-        if selected.selection_generation != selection_generation
-            || selected.series_generation != series_generation
-        {
-            return;
-        }
-        let Some(chart) = &self.chart else {
-            return;
-        };
-        if chart
-            .update(cx, |chart, _| {
-                chart.try_queue_replay_update(update).map_err(|_| ())
-            })
-            .is_err()
-        {
-            self.set_chart_state(
-                ChartState::Recovering,
-                "Rithmic live chart requires a covering snapshot".to_string(),
-                cx,
-            );
-            return;
-        }
-        self.series_message = "Live candle is current".to_string();
-        self.chart_state = ChartState::Ready;
-        self.chart_state_message = "Rithmic live candle is current".to_string();
     }
 
     /// Whether a market is selected. The header enables the Order Book toggle on this
@@ -2029,8 +1807,13 @@ impl WorkspaceSurface {
 
     pub(super) fn toggle_order_book(&mut self, cx: &mut Context<Self>) {
         if self.has_market_selection() {
-            self.side_panel =
-                (self.side_panel != Some(SidePanel::OrderBook)).then_some(SidePanel::OrderBook);
+            let visible = self.side_panel != Some(SidePanel::OrderBook);
+            self.side_panel = visible.then_some(SidePanel::OrderBook);
+            if visible {
+                self.order_book
+                    .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
+            }
+            let _ = self.market_worker.try_set_order_book_visible(visible);
             if self.side_panel.is_none() {
                 self.menu_state.order_book_column_open = false;
             }

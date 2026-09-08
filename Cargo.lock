@@ -603,6 +603,23 @@ name = "axiusflow_account"
 version = "0.1.0"
 
 [[package]]
+name = "axiusflow_account_runtime"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_account",
+ "axiusflow_engine_protocol",
+ "axiusflow_platform_runtime",
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "axiusflow_application"
 version = "0.1.0"
 dependencies = [
@@ -633,13 +650,14 @@ version = "0.1.0"
 name = "axiusflow_desktop"
 version = "0.1.0"
 dependencies = [
+ "axiusflow_account_runtime",
  "axiusflow_application",
  "axiusflow_chart_integration",
  "axiusflow_design_system",
  "axiusflow_engine_protocol",
  "axiusflow_instruments",
- "axiusflow_local_engine_client",
  "axiusflow_market_data",
+ "axiusflow_market_runtime",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
  "axiusflow_terminal_ui",
@@ -647,7 +665,6 @@ dependencies = [
  "getrandom 0.4.3",
  "gpui",
  "gpui_platform",
- "interprocess",
  "num-traits",
  "reqwest_client",
  "serde",
@@ -655,33 +672,6 @@ dependencies = [
  "sha2 0.11.0",
  "sysinfo 0.39.6",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "axiusflow_engine"
-version = "0.1.0"
-dependencies = [
- "axiusflow_account",
- "axiusflow_engine_protocol",
- "axiusflow_hyperliquid_market_adapter",
- "axiusflow_local_engine_client",
- "axiusflow_local_history",
- "axiusflow_market_data",
- "axiusflow_market_engine",
- "axiusflow_platform_runtime",
- "axiusflow_provider_history",
- "axiusflow_rithmic_protocol_adapter",
- "base64 0.23.1",
- "ed25519-dalek",
- "embed-resource",
- "getrandom 0.4.3",
- "interprocess",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sysinfo 0.39.6",
- "ureq",
- "zeroize",
 ]
 
 [[package]]
@@ -710,28 +700,6 @@ name = "axiusflow_instruments"
 version = "0.1.0"
 
 [[package]]
-name = "axiusflow_local_engine_client"
-version = "0.1.0"
-dependencies = [
- "axiusflow_engine_protocol",
- "axiusflow_platform_runtime",
- "getrandom 0.4.3",
- "interprocess",
- "zeroize",
-]
-
-[[package]]
-name = "axiusflow_local_history"
-version = "0.1.0"
-dependencies = [
- "axiusflow_local_storage",
- "axiusflow_market_data",
- "axiusflow_platform_runtime",
- "getrandom 0.4.3",
- "zeroize",
-]
-
-[[package]]
 name = "axiusflow_local_storage"
 version = "0.1.0"
 dependencies = [
@@ -755,6 +723,21 @@ dependencies = [
  "axiusflow_market_data",
  "serde_json",
  "sha2 0.11.0",
+]
+
+[[package]]
+name = "axiusflow_market_runtime"
+version = "0.1.0"
+dependencies = [
+ "axiusflow_engine_protocol",
+ "axiusflow_hyperliquid_market_adapter",
+ "axiusflow_market_data",
+ "axiusflow_market_engine",
+ "axiusflow_platform_runtime",
+ "axiusflow_provider_history",
+ "axiusflow_rithmic_protocol_adapter",
+ "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -1937,12 +1920,6 @@ checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
 ]
-
-[[package]]
-name = "doctest-file"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "document-features"
@@ -3482,19 +3459,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "interprocess"
-version = "2.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
-dependencies = [
- "doctest-file",
- "libc",
- "recvmsg",
- "widestring",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5643,12 +5607,6 @@ name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
-
-[[package]]
-name = "recvmsg"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"

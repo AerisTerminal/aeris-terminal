@@ -1,19 +1,15 @@
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarPeriod, BarSeriesKey, Command, ConsumerId,
-    Coordinator, DeferredHistoryRequest, DemandWaiter, EMPTY_REPAIR_RETRY_DELAY, FailureStage,
-    FormingBar, GenerationId, HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED,
-    HISTORY_RETRY_DELAY, HistoryRange, HistoryRequest, HistorySnapshot, HistorySource, HotSeries,
-    HotSetManager, HotSetTier, HyperliquidHandoffSeed, InstallProviderInstrument, Instant,
-    MAXIMUM_HISTORY_RETRIES, MAXIMUM_SERIES, MarketBar, Mutex, NonZeroU64, NonZeroUsize, Ordering,
-    PersistenceState, ProviderCatalogCommand, ProviderGeneration, ProviderRequest,
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, Receiver, ResourceMode, RithmicHandoffSeed,
-    SearchProviderInstruments, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
-    StorageRequest, SyncSender, TrySendError, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, WarmSeries,
-    WorkspaceId, WorkspaceState, engine_install_failure_stage, fail_waiters,
-    hyperliquid_interval_for_period, ipc_series, publish_state, series_state, thread,
+    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId,
+    Coordinator, DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar, GenerationId,
+    HISTORY_BARS_PER_SERIES, HISTORY_CAPACITY_EXHAUSTED, HISTORY_RETRY_DELAY, HistoryRange,
+    HistoryRequest, HistorySnapshot, HistorySource, HyperliquidHandoffSeed, InstallProviderInstrument,
+    Instant, INITIAL_HISTORY_BARS, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
+    ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed,
+    SeriesLoadState, SeriesSnapshot, SyncSender,
+    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage, fail_waiters,
+    hyperliquid_interval_for_period, publish_state, series_state, thread,
     try_enqueue_history,
 };
-use crate::hyperliquid_realtime::HYPERLIQUID_PUBLIC_ACCOUNT_ID;
 
 pub(super) fn reconcile_history_repair(
     current: &SeriesSnapshot,
@@ -76,11 +72,29 @@ fn deferred_history_request(range: Option<HistoryRange>) -> DeferredHistoryReque
     range.map_or(DeferredHistoryRequest::Full, DeferredHistoryRequest::Range)
 }
 
-pub(super) fn merge_history_ranges(left: HistoryRange, right: HistoryRange) -> HistoryRange {
-    HistoryRange {
-        start_unix_nanos: left.start_unix_nanos.min(right.start_unix_nanos),
-        end_unix_nanos: left.end_unix_nanos.max(right.end_unix_nanos),
-    }
+pub(super) fn history_request_bar_limit(
+    series: &BarSeriesKey,
+    range: Option<HistoryRange>,
+) -> usize {
+    range.map_or(INITIAL_HISTORY_BARS, |requested| {
+        series
+            .period
+            .duration_nanos()
+            .and_then(|duration| {
+                let span = requested
+                    .end_unix_nanos
+                    .saturating_sub(requested.start_unix_nanos);
+                let duration = duration.max(1);
+                let bars = span
+                    .saturating_add(duration.saturating_sub(1))
+                    .div_euclid(duration);
+                usize::try_from(bars).ok()
+            })
+            .unwrap_or(INITIAL_HISTORY_BARS)
+            .saturating_add(64)
+            .min(HISTORY_BARS_PER_SERIES)
+            .max(1)
+    })
 }
 
 fn viewport_history_range(
@@ -107,136 +121,6 @@ fn viewport_history_range(
     (start_unix_nanos < end_unix_nanos).then_some(HistoryRange {
         start_unix_nanos,
         end_unix_nanos,
-    })
-}
-
-pub(super) fn internal_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
-    if series.provider.trim().is_empty()
-        || series.instrument_id.trim().is_empty()
-        || series.entitlement_id.trim().is_empty()
-        || series.definition_revision == 0
-    {
-        return Err("market series identity is invalid".to_string());
-    }
-    let period = match SeriesCadence::try_from(series.cadence)
-        .map_err(|_| "market series cadence is invalid".to_string())?
-    {
-        SeriesCadence::FixedSeconds => BarPeriod::time(series.cadence_value),
-        SeriesCadence::Trades => BarPeriod::tick(series.cadence_value),
-        SeriesCadence::SessionDays => BarPeriod::session(series.cadence_value),
-        SeriesCadence::CalendarWeeks => BarPeriod::week(series.cadence_value),
-        SeriesCadence::CalendarMonths => BarPeriod::month(series.cadence_value),
-        SeriesCadence::Unspecified => {
-            Err(axiusflow_market_data::MarketDataValidationError::InvalidPeriod)
-        }
-    }
-    .map_err(|error| error.to_string())?;
-    Ok(BarSeriesKey {
-        provider_id: series.provider.clone(),
-        instrument_id: series.instrument_id.clone(),
-        entitlement_id: series.entitlement_id.clone(),
-        period,
-        definition_version: series.definition_revision,
-    })
-}
-
-pub(super) fn retained_hot_series(
-    workspace: &WorkspaceState,
-    available_memory_bytes: u64,
-) -> Result<Vec<HotSeries>, String> {
-    const MAXIMUM_HOT_SET_BYTES: u64 = 512 * 1024 * 1024;
-    let estimated_entry_bytes = (HISTORY_BARS_PER_SERIES + 1)
-        .saturating_mul(std::mem::size_of::<MarketBar>())
-        .saturating_add(1_024);
-    let memory_budget_bytes =
-        usize::try_from((available_memory_bytes / 16).min(MAXIMUM_HOT_SET_BYTES))
-            .unwrap_or(usize::MAX);
-    let mut manager =
-        HotSetManager::new(NonZeroUsize::new(MAXIMUM_SERIES).unwrap_or(NonZeroUsize::MIN));
-    manager
-        .restore(
-            workspace
-                .hot_series
-                .iter()
-                .map(crate::protocol_hot_entry)
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(|error| error.to_string())?;
-    let active_workspaces = NonZeroU64::new(workspace.active_workspace_id)
-        .map(WorkspaceId)
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let watchlist = workspace
-        .hot_series
-        .iter()
-        .filter(|series| {
-            workspace
-                .watchlist
-                .iter()
-                .any(|market| market == &series.market || market == &series.provider_symbol)
-        })
-        .map(|series| {
-            internal_series(&SeriesKey {
-                provider: series.provider.clone(),
-                instrument_id: series.instrument_id.clone(),
-                cadence_value: series.cadence_value,
-                definition_revision: series.definition_revision,
-                entitlement_id: series.entitlement_id.clone(),
-                cadence: series.cadence,
-            })
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    Ok(manager
-        .classify(
-            &active_workspaces,
-            &watchlist,
-            memory_budget_bytes,
-            estimated_entry_bytes,
-        )
-        .into_iter()
-        .filter(|retention| retention.tier != HotSetTier::Cold)
-        .map(|retention| crate::hot_entry_to_protocol(retention.entry))
-        .collect())
-}
-pub(super) fn warm_series(series: &HotSeries) -> Result<WarmSeries, String> {
-    if series.provider != "rithmic" && series.provider != "hyperliquid"
-        || series.provider_symbol.trim().is_empty()
-        || series.venue_id.trim().is_empty()
-        || series.display_symbol.trim().is_empty()
-        || series.price_scale > 18
-        || series.quantity_scale > 18
-    {
-        return Err("hot-set instrument metadata is invalid".to_string());
-    }
-    if series.provider == "rithmic" && series.account_id != RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID {
-        return Err("hot-set instrument metadata is invalid".to_string());
-    }
-    if series.provider == "hyperliquid" && series.account_id != HYPERLIQUID_PUBLIC_ACCOUNT_ID {
-        return Err("hot-set instrument metadata is invalid".to_string());
-    }
-    let canonical = internal_series(&SeriesKey {
-        provider: series.provider.clone(),
-        instrument_id: series.instrument_id.clone(),
-        cadence_value: series.cadence_value,
-        definition_revision: series.definition_revision,
-        entitlement_id: series.entitlement_id.clone(),
-        cadence: series.cadence,
-    })?;
-    Ok(WarmSeries {
-        series: canonical,
-        instrument: InstallProviderInstrument {
-            provider: series.provider.clone(),
-            session_generation: series.provider_watermark.max(1),
-            selection_generation: 1,
-            instrument_id: series.instrument_id.clone(),
-            provider_symbol: series.provider_symbol.clone(),
-            display_symbol: series.display_symbol.clone(),
-            venue_id: series.venue_id.clone(),
-            price_scale: series.price_scale,
-            quantity_scale: series.quantity_scale,
-            entitlement_id: series.entitlement_id.clone(),
-        },
-        provider_watermark: series.provider_watermark,
     })
 }
 
@@ -308,139 +192,18 @@ impl Coordinator<'_> {
             result => result,
         }
     }
-    pub(super) fn restore_hot_series(&mut self, series: Vec<WarmSeries>) {
-        self.hot_set_priority_count = series.len().min(MAXIMUM_SERIES);
-        for warm in series
-            .into_iter()
-            .filter(|warm| {
-                warm.series.provider_id == "rithmic" || warm.series.provider_id == "hyperliquid"
-            })
-            .take(MAXIMUM_SERIES)
-        {
-            if !self.warm_series.contains_key(&warm.series) {
-                self.warm_priority.push(warm.series.clone());
-            }
-            self.warm_series.insert(warm.series.clone(), warm.clone());
-        }
-        self.schedule_warm_local_history();
-    }
-
-    pub(super) fn schedule_warm_local_history(&mut self) {
-        if self.resource_mode == ResourceMode::OfflineSuspended {
-            return;
-        }
-        let candidates = self
-            .warm_priority
-            .iter()
-            .take(self.resource_policy.maximum_cached_series)
-            .filter_map(|series| self.warm_series.get(series))
-            .cloned()
-            .collect::<Vec<_>>();
-        for warm in candidates {
-            let generation = ProviderGeneration(
-                NonZeroU64::new(warm.provider_watermark.max(1)).unwrap_or(NonZeroU64::MIN),
-            );
-            let key = (warm.series.clone(), generation);
-            if self.warm_reads.contains(&key)
-                || self.retained_history.contains_key(&warm.series)
-                || self.prewarmed.contains(&warm.series)
-            {
-                continue;
-            }
-            match self
-                .storage
-                .try_send(StorageRequest::Read(warm.series.clone(), generation))
-            {
-                Ok(()) => {
-                    self.warm_reads.insert(key);
-                }
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => break,
-            }
-        }
-    }
-    pub(super) fn activate_markets_live_hot_set(&mut self) {
-        self.retained_live.extend(self.rithmic_live.keys().cloned());
-        self.retained_live
-            .extend(self.hyperliquid_live.keys().cloned());
-        self.activate_markets_live_provider_hot_set("rithmic");
-        self.activate_markets_live_provider_hot_set("hyperliquid");
-    }
-
-    pub(super) fn activate_markets_live_provider_hot_set(&mut self, provider: &str) {
-        if self.resource_mode != ResourceMode::MarketsLive
-            || self.warm_restore_pending.contains_key(provider)
-            || self.retained_live.len() >= self.resource_policy.maximum_derived_series
-        {
-            return;
-        }
-        let Some(series) = self
-            .warm_priority
-            .iter()
-            .find(|series| {
-                series.provider_id == provider
-                    && !self.retained_live.contains(*series)
-                    && !self.warm_restore_skipped.contains(*series)
-            })
-            .cloned()
-        else {
-            return;
-        };
-        let Some(warm) = self.warm_series.get(&series) else {
-            return;
-        };
-        let provider_symbol = warm.instrument.provider_symbol.clone();
-        let generation = self
-            .warm_search_generations
-            .get(provider)
-            .copied()
-            .unwrap_or(0)
-            .checked_add(1)
-            .unwrap_or(1);
-        match self.providers.dispatch_catalog(
-            provider,
-            ProviderCatalogCommand::Search(SearchProviderInstruments {
-                consumer_id: 0,
-                search_generation: generation,
-                provider: provider.to_string(),
-                query: provider_symbol,
-                maximum_results: 16,
-            }),
-        ) {
-            Ok(()) => {
-                self.warm_search_generations
-                    .insert(provider.to_string(), generation);
-                self.warm_restore_pending
-                    .insert(provider.to_string(), series);
-            }
-            Err(error) if error.ends_with("catalog command capacity is exhausted") => {
-                // Capacity pressure is transient. Leave this series eligible so
-                // the coordinator-tick retry below can dispatch it as soon as
-                // the bounded catalog lane drains.
-            }
-            Err(_) => {
-                // A disconnected/unavailable catalog worker cannot make forward
-                // progress by being hammered every tick. Skip this retained item
-                // until a later MarketsLive activation rebuilds restore state.
-                self.warm_restore_skipped.insert(series);
-            }
-        }
-    }
     pub(super) fn prepare_cached_demand(
         &mut self,
         series: &BarSeriesKey,
         provider_generation: ProviderGeneration,
         snapshot: &Arc<axiusflow_market_engine::SeriesSnapshot>,
     ) -> Result<bool, String> {
-        let needs_covering_repair =
-            snapshot.provider_generation != provider_generation || self.prewarmed.remove(series);
+        let needs_covering_repair = snapshot.provider_generation != provider_generation;
         if needs_covering_repair {
-            self.local_loaded
-                .insert((series.clone(), provider_generation));
             if let Err(detail) = self.enqueue_history(series, provider_generation) {
                 self.broadcast_series_resolution_for(
                     series,
                     SeriesLoadState::Partial,
-                    PersistenceState::Durable,
                     Some(detail),
                 );
             }
@@ -462,7 +225,7 @@ impl Coordinator<'_> {
             events.series_state = Some(series_state(
                 waiter.consumer_id,
                 waiter.generation,
-                ipc_series(series),
+                series.clone(),
                 SeriesLoadState::Resolving,
                 None,
             ));
@@ -471,14 +234,7 @@ impl Coordinator<'_> {
         if !first {
             return;
         }
-        let history = if self
-            .enqueue_local_history(series, provider_generation)
-            .is_ok()
-        {
-            Ok(())
-        } else {
-            self.enqueue_history_recovery(series, provider_generation)
-        };
+        let history = self.enqueue_history_recovery(series, provider_generation);
         if let Err(detail) = history
             && let Some(waiters) = self.pending.remove(series)
         {
@@ -492,44 +248,6 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn remember_pending_empty_repair(
-        &mut self,
-        series: &BarSeriesKey,
-        range: HistoryRange,
-    ) {
-        self.pending_empty_repairs
-            .entry(series.clone())
-            .and_modify(|pending| {
-                pending.start_unix_nanos = pending.start_unix_nanos.min(range.start_unix_nanos);
-                pending.end_unix_nanos = pending.end_unix_nanos.max(range.end_unix_nanos);
-            })
-            .or_insert(range);
-    }
-
-    pub(super) fn retry_pending_empty_repairs(&mut self) {
-        if self.pending_empty_repairs.is_empty() || Instant::now() < self.empty_repair_retry_at {
-            return;
-        }
-        let Some((series, range)) = self
-            .pending_empty_repairs
-            .iter()
-            .next()
-            .map(|(series, range)| (series.clone(), *range))
-        else {
-            return;
-        };
-        match self
-            .storage
-            .try_send(StorageRequest::ResolveConfirmedEmpty(series.clone(), range))
-        {
-            Ok(()) => {
-                self.pending_empty_repairs.remove(&series);
-            }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                self.empty_repair_retry_at = Instant::now() + EMPTY_REPAIR_RETRY_DELAY;
-            }
-        }
-    }
     pub(super) fn schedule_history_retry(
         &mut self,
         series: &BarSeriesKey,
@@ -564,10 +282,6 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn retry_history(&mut self) {
-        if self.resource_mode == ResourceMode::MarketsLive {
-            self.activate_markets_live_provider_hot_set("rithmic");
-            self.activate_markets_live_provider_hot_set("hyperliquid");
-        }
         let now = Instant::now();
         let Some(key) = self
             .history_retries
@@ -595,41 +309,6 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn protected_history_ranges(&self) -> Vec<(BarSeriesKey, HistoryRange)> {
-        let mut protected = BTreeSet::new();
-        for series in self.rithmic_live.keys().chain(self.hyperliquid_live.keys()) {
-            if !self.engine.has_subscription(series) {
-                continue;
-            }
-            let Some(snapshot) = self.engine.series_snapshot(series) else {
-                continue;
-            };
-            let Some(first) = snapshot.bars.get(
-                snapshot
-                    .bars
-                    .len()
-                    .saturating_sub(VIEWPORT_LIVE_TAIL_RESERVE),
-            ) else {
-                continue;
-            };
-            let Some(last) = snapshot.bars.last() else {
-                continue;
-            };
-            let end = last
-                .exchange_timestamp_unix_nanos
-                .saturating_add(series.period.duration_nanos().unwrap_or(1).max(1));
-            if first.exchange_timestamp_unix_nanos < end {
-                protected.insert((
-                    series.clone(),
-                    HistoryRange {
-                        start_unix_nanos: first.exchange_timestamp_unix_nanos,
-                        end_unix_nanos: end,
-                    },
-                ));
-            }
-        }
-        protected.into_iter().collect()
-    }
     pub(super) fn provider_generation_for_series(
         &self,
         series: &BarSeriesKey,
@@ -651,7 +330,7 @@ impl Coordinator<'_> {
                 .ok_or_else(|| "Hyperliquid engine session is unavailable".to_string());
         }
         if series.provider_id != "rithmic" {
-            return Err("resident engine market provider is unsupported".to_string());
+            return Err("market provider is unsupported".to_string());
         }
         crate::rithmic_history::chart_interval(series.period)?;
         if series.definition_version != 1 {
@@ -666,34 +345,6 @@ impl Coordinator<'_> {
             .and_then(|status| status.generation)
             .ok_or_else(|| "Rithmic engine session is unavailable".to_string())
     }
-    pub(super) fn series_precision(&self, series: &BarSeriesKey) -> Result<(u8, u8), String> {
-        if series.provider_id == "hyperliquid" {
-            let installed = self.hyperliquid_instrument(series)?;
-            if installed.entitlement_id != series.entitlement_id {
-                return Err("Hyperliquid series entitlement is inconsistent".to_string());
-            }
-            return Ok((
-                u8::try_from(installed.price_scale)
-                    .map_err(|_| "Hyperliquid price scale is invalid".to_string())?,
-                u8::try_from(installed.quantity_scale)
-                    .map_err(|_| "Hyperliquid quantity scale is invalid".to_string())?,
-            ));
-        }
-        if series.provider_id != "rithmic" {
-            return Err("resident engine market provider is unsupported".to_string());
-        }
-        let installed = self.rithmic_instrument(series)?;
-        if installed.entitlement_id != series.entitlement_id {
-            return Err("Rithmic series entitlement is inconsistent".to_string());
-        }
-        Ok((
-            u8::try_from(installed.price_scale)
-                .map_err(|_| "Rithmic price scale is invalid".to_string())?,
-            u8::try_from(installed.quantity_scale)
-                .map_err(|_| "Rithmic quantity scale is invalid".to_string())?,
-        ))
-    }
-
     pub(super) fn rithmic_instrument(
         &self,
         series: &BarSeriesKey,
@@ -750,36 +401,8 @@ impl Coordinator<'_> {
             return Ok(());
         };
         let provider_generation = self.provider_generation_for_series(&series)?;
-        let key = (series.clone(), provider_generation);
-        if let Some(pending) = self.local_history_deadlines.get(&key) {
-            if pending.range == Some(range) {
-                return Ok(());
-            }
-            // The current viewport already lives in the demand registry. Keep
-            // one local read in flight; its completion re-derives the newest
-            // aggregate viewport before any provider fallback, so rapid pans do
-            // not bypass available cache or require a second scheduling queue.
-            return Ok(());
-        }
-        match self.enqueue_local_history_range(&series, provider_generation, range) {
-            Ok(()) => Ok(()),
-            Err(_) => self
-                .enqueue_history_request(&series, provider_generation, Some(range))
-                .map_err(str::to_string),
-        }
-    }
-
-    pub(super) fn current_viewport_history_range(
-        &self,
-        series: &BarSeriesKey,
-    ) -> Option<HistoryRange> {
-        let snapshot = self.engine.series_snapshot(series)?;
-        self.engine
-            .retained_viewports(series)
-            .into_iter()
-            .map(|(_, _, viewport)| viewport)
-            .filter_map(|viewport| viewport_history_range(series, &snapshot, viewport))
-            .reduce(merge_history_ranges)
+        self.enqueue_history_request(&series, provider_generation, Some(range))
+            .map_err(str::to_string)
     }
 
     /// Seeds the live aggregator from installed history and drains the buffer.
@@ -832,13 +455,7 @@ impl Coordinator<'_> {
             None
         };
         let stop = Arc::new(AtomicBool::new(false));
-        let maximum_bars = if series.provider_id == "hyperliquid" {
-            // Hyperliquid exposes only its latest 5,000 candles. Fetch that
-            // complete public window once; local history then extends it.
-            axiusflow_hyperliquid_market_adapter::MAXIMUM_HYPERLIQUID_CANDLES
-        } else {
-            self.resource_policy.history_prefetch_bars.max(1)
-        };
+        let maximum_bars = history_request_bar_limit(series, range);
         let request = HistoryRequest {
             series: series.clone(),
             provider_generation: generation,
@@ -857,31 +474,14 @@ impl Coordinator<'_> {
             Err(error) => Err(error),
         }
     }
-    pub(super) fn history_failed(&mut self, series: &BarSeriesKey, generation: ProviderGeneration) {
-        if self.local_loaded.contains(&(series.clone(), generation)) {
+    pub(super) fn history_failed(&mut self, series: &BarSeriesKey, _generation: ProviderGeneration) {
+        if self.engine.series_snapshot(series).is_some() {
             self.pending.remove(series);
-            if let Ok(publications) = self.engine.publish_series_snapshot(series) {
-                for publication in publications {
-                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        publish_state(
-                            events,
-                            &publication,
-                            SeriesLoadState::Partial,
-                            PersistenceState::Durable,
-                            Some(
-                                "Retained local history is usable; provider repair is unavailable",
-                            ),
-                        );
-                    }
-                }
-            }
-            if let Some(snapshot) = self.engine.series_snapshot(series) {
-                if series.provider_id == "hyperliquid" {
-                    let _ = self.start_hyperliquid_realtime_from_snapshot(series, &snapshot);
-                } else {
-                    let _ = self.start_rithmic_realtime_from_snapshot(series, &snapshot);
-                }
-            }
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Partial,
+                Some("Older provider history is temporarily unavailable"),
+            );
         } else if let Some(waiters) = self.pending.remove(series) {
             fail_waiters(
                 &mut self.events,
@@ -909,13 +509,12 @@ impl Coordinator<'_> {
             .history_cancellations
             .remove(&key)
             .is_some_and(|stop| stop.load(Ordering::Acquire));
-        let suspended = self.suspended_history.remove(&key);
         let current = self
             .engine
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
-        if current != Some(generation) || suspended {
-            if !suspended && current == Some(generation) && self.engine.has_subscription(series) {
+        if current != Some(generation) {
+            if current == Some(generation) && self.engine.has_subscription(series) {
                 let _ = self.enqueue_history(series, generation);
             }
             return None;
@@ -1022,7 +621,6 @@ impl Coordinator<'_> {
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
-        let persisted_bars = snapshot.bars.clone();
         let mut forming = snapshot.forming;
         let provider_forming =
             if series.provider_id == "hyperliquid" || series.provider_id == "rithmic" {
@@ -1065,13 +663,6 @@ impl Coordinator<'_> {
             }
         };
         self.publish_installed_history(&publications);
-        self.enqueue_persistence(
-            series,
-            generation,
-            persisted_bars,
-            false,
-            "Local history persistence is unavailable",
-        );
         if !reseed_live {
             return Some((bars, forming));
         }
@@ -1118,8 +709,7 @@ impl Coordinator<'_> {
         }
     }
 
-    /// Publishes one installed covering snapshot to every matching consumer
-    /// as ready-but-undurable: the storage worker confirms durability next.
+    /// Publishes one installed covering snapshot to every matching consumer.
     pub(super) fn publish_installed_history(
         &mut self,
         publications: &[axiusflow_market_engine::ConsumerPublication],
@@ -1130,7 +720,6 @@ impl Coordinator<'_> {
                     events,
                     publication,
                     SeriesLoadState::Ready,
-                    PersistenceState::Pending,
                     None,
                 );
             }
@@ -1143,7 +732,6 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
         mut snapshot: HistorySnapshot,
     ) -> Option<HistorySnapshot> {
-        let had_local_history = self.local_loaded.contains(&(series.clone(), generation));
         let Some(current) = self.engine.series_snapshot(series) else {
             return Some(snapshot);
         };
@@ -1159,9 +747,6 @@ impl Coordinator<'_> {
                 .last()
                 .map_or(1, |bar| bar.source_sequence.saturating_add(1));
             forming.bar.source_sequence = next_sequence;
-        }
-        if had_local_history {
-            self.local_loaded.remove(&(series.clone(), generation));
         }
         Some(snapshot)
     }
@@ -1355,6 +940,8 @@ impl Coordinator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiusflow_market_data::BarPeriod;
+    use std::num::NonZeroU64;
     use std::sync::{Arc as StdArc, Mutex as StdMutex, mpsc};
 
     fn test_series(instrument_id: &str) -> BarSeriesKey {

@@ -1,4 +1,4 @@
-//! Single-owner resident market coordinator and provider history/realtime workers.
+//! Single-owner in-process market runtime and provider workers.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -12,41 +12,29 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::MarketRuntimeEvent;
 use axiusflow_engine_protocol::{
-    DemandError, EngineFaultCode, FailureStage, HotSeries, InstallProviderInstrument,
-    MarketBar as IpcMarketBar, OrderBookLevel as IpcOrderBookLevel,
-    OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState,
-    OrderFlowAggressor, OrderFlowLevel as IpcOrderFlowLevel,
-    OrderFlowSnapshot as IpcOrderFlowSnapshot, OrderFlowTrade as IpcOrderFlowTrade,
-    OrderFlowUpdate as IpcOrderFlowUpdate, PersistenceState, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSelection,
-    ProviderState, ResourceMode, SearchProviderInstruments, SelectProviderInstrument,
-    SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot as IpcSeriesSnapshot, SeriesState,
-    SeriesUpdateOperation, WorkspaceState, envelope,
+    EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesLoadState,
 };
 use axiusflow_hyperliquid_market_adapter::{
     HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
 };
-use axiusflow_local_history::{
-    HistoryScope, LocalHistoryError, LocalHistoryStore, RetainedRange, StoredHistory,
-};
 use axiusflow_market_data::{
-    BarPeriod, BarSeriesKey, DepthLevel, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
-    OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState as CanonicalOrderBookState,
-    TopOfBookQuote,
+    BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar, MarketTrade, OrderBook,
+    OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState, TopOfBookQuote,
 };
 use axiusflow_market_engine::{
-    ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, EngineResourceMode,
-    GenerationId, HotSetManager, HotSetTier, MarketEngine, MarketEngineConfig, MarketStream,
-    OrderFlowPublicationKind, ProviderCapabilities, ProviderConfig, ProviderGeneration,
-    ProviderHealth, ProviderRequest, ResourcePolicyDecision, ResourcePolicyInput, SeriesSnapshot,
-    SeriesTailOperation, StreamRequirements, Viewport, WorkspaceId, decide_resource_policy,
+    ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
+    MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
+    ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation, StreamRequirements,
+    Viewport, WorkspaceId,
 };
 use axiusflow_provider_history::HistoryRange;
 use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
-use sysinfo::System;
 
 use crate::hyperliquid_realtime::{
     HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidCandleDemand, HyperliquidCatalogControl,
@@ -60,23 +48,20 @@ use crate::rithmic_realtime::{
 
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
-const STORAGE_CAPACITY: usize = 16;
-const PERSISTENCE_BACKLOG_CAPACITY: usize = STORAGE_CAPACITY;
 const REALTIME_CAPACITY: usize = 2_048;
 const RITHMIC_REALTIME_CONTROL_CAPACITY: usize = 2;
 const REALTIME_DRAIN_BUDGET: usize = 256;
 /// Bar updates a consumer may fall behind by before the oldest is dropped.
 const CONSUMER_SERIES_QUEUE_CAPACITY: usize = 1_024;
 const COORDINATOR_TICK: Duration = Duration::from_millis(16);
-const LOCAL_HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(2);
-const EMPTY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporarily exhausted";
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
-const MAXIMUM_SERIES: usize = 128;
-const HISTORY_BARS_PER_SERIES: usize = 32_768;
+const MAXIMUM_SERIES: usize = 64;
+const HISTORY_BARS_PER_SERIES: usize = 8_192;
+const INITIAL_HISTORY_BARS: usize = 600;
 const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * (HISTORY_BARS_PER_SERIES + 1);
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
@@ -84,11 +69,10 @@ const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
 const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
 const MAXIMUM_PUBLISHED_DEPTH_LEVELS: usize = 50;
-const MAXIMUM_TRADED_VOLUME_LEVELS: usize = 4_096;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
-/// Cloneable command boundary for the process-owned market coordinator.
+/// Cloneable command boundary for the desktop-owned market coordinator.
 #[derive(Clone)]
 pub struct MarketService {
     commands: SyncSender<Command>,
@@ -98,7 +82,6 @@ pub struct MarketService {
 /// Bounded coordinator-owned lifecycle and memory snapshot for authenticated diagnostics.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketServiceStatus {
-    pub resource_mode: ResourceMode,
     pub connected_desktop_clients: usize,
     pub providers: Vec<ProviderState>,
     pub retained_series: usize,
@@ -124,47 +107,36 @@ enum Command {
     /// provider event remains in its dedicated bounded lane and is drained at
     /// the top of the next coordinator iteration.
     ProviderWake,
-    RestoreHotSet(Vec<WarmSeries>, Reply<()>),
-    SetResourceMode(ResourceMode, Reply<()>),
     Status(Reply<MarketServiceStatus>),
-    Attach(
-        ClientId,
-        Option<SyncSender<(u64, envelope::Payload)>>,
-        Reply<()>,
-    ),
+    Attach(ClientId, Reply<()>),
     Detach(ClientId, Reply<()>),
     Register(ConsumerIdentity, Reply<()>),
     Remove(ClientId, ConsumerId, Reply<()>),
     Viewport(ClientId, ConsumerId, GenerationId, Viewport, Reply<()>),
     ResourceClass(ClientId, ConsumerId, ConsumerResourceClass, Reply<()>),
-    Demand(ClientId, ConsumerId, GenerationId, BarSeriesKey, Reply<()>),
+    Streams(ClientId, ConsumerId, GenerationId, StreamRequirements, Reply<()>),
+    Demand(
+        ClientId,
+        ConsumerId,
+        GenerationId,
+        BarSeriesKey,
+        StreamRequirements,
+        Reply<()>,
+    ),
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
     InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
-    Poll(ClientId, ConsumerId, Reply<Option<envelope::Payload>>),
+    Poll(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
+    PollClient(
+        ClientId,
+        Vec<(ConsumerId, usize)>,
+        Reply<Vec<(u64, MarketRuntimeEvent)>>,
+    ),
     HistoryCompleted(
         BarSeriesKey,
         ProviderGeneration,
         Option<HistoryRange>,
         Result<HistorySnapshot, String>,
-    ),
-    LocalHistoryCompleted(
-        BarSeriesKey,
-        ProviderGeneration,
-        Result<Option<StoredHistory>, String>,
-    ),
-    LocalHistoryRangeCompleted(
-        BarSeriesKey,
-        ProviderGeneration,
-        HistoryRange,
-        Result<Option<StoredHistory>, String>,
-    ),
-    ConfirmedEmptyResolved(BarSeriesKey, HistoryRange, Result<(), LocalHistoryError>),
-    PersistenceCompleted(
-        BarSeriesKey,
-        ProviderGeneration,
-        Result<(), LocalHistoryError>,
-        u64,
     ),
 }
 
@@ -223,33 +195,6 @@ impl HistoryRequest {
             range: self.range,
         }
     }
-}
-
-#[derive(Clone)]
-struct WarmSeries {
-    series: BarSeriesKey,
-    instrument: InstallProviderInstrument,
-    provider_watermark: u64,
-}
-
-enum StorageRequest {
-    Read(BarSeriesKey, ProviderGeneration),
-    ReadRange(BarSeriesKey, ProviderGeneration, HistoryRange),
-    Persist(
-        BarSeriesKey,
-        ProviderGeneration,
-        Vec<MarketBar>,
-        bool,
-        Vec<(BarSeriesKey, HistoryRange)>,
-        Instant,
-    ),
-    ResolveConfirmedEmpty(BarSeriesKey, HistoryRange),
-}
-
-#[derive(Clone, Copy)]
-struct PendingLocalHistoryRead {
-    deadline: Instant,
-    range: Option<HistoryRange>,
 }
 
 struct HistorySnapshot {
@@ -316,26 +261,24 @@ struct DemandWaiter {
 /// book, provider state, or catalog result fully supersedes the one before it.
 #[derive(Default)]
 struct ConsumerEvents {
-    provider: Option<envelope::Payload>,
-    series: VecDeque<envelope::Payload>,
+    provider: Option<MarketRuntimeEvent>,
+    series: VecDeque<MarketRuntimeEvent>,
     /// Set when the series queue could not hold one more distinct bar. The
     /// coordinator resolves it by replacing the whole queue with a covering
     /// snapshot, because dropping the oldest update opens a sequence gap the
     /// consumer can only read as corruption.
     series_overflowed: bool,
-    series_state: Option<envelope::Payload>,
-    demand_error: Option<envelope::Payload>,
-    order_book: Option<envelope::Payload>,
-    order_flow: Option<envelope::Payload>,
-    catalog_search: Option<envelope::Payload>,
-    catalog_selection: Option<envelope::Payload>,
+    series_state: Option<MarketRuntimeEvent>,
+    demand_error: Option<MarketRuntimeEvent>,
+    order_book: Option<MarketRuntimeEvent>,
+    catalog_search: Option<MarketRuntimeEvent>,
+    catalog_selection: Option<MarketRuntimeEvent>,
 }
 
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
-    traded_volumes: BTreeMap<i64, i64>,
 }
 
 mod realtime;
@@ -358,7 +301,6 @@ struct HyperliquidLiveHandoff {
     /// Live updates that arrived before history seeded the seam, bounded.
     buffered: VecDeque<HyperliquidLiveCandle>,
     pending_publications: VecDeque<MarketBar>,
-    pending_persistence: VecDeque<MarketBar>,
     connected: bool,
     history_ready: bool,
     dirty: bool,
@@ -373,7 +315,6 @@ struct RithmicLiveHandoff {
     bars: Vec<MarketBar>,
     buffered: VecDeque<MarketTrade>,
     pending_publications: VecDeque<MarketBar>,
-    pending_persistence: VecDeque<MarketBar>,
     connected: bool,
     history_ready: bool,
     dirty: bool,
@@ -656,9 +597,6 @@ enum ProviderRuntimeEvent {
 mod runtime;
 use runtime::join_runtime_workers;
 
-mod storage;
-use storage::spawn_storage_worker;
-
 mod coordinator;
 use coordinator::{Coordinator, OwnedCoordinatorChannels, spawn_coordinator};
 
@@ -689,22 +627,6 @@ fn configured_reconnect_delay(engine: &MarketEngine, provider: &str) -> Result<D
     engine
         .provider_reconnect_delay(provider)
         .ok_or_else(|| format!("{provider} reconnect policy is unavailable"))
-}
-
-fn available_memory_bytes() -> u64 {
-    let mut system = System::new();
-    system.refresh_memory();
-    system.available_memory()
-}
-
-const fn resource_policy_mode(mode: ResourceMode) -> EngineResourceMode {
-    match mode {
-        ResourceMode::Interactive => EngineResourceMode::Interactive,
-        ResourceMode::Warm => EngineResourceMode::Warm,
-        ResourceMode::Constrained => EngineResourceMode::Constrained,
-        ResourceMode::OfflineSuspended => EngineResourceMode::OfflineSuspended,
-        ResourceMode::MarketsLive => EngineResourceMode::MarketsLive,
-    }
 }
 
 fn configured_engine() -> Result<MarketEngine, String> {
@@ -750,54 +672,19 @@ fn configured_engine() -> Result<MarketEngine, String> {
 
 mod publication;
 use publication::{
-    engine_install_failure_stage, fail_waiters, order_flow_payload, publish_state, series_state,
-    series_state_with_persistence, series_update_message,
+    engine_install_failure_stage, fail_waiters, publish_state, series_state, series_state_payload,
+    series_update_message,
 };
 
 mod instrument_selection;
 use instrument_selection::{
-    chart_stream_requirements, id, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
-    validate_provider_instrument, validate_provider_search, validate_provider_selection,
+    id, try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
+    validate_provider_search, validate_provider_selection,
 };
 
 mod history;
-use history::{internal_series, retained_hot_series, spawn_history_worker, warm_series};
+use history::spawn_history_worker;
 
-fn ipc_series(series: &BarSeriesKey) -> SeriesKey {
-    SeriesKey {
-        provider: series.provider_id.clone(),
-        instrument_id: series.instrument_id.clone(),
-        cadence_value: match series.period {
-            BarPeriod::Time { seconds } => seconds,
-            BarPeriod::Tick { trades } => trades,
-            BarPeriod::Session { days } => days,
-            BarPeriod::Week { weeks } => weeks,
-            BarPeriod::Month { months } => months,
-        },
-        definition_revision: series.definition_version,
-        entitlement_id: series.entitlement_id.clone(),
-        cadence: match series.period {
-            BarPeriod::Time { .. } => SeriesCadence::FixedSeconds,
-            BarPeriod::Tick { .. } => SeriesCadence::Trades,
-            BarPeriod::Session { .. } => SeriesCadence::SessionDays,
-            BarPeriod::Week { .. } => SeriesCadence::CalendarWeeks,
-            BarPeriod::Month { .. } => SeriesCadence::CalendarMonths,
-        } as i32,
-    }
-}
-
-const fn ipc_bar(bar: MarketBar) -> IpcMarketBar {
-    IpcMarketBar {
-        source_sequence: bar.source_sequence,
-        exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
-        exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close,
-        volume: bar.volume,
-    }
-}
 
 #[cfg(test)]
 pub(crate) mod tests;

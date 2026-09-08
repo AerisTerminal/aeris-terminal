@@ -1,0 +1,21 @@
+[package]
+name = "axiusflow_market_runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axiusflow_engine_protocol = { path = "../engine_protocol" }
+axiusflow_market_data = { path = "../domain/market_data" }
+axiusflow_market_engine = { path = "../market_engine" }
+axiusflow_platform_runtime = { path = "../platform_runtime" }
+axiusflow_provider_history = { path = "../provider_history" }
+axiusflow_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
+axiusflow_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
+serde_json.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

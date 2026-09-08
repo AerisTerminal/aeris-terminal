@@ -11,7 +11,7 @@ mod order_book;
 mod order_book_view;
 
 pub use axiusflow_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
-pub use order_book::{OrderBookSelection, OrderBookUpdateOutcome, ReadOnlyOrderBook};
+pub use order_book::{OrderBookSelection, project_order_book};
 #[cfg(feature = "gpui")]
 pub use order_book_view::{
     OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, ReadOnlyOrderBookView,

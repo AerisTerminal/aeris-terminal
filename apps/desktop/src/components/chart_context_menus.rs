@@ -631,15 +631,12 @@ pub(super) fn price_axis_menu_item(
 pub(super) fn chart_settings_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
-    state: LifecyclePresentation,
-    error: Option<&str>,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let origin = clamp_overlay_origin(menu.position, viewport, CHART_SETTINGS_MENU_WIDTH, 5.0, 2.0);
+    let origin = clamp_overlay_origin(menu.position, viewport, CHART_SETTINGS_MENU_WIDTH, 1.0, 0.0);
     let dismiss = terminal.clone();
-    let pending = state.pending;
     div()
         .id("chart_settings_menu_scrim")
         .absolute()
@@ -661,157 +658,17 @@ pub(super) fn chart_settings_menu_layer(
                 px(CHART_SETTINGS_MENU_WIDTH),
                 theme,
             )
-            .child(settings_mode_row(
-                terminal,
-                "settings_exit_fully",
-                DesktopLifetimeMode::ExitWithDesktop,
-                state.mode,
-                !pending,
-                theme,
-            ))
-            .child(settings_mode_row(
-                terminal,
-                "settings_engine_warm",
-                DesktopLifetimeMode::KeepEngineWarm,
-                state.mode,
-                !pending,
-                theme,
-            ))
-            .child(settings_mode_row(
-                terminal,
-                "settings_markets_live",
-                DesktopLifetimeMode::KeepMarketsLive,
-                state.mode,
-                !pending && state.markets_live_permitted,
-                theme,
-            ))
-            .child(menu_separator(theme))
-            .child(settings_toggle_row(
-                terminal,
-                LifecycleToggle::AutoStart,
-                state.autostart_enabled,
-                !pending,
-                theme,
-            ))
-            .child(menu_separator(theme))
-            .child(settings_toggle_row(
-                terminal,
-                LifecycleToggle::LiveRetention,
-                state.markets_live_permitted,
-                !pending,
-                theme,
-            ))
-            .children(error.map(|error| {
+            .child(
                 div()
                     .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(gpui_color(colors.danger))
-                    .child(error.to_string())
-            })),
+                    .py_2()
+                    .text_sm()
+                    .text_color(gpui_color(colors.text_muted))
+                    .child("Axiusflow runs market data only while the app is open."),
+            ),
         )
         .into_any_element()
 }
-
-pub(super) fn settings_mode_row(
-    terminal: &Entity<TerminalApp>,
-    id: &'static str,
-    mode: DesktopLifetimeMode,
-    current: DesktopLifetimeMode,
-    enabled: bool,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let selected = current == mode;
-    let action_terminal = terminal.clone();
-    div()
-        .id(id)
-        .occlude()
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_3()
-        .text_sm()
-        .when(selected, |row| row.text_color(gpui_color(colors.primary)))
-        .when(enabled, |row| {
-            row.cursor_pointer()
-                .hover(|row| row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
-        })
-        .when(!enabled, |row| {
-            row.text_color(gpui_color(colors.text_muted))
-                .cursor_not_allowed()
-        })
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            if enabled {
-                action_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.set_lifetime_mode(mode, terminal_cx);
-                });
-            }
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(mode.label())
-                .child(settings_help_button(id, mode.description(), theme)),
-        )
-        .children(selected.then(|| {
-            header_icon(HugeIcon::CheckIcon)
-                .with_size(px(16.0))
-                .color(gpui_color(colors.primary))
-        }))
-}
-
-pub(super) fn settings_toggle_row(
-    terminal: &Entity<TerminalApp>,
-    setting: LifecycleToggle,
-    selected: bool,
-    enabled: bool,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    let id = setting.id();
-    let label = setting.label();
-    let colors = theme.colors;
-    let switch_terminal = terminal.clone();
-    div()
-        .id(id)
-        .occlude()
-        .h(px(CHART_CONTEXT_MENU_ROW_HEIGHT))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_3()
-        .text_sm()
-        .when(!enabled, |row| {
-            row.text_color(gpui_color(colors.text_muted))
-        })
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(label)
-                .child(settings_help_button(id, setting.description(), theme)),
-        )
-        .child(
-            Toggle::new(format!("{id}_switch"), theme)
-                .selected(selected)
-                .disabled(!enabled)
-                .aria_label(label)
-                .on_click(move |_, _, cx| {
-                    if enabled {
-                        switch_terminal.update(cx, setting.toggle());
-                    }
-                }),
-        )
-}
-
 /// Circular account avatar for the header toolbar. Signed-out sessions keep
 /// the asset-free muted person glyph; signed-in sessions render verified
 /// initials with the profile photo overlaid when the user record has one.
@@ -1247,39 +1104,4 @@ fn account_menu_row(
             }
         })
         .into_any_element()
-}
-
-pub(super) fn settings_help_button(
-    id: &'static str,
-    description: &'static str,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    chrome_tooltip(
-        id,
-        description,
-        div()
-            .id((id, 0_usize))
-            .size(px(16.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-            .border_1()
-            .border_color(gpui_color(colors.border_secondary))
-            .text_xs()
-            .text_color(gpui_color(colors.text_secondary))
-            .cursor_pointer()
-            .role(Role::Button)
-            .aria_label(description)
-            .hover(move |button| {
-                button
-                    .border_color(gpui_color(colors.border))
-                    .text_color(gpui_color(colors.text_primary))
-            })
-            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .child("?"),
-        theme,
-    )
 }

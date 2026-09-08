@@ -1,9 +1,9 @@
-//! Desktop-side client for engine-owned Rithmic historical and realtime bars.
+//! Desktop-side bridge from the in-process market runtime to GPUI chart workers.
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -16,21 +16,23 @@ use axiusflow_application::{
     ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
 };
 use axiusflow_engine_protocol::{
-    ConsumerResourceClass, DemandError, EngineFaultCode, FailureStage, InstallProviderInstrument,
-    ProviderConnectionState, ProviderInstrumentSummary, ProviderState, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState, SeriesSnapshot,
-    SeriesState, SeriesUpdate, SeriesUpdateOperation, WorkspacePaneKind, WorkspaceState, envelope,
+    EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
+    ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
+    SeriesCadence, SeriesKey, SeriesLoadState, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
 use axiusflow_engine_protocol::{WorkspacePaneState, WorkspaceTabState};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use axiusflow_market_data::{BarDefinition, ChartInterval, MarketBar};
+use axiusflow_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
+pub(super) use axiusflow_market_runtime::{
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError, MarketOrderBookSnapshot,
+    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
+    MarketStream, SeriesTailOperation, StreamRequirements,
+};
 use axiusflow_observability::FeedConnectionState;
 
-use crate::desktop::engine_supervisor::EngineSupervisor;
-use crate::desktop::rithmic_engine_history::{OrderBookIdentity, order_book_from_snapshot};
 #[cfg(test)]
 use axiusflow_desktop::market_worker::ProviderCatalogEvent;
 use axiusflow_desktop::market_worker::{
@@ -46,32 +48,37 @@ const STARTUP_CATALOG_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(12);
 const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
-const RETAINED_BAR_CAPACITY: usize = 32_768;
-const SUBSCRIPTION_ID: &str = "desktop_engine_rithmic_bars";
-const WORKER_LABEL: &str = "Rithmic engine - history and realtime IPC";
-const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_engine_hyperliquid_bars";
-const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid engine - history and realtime IPC";
-/// Recovery notice sent when the worker observes an engine replacement.
-/// The UI matches on this to reset generation-fenced views back to loading
-/// instead of holding books from a dead engine incarnation.
-pub(crate) const ENGINE_RESTARTED_MESSAGE: &str =
-    "Resident engine restarted; restoring chart demand";
-/// Foreground selections live in latest-value slots outside the IPC reader.
+const SUBSCRIPTION_ID: &str = "desktop_runtime_rithmic_bars";
+const WORKER_LABEL: &str = "Rithmic market runtime";
+const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_runtime_hyperliquid_bars";
+const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid market runtime";
+pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
+    "Rithmic Test session is ready for instrument search";
+/// Foreground selections live in latest-value slots outside the event reader.
 /// Keep the reader wait short so a symbol click cannot sit behind a half-frame
-/// polling quantum before the engine receives it.
+/// polling quantum before the runtime receives it.
 const EVENT_WAIT: Duration = Duration::from_millis(2);
-/// Backoff between engine-restore retries in the event loop. Each failed
-/// receive already spent up to the supervisor's restore deadline retrying,
-/// so this only spaces the recovering notices, never hot-loops reconnects.
-const RESTORE_BACKOFF: Duration = Duration::from_millis(250);
-/// Engine events one chart drains per tick before yielding to the other charts.
-const MARKET_EVENTS_PER_POLL: usize = 512;
 const WORKSPACE_ADDITION_CAPACITY: usize = 8;
+
+static MARKET_RUNTIME: OnceLock<Result<MarketService, String>> = OnceLock::new();
+
+pub(crate) fn shared_market_runtime() -> Result<MarketService, String> {
+    MARKET_RUNTIME.get_or_init(MarketService::start).clone()
+}
+
+pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
+    if depth_visible {
+        StreamRequirements::BARS.with(MarketStream::Depth)
+    } else {
+        StreamRequirements::BARS
+    }
+}
 
 struct EndpointRecord {
     workspace_id: u64,
     product: InstallProviderInstrument,
     interval: ChartInterval,
+    catalog_only: bool,
     endpoint: WorkerEndpoint,
 }
 
@@ -131,7 +138,7 @@ impl WorkspaceMarketFactory {
                         .to_string()
                 }
                 mpsc::TrySendError::Disconnected(_) => {
-                    "the resident engine workspace coordinator is unavailable".to_string()
+                    "the market workspace runtime is unavailable".to_string()
                 }
             })?;
         Ok(worker)
@@ -181,6 +188,25 @@ pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketData
     let es = default_product("ES");
     let (workers, _factory) = start_group(vec![(1, mnq), (2, es)])?;
     Ok(workers)
+}
+
+pub(super) fn start_rithmic_catalog() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+    let client_id = random_order_book_identity()?;
+    let consumer_id = random_order_book_identity()?;
+    let pane_id = random_order_book_identity()?;
+    let (mut pane, mut endpoint) = worker_endpoint(
+        DEFAULT_WORKSPACE_ID,
+        pane_id,
+        default_product("MNQ"),
+        consumer_id,
+        ChartInterval::Minute1,
+        None,
+        0,
+    );
+    pane.startup = MarketWorkerStartup::Rithmic;
+    endpoint.catalog_only = true;
+    spawn_group(client_id, vec![endpoint], None)?;
+    Ok((pane.startup, pane.worker))
 }
 
 pub(super) fn start_workspace_tabs(
@@ -281,19 +307,19 @@ struct WorkerEndpoint {
     messages: MarketWorkerSender,
     commands: mpsc::Receiver<MarketWorkerCommand>,
     pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
+    pending_depth_visible: Arc<Mutex<Option<bool>>>,
     pending_provider_selection:
         Arc<Mutex<Option<axiusflow_engine_protocol::SelectProviderInstrument>>>,
     pending_engine_selection:
         Arc<Mutex<Option<Box<axiusflow_desktop::market_worker::EngineSelectionRequest>>>>,
     shutdown: mpsc::SyncSender<()>,
-    publication: Option<MarketPublicationGeneration>,
     pending_recovery: Option<ReplayRecoveryCommand>,
     /// Set once the engine has reported this demand generation live. After that
     /// a `Partial` state is a background history repair, not a loading chart.
     live: bool,
     active_generation: u64,
-    provider_state_generation: Option<u64>,
     resource_class: ConsumerResourceClass,
+    depth_visible: bool,
     active: bool,
 }
 
@@ -368,6 +394,7 @@ fn worker_endpoint(
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let selection_sequence = Arc::new(AtomicU64::new(initial_generation));
     let pending_resource_class = Arc::new(Mutex::new(None));
+    let pending_depth_visible = Arc::new(Mutex::new(None));
     let pending_provider_selection = Arc::new(Mutex::new(None));
     let pending_engine_selection = Arc::new(Mutex::new(None));
     let worker = WorkspaceMarketPane {
@@ -383,6 +410,7 @@ fn worker_endpoint(
             Some(Arc::clone(&selection_sequence)),
         )
         .with_resource_class_slot(Arc::clone(&pending_resource_class))
+        .with_depth_visibility_slot(Arc::clone(&pending_depth_visible))
         .with_foreground_selection_slots(
             Arc::clone(&pending_provider_selection),
             Arc::clone(&pending_engine_selection),
@@ -392,20 +420,21 @@ fn worker_endpoint(
         workspace_id,
         product,
         interval,
+        catalog_only: false,
         endpoint: WorkerEndpoint {
             consumer_id,
             messages: message_tx,
             commands: command_rx,
             pending_resource_class,
+            pending_depth_visible,
             pending_provider_selection,
             pending_engine_selection,
             shutdown: shutdown_tx,
-            publication: None,
             pending_recovery: None,
             live: false,
             active_generation: initial_generation,
-            provider_state_generation: None,
             resource_class: ConsumerResourceClass::Foreground,
+            depth_visible: false,
             active: true,
         },
     };
@@ -417,9 +446,9 @@ fn spawn_group(
     mut endpoints: Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
 ) -> Result<(), String> {
-    // One supervisor owns every pane in this workspace group. Tab selection and
-    // layout edits only change endpoint resource classes or membership; provider
-    // sessions remain resident-engine owned and are never created per pane.
+    // One presentation worker drains all runtime-owned consumer outboxes for this
+    // workspace group. Tab selection and layout edits only change endpoint
+    // resource classes or membership; provider sessions remain runtime-owned.
     thread::Builder::new()
         .name("axiusflow-engine-market-client".to_string())
         .spawn(move || {
@@ -467,8 +496,10 @@ fn worker_identity(provider: &str) -> (&'static str, &'static str) {
 #[path = "engine_market_worker/replay_conversion.rs"]
 mod replay_conversion;
 use replay_conversion::{
-    generation_from_snapshot, replay_snapshot, replay_tail_update, series_key, tail_publication,
+    replay_runtime_snapshot, replay_runtime_tail_update, runtime_generation_from_snapshot,
+    series_key,
 };
+pub(crate) use replay_conversion::runtime_order_book_frame;
 #[cfg(test)]
 use replay_conversion::{replay_bar_definition, snapshot_instrument};
 
@@ -508,8 +539,8 @@ fn products() -> Vec<InstallProviderInstrument> {
     ["MNQ", "ES"].into_iter().map(default_product).collect()
 }
 
-fn demand_error(error: &DemandError) -> String {
-    let class = EngineFaultCode::try_from(error.code).map_or("unknown", |code| match code {
+fn demand_error(error: &MarketDemandError) -> String {
+    let class = match error.code {
         EngineFaultCode::Retryable => "retryable",
         EngineFaultCode::Offline => "offline",
         EngineFaultCode::Cancelled => "cancelled",
@@ -520,11 +551,8 @@ fn demand_error(error: &DemandError) -> String {
         EngineFaultCode::Backpressure => "backpressure",
         EngineFaultCode::MalformedMessage => "malformed message",
         EngineFaultCode::OversizedFrame => "oversized frame",
-    });
-    let stage = match FailureStage::try_from(error.stage_code) {
-        Ok(stage) => failure_stage_label(stage),
-        Err(_) => error.stage.as_str(),
     };
+    let stage = failure_stage_label(error.stage);
     let elapsed = error
         .elapsed_millis
         .map_or(String::new(), |elapsed| format!(" after {elapsed} ms"));
@@ -538,13 +566,8 @@ const fn failure_stage_label(stage: FailureStage) -> &'static str {
         FailureStage::CanonicalValidation => "canonical validation",
         FailureStage::MemoryInstall => "memory install",
         FailureStage::Aggregation => "aggregation",
-        FailureStage::SegmentEncode => "segment encode",
-        FailureStage::Encryption => "encryption",
-        FailureStage::FilesystemWrite => "filesystem write",
-        FailureStage::CatalogCommit => "catalog commit",
         FailureStage::Handoff => "history/live handoff",
         FailureStage::Publication => "publication",
-        FailureStage::IpcSend => "local IPC send",
         FailureStage::ChartInstall => "chart install",
         FailureStage::ProviderRealtime => "provider realtime",
     }
@@ -568,13 +591,13 @@ fn random_order_book_identity() -> Result<u64, String> {
 
 #[path = "engine_market_worker/runtime.rs"]
 mod runtime;
-#[cfg(test)]
-use runtime::note_engine_restore_failure;
 use runtime::{retire_endpoint, run_workers};
 
 #[path = "engine_market_worker/selection_commands.rs"]
 mod selection_commands;
-use selection_commands::{initialize_endpoint, process_command, set_resource_class};
+use selection_commands::{
+    initialize_catalog_endpoint, initialize_endpoint, process_command, set_resource_class,
+};
 
 #[path = "engine_market_worker/publications.rs"]
 mod publications;
@@ -591,18 +614,20 @@ mod tests {
     use super::*;
     use axiusflow_chart_integration::{NucleusChartTheme, NucleusChartView};
     use axiusflow_engine_protocol::{
-        MarketBar as IpcMarketBar, OrderBookLevel as IpcOrderBookLevel,
-        OrderBookSnapshot as IpcOrderBookSnapshot, OrderBookState as IpcOrderBookState,
-        ProviderInstrumentSearchResult, ProviderInstrumentSelection, ProviderInstrumentSummary,
-        SelectProviderInstrument,
+        ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
+    use axiusflow_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
+    use axiusflow_market_runtime::{
+        CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
+        MarketProviderGeneration, MarketProviderInstrumentSelection,
+    };
+    use std::collections::BTreeMap;
 
     fn handle_rithmic_catalog_event(
         endpoint: &mut WorkerEndpoint,
-        event: envelope::Payload,
-    ) -> Option<envelope::Payload> {
-        let (catalog, event) =
-            classify_provider_catalog_event(event, "rithmic", endpoint.consumer_id);
+        event: MarketRuntimeEvent,
+    ) -> Option<MarketRuntimeEvent> {
+        let (catalog, event) = classify_provider_catalog_event(event);
         match catalog {
             Some(event) => {
                 let _ = endpoint
@@ -611,6 +636,61 @@ mod tests {
                 None
             }
             None => event,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn runtime_snapshot(
+        consumer_id: u64,
+        generation: u64,
+        series: BarSeriesKey,
+        provider_generation: u64,
+        price_scale: u32,
+        quantity_scale: u32,
+        bars: Vec<MarketBar>,
+        publication_generation: u64,
+        forming: bool,
+    ) -> MarketSeriesSnapshot {
+        MarketSeriesSnapshot {
+            consumer_id: MarketConsumerId(NonZeroU64::new(consumer_id).expect("consumer id")),
+            generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+            publication_generation,
+            snapshot: Arc::new(CanonicalMarketSeriesSnapshot {
+                series,
+                provider_generation: MarketProviderGeneration(
+                    NonZeroU64::new(provider_generation).expect("provider generation"),
+                ),
+                publication_generation,
+                price_scale: u8::try_from(price_scale).expect("price scale"),
+                quantity_scale: u8::try_from(quantity_scale).expect("quantity scale"),
+                forming,
+                bars: Arc::from(bars),
+            }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn runtime_update(
+        consumer_id: u64,
+        generation: u64,
+        series: BarSeriesKey,
+        provider_generation: u64,
+        bar: MarketBar,
+        forming: bool,
+        publication_generation: u64,
+        operation: SeriesTailOperation,
+    ) -> MarketSeriesUpdate {
+        MarketSeriesUpdate {
+            consumer_id: MarketConsumerId(NonZeroU64::new(consumer_id).expect("consumer id")),
+            generation: MarketGenerationId(NonZeroU64::new(generation).expect("generation")),
+            publication_generation,
+            series,
+            provider_generation: MarketProviderGeneration(
+                NonZeroU64::new(provider_generation).expect("provider generation"),
+            ),
+            forming,
+            operation,
+            bar,
         }
     }
 
@@ -678,11 +758,49 @@ mod tests {
         assert_eq!(pending_engine.interval, ChartInterval::Minute5);
     }
 
+    #[test]
+    fn catalog_only_rithmic_endpoint_defers_demand_and_starts_selection_at_one() {
+        let placeholder = default_product("MNQ");
+        let (mut pane, mut record) = worker_endpoint(
+            DEFAULT_WORKSPACE_ID,
+            9,
+            placeholder,
+            41,
+            ChartInterval::Minute1,
+            None,
+            0,
+        );
+        pane.startup = MarketWorkerStartup::Rithmic;
+        record.catalog_only = true;
+
+        assert!(matches!(pane.startup, MarketWorkerStartup::Rithmic));
+        assert!(record.catalog_only);
+        assert_eq!(record.endpoint.active_generation, 0);
+
+        let selected = default_product("ES");
+        assert_eq!(
+            pane.worker
+                .try_select_engine(selected.clone(), ChartInterval::Minute5)
+                .expect("first catalog selection is dispatchable"),
+            1
+        );
+        let pending = record
+            .endpoint
+            .pending_engine_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("selection waits in the foreground slot");
+        assert_eq!(pending.sequence, 1);
+        assert_eq!(pending.product, selected);
+        assert_eq!(pending.interval, ChartInterval::Minute5);
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
-    #[ignore = "requires the optimized resident engine and live Hyperliquid public access"]
-    fn native_resident_hyperliquid_startup_resolves_stale_default_generation() {
-        let (_startup, mut worker, factory) = start().expect("start resident Hyperliquid worker");
+    #[ignore = "requires the optimized market runtime and live Hyperliquid public access"]
+    fn native_market_runtime_hyperliquid_startup_resolves_stale_default_generation() {
+        let (_startup, mut worker, factory) = start().expect("start Hyperliquid market worker");
         drop(factory);
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -699,17 +817,17 @@ mod tests {
                     MarketWorkerMessage::State {
                         state: ChartState::Error,
                         message,
-                    } => panic!("resident Hyperliquid startup failed: {message}"),
+                    } => panic!("Hyperliquid market runtime startup failed: {message}"),
                     _ => {}
                 }
             }
             assert!(
                 !disconnected,
-                "resident Hyperliquid startup worker disconnected"
+                "Hyperliquid market worker disconnected"
             );
             assert!(
                 Instant::now() < deadline,
-                "resident Hyperliquid startup did not publish a covering snapshot"
+                "Hyperliquid market runtime did not publish a covering snapshot"
             );
             thread::sleep(Duration::from_millis(20));
         }
@@ -729,7 +847,7 @@ mod tests {
         assert!(
             handle_rithmic_catalog_event(
                 &mut record.endpoint,
-                envelope::Payload::ProviderInstrumentSearchResult(ProviderInstrumentSearchResult {
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(ProviderInstrumentSearchResult {
                     consumer_id: 41,
                     provider: "rithmic".to_string(),
                     provider_generation: 1,
@@ -757,9 +875,9 @@ mod tests {
         assert!(
             handle_rithmic_catalog_event(
                 &mut record.endpoint,
-                envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
-                    consumer_id: 41,
-                    instrument: Some(selected),
+                MarketRuntimeEvent::ProviderInstrumentSelection(MarketProviderInstrumentSelection {
+                    consumer_id: MarketConsumerId(NonZeroU64::new(41).expect("nonzero consumer")),
+                    instrument: selected,
                     command_generation: 4,
                 }),
             )
@@ -814,54 +932,57 @@ mod tests {
     }
 
     #[test]
-    fn ipc_snapshot_preserves_fixed_point_precision_and_engine_provenance() {
-        let snapshot = replay_snapshot(&SeriesSnapshot {
-            consumer_id: 1,
-            generation: 1,
-            series: Some(
-                series_key(
-                    products().first().expect("BTC product"),
-                    ChartInterval::Minute1,
-                )
-                .expect("series"),
-            ),
-            provider_generation: 7,
-            price_scale: 2,
-            quantity_scale: 8,
-            bars: vec![IpcMarketBar {
+    fn runtime_snapshot_preserves_precision_exact_time_generation_and_engine_provenance() {
+        let publication = runtime_snapshot(
+            1,
+            1,
+            series_key(
+                products().first().expect("BTC product"),
+                ChartInterval::Minute1,
+            )
+            .expect("series"),
+            8,
+            2,
+            8,
+            vec![MarketBar {
                 source_sequence: 1,
-                exchange_timestamp_seconds: 60,
-                exchange_timestamp_unix_nanos: 60_123_456_000,
+                exchange_timestamp_seconds: 1_700_000_000,
+                exchange_timestamp_unix_nanos: 1_700_000_000_123_456_789,
                 open: 100,
                 high: 110,
                 low: 90,
                 close: 105,
                 volume: 7,
             }],
-            publication_generation: 1,
-            forming: false,
-        })
-        .expect("snapshot converts");
+            4,
+            false,
+        );
+        let snapshot = replay_runtime_snapshot(&publication).expect("snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 2);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
-        assert_eq!(snapshot.evidence().session_generation, 7);
+        assert_eq!(snapshot.evidence().session_generation, 8);
+        assert_eq!(snapshot.evidence().publication_generation, 4);
+        assert_eq!(
+            snapshot.bars()[0]
+                .provenance()
+                .exchange_timestamp_unix_nanos,
+            1_700_000_000_123_456_789
+        );
         assert_eq!(snapshot.bars()[0].provenance().producer, "axiusflow_engine");
     }
 
     #[test]
-    fn ipc_live_update_preserves_one_tail_without_rebuilding_history() {
-        let update = replay_tail_update(&SeriesUpdate {
-            consumer_id: 1,
-            generation: 2,
-            series: Some(
-                series_key(
-                    products().first().expect("BTC product"),
-                    ChartInterval::Minute1,
-                )
-                .expect("series"),
-            ),
-            provider_generation: 7,
-            bar: Some(IpcMarketBar {
+    fn runtime_live_update_preserves_one_tail_without_rebuilding_history() {
+        let update = replay_runtime_tail_update(&runtime_update(
+            1,
+            2,
+            series_key(
+                products().first().expect("BTC product"),
+                ChartInterval::Minute1,
+            )
+            .expect("series"),
+            7,
+            MarketBar {
                 source_sequence: 3,
                 exchange_timestamp_seconds: 120,
                 exchange_timestamp_unix_nanos: 120_000_000_000,
@@ -870,11 +991,11 @@ mod tests {
                 low: 90,
                 close: 115,
                 volume: 9,
-            }),
-            forming: true,
-            publication_generation: 8,
-            operation: SeriesUpdateOperation::AppendTail as i32,
-        })
+            },
+            true,
+            8,
+            SeriesTailOperation::Append,
+        ))
         .expect("tail converts");
         assert_eq!(update.item().value().source_sequence, 3);
         assert_eq!(update.item().value().close, 115);
@@ -903,12 +1024,11 @@ mod tests {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(16).unwrap_or(NonZeroUsize::MIN));
         let mut live = false;
-        let state = |load_state: SeriesLoadState, detail: Option<&str>| SeriesState {
-            consumer_id: 1,
-            generation: 1,
+        let state = |load_state: SeriesLoadState, detail: Option<&str>| MarketSeriesState {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::MIN),
             series: None,
-            state: load_state as i32,
-            persistence: 0,
+            state: load_state,
             detail: detail.map(str::to_string),
         };
 
@@ -918,7 +1038,6 @@ mod tests {
                 Some("Showing retained local history while provider coverage repairs"),
             ),
             "rithmic",
-            true,
             true,
             &mut live,
             &sender,
@@ -937,7 +1056,6 @@ mod tests {
             state(SeriesLoadState::Ready, None),
             "rithmic",
             true,
-            true,
             &mut live,
             &sender,
         )
@@ -954,7 +1072,6 @@ mod tests {
         apply_series_state(
             state(SeriesLoadState::Live, None),
             "rithmic",
-            true,
             true,
             &mut live,
             &sender,
@@ -976,7 +1093,6 @@ mod tests {
             state(SeriesLoadState::Partial, Some("visible coverage repairs")),
             "rithmic",
             true,
-            true,
             &mut live,
             &sender,
         )
@@ -997,30 +1113,31 @@ mod tests {
             ChartInterval::Minute1,
         )
         .expect("series");
-        let (sender, _receiver) =
+        let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut publication = None;
         let mut live = false;
-        let snapshot = |publication_generation: u64, sequence: u64| SeriesSnapshot {
-            consumer_id: 1,
-            generation: 1,
-            series: Some(series.clone()),
-            provider_generation: 7,
-            price_scale: 2,
-            quantity_scale: 8,
-            bars: vec![IpcMarketBar {
-                source_sequence: sequence,
-                exchange_timestamp_seconds: i64::try_from(sequence).expect("sequence") * 60,
-                exchange_timestamp_unix_nanos: i64::try_from(sequence).expect("sequence")
-                    * 60_000_000_000,
-                open: 100,
-                high: 110,
-                low: 90,
-                close: 105,
-                volume: 7,
-            }],
-            publication_generation,
-            forming: false,
+        let snapshot = |publication_generation: u64, sequence: u64| {
+            runtime_snapshot(
+                1,
+                1,
+                series.clone(),
+                7,
+                2,
+                8,
+                vec![MarketBar {
+                    source_sequence: sequence,
+                    exchange_timestamp_seconds: i64::try_from(sequence).expect("sequence") * 60,
+                    exchange_timestamp_unix_nanos: i64::try_from(sequence).expect("sequence")
+                        * 60_000_000_000,
+                    open: 100,
+                    high: 110,
+                    low: 90,
+                    close: 105,
+                    volume: 7,
+                }],
+                publication_generation,
+                false,
+            )
         };
         let context = PushedEventContext {
             consumer_id: 1,
@@ -1031,9 +1148,8 @@ mod tests {
 
         assert_eq!(
             apply_pushed_event(
-                envelope::Payload::SeriesSnapshot(snapshot(4, 2)),
+                MarketRuntimeEvent::SeriesSnapshot(snapshot(4, 2)),
                 &context,
-                &mut publication,
                 &mut live,
                 &sender,
             ),
@@ -1044,9 +1160,8 @@ mod tests {
         for superseded in [snapshot(1, 2), snapshot(4, 1)] {
             assert_eq!(
                 apply_pushed_event(
-                    envelope::Payload::SeriesSnapshot(superseded),
+                    MarketRuntimeEvent::SeriesSnapshot(superseded),
                     &context,
-                    &mut publication,
                     &mut live,
                     &sender,
                 ),
@@ -1054,10 +1169,22 @@ mod tests {
                 "a superseded covering snapshot must not take the chart down"
             );
         }
-        assert_eq!(
-            publication.map(MarketPublicationGeneration::sequence_range),
-            Some((1, 1))
-        );
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        let forwarded = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Snapshot(snapshot),
+                    ..
+                }) => Some((
+                    snapshot.evidence().publication_generation,
+                    snapshot.sequence_range(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(forwarded, vec![(4, (2, 2)), (1, (2, 2)), (4, (1, 1))]);
     }
 
     #[test]
@@ -1069,14 +1196,14 @@ mod tests {
             request_id: 9,
             reason: axiusflow_application::ResnapshotReason::QueueOverflow,
         });
-        let snapshot = envelope::Payload::SeriesSnapshot(SeriesSnapshot {
-            consumer_id: 41,
-            generation: 3,
-            series: Some(series_key(&product, ChartInterval::Minute1).expect("series")),
-            provider_generation: product.session_generation,
-            price_scale: product.price_scale,
-            quantity_scale: product.quantity_scale,
-            bars: vec![IpcMarketBar {
+        let snapshot = MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
+            41,
+            3,
+            series_key(&product, ChartInterval::Minute1).expect("series"),
+            product.session_generation,
+            product.price_scale,
+            product.quantity_scale,
+            vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
                 exchange_timestamp_unix_nanos: 60_000_000_000,
@@ -1086,9 +1213,9 @@ mod tests {
                 close: 105,
                 volume: 7,
             }],
-            publication_generation: 1,
-            forming: false,
-        });
+            1,
+            false,
+        ));
 
         assert!(
             complete_pending_recovery(&snapshot, &product, &mut record.endpoint)
@@ -1122,14 +1249,14 @@ mod tests {
         )
         .expect("selection cancels old recovery");
         record.endpoint.active_generation = 4;
-        let snapshot = envelope::Payload::SeriesSnapshot(SeriesSnapshot {
-            consumer_id: 41,
-            generation: 4,
-            series: Some(series_key(&product, ChartInterval::Minute1).expect("series")),
-            provider_generation: product.session_generation,
-            price_scale: product.price_scale,
-            quantity_scale: product.quantity_scale,
-            bars: vec![IpcMarketBar {
+        let snapshot = MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
+            41,
+            4,
+            series_key(&product, ChartInterval::Minute1).expect("series"),
+            product.session_generation,
+            product.price_scale,
+            product.quantity_scale,
+            vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
                 exchange_timestamp_unix_nanos: 60_000_000_000,
@@ -1139,9 +1266,9 @@ mod tests {
                 close: 105,
                 volume: 7,
             }],
-            publication_generation: 1,
-            forming: false,
-        });
+            1,
+            false,
+        ));
 
         assert!(
             !complete_pending_recovery(&snapshot, &product, &mut record.endpoint)
@@ -1165,18 +1292,17 @@ mod tests {
             ChartInterval::Minute1,
         )
         .expect("series");
-        let (sender, _receiver) =
+        let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut publication = None;
         let mut live = false;
-        let snapshot = SeriesSnapshot {
-            consumer_id: 1,
-            generation: 1,
-            series: Some(series.clone()),
-            provider_generation: 7,
-            price_scale: 2,
-            quantity_scale: 8,
-            bars: vec![IpcMarketBar {
+        let snapshot = runtime_snapshot(
+            1,
+            1,
+            series.clone(),
+            7,
+            2,
+            8,
+            vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
                 exchange_timestamp_unix_nanos: 60_000_000_000,
@@ -1186,30 +1312,29 @@ mod tests {
                 close: 105,
                 volume: 7,
             }],
-            publication_generation: 1,
-            forming: false,
-        };
+            1,
+            false,
+        );
         assert_eq!(
             apply_pushed_event(
-                envelope::Payload::SeriesSnapshot(snapshot),
+                MarketRuntimeEvent::SeriesSnapshot(snapshot),
                 &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_product("MNQ"),
                 },
-                &mut publication,
                 &mut live,
                 &sender,
             ),
             Ok(())
         );
-        let skipped_tail = SeriesUpdate {
-            consumer_id: 1,
-            generation: 1,
-            series: Some(series),
-            provider_generation: 7,
-            bar: Some(IpcMarketBar {
+        let skipped_tail = runtime_update(
+            1,
+            1,
+            series,
+            7,
+            MarketBar {
                 source_sequence: 3,
                 exchange_timestamp_seconds: 180,
                 exchange_timestamp_unix_nanos: 180_000_000_000,
@@ -1218,29 +1343,35 @@ mod tests {
                 low: 100,
                 close: 115,
                 volume: 9,
-            }),
-            forming: true,
-            publication_generation: 2,
-            operation: SeriesUpdateOperation::AppendTail as i32,
-        };
+            },
+            true,
+            2,
+            SeriesTailOperation::Append,
+        );
         assert_eq!(
             apply_pushed_event(
-                envelope::Payload::SeriesUpdate(skipped_tail),
+                MarketRuntimeEvent::SeriesUpdate(skipped_tail),
                 &PushedEventContext {
                     consumer_id: 1,
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_product("MNQ"),
                 },
-                &mut publication,
                 &mut live,
                 &sender,
             ),
             Ok(())
         );
-        assert_eq!(
-            publication.map(MarketPublicationGeneration::sequence_range),
-            Some((1, 3))
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        let (chart, delivered) = replay_into_a_chart(&messages);
+        assert_eq!(delivered, vec![1, 3]);
+        assert!(
+            chart
+                .expect("the covering snapshot builds a chart")
+                .replay_bridge_metrics()
+                .recovery_pending,
+            "the worker must forward the gap and leave recovery ownership to the chart validator"
         );
     }
 
@@ -1262,7 +1393,6 @@ mod tests {
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(MESSAGE_CAPACITY).unwrap_or(NonZeroUsize::MIN));
-        let mut publication = None;
         let mut live = false;
         let context = PushedEventContext {
             consumer_id: 1,
@@ -1273,19 +1403,18 @@ mod tests {
 
         assert_eq!(
             apply_pushed_event(
-                envelope::Payload::SeriesSnapshot(SeriesSnapshot {
-                    consumer_id: 1,
-                    generation: 1,
-                    series: Some(series.clone()),
-                    provider_generation: 7,
-                    price_scale: 2,
-                    quantity_scale: 8,
-                    bars: vec![burst_bar(1)],
-                    publication_generation: 1,
-                    forming: false,
-                }),
+                MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
+                    1,
+                    1,
+                    series.clone(),
+                    7,
+                    2,
+                    8,
+                    vec![burst_bar(1)],
+                    1,
+                    false,
+                )),
                 &context,
-                &mut publication,
                 &mut live,
                 &sender,
             ),
@@ -1294,18 +1423,17 @@ mod tests {
         for sequence in 2..=BURST {
             assert_eq!(
                 apply_pushed_event(
-                    envelope::Payload::SeriesUpdate(SeriesUpdate {
-                        consumer_id: 1,
-                        generation: 1,
-                        series: Some(series.clone()),
-                        provider_generation: 7,
-                        bar: Some(burst_bar(sequence)),
-                        forming: sequence == BURST,
-                        publication_generation: sequence,
-                        operation: SeriesUpdateOperation::AppendTail as i32,
-                    }),
+                    MarketRuntimeEvent::SeriesUpdate(runtime_update(
+                        1,
+                        1,
+                        series.clone(),
+                        7,
+                        burst_bar(sequence),
+                        sequence == BURST,
+                        sequence,
+                        SeriesTailOperation::Append,
+                    )),
                     &context,
-                    &mut publication,
                     &mut live,
                     &sender,
                 ),
@@ -1382,9 +1510,9 @@ mod tests {
         (chart, delivered)
     }
 
-    fn burst_bar(sequence: u64) -> IpcMarketBar {
+    fn burst_bar(sequence: u64) -> MarketBar {
         let seconds = i64::try_from(sequence).unwrap_or(i64::MAX) * 60;
-        IpcMarketBar {
+        MarketBar {
             source_sequence: sequence,
             exchange_timestamp_seconds: seconds,
             exchange_timestamp_unix_nanos: seconds * 1_000_000_000,
@@ -1397,33 +1525,55 @@ mod tests {
     }
 
     #[test]
-    fn live_state_without_covering_snapshot_is_rejected() {
-        let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut publication = None;
+    fn retained_snapshot_from_older_provider_session_reaches_the_chart_baseline() {
+        let mut product = default_product("MNQ");
+        product.session_generation = 2;
+        let series = series_key(&product, ChartInterval::Minute1).expect("series");
+        let snapshot = runtime_snapshot(
+            1,
+            7,
+            series,
+            1,
+            product.price_scale,
+            product.quantity_scale,
+            vec![MarketBar {
+                source_sequence: 1,
+                exchange_timestamp_seconds: 60,
+                exchange_timestamp_unix_nanos: 60_000_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 7,
+            }],
+            1,
+            false,
+        );
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
         let mut live = false;
 
-        let result = apply_pushed_event(
-            envelope::Payload::SeriesState(SeriesState {
-                consumer_id: 1,
-                generation: 7,
-                state: SeriesLoadState::Live as i32,
-                ..SeriesState::default()
-            }),
+        apply_pushed_event(
+            MarketRuntimeEvent::SeriesSnapshot(snapshot),
             &PushedEventContext {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
-                instrument: &default_product("MNQ"),
+                instrument: &product,
             },
-            &mut publication,
             &mut live,
             &sender,
-        );
+        )
+        .expect("runtime-owned retained baseline applies");
 
-        assert_eq!(
-            result,
-            Err("engine marked history live without a covering snapshot".to_string())
-        );
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Update(MarketWorkerPublication {
+                update: ReplayStreamUpdate::Snapshot(snapshot),
+                ..
+            })] if snapshot.evidence().session_generation == 1
+        ));
     }
 
     #[test]
@@ -1457,10 +1607,9 @@ mod tests {
     fn newer_provider_session_reaches_the_connection_presentation() {
         let product = default_product("MNQ");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut publication = None;
         let mut live = false;
         apply_pushed_event(
-            envelope::Payload::ProviderState(ProviderState {
+            MarketRuntimeEvent::ProviderState(ProviderState {
                 provider: product.provider.clone(),
                 state: ProviderConnectionState::Online as i32,
                 generation: product.session_generation + 1,
@@ -1473,7 +1622,6 @@ mod tests {
                 realtime: true,
                 instrument: &product,
             },
-            &mut publication,
             &mut live,
             &sender,
         )
@@ -1516,37 +1664,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_restore_failure_stays_recovering_without_killing_the_worker() {
-        let product = products().remove(0);
-        let (mut live_pane, live_record) =
-            worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute5, None, 7);
-        let (mut dead_pane, mut dead_record) =
-            worker_endpoint(2, 10, product.clone(), 42, ChartInterval::Minute5, None, 7);
-        dead_record.endpoint.active = false;
-        let records = vec![live_record, dead_record];
-
-        note_engine_restore_failure(
-            &records,
-            "resident engine connection failed: ipc_receive failed: local engine connection closed; recovery failed: sign in before using the Axiusflow platform",
-        );
-
-        let (messages, disconnected) = live_pane.worker.drain_messages();
-        assert!(!disconnected);
-        assert!(matches!(
-            messages.as_slice(),
-            [MarketWorkerMessage::Connection {
-                state: FeedConnectionState::Recovering,
-                message,
-                transport_rtt_nanos: None,
-            }] if message.contains("sign in before using the Axiusflow platform")
-        ));
-        // Retired endpoints never observe the failure.
-        let (messages, _) = dead_pane.worker.drain_messages();
-        assert!(messages.is_empty());
-        drop(records);
-    }
-
-    #[test]
     fn phase_four_series_keys_cover_required_symbols_and_intervals() {
         let products = vec![default_product("MNQ"), default_product("ES")];
         for product in &products {
@@ -1564,16 +1681,24 @@ mod tests {
                 (ChartInterval::Day1, 86_400),
             ] {
                 let series = series_key(product, interval).expect("phase-four series validates");
-                assert_eq!(series.cadence_value, seconds);
+                assert_eq!(
+                    series.period,
+                    BarPeriod::time(seconds).expect("fixed period validates")
+                );
                 assert_eq!(series.instrument_id, product.instrument_id);
             }
-            for (interval, cadence, value) in [
-                (ChartInterval::Week1, SeriesCadence::CalendarWeeks, 1),
-                (ChartInterval::Month1, SeriesCadence::CalendarMonths, 1),
+            for (interval, period) in [
+                (
+                    ChartInterval::Week1,
+                    BarPeriod::week(1).expect("week period validates"),
+                ),
+                (
+                    ChartInterval::Month1,
+                    BarPeriod::month(1).expect("month period validates"),
+                ),
             ] {
                 let series = series_key(product, interval).expect("calendar series validates");
-                assert_eq!(series.cadence, cadence as i32);
-                assert_eq!(series.cadence_value, value);
+                assert_eq!(series.period, period);
             }
         }
     }
@@ -1628,14 +1753,14 @@ mod tests {
     fn calendar_series_accepts_the_engine_live_handoff() {
         let product = default_product("MNQ");
         let series = series_key(&product, ChartInterval::Week1).expect("calendar series");
-        let snapshot = SeriesSnapshot {
-            consumer_id: 1,
-            generation: 7,
-            series: Some(series),
-            provider_generation: 1,
-            price_scale: 2,
-            quantity_scale: 8,
-            bars: vec![IpcMarketBar {
+        let snapshot = runtime_snapshot(
+            1,
+            7,
+            series,
+            1,
+            2,
+            8,
+            vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 0,
                 exchange_timestamp_unix_nanos: 0,
@@ -1645,32 +1770,33 @@ mod tests {
                 close: 100,
                 volume: 1,
             }],
-            publication_generation: 1,
-            forming: false,
-        };
+            1,
+            false,
+        );
         let (sender, _receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let mut publication = None;
         let mut live = false;
         apply_pushed_event(
-            envelope::Payload::SeriesSnapshot(snapshot),
+            MarketRuntimeEvent::SeriesSnapshot(snapshot),
             &PushedEventContext {
                 consumer_id: 1,
                 active_generation: 7,
                 realtime: true,
                 instrument: &default_product("MNQ"),
             },
-            &mut publication,
             &mut live,
             &sender,
         )
         .expect("calendar snapshot applies");
 
         apply_pushed_event(
-            envelope::Payload::SeriesState(SeriesState {
-                consumer_id: 1,
-                generation: 7,
-                state: SeriesLoadState::Live as i32,
-                ..SeriesState::default()
+            MarketRuntimeEvent::SeriesState(MarketSeriesState {
+                consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                generation: MarketGenerationId(
+                    NonZeroU64::new(7).expect("generation validates"),
+                ),
+                series: None,
+                state: SeriesLoadState::Live,
+                detail: None,
             }),
             &PushedEventContext {
                 consumer_id: 1,
@@ -1678,7 +1804,6 @@ mod tests {
                 realtime: true,
                 instrument: &default_product("MNQ"),
             },
-            &mut publication,
             &mut live,
             &sender,
         )
@@ -1687,18 +1812,18 @@ mod tests {
     }
 
     #[test]
-    fn replacement_engine_resets_application_generation_fence() {
+    fn replacement_engine_snapshots_are_forwarded_without_a_worker_generation_fence() {
         let product = default_product("MNQ");
         let series = series_key(&product, ChartInterval::Minute1).expect("series");
         let snapshot = |provider_generation, publication_generation, source_sequence| {
-            envelope::Payload::SeriesSnapshot(SeriesSnapshot {
-                consumer_id: 1,
-                generation: 1,
-                series: Some(series.clone()),
+            MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
+                1,
+                1,
+                series.clone(),
                 provider_generation,
-                price_scale: 2,
-                quantity_scale: 8,
-                bars: vec![IpcMarketBar {
+                2,
+                8,
+                vec![MarketBar {
                     source_sequence,
                     exchange_timestamp_seconds: i64::try_from(source_sequence).unwrap_or(i64::MAX),
                     exchange_timestamp_unix_nanos: i64::try_from(source_sequence)
@@ -1711,11 +1836,10 @@ mod tests {
                     volume: 7,
                 }],
                 publication_generation,
-                forming: false,
-            })
+                false,
+            ))
         };
-        let (sender, _receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
-        let mut publication = None;
+        let (sender, receiver) = market_worker_channel(NonZeroUsize::new(4).unwrap());
         let mut live = false;
         assert_eq!(
             apply_pushed_event(
@@ -1726,14 +1850,11 @@ mod tests {
                     realtime: true,
                     instrument: &default_product("MNQ"),
                 },
-                &mut publication,
                 &mut live,
                 &sender,
             ),
             Ok(())
         );
-
-        publication = None;
 
         assert_eq!(
             apply_pushed_event(
@@ -1744,16 +1865,24 @@ mod tests {
                     realtime: true,
                     instrument: &default_product("MNQ"),
                 },
-                &mut publication,
                 &mut live,
                 &sender,
             ),
             Ok(())
         );
-        assert_eq!(
-            publication.map(MarketPublicationGeneration::publication_generation),
-            Some(1)
-        );
+        let (messages, disconnected) = receiver.drain();
+        assert!(!disconnected);
+        let generations = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                MarketWorkerMessage::Update(MarketWorkerPublication {
+                    update: ReplayStreamUpdate::Snapshot(snapshot),
+                    ..
+                }) => Some(snapshot.evidence().publication_generation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generations, vec![12, 1]);
     }
 
     #[test]
@@ -1770,14 +1899,13 @@ mod tests {
 
     #[test]
     fn structured_demand_errors_render_stage_and_elapsed_context() {
-        let error = DemandError {
-            consumer_id: 1,
-            generation: 2,
-            code: EngineFaultCode::Retryable as i32,
-            stage: "handoff".to_string(),
+        let error = MarketDemandError {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::new(2).expect("generation validates")),
+            code: EngineFaultCode::Retryable,
+            stage: FailureStage::Handoff,
             detail: "history/live handoff failed".to_string(),
             series: None,
-            stage_code: FailureStage::Handoff as i32,
             cause: "history and realtime state could not be joined safely".to_string(),
             elapsed_millis: Some(17),
         };
@@ -1790,14 +1918,13 @@ mod tests {
     #[test]
     fn retryable_demand_error_recovers_without_making_the_chart_unavailable() {
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
-        let retryable = DemandError {
-            consumer_id: 1,
-            generation: 2,
-            code: EngineFaultCode::Retryable as i32,
-            stage: "provider history".to_string(),
+        let retryable = MarketDemandError {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::new(2).expect("generation validates")),
+            code: EngineFaultCode::Retryable,
+            stage: FailureStage::ProviderHistory,
             detail: "covering history is retrying".to_string(),
             series: None,
-            stage_code: FailureStage::ProviderHistory as i32,
             cause: "provider history was unavailable".to_string(),
             elapsed_millis: Some(4),
         };
@@ -1815,8 +1942,8 @@ mod tests {
             )]
         );
 
-        let permanent = DemandError {
-            code: EngineFaultCode::Permanent as i32,
+        let permanent = MarketDemandError {
+            code: EngineFaultCode::Permanent,
             detail: "permanent fixture failure".to_string(),
             elapsed_millis: None,
             ..retryable
@@ -1832,69 +1959,61 @@ mod tests {
     /// rendered, but never constructed. Levels are a real MNQ top-of-book fixture
     /// with accurate Rithmic integer-contract volumes.
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn rithmic_order_book_snapshot_uses_the_consumers_selection_identity() {
         let product = default_product("MNQ");
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
-        let mut publication = None;
         let mut live = false;
 
         let outcome = apply_pushed_event(
-            envelope::Payload::OrderBookSnapshot(IpcOrderBookSnapshot {
-                consumer_id: 1,
-                generation: 1,
-                provider: "rithmic".to_string(),
-                instrument_id: product.instrument_id.clone(),
-                entitlement_id: product.entitlement_id.clone(),
-                provider_generation: 1,
-                // The engine book is shared by instrument, so this may carry
-                // the generation of another chart that selected BTC/USD.
-                selection_generation: 99,
-                revision: 1,
-                source_watermark: 1,
-                state: IpcOrderBookState::Ready as i32,
-                bids: vec![
-                    IpcOrderBookLevel {
-                        price: 7_798_670,
-                        quantity: 653_408,
-                        order_count: None,
-                        traded_volume: 125,
-                    },
-                    IpcOrderBookLevel {
-                        price: 7_798_514,
-                        quantity: 2_564_592,
-                        order_count: None,
-                        traded_volume: 0,
-                    },
-                ],
-                asks: vec![
-                    IpcOrderBookLevel {
-                        price: 7_798_671,
-                        quantity: 22_517_771,
-                        order_count: None,
-                        traded_volume: 75,
-                    },
-                    IpcOrderBookLevel {
-                        price: 7_798_727,
-                        quantity: 4_582_685,
-                        order_count: None,
-                        traded_volume: 0,
-                    },
-                ],
-                best_bid: Some(IpcOrderBookLevel {
+            MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
+                consumer_id: MarketConsumerId(NonZeroU64::MIN),
+                generation: MarketGenerationId(NonZeroU64::MIN),
+                publication: OrderBookPublication {
+                    provider_id: "rithmic".to_string(),
+                    instrument_id: product.instrument_id.clone(),
+                    entitlement_id: product.entitlement_id.clone(),
+                    session_generation: 1,
+                    revision: 1,
+                    source_watermark: 1,
+                    state: OrderBookState::Ready,
+                    bids: vec![
+                        DepthLevel {
+                            price: 7_798_670,
+                            quantity: 653_408,
+                            order_count: None,
+                        },
+                        DepthLevel {
+                            price: 7_798_514,
+                            quantity: 2_564_592,
+                            order_count: None,
+                        },
+                    ],
+                    asks: vec![
+                        DepthLevel {
+                            price: 7_798_671,
+                            quantity: 22_517_771,
+                            order_count: None,
+                        },
+                        DepthLevel {
+                            price: 7_798_727,
+                            quantity: 4_582_685,
+                            order_count: None,
+                        },
+                    ],
+                    best_bid: Some(DepthLevel {
                     price: 7_798_670,
                     quantity: 653_408,
                     order_count: Some(3),
-                    traded_volume: 125,
-                }),
-                best_ask: Some(IpcOrderBookLevel {
-                    price: 7_798_671,
-                    quantity: 22_517_771,
-                    order_count: Some(4),
-                    traded_volume: 75,
-                }),
-                bbo_source_watermark: 2,
+                    }),
+                    best_ask: Some(DepthLevel {
+                        price: 7_798_671,
+                        quantity: 22_517_771,
+                        order_count: Some(4),
+                    }),
+                    bbo_source_watermark: 2,
+                    traded_volumes: BTreeMap::new(),
+                },
             }),
             &PushedEventContext {
                 consumer_id: 1,
@@ -1902,7 +2021,6 @@ mod tests {
                 realtime: true,
                 instrument: &product,
             },
-            &mut publication,
             &mut live,
             &sender,
         );
@@ -1934,14 +2052,14 @@ mod tests {
                 .bid
                 .as_ref()
                 .map(|level| level.traded_volume_text.as_str()),
-            Some("125")
+            Some("")
         );
         assert_eq!(
             frame.rows[0]
                 .ask
                 .as_ref()
                 .map(|level| level.traded_volume_text.as_str()),
-            Some("75")
+            Some("")
         );
     }
 
@@ -1955,14 +2073,20 @@ mod tests {
             (ChartInterval::Day1, 86_400),
         ] {
             let series = series_key(&product, interval).expect("HL series validates");
-            assert_eq!(series.provider, "hyperliquid");
-            assert_eq!(series.cadence_value, seconds);
+            assert_eq!(series.provider_id, "hyperliquid");
+            assert_eq!(
+                series.period,
+                BarPeriod::time(seconds).expect("fixed period validates")
+            );
             assert_eq!(series.instrument_id, product.instrument_id);
             assert_eq!(series.entitlement_id, "hyperliquid-public");
         }
         // Native 3-day candles exist on Hyperliquid but not on Rithmic.
         let day3 = series_key(&product, ChartInterval::Day3).expect("HL day3 series");
-        assert_eq!(day3.cadence, SeriesCadence::SessionDays as i32);
+        assert_eq!(
+            day3.period,
+            BarPeriod::session(3).expect("three-day session period validates")
+        );
         // Tick candles exist on neither public path.
         assert!(series_key(&product, ChartInterval::Tick100).is_err());
         // Rithmic intervals stay Rithmic-only.
@@ -1971,13 +2095,12 @@ mod tests {
 
     #[test]
     fn snapshot_instrument_parses_all_hyperliquid_identities() {
-        let perp = SeriesKey {
-            provider: "hyperliquid".to_string(),
+        let perp = BarSeriesKey {
+            provider_id: "hyperliquid".to_string(),
             instrument_id: "hyperliquid:perp:BTC".to_string(),
-            cadence_value: 60,
-            definition_revision: 1,
             entitlement_id: "hyperliquid-public".to_string(),
-            cadence: SeriesCadence::FixedSeconds as i32,
+            period: BarPeriod::time(60).expect("minute period validates"),
+            definition_version: 1,
         };
         assert_eq!(
             snapshot_instrument(&perp).expect("perp parses"),
@@ -1988,7 +2111,7 @@ mod tests {
                 "USDC".to_string()
             )
         );
-        let spot = SeriesKey {
+        let spot = BarSeriesKey {
             instrument_id: "hyperliquid:spot:7:HFUN/USDC".to_string(),
             ..perp.clone()
         };
@@ -2001,7 +2124,7 @@ mod tests {
                 "USDC".to_string()
             )
         );
-        let builder = SeriesKey {
+        let builder = BarSeriesKey {
             instrument_id: "hyperliquid:builder:xyz:TSLA".to_string(),
             ..perp.clone()
         };
@@ -2037,14 +2160,14 @@ mod tests {
     fn hyperliquid_snapshot_converts_with_eight_place_precision() {
         let product = default_hyperliquid_product();
         let series = series_key(&product, ChartInterval::Minute1).expect("HL series");
-        let snapshot = replay_snapshot(&SeriesSnapshot {
-            consumer_id: 1,
-            generation: 1,
-            series: Some(series),
-            provider_generation: 7,
-            price_scale: 8,
-            quantity_scale: 8,
-            bars: vec![IpcMarketBar {
+        let publication = runtime_snapshot(
+            1,
+            1,
+            series,
+            7,
+            8,
+            8,
+            vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
                 exchange_timestamp_unix_nanos: 60_000_000_000,
@@ -2054,10 +2177,10 @@ mod tests {
                 close: 6_700_075_000_000,
                 volume: 98_639_000,
             }],
-            publication_generation: 1,
-            forming: false,
-        })
-        .expect("HL snapshot converts");
+            1,
+            false,
+        );
+        let snapshot = replay_runtime_snapshot(&publication).expect("HL snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 8);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.instrument().symbol, "BTC");
@@ -2066,14 +2189,14 @@ mod tests {
     #[test]
     fn hyperliquid_publication_uses_hyperliquid_worker_identity() {
         let product = default_hyperliquid_product();
-        let snapshot = SeriesSnapshot {
-            consumer_id: 1,
-            generation: 1,
-            series: Some(series_key(&product, ChartInterval::Minute1).expect("HL series")),
-            provider_generation: 7,
-            price_scale: 8,
-            quantity_scale: 8,
-            bars: vec![IpcMarketBar {
+        let snapshot = runtime_snapshot(
+            1,
+            1,
+            series_key(&product, ChartInterval::Minute1).expect("HL series"),
+            7,
+            8,
+            8,
+            vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 60,
                 exchange_timestamp_unix_nanos: 60_000_000_000,
@@ -2083,19 +2206,15 @@ mod tests {
                 close: 6_700_075_000_000,
                 volume: 98_639_000,
             }],
-            publication_generation: 1,
-            forming: false,
-        };
-        let replay = replay_snapshot(&snapshot).expect("HL snapshot converts");
-        let generation = MarketPublicationGeneration::from_generation(
-            &generation_from_snapshot(&snapshot, &replay).expect("generation validates"),
+            1,
+            false,
         );
+        let replay = replay_runtime_snapshot(&snapshot).expect("HL snapshot converts");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
 
         send_publication(
             &sender,
             ReplayStreamUpdate::Snapshot(replay),
-            generation,
             "hyperliquid",
         )
         .expect("publication queues");

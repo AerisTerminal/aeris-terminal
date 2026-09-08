@@ -1045,34 +1045,6 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn set_lifetime_mode(&mut self, mode: DesktopLifetimeMode, cx: &mut Context<Self>) {
-        let current = self.lifecycle.presentation();
-        if current.pending || current.mode == mode {
-            return;
-        }
-        if mode == DesktopLifetimeMode::KeepMarketsLive && !current.markets_live_permitted {
-            return;
-        }
-        self.request_lifecycle_preferences(
-            LifecyclePreferenceRequest {
-                mode,
-                autostart_enabled: current.autostart_enabled,
-                markets_live_permitted: current.markets_live_permitted,
-            },
-            cx,
-        );
-    }
-
-    pub(super) fn toggle_engine_autostart(&mut self, cx: &mut Context<Self>) {
-        let current = self.lifecycle.presentation();
-        let request = LifecyclePreferenceRequest {
-            mode: current.mode,
-            autostart_enabled: !current.autostart_enabled,
-            markets_live_permitted: current.markets_live_permitted,
-        };
-        self.request_lifecycle_preferences(request, cx);
-    }
-
     pub(super) fn request_sign_in(cx: &mut Context<Self>) {
         let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),
@@ -1113,32 +1085,6 @@ impl TerminalApp {
         );
         if let Err(error) = result {
             eprintln!("Axiusflow sign-in cancellation degraded: {error}");
-        }
-        cx.notify();
-    }
-
-    pub(super) fn toggle_markets_live_permission(&mut self, cx: &mut Context<Self>) {
-        let current = self.lifecycle.presentation();
-        let permitted = !current.markets_live_permitted;
-        let request = LifecyclePreferenceRequest {
-            mode: if !permitted && current.mode == DesktopLifetimeMode::KeepMarketsLive {
-                DesktopLifetimeMode::KeepEngineWarm
-            } else {
-                current.mode
-            },
-            autostart_enabled: current.autostart_enabled,
-            markets_live_permitted: permitted,
-        };
-        self.request_lifecycle_preferences(request, cx);
-    }
-
-    fn request_lifecycle_preferences(
-        &mut self,
-        request: LifecyclePreferenceRequest,
-        cx: &mut Context<Self>,
-    ) {
-        if let Err(error) = self.lifecycle.request_preferences(request) {
-            self.lifecycle.set_preference_error(error);
         }
         cx.notify();
     }
@@ -1273,11 +1219,6 @@ impl TerminalApp {
         window.on_next_frame(move |window, cx| {
             let diagnostics = terminal.update(cx, |terminal, cx| {
                 terminal.frame_poll_gate.complete();
-                if terminal.lifecycle.poll_preferences()
-                    || terminal.lifecycle.presentation().pending
-                {
-                    cx.notify();
-                }
                 if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
                     && account.poll()
                 {
@@ -1449,13 +1390,10 @@ impl TerminalApp {
                 &self.theme,
             )
         });
-        let preference_error = self.lifecycle.preference_error();
         let settings_menu = self.chart_settings_menu.clone().map(|menu| {
             chart_settings_menu_layer(
                 terminal,
                 &menu,
-                self.lifecycle.presentation(),
-                preference_error.as_deref(),
                 viewport,
                 &self.theme,
             )

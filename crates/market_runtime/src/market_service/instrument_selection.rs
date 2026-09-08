@@ -1,12 +1,12 @@
 use super::{
-    BarSeriesKey, ClientId, ConsumerId, Coordinator, InstallProviderInstrument,
-    MAXIMUM_CATALOG_FIELD_BYTES, MAXIMUM_CATALOG_INSTRUMENTS, MarketStream, NonZeroU64,
+    ClientId, ConsumerId, Coordinator, InstallProviderInstrument,
+    MAXIMUM_CATALOG_FIELD_BYTES, MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64,
     ProviderCatalogCommand, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderGeneration, ProviderHealth, ProviderInstrumentSelection, Reply, ResourceMode,
-    RithmicCatalogControl, RithmicCatalogEvent, SearchProviderInstruments,
-    SelectProviderInstrument, StreamRequirements, SyncSender, TrySendError, authorize_consumer,
-    envelope,
+    ProviderGeneration, ProviderHealth, Reply, RithmicCatalogControl, RithmicCatalogEvent,
+    SearchProviderInstruments,
+    SelectProviderInstrument, SyncSender, TrySendError, authorize_consumer,
 };
+use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
 use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidCatalogEvent};
 
 pub(super) fn id(value: u64) -> Result<NonZeroU64, String> {
@@ -87,10 +87,6 @@ pub(super) fn try_send_hyperliquid_catalog(
     })
 }
 
-pub(super) fn chart_stream_requirements(_series: &BarSeriesKey) -> StreamRequirements {
-    StreamRequirements::BARS.with(MarketStream::Depth)
-}
-
 pub(super) fn validate_provider_instrument(
     instrument: &InstallProviderInstrument,
 ) -> Result<(), String> {
@@ -120,36 +116,50 @@ pub(super) fn validate_provider_instrument(
 
 impl Coordinator<'_> {
     pub(super) fn handle_provider_search(
-        &self,
+        &mut self,
         client_id: ClientId,
         search: SearchProviderInstruments,
         reply: &Reply<()>,
     ) {
-        let consumer_id = search.consumer_id;
+        let raw_consumer_id = search.consumer_id;
         let provider = search.provider.clone();
+        let generation = search.search_generation;
         let result = self
-            .authorize_catalog_consumer(client_id, consumer_id)
+            .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search))
             });
+        if result.is_ok()
+            && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
+        {
+            self.catalog_searches
+                .insert((consumer_id, provider), generation);
+        }
         let _ = reply.send(result);
     }
 
     pub(super) fn handle_provider_selection(
-        &self,
+        &mut self,
         client_id: ClientId,
         selection: SelectProviderInstrument,
         reply: &Reply<()>,
     ) {
-        let consumer_id = selection.consumer_id;
+        let raw_consumer_id = selection.consumer_id;
         let provider = selection.provider.clone();
+        let generation = selection.selection_generation;
         let result = self
-            .authorize_catalog_consumer(client_id, consumer_id)
+            .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))
             });
+        if result.is_ok()
+            && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
+        {
+            self.catalog_selections
+                .insert((consumer_id, provider), generation);
+        }
         let _ = reply.send(result);
     }
 
@@ -213,65 +223,9 @@ impl Coordinator<'_> {
             .entry(provider.clone())
             .and_modify(|current| *current = (*current).max(instrument.session_generation))
             .or_insert(instrument.session_generation);
-        let instrument_id = instrument.instrument_id.clone();
         self.catalog.insert(key, instrument.clone());
         self.reconcile_order_books();
-        self.activate_retained_instrument(instrument, provider_generation);
-        if self.resource_mode == ResourceMode::MarketsLive
-            && let Some(series) = self
-                .warm_priority
-                .iter()
-                .find(|series| {
-                    series.provider_id == provider && series.instrument_id == instrument_id
-                })
-                .cloned()
-        {
-            self.retained_live.insert(series.clone());
-            let _ = self.enqueue_history(&series, provider_generation);
-        }
         Ok(())
-    }
-
-    pub(super) fn activate_retained_instrument(
-        &mut self,
-        instrument: &InstallProviderInstrument,
-        generation: ProviderGeneration,
-    ) {
-        let series = self
-            .retained_history
-            .keys()
-            .filter(|series| {
-                series.provider_id == instrument.provider
-                    && series.instrument_id == instrument.instrument_id
-                    && series.entitlement_id == instrument.entitlement_id
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let (Ok(price_scale), Ok(quantity_scale)) = (
-            u8::try_from(instrument.price_scale),
-            u8::try_from(instrument.quantity_scale),
-        ) else {
-            return;
-        };
-        for series in series {
-            let Some(stored) = self.retained_history.remove(&series) else {
-                continue;
-            };
-            if self
-                .engine
-                .install_retained_history(
-                    generation,
-                    &series,
-                    price_scale,
-                    quantity_scale,
-                    stored.bars,
-                )
-                .is_ok()
-            {
-                self.prewarmed.insert(series.clone());
-                self.local_loaded.insert((series, generation));
-            }
-        }
     }
 
     pub(super) fn handle_rithmic_catalog(&mut self, event: RithmicCatalogEvent) {
@@ -360,66 +314,17 @@ impl Coordinator<'_> {
         &mut self,
         result: axiusflow_engine_protocol::ProviderInstrumentSearchResult,
     ) {
-        if result.consumer_id == 0 {
-            self.select_warm_instrument(&result);
-            return;
-        }
+        if result.consumer_id == 0 { return; }
         let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
             return;
         };
+        let key = (consumer_id, result.provider.clone());
+        if self.catalog_searches.get(&key).copied() != Some(result.search_generation) {
+            return;
+        }
+        self.catalog_searches.remove(&key);
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            events.catalog_search = Some(envelope::Payload::ProviderInstrumentSearchResult(result));
-        }
-    }
-
-    pub(super) fn select_warm_instrument(
-        &mut self,
-        result: &axiusflow_engine_protocol::ProviderInstrumentSearchResult,
-    ) {
-        if self.warm_search_generations.get(&result.provider).copied()
-            != Some(result.search_generation)
-        {
-            return;
-        }
-        let Some(series) = self.warm_restore_pending.get(&result.provider).cloned() else {
-            return;
-        };
-        let Some(warm) = self.warm_series.get(&series).cloned() else {
-            return;
-        };
-        if !result.instruments.iter().any(|candidate| {
-            candidate.symbol == warm.instrument.provider_symbol
-                && candidate.exchange == warm.instrument.venue_id
-        }) {
-            self.warm_restore_pending.remove(&result.provider);
-            self.warm_restore_skipped.insert(series);
-            self.activate_markets_live_provider_hot_set(&result.provider);
-            return;
-        }
-        match self.providers.dispatch_catalog(
-            &result.provider,
-            ProviderCatalogCommand::Select(SelectProviderInstrument {
-                consumer_id: 0,
-                selection_generation: result.search_generation,
-                search_generation: result.search_generation,
-                provider: result.provider.clone(),
-                symbol: warm.instrument.provider_symbol.clone(),
-                exchange: warm.instrument.venue_id.clone(),
-                entitlement_id: warm.instrument.entitlement_id.clone(),
-            }),
-        ) {
-            Ok(()) => {}
-            Err(error) if error.ends_with("catalog command capacity is exhausted") => {
-                // A full bounded control lane is transient. Re-run the search on
-                // a later coordinator tick instead of turning queue pressure into
-                // a permanent saved-demand rejection.
-                self.warm_restore_pending.remove(&result.provider);
-            }
-            Err(_) => {
-                self.warm_restore_pending.remove(&result.provider);
-                self.warm_restore_skipped.insert(series);
-                self.activate_markets_live_provider_hot_set(&result.provider);
-            }
+            events.catalog_search = Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
         }
     }
 
@@ -429,43 +334,23 @@ impl Coordinator<'_> {
         command_generation: u64,
         instrument: InstallProviderInstrument,
     ) {
-        if consumer_id == 0 {
-            if self
-                .warm_search_generations
-                .get(&instrument.provider)
-                .copied()
-                != Some(command_generation)
-            {
-                return;
-            }
-            let provider = instrument.provider.clone();
-            let Some(series) = self.warm_restore_pending.get(&provider).cloned() else {
-                return;
-            };
-            let exact = self.warm_series.get(&series).is_some_and(|warm| {
-                instrument.instrument_id == warm.instrument.instrument_id
-                    && instrument.provider_symbol == warm.instrument.provider_symbol
-                    && instrument.venue_id == warm.instrument.venue_id
-                    && instrument.entitlement_id == warm.instrument.entitlement_id
-            });
-            self.warm_restore_pending.remove(&provider);
-            if !exact || self.install_provider_instrument(&instrument).is_err() {
-                self.warm_restore_skipped.insert(series);
-            }
-            self.activate_markets_live_provider_hot_set(&provider);
-            return;
-        }
+        if consumer_id == 0 { return; }
         let Ok(id) = id(consumer_id).map(ConsumerId) else {
             return;
         };
         let provider = instrument.provider.clone();
+        let key = (id, provider.clone());
+        if self.catalog_selections.get(&key).copied() != Some(command_generation) {
+            return;
+        }
+        self.catalog_selections.remove(&key);
         let publication = match self.install_provider_instrument(&instrument) {
-            Ok(()) => envelope::Payload::ProviderInstrumentSelection(ProviderInstrumentSelection {
-                consumer_id,
-                instrument: Some(instrument),
+            Ok(()) => MarketRuntimeEvent::ProviderInstrumentSelection(MarketProviderInstrumentSelection {
+                consumer_id: id,
+                instrument,
                 command_generation,
             }),
-            Err(_) => envelope::Payload::ProviderCatalogRejected(ProviderCatalogRejected {
+            Err(_) => MarketRuntimeEvent::ProviderCatalogRejected(ProviderCatalogRejected {
                 consumer_id,
                 provider,
                 provider_generation: Some(instrument.session_generation),
@@ -483,29 +368,27 @@ impl Coordinator<'_> {
         rejection: ProviderCatalogRejected,
         selection: bool,
     ) {
-        if rejection.consumer_id == 0 {
-            if self
-                .warm_search_generations
-                .get(&rejection.provider)
-                .copied()
-                == Some(rejection.command_generation)
-                && let Some(series) = self.warm_restore_pending.remove(&rejection.provider)
-            {
-                self.warm_restore_skipped.insert(series);
-                self.activate_markets_live_provider_hot_set(&rejection.provider);
-            }
-            return;
-        }
+        if rejection.consumer_id == 0 { return; }
         let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
             return;
         };
+        let key = (consumer_id, rejection.provider.clone());
+        let pending = if selection {
+            &mut self.catalog_selections
+        } else {
+            &mut self.catalog_searches
+        };
+        if pending.get(&key).copied() != Some(rejection.command_generation) {
+            return;
+        }
+        pending.remove(&key);
         if let Some(events) = self.events.get_mut(&consumer_id) {
             let slot = if selection {
                 &mut events.catalog_selection
             } else {
                 &mut events.catalog_search
             };
-            *slot = Some(envelope::Payload::ProviderCatalogRejected(rejection));
+            *slot = Some(MarketRuntimeEvent::ProviderCatalogRejected(rejection));
         }
     }
 }

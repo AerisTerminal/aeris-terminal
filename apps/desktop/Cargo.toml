@@ -11,11 +11,12 @@ diagnostics = ["axiusflow_chart_integration/diagnostics"]
 
 [dependencies]
 axiusflow_application = { path = "../../crates/application" }
+axiusflow_account_runtime = { path = "../../crates/account_runtime" }
 axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
-axiusflow_local_engine_client = { path = "../../crates/local_engine_client" }
 axiusflow_design_system = { path = "../../crates/ui/design_system" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }
+axiusflow_market_runtime = { path = "../../crates/market_runtime" }
 axiusflow_engine_protocol = { path = "../../crates/engine_protocol" }
 axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
@@ -30,9 +31,6 @@ gpui_platform.workspace = true
 reqwest_client.workspace = true
 num-traits = "=0.2.19"
 unicode-segmentation.workspace = true
-
-[dev-dependencies]
-interprocess.workspace = true
 
 [build-dependencies]
 embed-resource.workspace = true

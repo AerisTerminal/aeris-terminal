@@ -1,57 +1,30 @@
 //! Replay conversion.
 
 use super::{
-    AssetClass, BarDefinition, ChartInterval, DesktopMarketGeneration, InstallProviderInstrument,
-    InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision, MarketBar,
-    MarketEventProvenance, MarketPublicationGeneration, Provenanced, RETAINED_BAR_CAPACITY,
-    ReplayProvenance, ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate, SeriesCadence,
-    SeriesKey, SeriesSnapshot, SeriesUpdate, SeriesUpdateOperation, now_unix_nanos,
-    provider_display_name,
+    AssetClass, BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, DesktopMarketGeneration,
+    InstallProviderInstrument, InstrumentId, InstrumentLifecycle, InstrumentPrecision,
+    InstrumentRevision, MarketBar, MarketEventProvenance, MarketOrderBookSnapshot,
+    MarketSeriesSnapshot, MarketSeriesUpdate, Provenanced,
+    ReplayProvenance, ReplaySnapshot, ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation,
+    now_unix_nanos, provider_display_name,
 };
+use axiusflow_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
-pub(super) fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapshot, String> {
-    let series = snapshot
-        .series
-        .clone()
-        .ok_or_else(|| "engine snapshot has no series identity".to_string())?;
-    if series.provider != "rithmic" && series.provider != "hyperliquid"
-        || !matches!(
-            SeriesCadence::try_from(series.cadence),
-            Ok(SeriesCadence::FixedSeconds
-                | SeriesCadence::CalendarWeeks
-                | SeriesCadence::CalendarMonths)
-        )
-    {
-        return Err(format!(
-            "engine {} snapshot identity is invalid",
-            provider_display_name(series.provider.as_str())
-        ));
-    }
-    if series.provider == "rithmic" {
-        if !series.entitlement_id.starts_with("rithmic-test:")
-            || !series.instrument_id.starts_with("instrument:rithmic:")
-        {
-            return Err("engine Rithmic snapshot identity is invalid".to_string());
-        }
-    } else if !series.entitlement_id.starts_with("hyperliquid-")
-        || !series.instrument_id.starts_with("hyperliquid:")
-    {
-        return Err("engine Hyperliquid snapshot identity is invalid".to_string());
-    }
-    let price_scale = u8::try_from(snapshot.price_scale)
-        .map_err(|_| "engine price scale is invalid".to_string())?;
-    let quantity_scale = u8::try_from(snapshot.quantity_scale)
-        .map_err(|_| "engine quantity scale is invalid".to_string())?;
-    let (venue, symbol, asset_class, trading_currency) = snapshot_instrument(&series)?;
+pub(crate) fn replay_runtime_snapshot(
+    publication: &MarketSeriesSnapshot,
+) -> Result<ReplaySnapshot, String> {
+    let snapshot = publication.snapshot.as_ref();
+    let series = &snapshot.series;
+    let (venue, symbol, asset_class, trading_currency) = snapshot_instrument(series)?;
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
-        revision: u64::from(series.definition_revision),
+        revision: u64::from(series.definition_version),
         asset_class,
         symbol,
         venue_id: venue,
         trading_currency,
-        precision: InstrumentPrecision::try_new(price_scale, quantity_scale)
+        precision: InstrumentPrecision::try_new(snapshot.price_scale, snapshot.quantity_scale)
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
     };
@@ -61,11 +34,11 @@ pub(super) fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapsho
         .bars
         .iter()
         .map(|bar| {
-            provenanced_engine_bar(
-                &series,
-                snapshot.provider_generation,
-                snapshot.consumer_id,
-                snapshot.generation,
+            provenanced_runtime_bar(
+                &snapshot.series,
+                snapshot.provider_generation.0.get(),
+                publication.consumer_id.0.get(),
+                publication.generation.0.get(),
                 bar,
                 received,
             )
@@ -75,10 +48,130 @@ pub(super) fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapsho
         instrument,
         ReplayProvenance::LiveProvider,
         definition,
-        snapshot.publication_generation,
+        publication.publication_generation,
         bars,
     )
     .map_err(|error| error.to_string())
+}
+
+pub(crate) fn runtime_generation_from_snapshot(
+    publication: &MarketSeriesSnapshot,
+    replay: &ReplaySnapshot,
+) -> Result<DesktopMarketGeneration, String> {
+    let first_sequence = replay
+        .bars()
+        .first()
+        .map(|bar| bar.value().source_sequence)
+        .ok_or_else(|| "runtime snapshot is empty".to_string())?;
+    let last_sequence = replay
+        .bars()
+        .last()
+        .map(|bar| bar.value().source_sequence)
+        .ok_or_else(|| "runtime snapshot is empty".to_string())?;
+    DesktopMarketGeneration::try_new(
+        publication.snapshot.provider_generation.0.get(),
+        publication.publication_generation,
+        first_sequence,
+        last_sequence,
+        replay.bars().to_vec(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn replay_runtime_tail_update(
+    update: &MarketSeriesUpdate,
+) -> Result<ReplayTailUpdate, String> {
+    let item = provenanced_runtime_bar(
+        &update.series,
+        update.provider_generation.0.get(),
+        update.consumer_id.0.get(),
+        update.generation.0.get(),
+        &update.bar,
+        now_unix_nanos(),
+    );
+    let operation = match update.operation {
+        SeriesTailOperation::Revise => ReplayTailOperation::Revise,
+        SeriesTailOperation::Append => ReplayTailOperation::Append,
+    };
+    ReplayTailUpdate::try_new(
+        item,
+        update.publication_generation,
+        update.forming,
+        operation,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn runtime_order_book_frame(
+    snapshot: &MarketOrderBookSnapshot,
+    instrument: &InstallProviderInstrument,
+    generation: u64,
+) -> Option<OrderBookFrame> {
+    let publication = &snapshot.publication;
+    if snapshot.generation.0.get() != generation
+        || publication.provider_id != instrument.provider
+        || publication.instrument_id != instrument.instrument_id
+        || publication.entitlement_id != instrument.entitlement_id
+        || publication.session_generation < instrument.session_generation
+    {
+        return None;
+    }
+    let precision = InstrumentPrecision::try_new(
+        u8::try_from(instrument.price_scale).ok()?,
+        u8::try_from(instrument.quantity_scale).ok()?,
+    )
+    .ok()?;
+    project_order_book(
+        &OrderBookSelection {
+            provider_id: publication.provider_id.clone(),
+            instrument_id: publication.instrument_id.clone(),
+            entitlement_id: publication.entitlement_id.clone(),
+            session_generation: publication.session_generation,
+            selection_generation: instrument.selection_generation,
+            precision,
+        },
+        publication,
+    )
+}
+
+fn provenanced_runtime_bar(
+    series: &BarSeriesKey,
+    provider_generation: u64,
+    consumer_id: u64,
+    generation: u64,
+    bar: &MarketBar,
+    received: i64,
+) -> Provenanced<MarketBar> {
+    let exchange = bar.exchange_timestamp_unix_nanos;
+    Provenanced::new(
+        *bar,
+        MarketEventProvenance {
+            event_id: format!(
+                "engine-{provider_generation}-{generation}-{}",
+                bar.source_sequence
+            ),
+            event_time_unix_nanos: exchange,
+            publication_time_unix_nanos: received,
+            producer: "axiusflow_engine".to_string(),
+            schema_version: 1,
+            correlation_id: format!("engine-series-{consumer_id}-{generation}"),
+            causation_id: String::new(),
+            entitlement_revision: series.entitlement_id.clone(),
+            session_generation: provider_generation,
+            source_id: series.provider_id.clone(),
+            source_sequence: bar.source_sequence,
+            exchange_timestamp_unix_nanos: exchange,
+            provider_receive_timestamp_unix_nanos: received,
+            nic_receive_timestamp_unix_nanos: None,
+            axiusflow_receive_timestamp_unix_nanos: received,
+            normalized_timestamp_unix_nanos: received,
+            fanout_enqueue_timestamp_unix_nanos: Some(received),
+            correction_flags: 0,
+            quality_flags: 0,
+            nic_timestamp_source: 0,
+            semantic_class: 2,
+        },
+    )
 }
 
 /// Splits a canonical engine instrument identity into presentation metadata.
@@ -88,9 +181,9 @@ pub(super) fn replay_snapshot(snapshot: &SeriesSnapshot) -> Result<ReplaySnapsho
 /// or `hyperliquid:builder:DEX:COIN`. Anything else fails closed instead of
 /// rendering a misrouted instrument.
 pub(super) fn snapshot_instrument(
-    series: &SeriesKey,
+    series: &BarSeriesKey,
 ) -> Result<(String, String, AssetClass, String), String> {
-    if series.provider == "rithmic" {
+    if series.provider_id == "rithmic" {
         let (venue, symbol) = series
             .instrument_id
             .strip_prefix("instrument:rithmic:")
@@ -152,153 +245,10 @@ pub(super) fn snapshot_instrument(
     }
 }
 
-pub(super) fn generation_from_snapshot(
-    snapshot: &SeriesSnapshot,
-    replay: &ReplaySnapshot,
-) -> Result<DesktopMarketGeneration, String> {
-    let first_sequence = replay
-        .bars()
-        .first()
-        .map(|bar| bar.value().source_sequence)
-        .ok_or_else(|| "engine snapshot is empty".to_string())?;
-    let last_sequence = replay
-        .bars()
-        .last()
-        .map(|bar| bar.value().source_sequence)
-        .ok_or_else(|| "engine snapshot is empty".to_string())?;
-    DesktopMarketGeneration::try_new(
-        snapshot.provider_generation,
-        snapshot.publication_generation,
-        first_sequence,
-        last_sequence,
-        replay.bars().to_vec(),
-    )
-    .map_err(|error| error.to_string())
-}
-
-pub(super) fn tail_publication(
-    current: MarketPublicationGeneration,
-    tail: &ReplayTailUpdate,
-) -> MarketPublicationGeneration {
-    let sequence = tail.item().value().source_sequence;
-    let (mut first, _) = current.sequence_range();
-    let retained = match tail.operation() {
-        ReplayTailOperation::Revise => current.retained_items(),
-        ReplayTailOperation::Append => {
-            let retained = current
-                .retained_items()
-                .saturating_add(1)
-                .min(RETAINED_BAR_CAPACITY);
-            if retained == RETAINED_BAR_CAPACITY && current.retained_items() == retained {
-                first = first.saturating_add(1);
-            }
-            retained
-        }
-    };
-    MarketPublicationGeneration::from_tail(tail.publication_generation(), retained, first, sequence)
-}
-
-pub(super) fn replay_tail_update(update: &SeriesUpdate) -> Result<ReplayTailUpdate, String> {
-    let series = update
-        .series
-        .as_ref()
-        .ok_or_else(|| "engine update has no series identity".to_string())?;
-    if series.provider != "rithmic" && series.provider != "hyperliquid"
-        || series.cadence_value == 0
-        || !matches!(
-            SeriesCadence::try_from(series.cadence),
-            Ok(SeriesCadence::FixedSeconds
-                | SeriesCadence::CalendarWeeks
-                | SeriesCadence::CalendarMonths)
-        )
-    {
-        return Err(format!(
-            "engine {} update identity is invalid",
-            provider_display_name(series.provider.as_str())
-        ));
-    }
-    let bar = update
-        .bar
-        .as_ref()
-        .ok_or_else(|| "engine update has no bar".to_string())?;
-    let item = provenanced_engine_bar(
-        series,
-        update.provider_generation,
-        update.consumer_id,
-        update.generation,
-        bar,
-        now_unix_nanos(),
-    );
-    let operation = match SeriesUpdateOperation::try_from(update.operation) {
-        Ok(SeriesUpdateOperation::ReviseTail) => ReplayTailOperation::Revise,
-        Ok(SeriesUpdateOperation::AppendTail) => ReplayTailOperation::Append,
-        Ok(SeriesUpdateOperation::Unspecified) | Err(_) => {
-            return Err("engine update operation is invalid".to_string());
-        }
-    };
-    ReplayTailUpdate::try_new(
-        item,
-        update.publication_generation,
-        update.forming,
-        operation,
-    )
-    .map_err(|error| error.to_string())
-}
-
-pub(super) fn provenanced_engine_bar(
-    series: &SeriesKey,
-    provider_generation: u64,
-    consumer_id: u64,
-    generation: u64,
-    bar: &axiusflow_engine_protocol::MarketBar,
-    received: i64,
-) -> Provenanced<MarketBar> {
-    let bar = MarketBar {
-        source_sequence: bar.source_sequence,
-        exchange_timestamp_seconds: bar.exchange_timestamp_seconds,
-        exchange_timestamp_unix_nanos: bar.exchange_timestamp_unix_nanos,
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close,
-        volume: bar.volume,
-    };
-    let exchange = bar.exchange_timestamp_unix_nanos;
-    Provenanced::new(
-        bar,
-        MarketEventProvenance {
-            event_id: format!(
-                "engine-{provider_generation}-{generation}-{}",
-                bar.source_sequence
-            ),
-            event_time_unix_nanos: exchange,
-            publication_time_unix_nanos: received,
-            producer: "axiusflow_engine".to_string(),
-            schema_version: 1,
-            correlation_id: format!("engine-series-{consumer_id}-{generation}"),
-            causation_id: String::new(),
-            entitlement_revision: series.entitlement_id.clone(),
-            session_generation: provider_generation,
-            source_id: series.provider.clone(),
-            source_sequence: bar.source_sequence,
-            exchange_timestamp_unix_nanos: exchange,
-            provider_receive_timestamp_unix_nanos: received,
-            nic_receive_timestamp_unix_nanos: None,
-            axiusflow_receive_timestamp_unix_nanos: received,
-            normalized_timestamp_unix_nanos: received,
-            fanout_enqueue_timestamp_unix_nanos: Some(received),
-            correction_flags: 0,
-            quality_flags: 0,
-            nic_timestamp_source: 0,
-            semantic_class: 2,
-        },
-    )
-}
-
 pub(super) fn series_key(
     product: &InstallProviderInstrument,
     interval: ChartInterval,
-) -> Result<SeriesKey, String> {
+) -> Result<BarSeriesKey, String> {
     // The provider field must agree with the installed instrument identity:
     // a Hyperliquid product can never demand a Rithmic series and vice
     // versa, so a mismatch fails here instead of misrouting demand.
@@ -327,69 +277,66 @@ pub(super) fn series_key(
             provider_display_name(product.provider.as_str())
         ));
     }
-    let (cadence, cadence_value) = match interval {
-        ChartInterval::Minute1 => (SeriesCadence::FixedSeconds, 60),
-        ChartInterval::Minute3 => (SeriesCadence::FixedSeconds, 180),
-        ChartInterval::Minute5 => (SeriesCadence::FixedSeconds, 300),
-        ChartInterval::Minute15 => (SeriesCadence::FixedSeconds, 900),
-        ChartInterval::Minute30 => (SeriesCadence::FixedSeconds, 1_800),
-        ChartInterval::Hour1 => (SeriesCadence::FixedSeconds, 3_600),
-        ChartInterval::Hour2 => (SeriesCadence::FixedSeconds, 7_200),
-        ChartInterval::Hour4 => (SeriesCadence::FixedSeconds, 14_400),
-        ChartInterval::Hour8 => (SeriesCadence::FixedSeconds, 28_800),
-        ChartInterval::Hour12 => (SeriesCadence::FixedSeconds, 43_200),
-        ChartInterval::Day1 => (SeriesCadence::FixedSeconds, 86_400),
-        ChartInterval::Week1 => (SeriesCadence::CalendarWeeks, 1),
-        ChartInterval::Month1 => (SeriesCadence::CalendarMonths, 1),
+    let period = match interval {
+        ChartInterval::Minute1 => BarPeriod::time(60),
+        ChartInterval::Minute3 => BarPeriod::time(180),
+        ChartInterval::Minute5 => BarPeriod::time(300),
+        ChartInterval::Minute15 => BarPeriod::time(900),
+        ChartInterval::Minute30 => BarPeriod::time(1_800),
+        ChartInterval::Hour1 => BarPeriod::time(3_600),
+        ChartInterval::Hour2 => BarPeriod::time(7_200),
+        ChartInterval::Hour4 => BarPeriod::time(14_400),
+        ChartInterval::Hour8 => BarPeriod::time(28_800),
+        ChartInterval::Hour12 => BarPeriod::time(43_200),
+        ChartInterval::Day1 => BarPeriod::time(86_400),
+        ChartInterval::Week1 => BarPeriod::week(1),
+        ChartInterval::Month1 => BarPeriod::month(1),
         // Hyperliquid serves a native 3-day candle; Rithmic has no Day3
         // series. Tick candles exist on neither public path: Hyperliquid
         // exposes no tick history and the Rithmic test feed prints none.
-        ChartInterval::Day3 if product.provider == "hyperliquid" => (SeriesCadence::SessionDays, 3),
+        ChartInterval::Day3 if product.provider == "hyperliquid" => BarPeriod::session(3),
         ChartInterval::Tick100 | ChartInterval::Day3 => {
             return Err(format!(
                 "{} chart interval is unsupported",
                 provider_display_name(product.provider.as_str())
             ));
         }
-    };
-    Ok(SeriesKey {
-        provider: product.provider.clone(),
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(BarSeriesKey {
+        provider_id: product.provider.clone(),
         instrument_id: product.instrument_id.clone(),
-        cadence_value,
-        definition_revision: 1,
         entitlement_id: product.entitlement_id.clone(),
-        cadence: cadence as i32,
+        period,
+        definition_version: 1,
     })
 }
 
-pub(super) fn replay_bar_definition(series: &SeriesKey) -> Result<BarDefinition, String> {
-    let (cadence_id, interval_seconds, calendar_months) =
-        match SeriesCadence::try_from(series.cadence) {
-            Ok(SeriesCadence::FixedSeconds) if series.cadence_value > 0 => (
-                format!("{}s", series.cadence_value),
-                series.cadence_value,
-                None,
-            ),
-            Ok(SeriesCadence::CalendarWeeks) if series.cadence_value > 0 => (
-                format!("calendar-weeks:{}", series.cadence_value),
-                series
-                    .cadence_value
-                    .checked_mul(7 * 24 * 60 * 60)
-                    .ok_or_else(|| "engine calendar-week cadence overflowed".to_string())?,
-                None,
-            ),
-            Ok(SeriesCadence::CalendarMonths) if series.cadence_value > 0 => (
-                format!("calendar-months:{}", series.cadence_value),
-                0,
-                Some(series.cadence_value),
-            ),
-            _ => return Err("engine bar definition is invalid".to_string()),
-        };
+pub(super) fn replay_bar_definition(series: &BarSeriesKey) -> Result<BarDefinition, String> {
+    let (cadence_id, interval_seconds, trades_per_bar, calendar_months) = match series.period {
+        BarPeriod::Tick { trades } => (format!("trades:{trades}"), 0, Some(trades), None),
+        BarPeriod::Time { seconds } => (format!("{seconds}s"), seconds, None, None),
+        BarPeriod::Session { days } => {
+            let seconds = days
+                .checked_mul(24 * 60 * 60)
+                .ok_or_else(|| "engine session cadence overflowed".to_string())?;
+            (format!("session-days:{days}"), seconds, None, None)
+        }
+        BarPeriod::Week { weeks } => {
+            let seconds = weeks
+                .checked_mul(7 * 24 * 60 * 60)
+                .ok_or_else(|| "engine calendar-week cadence overflowed".to_string())?;
+            (format!("calendar-weeks:{weeks}"), seconds, None, None)
+        }
+        BarPeriod::Month { months } => {
+            (format!("calendar-months:{months}"), 0, None, Some(months))
+        }
+    };
     Ok(BarDefinition {
-        definition_id: format!("{}:{}:{cadence_id}", series.provider, series.instrument_id),
-        version: series.definition_revision,
+        definition_id: format!("{}:{}:{cadence_id}", series.provider_id, series.instrument_id),
+        version: series.definition_version,
         interval_seconds,
-        trades_per_bar: None,
+        trades_per_bar,
         calendar_months,
     })
 }

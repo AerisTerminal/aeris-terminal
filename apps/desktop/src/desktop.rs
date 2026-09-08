@@ -18,8 +18,6 @@ mod chrome_menu;
 mod drawing_toolbar;
 #[path = "engine_market_worker.rs"]
 mod engine_market_worker;
-#[path = "engine_supervisor.rs"]
-mod engine_supervisor;
 #[path = "frame_poll_gate.rs"]
 mod frame_poll_gate;
 #[path = "components/indicator_menu.rs"]
@@ -31,12 +29,6 @@ mod onboarding;
 #[cfg(any(test, feature = "diagnostics"))]
 #[path = "readiness_conformance.rs"]
 mod readiness_conformance;
-#[path = "rithmic_engine_client.rs"]
-mod rithmic_engine_client;
-#[path = "rithmic_engine_history.rs"]
-mod rithmic_engine_history;
-#[path = "rithmic_history.rs"]
-mod rithmic_history;
 #[path = "rithmic_shell.rs"]
 mod rithmic_shell;
 #[path = "components/symbol_menu.rs"]
@@ -45,14 +37,12 @@ mod symbol_menu;
 mod terminal_chrome;
 #[path = "components/terminal_view.rs"]
 mod terminal_view;
-#[cfg(any(test, feature = "diagnostics"))]
-#[cfg_attr(all(test, not(feature = "diagnostics")), allow(dead_code))]
-#[path = "transition_capture.rs"]
-mod transition_capture;
 #[path = "update.rs"]
 mod update;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
+#[path = "desktop/local_state.rs"]
+mod local_state;
 
 use about_dialog::about_dialog_layer;
 use assets::UiIcon as HugeIcon;
@@ -65,19 +55,18 @@ use axiusflow_chart_integration::{
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
-    ChartState, EngineSeriesRequest, MarketDataWorker, MarketPublicationGeneration,
-    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
-    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
-    UiDiagnosticsFeedback,
+    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
+    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
 use axiusflow_engine_protocol::{
-    ConsumerResourceClass, EngineLifetimeMode, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    ResourceMode, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceTabState,
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
+use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
 #[cfg(test)]
@@ -127,7 +116,6 @@ use native_ui::{
     loader::Loader,
     menu::{MenuRow, compact_menu_panel, menu_separator},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
-    toggle::Toggle,
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
@@ -294,12 +282,7 @@ const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const CHROME_OVERLAY_TRANSITION_OFFSET: f32 = 5.0;
 
 mod lifecycle;
-#[cfg(test)]
-use lifecycle::finish_desktop_shutdown;
-use lifecycle::{
-    DesktopLifecycle, DesktopLifetimeMode, LifecyclePreferenceRequest, LifecyclePresentation,
-    LifecycleToggle,
-};
+use lifecycle::DesktopLifecycle;
 
 mod workspace_persistence;
 use workspace_persistence::WorkspaceLayoutPersistence;
@@ -473,15 +456,6 @@ fn default_rithmic_contract_index(results: &[ProviderInstrumentSummary]) -> Opti
         .map(|(index, _)| index)
 }
 
-fn reconnect_contract_index(
-    results: &[ProviderInstrumentSummary],
-    target: &RithmicReconnectTarget,
-) -> Option<usize> {
-    results
-        .iter()
-        .position(|result| result.symbol == target.symbol && result.exchange == target.exchange)
-}
-
 #[cfg(feature = "diagnostics")]
 const FOREGROUND_INTERACTION_SAMPLE_CAPACITY: usize = 128;
 
@@ -549,9 +523,7 @@ struct WorkspaceSurface {
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
     market_state: WorkspaceMarketState,
-    series_browser: rithmic_history::RithmicSeriesBrowser,
     series_message: String,
-    rithmic_reconnect: RithmicReconnectState,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
@@ -778,23 +750,8 @@ const fn should_finish_chrome_overlay_close(
     matches!(phase, ChromeOverlayPhase::Closing) && current_generation == closing_generation
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RithmicReconnectTarget {
-    symbol: String,
-    exchange: String,
-    series: rithmic_history::RithmicSeries,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-enum RithmicReconnectState {
-    #[default]
-    Idle,
-    AwaitingSearch(RithmicReconnectTarget),
-    SearchInFlight(RithmicReconnectTarget),
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RithmicSessionRetirement {
+enum ProviderConnectionPresentation {
     None,
     Offline,
     Recovering,
@@ -822,7 +779,7 @@ impl DrawingToolbarVisibility {
     }
 }
 
-impl RithmicSessionRetirement {
+impl ProviderConnectionPresentation {
     const fn from_connection(state: FeedConnectionState) -> Self {
         match state {
             FeedConnectionState::Disconnected => Self::Offline,
@@ -840,15 +797,6 @@ impl RithmicSessionRetirement {
             Self::Recovering if has_market_data => Some(ChartState::Recovering),
             Self::Stopped => Some(ChartState::Error),
             Self::None | Self::Offline | Self::Recovering => None,
-        }
-    }
-}
-
-impl RithmicReconnectState {
-    fn target(&self) -> Option<&RithmicReconnectTarget> {
-        match self {
-            Self::AwaitingSearch(target) | Self::SearchInFlight(target) => Some(target),
-            Self::Idle => None,
         }
     }
 }
@@ -943,33 +891,17 @@ struct InstrumentMenuEntry {
     selection: InstrumentMenuSelection,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RithmicReadyAction {
-    None,
-    Reconnect(String),
-    Autoload,
-}
-
-fn rithmic_ready_action(
+fn should_autoload_rithmic_catalog(
     state: FeedConnectionState,
     message: &str,
-    reconnect: &RithmicReconnectState,
     autoload_started: bool,
-) -> RithmicReadyAction {
+) -> bool {
     if state != FeedConnectionState::Authenticating
-        || !message.contains(crate::desktop::rithmic_engine_client::RITHMIC_CATALOG_READY_MESSAGE)
+        || !message.contains(crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE)
     {
-        return RithmicReadyAction::None;
+        return false;
     }
-    match reconnect {
-        RithmicReconnectState::AwaitingSearch(target) => {
-            RithmicReadyAction::Reconnect(target.symbol.clone())
-        }
-        RithmicReconnectState::Idle if !autoload_started => RithmicReadyAction::Autoload,
-        RithmicReconnectState::Idle | RithmicReconnectState::SearchInFlight(_) => {
-            RithmicReadyAction::None
-        }
-    }
+    !autoload_started
 }
 
 struct HeaderState {
@@ -980,7 +912,6 @@ struct HeaderState {
     chart_type: ChartType,
     chart_type_label: String,
     instruments: Vec<InstrumentMenuEntry>,
-    selected_series: Option<rithmic_history::RithmicSeries>,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
     indicator_message: Option<String>,
@@ -1402,47 +1333,33 @@ fn run_desktop_readiness_command(
     if arguments.next().is_some() {
         return Err(usage.to_string());
     }
-    let engine = axiusflow_local_engine_client::sibling_engine_executable()?;
-    let mut client = axiusflow_local_engine_client::connect_or_start_engine(&engine)?;
-    let ready = client.ready().clone();
-    let workspace = client.restore_workspace()?;
-    client.attach_client(u64::from(std::process::id()))?;
-    let status = client.engine_status()?;
-    if status.process_id == 0
-        || status.connected_desktop_clients == 0
-        || status.providers.is_empty()
-        || axiusflow_engine_protocol::EngineShutdownState::try_from(status.shutdown_state)
-            != Ok(axiusflow_engine_protocol::EngineShutdownState::Running)
-    {
+    let workspace = local_state::load_workspace();
+    let market = axiusflow_market_runtime::MarketService::start()?;
+    let status = market.status()?;
+    if status.providers.is_empty() {
         return Err("candidate market service did not reach readiness".to_string());
     }
-    let account = axiusflow_desktop::account::fetch_account_status(&mut client)?;
+    let account_service = axiusflow_account_runtime::AccountService::new(
+        axiusflow_account_runtime::AccountServiceConfig::from_environment(),
+    );
+    let account = axiusflow_desktop::account::fetch_account_status(&account_service)?;
     axiusflow_desktop::account::verify_account_readiness(&account)?;
-    // The probe shuts the engine down at the end, so it must never run
-    // against a live session: this attach is counted, so more than one
-    // client means another desktop is using the resident engine.
-    if status.connected_desktop_clients > 1 {
-        return Err("candidate readiness probe refused: another desktop session is attached to the resident engine".to_string());
-    }
     let release = axiusflow_platform_runtime::current_release_identity();
-    if ready.release_identity != release.release_identity
-        || ready.install_generation != release.install_generation
-    {
-        return Err("candidate desktop and engine release identities do not match".to_string());
-    }
     let report = LifecycleReadinessReport {
         schema_version: 1,
         release_identity: release.release_identity,
         install_generation: release.install_generation,
-        engine_process_id: status.process_id,
+        engine_process_id: std::process::id(),
         workspace_revision: workspace.workspace_revision,
         provider_count: status.providers.len(),
+        // Legacy launcher field names. There is no IPC in the desktop runtime;
+        // true now means the direct in-process boundary initialized correctly.
         authenticated_ipc_ready: true,
         workspace_restored: true,
         market_service_ready: true,
         account_ipc_ready: true,
     };
-    client.shutdown_engine()?;
+    market.shutdown(std::time::Duration::from_secs(2))?;
     let mut encoded = serde_json::to_vec(&report)
         .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
     encoded.push(b'\n');
@@ -2123,9 +2040,6 @@ struct ConfiguredDesktop {
     workspace_panes: Vec<engine_market_worker::WorkspaceMarketPane>,
     restored_workspace: WorkspaceState,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
-    lifetime_mode: DesktopLifetimeMode,
-    autostart_enabled: bool,
-    markets_live_permitted: bool,
     layout: DesktopLayout,
     chart_chrome: chart_chrome::ChartChromePreferences,
 }
@@ -2137,47 +2051,18 @@ enum DesktopLayout {
     WorkspaceTabs,
 }
 
-fn split_lifetime_mode(
-    first: Option<std::ffi::OsString>,
-    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
-) -> (Option<DesktopLifetimeMode>, Option<std::ffi::OsString>) {
-    if first.as_deref() == Some(std::ffi::OsStr::new("--exit-with-desktop")) {
-        (Some(DesktopLifetimeMode::ExitWithDesktop), arguments.next())
-    } else if first.as_deref() == Some(std::ffi::OsStr::new("--keep-markets-live")) {
-        (Some(DesktopLifetimeMode::KeepMarketsLive), arguments.next())
-    } else {
-        (None, first)
-    }
-}
-
 struct ConfiguredLifecycle {
-    mode: DesktopLifetimeMode,
-    autostart_enabled: bool,
-    markets_live_permitted: bool,
     workspace: WorkspaceState,
 }
 
-fn configure_engine_lifecycle(
-    launch_override: Option<DesktopLifetimeMode>,
-) -> Result<ConfiguredLifecycle, String> {
-    let executable = axiusflow_local_engine_client::sibling_engine_executable()?;
-    let mut client = axiusflow_local_engine_client::connect_or_start_engine(&executable)?;
-    let workspace = client.restore_workspace()?;
-    let persisted = DesktopLifetimeMode::from_workspace(&workspace)?;
-    let mode = launch_override.unwrap_or(persisted);
-    client.set_engine_resource_mode(mode.engine_resource_mode())?;
-    Ok(ConfiguredLifecycle {
-        mode,
-        autostart_enabled: workspace.autostart_enabled,
-        markets_live_permitted: workspace.markets_live_permitted,
-        workspace,
-    })
+fn configure_desktop_state() -> Result<ConfiguredLifecycle, String> {
+    let workspace = local_state::load_workspace();
+    Ok(ConfiguredLifecycle { workspace })
 }
 
 fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let mut arguments = std::env::args_os().skip(1);
-    let first = arguments.next();
-    let (lifetime_mode, command) = split_lifetime_mode(first, &mut arguments);
+    let command = arguments.next();
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
     let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
@@ -2195,25 +2080,23 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
             return Ok(None);
         }
-        #[cfg(feature = "diagnostics")]
-        if argument == "--capture-native-transitions" {
-            transition_capture::run_transition_capture_command(arguments)
-                .expect("transition capture completes");
-            return Ok(None);
-        }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
                 std::process::exit(2);
             }
-            let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
-            (vec![rithmic_engine_client::start()?], Vec::new(), lifecycle)
+            let lifecycle = configure_desktop_state()?;
+            (
+                vec![engine_market_worker::start_rithmic_catalog()?],
+                Vec::new(),
+                lifecycle,
+            )
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
                 std::process::exit(2);
             }
-            let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
+            let lifecycle = configure_desktop_state()?;
             (
                 engine_market_worker::start_multi_chart()?,
                 Vec::new(),
@@ -2224,7 +2107,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
                 eprintln!("usage: axiusflow_desktop --workspace-tabs");
                 std::process::exit(2);
             }
-            let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
+            let lifecycle = configure_desktop_state()?;
             layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
             workspace_factory = Some(group.factory);
@@ -2234,7 +2117,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             std::process::exit(2);
         }
     } else {
-        let lifecycle = configure_engine_lifecycle(lifetime_mode)?;
+        let lifecycle = configure_desktop_state()?;
         let (startup, worker, factory) = engine_market_worker::start()?;
         workspace_factory = Some(factory);
         (vec![(startup, worker)], Vec::new(), lifecycle)
@@ -2244,9 +2127,6 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         workspace_panes,
         restored_workspace: lifecycle.workspace.clone(),
         workspace_factory,
-        lifetime_mode: lifecycle.mode,
-        autostart_enabled: lifecycle.autostart_enabled,
-        markets_live_permitted: lifecycle.markets_live_permitted,
         layout,
         chart_chrome: chart_chrome::load_chart_chrome_preferences(),
     }))
@@ -2259,7 +2139,7 @@ pub(super) fn run() {
         eprintln!("Axiusflow launcher promotion deferred: {error}");
     }
     let account =
-        match axiusflow_desktop::account::DesktopAccount::install(u64::from(std::process::id())) {
+        match axiusflow_desktop::account::DesktopAccount::install() {
             Ok(account) => account,
             Err(error) => {
                 eprintln!("Axiusflow account client could not start: {error}");
@@ -2279,17 +2159,7 @@ pub(super) fn run() {
             std::process::exit(1);
         }
     };
-    let lifecycle = match DesktopLifecycle::new(
-        configured.lifetime_mode,
-        configured.autostart_enabled,
-        configured.markets_live_permitted,
-    ) {
-        Ok(lifecycle) => lifecycle,
-        Err(error) => {
-            eprintln!("Axiusflow lifecycle client could not start: {error}");
-            std::process::exit(1);
-        }
-    };
+    let lifecycle = DesktopLifecycle::new();
     run_desktop(configured, lifecycle);
 }
 
