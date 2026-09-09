@@ -18,6 +18,9 @@ pub const MAXIMUM_CODE_BYTES: usize = 2048;
 /// Maximum OAuth state length accepted from the callback query.
 pub const MAXIMUM_STATE_BYTES: usize = 256;
 
+const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
+const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var t=q.matches?'dark':'light';document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
+
 /// One bound loopback listener awaiting a single callback.
 pub struct LoopbackListener {
     listener: TcpListener,
@@ -167,11 +170,17 @@ fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) {
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+fn browser_platform_styles() -> &'static str {
+    PLATFORM_STYLESHEET
+        .find(":root,")
+        .map_or(PLATFORM_STYLESHEET, |start| &PLATFORM_STYLESHEET[start..])
 }
 
 fn outcome_page(success: bool, detail: &str) -> String {
@@ -196,9 +205,11 @@ fn outcome_page(success: bool, detail: &str) -> String {
         format!("<p class=\"detail\">{}</p>", escape_html(detail))
     };
     let state = if success { "success" } else { "failure" };
+    let platform = browser_platform_styles();
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>{title}</title><style>
-*{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}}body{{min-height:100vh;display:grid;place-items:center;background:#090b0f;color:#f4f5f7;padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{margin-bottom:40px;font-size:12px;font-weight:700;letter-spacing:.22em;color:#9299a6}}.mark{{width:72px;height:72px;margin:0 auto 24px;display:grid;place-items:center;border-radius:50%;font-size:30px;font-weight:600;animation:arrive .42s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{background:#163a2b;color:#70e0a7;box-shadow:0 0 0 1px #285940}}.failure .mark{{background:#3a1b1d;color:#ff9a9f;box-shadow:0 0 0 1px #633034}}svg{{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .45s .24s ease-out forwards}}h1{{margin:0 0 10px;font-size:26px;letter-spacing:-.03em}}p{{margin:0;color:#9ea5b1;font-size:14px;line-height:1.6}}.detail{{margin:16px auto 0;max-width:360px;color:#ff9a9f;font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.7)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,svg path{{animation:none}}svg path{{stroke-dashoffset:0}}}}
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>{title}</title>{SYSTEM_THEME_BOOTSTRAP}<style>
+{platform}
+html,body{{margin:0;min-height:100%}}body{{min-height:100vh;display:grid;place-items:center;background:var(--surface);color:var(--text-primary);padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{margin-bottom:38px;color:var(--text-secondary);font-size:11px;font-weight:700;letter-spacing:.2em}}.mark{{width:64px;height:64px;margin:0 auto 24px;display:grid;place-items:center;border:1px solid var(--border);border-radius:var(--radius-large);background:var(--surface-secondary);font-size:27px;font-weight:700;animation:arrive .34s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{color:var(--bullish)}}.failure .mark{{color:var(--bearish)}}svg{{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .4s .18s ease-out forwards}}h1{{margin:0 0 9px;font-size:24px;font-weight:700;letter-spacing:-.025em}}p{{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.55}}.detail{{margin:16px auto 0;max-width:360px;color:var(--bearish);font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,svg path{{animation:none}}svg path{{stroke-dashoffset:0}}}}
 </style></head><body><main class="{state}"><div class="brand">AXIUSFLOW</div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
     )
 }
@@ -371,7 +382,13 @@ mod tests {
             response.contains("You’re signed in") && response.contains("@keyframes draw"),
             "success page must reflect completion: {response}"
         );
+        assert!(response.contains("--surface: #ffffff"));
+        assert!(response.contains("--surface: #141414"));
+        assert!(response.contains("var(--bullish)"));
+        assert!(!response.contains("#090b0f"));
+        assert!(!response.contains("font-family:Inter"));
         assert!(response.contains("Content-Type: text/html; charset=utf-8"));
+        assert!(response.contains("script-src 'unsafe-inline'"));
     }
 
     #[test]
@@ -419,6 +436,8 @@ mod tests {
     fn failure_page_escapes_detail() {
         let page = outcome_page(false, "failed <script>alert('x')</script>");
         assert!(page.contains("&lt;script&gt;"));
-        assert!(!page.contains("<script>"));
+        assert!(!page.contains("<script>alert('x')</script>"));
+        assert!(page.contains("data-theme"));
+        assert!(page.contains("var(--bearish)"));
     }
 }
