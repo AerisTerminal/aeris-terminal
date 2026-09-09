@@ -193,7 +193,7 @@ fn url_encode(value: &str) -> String {
 }
 
 /// Verified token outcome for one login transaction. Access material stays
-/// in engine memory and never crosses IPC or enters logs.
+/// in engine memory and never leaves the account-runtime ownership boundary or enters logs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedTokens {
     /// OIDC subject linked to the canonical account.
@@ -413,7 +413,7 @@ pub fn link_subject(
     ))
 }
 
-/// Clips server profile text to the IPC bound on a character boundary.
+/// Clips server profile text to the native contract bound on a character boundary.
 /// Overlong values truncate; they never fail the link.
 fn clip_profile(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {

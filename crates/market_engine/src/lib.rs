@@ -727,35 +727,6 @@ impl MarketEngine {
         }
     }
 
-    /// Installs validated local history before a provider session is available.
-    ///
-    /// Retained data keeps its historical provenance generation and remains usable
-    /// while a fresh provider session is established and covering repair runs.
-    ///
-    /// # Errors
-    /// Returns an error for an unknown provider, invalid data, or configured capacity exhaustion.
-    pub fn install_retained_history(
-        &mut self,
-        provider_generation: ProviderGeneration,
-        series: &BarSeriesKey,
-        price_scale: u8,
-        quantity_scale: u8,
-        bars: Vec<MarketBar>,
-    ) -> Result<Vec<ConsumerPublication>, EngineError> {
-        if self.providers.status(&series.provider_id).is_none() {
-            return Err(EngineError::UnknownProvider(series.provider_id.clone()));
-        }
-        let bars = bars.into_boxed_slice();
-        let snapshot = self.series.install(
-            series.clone(),
-            provider_generation,
-            price_scale,
-            quantity_scale,
-            &bars,
-        )?;
-        self.publish_snapshot(series, &snapshot)
-    }
-
     /// Installs one bounded live covering image and publishes it to matching demand.
     ///
     /// The newest forming bar may be revised within the same provider generation;

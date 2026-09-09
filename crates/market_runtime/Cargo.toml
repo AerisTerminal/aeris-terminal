@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-axiusflow_engine_protocol = { path = "../engine_protocol" }
+axiusflow_contracts = { path = "../contracts" }
 axiusflow_market_data = { path = "../domain/market_data" }
 axiusflow_market_engine = { path = "../market_engine" }
 axiusflow_platform_runtime = { path = "../platform_runtime" }

@@ -311,7 +311,7 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_catalog_search(
         &mut self,
-        result: axiusflow_engine_protocol::ProviderInstrumentSearchResult,
+        result: axiusflow_contracts::ProviderInstrumentSearchResult,
     ) {
         if result.consumer_id == 0 {
             return;
@@ -361,7 +361,7 @@ impl Coordinator<'_> {
                 provider,
                 provider_generation: Some(instrument.session_generation),
                 command_generation,
-                reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
+                reason: ProviderCatalogRejectionReason::SubscriptionRejected,
             }),
         };
         if let Some(events) = self.events.get_mut(&id) {

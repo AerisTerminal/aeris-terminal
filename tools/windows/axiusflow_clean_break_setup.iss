@@ -49,7 +49,7 @@ Type: filesandordirs; Name: "{app}\*"
 Source: "{#DesktopPath}"; DestDir: "{app}"; DestName: "axiusflow_desktop.exe"; Flags: ignoreversion
 
 [Registry]
-; Retire the legacy resident-engine autostart left by IPC-era installers.
+; Retire the obsolete market-process autostart left by legacy installers.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Axiusflow Engine"; Flags: deletevalue
 
 [Icons]

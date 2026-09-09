@@ -1,5 +1,8 @@
 //! Desktop-side bridge from the in-process market runtime to GPUI chart workers.
 
+#[cfg(test)]
+use std::time::Instant;
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
@@ -8,20 +11,20 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axiusflow_application::{
     MarketEventProvenance, Provenanced, ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot,
     ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
 };
-use axiusflow_engine_protocol::{
+use axiusflow_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
     ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
     SeriesCadence, SeriesKey, SeriesLoadState, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
-use axiusflow_engine_protocol::{WorkspacePaneState, WorkspaceTabState};
+use axiusflow_contracts::{WorkspacePaneState, WorkspaceTabState};
 use axiusflow_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -44,7 +47,6 @@ use axiusflow_desktop::market_worker::{
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
-const STARTUP_CATALOG_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(12);
 const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
@@ -76,11 +78,17 @@ pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
     }
 }
 
+enum StartupResolution {
+    Searching(InstallProviderInstrument),
+    Selecting(InstallProviderInstrument),
+}
+
 struct EndpointRecord {
     workspace_id: u64,
     product: InstallProviderInstrument,
     interval: ChartInterval,
     catalog_only: bool,
+    startup_resolution: Option<StartupResolution>,
     endpoint: WorkerEndpoint,
 }
 
@@ -360,8 +368,7 @@ struct WorkerEndpoint {
     commands: mpsc::Receiver<MarketWorkerCommand>,
     pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
     pending_depth_visible: Arc<Mutex<Option<bool>>>,
-    pending_provider_selection:
-        Arc<Mutex<Option<axiusflow_engine_protocol::SelectProviderInstrument>>>,
+    pending_provider_selection: Arc<Mutex<Option<axiusflow_contracts::SelectProviderInstrument>>>,
     pending_engine_selection:
         Arc<Mutex<Option<Box<axiusflow_desktop::market_worker::EngineSelectionRequest>>>>,
     shutdown: mpsc::SyncSender<()>,
@@ -473,6 +480,7 @@ fn worker_endpoint(
         product,
         interval,
         catalog_only: false,
+        startup_resolution: None,
         endpoint: WorkerEndpoint {
             consumer_id,
             messages: message_tx,
@@ -602,10 +610,6 @@ fn demand_error(error: &MarketDemandError) -> String {
         EngineFaultCode::Permanent => "permanent",
         EngineFaultCode::CorruptLocalState => "corrupt local state",
         EngineFaultCode::Unauthenticated => "unauthenticated",
-        EngineFaultCode::VersionMismatch => "version mismatch",
-        EngineFaultCode::Backpressure => "backpressure",
-        EngineFaultCode::MalformedMessage => "malformed message",
-        EngineFaultCode::OversizedFrame => "oversized frame",
     };
     let stage = failure_stage_label(error.stage);
     let elapsed = error
@@ -651,7 +655,8 @@ use runtime::{retire_endpoint, run_workers};
 #[path = "engine_market_worker/selection_commands.rs"]
 mod selection_commands;
 use selection_commands::{
-    initialize_catalog_endpoint, initialize_endpoint, process_command, set_resource_class,
+    handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
+    process_command, set_resource_class,
 };
 
 #[path = "engine_market_worker/publications.rs"]
@@ -668,7 +673,7 @@ use publications::{
 mod tests {
     use super::*;
     use axiusflow_chart_integration::{NucleusChartTheme, NucleusChartView};
-    use axiusflow_engine_protocol::{
+    use axiusflow_contracts::{
         ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
     use axiusflow_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
@@ -1084,7 +1089,7 @@ mod tests {
             .collect()
     }
 
-    /// The engine says outright that a series serving retained local history is
+    /// The engine says outright that a series serving retained canonical history is
     /// not ready. Swallowing that is what showed a stale chart as current.
     #[test]
     fn retained_partial_history_presents_as_loading_until_the_series_goes_live() {
@@ -1102,7 +1107,7 @@ mod tests {
         apply_series_state(
             state(
                 SeriesLoadState::Partial,
-                Some("Showing retained local history while provider coverage repairs"),
+                Some("Showing retained canonical history while provider coverage repairs"),
             ),
             "rithmic",
             true,
@@ -1114,7 +1119,7 @@ mod tests {
             drained_states(&receiver),
             vec![(
                 ChartState::Loading,
-                "Showing retained local history while provider coverage repairs".to_string()
+                "Showing retained canonical history while provider coverage repairs".to_string()
             )],
             "retained history has to read as loading, with the engine's own reason"
         );
@@ -1649,7 +1654,7 @@ mod tests {
         apply_provider_state(
             &ProviderState {
                 provider: "rithmic".to_string(),
-                state: ProviderConnectionState::Recovering as i32,
+                state: ProviderConnectionState::Recovering,
                 generation: 2,
                 detail: None,
                 transport_rtt_nanos: None,
@@ -1678,7 +1683,7 @@ mod tests {
         apply_pushed_event(
             MarketRuntimeEvent::ProviderState(ProviderState {
                 provider: product.provider.clone(),
-                state: ProviderConnectionState::Online as i32,
+                state: ProviderConnectionState::Online,
                 generation: product.session_generation + 1,
                 detail: None,
                 transport_rtt_nanos: None,
@@ -1709,7 +1714,7 @@ mod tests {
         apply_provider_state(
             &ProviderState {
                 provider: "hyperliquid".to_string(),
-                state: ProviderConnectionState::Online as i32,
+                state: ProviderConnectionState::Online,
                 generation: 4,
                 detail: None,
                 transport_rtt_nanos: Some(12_500_000),
@@ -1797,7 +1802,7 @@ mod tests {
         apply_provider_state(
             &ProviderState {
                 provider: "rithmic".to_string(),
-                state: ProviderConnectionState::Connecting as i32,
+                state: ProviderConnectionState::Connecting,
                 generation: 1,
                 detail: None,
                 transport_rtt_nanos: None,
@@ -2299,7 +2304,7 @@ mod tests {
             apply_provider_state(
                 &ProviderState {
                     provider: "hyperliquid".to_string(),
-                    state: ProviderConnectionState::Online as i32,
+                    state: ProviderConnectionState::Online,
                     generation: 1,
                     detail: None,
                     transport_rtt_nanos: Some(12_000_000),
@@ -2315,7 +2320,7 @@ mod tests {
             apply_provider_state(
                 &ProviderState {
                     provider: "rithmic".to_string(),
-                    state: ProviderConnectionState::Online as i32,
+                    state: ProviderConnectionState::Online,
                     generation: 1,
                     detail: None,
                     transport_rtt_nanos: Some(12_000_000),

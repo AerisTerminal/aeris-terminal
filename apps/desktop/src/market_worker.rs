@@ -10,7 +10,7 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
-use axiusflow_engine_protocol::{
+use axiusflow_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
 };
@@ -178,14 +178,14 @@ pub fn classify_provider_catalog_event(
 }
 
 #[must_use]
-pub const fn provider_catalog_command(reason: i32) -> ProviderCatalogCommand {
-    if reason == ProviderCatalogRejectionReason::SearchRejected as i32
-        || reason == ProviderCatalogRejectionReason::SupersededSearch as i32
-        || reason == ProviderCatalogRejectionReason::SearchTimedOut as i32
-    {
-        ProviderCatalogCommand::Search
-    } else {
-        ProviderCatalogCommand::Selection
+pub const fn provider_catalog_command(
+    reason: ProviderCatalogRejectionReason,
+) -> ProviderCatalogCommand {
+    match reason {
+        ProviderCatalogRejectionReason::SearchRejected
+        | ProviderCatalogRejectionReason::SupersededSearch
+        | ProviderCatalogRejectionReason::SearchTimedOut => ProviderCatalogCommand::Search,
+        _ => ProviderCatalogCommand::Selection,
     }
 }
 
@@ -1307,7 +1307,7 @@ mod tests {
     use axiusflow_application::{
         Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
     };
-    use axiusflow_engine_protocol::{
+    use axiusflow_contracts::{
         InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
         SearchProviderInstruments, SelectProviderInstrument,
     };
@@ -2436,7 +2436,7 @@ mod tests {
                             provider: "rithmic".to_string(),
                             provider_generation: Some(generation.get()),
                             command_generation: 1,
-                            reason: ProviderCatalogRejectionReason::SupersededSearch as i32,
+                            reason: ProviderCatalogRejectionReason::SupersededSearch,
                         },
                         command: ProviderCatalogCommand::Search,
                     },
@@ -2453,7 +2453,7 @@ mod tests {
                             provider: "rithmic".to_string(),
                             provider_generation: Some(generation.get()),
                             command_generation: latest_generation.get() as u64,
-                            reason: ProviderCatalogRejectionReason::InstrumentUnavailable as i32,
+                            reason: ProviderCatalogRejectionReason::InstrumentUnavailable,
                         },
                         command: ProviderCatalogCommand::Selection,
                     },
@@ -2486,7 +2486,7 @@ mod tests {
                 )
             ] if *first_generation == 1
                 && *command_generation == latest_generation.get() as u64
-                && *reason == ProviderCatalogRejectionReason::InstrumentUnavailable as i32
+                && *reason == ProviderCatalogRejectionReason::InstrumentUnavailable
         ));
 
         assert!(
@@ -2506,7 +2506,7 @@ mod tests {
                             provider: "rithmic".to_string(),
                             provider_generation: Some(generation.get()),
                             command_generation: latest_generation.get() as u64,
-                            reason: ProviderCatalogRejectionReason::SubscriptionRejected as i32,
+                            reason: ProviderCatalogRejectionReason::SubscriptionRejected,
                         },
                         command: ProviderCatalogCommand::Selection,
                     },

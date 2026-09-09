@@ -17,7 +17,7 @@ axiusflow_design_system = { path = "../../crates/ui/design_system" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }
 axiusflow_market_runtime = { path = "../../crates/market_runtime" }
-axiusflow_engine_protocol = { path = "../../crates/engine_protocol" }
+axiusflow_contracts = { path = "../../crates/contracts" }
 axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
 getrandom.workspace = true
@@ -30,6 +30,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 reqwest_client.workspace = true
 num-traits = "=0.2.19"
+prost.workspace = true
 unicode-segmentation.workspace = true
 
 [build-dependencies]

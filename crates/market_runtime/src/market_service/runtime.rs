@@ -737,7 +737,7 @@ impl MarketService {
     /// Starts the desktop-owned in-process market runtime.
     ///
     /// Market state is intentionally ephemeral. History is requested from the
-    /// provider when demanded; no local market-history store or resident hot set
+    /// provider when demanded; no local market-history store or persisted hot set
     /// participates in startup.
     ///
     /// # Errors
@@ -855,7 +855,7 @@ impl MarketService {
         }
     }
 
-    /// Attaches a client identity to resident market state.
+    /// Attaches a client identity to in-process market state.
     ///
     /// # Errors
     /// Returns an error for zero identity or coordinator failure.

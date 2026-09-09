@@ -1,4 +1,4 @@
-use axiusflow_engine_protocol::ProviderInstrumentSummary;
+use axiusflow_contracts::ProviderInstrumentSummary;
 use axiusflow_observability::{FeedConnectionState, FeedIdentity};
 use std::num::NonZeroUsize;
 

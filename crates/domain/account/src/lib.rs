@@ -2,7 +2,7 @@
 //!
 //! Pure provider-neutral contracts for phase 5 authentication. No HTTP, no
 //! GPUI, no vault, no Better Auth, no billing SDK, no provider wire types.
-//! The resident engine owns session state; the desktop renders sanitized
+//! The in-process account runtime owns session state; the desktop renders sanitized
 //! views; the cloud control plane owns identity truth.
 
 use core::fmt;
@@ -60,7 +60,7 @@ impl AccountId {
 }
 
 /// Internal subscription plan. Vendor product/price IDs map to these values
-/// server-side and never cross native IPC.
+/// server-side and never cross the sanitized native contract boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PlanId {
     Starter,

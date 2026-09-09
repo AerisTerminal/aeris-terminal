@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn order_book_publication_preserves_canonical_depth_beyond_the_old_ui_cutoff() {
         const LEVELS: usize = 64;
-        let instrument = axiusflow_engine_protocol::InstallProviderInstrument {
+        let instrument = axiusflow_contracts::InstallProviderInstrument {
             provider: "rithmic".to_string(),
             session_generation: 1,
             selection_generation: 1,

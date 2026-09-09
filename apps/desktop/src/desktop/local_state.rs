@@ -1,13 +1,32 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use axiusflow_engine_protocol::{
-    Envelope, EnvelopeDecoder, InstallProviderInstrument, PROTOCOL_VERSION, SeriesCadence,
-    SeriesKey, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceTabState, encode_envelope, envelope,
+use axiusflow_contracts::{
+    InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
+use prost::Message as _;
 
-const WORKSPACE_FILE: &str = "workspace-state.frame";
+const WORKSPACE_FILE: &str = "workspace-state.pb";
+const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
+const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
+const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 3 * 1_048_576;
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct LegacyWorkspaceEnvelope {
+    #[prost(uint32, tag = "1")]
+    protocol_version: u32,
+    #[prost(oneof = "legacy_workspace_envelope::Payload", tags = "5")]
+    payload: Option<legacy_workspace_envelope::Payload>,
+}
+
+mod legacy_workspace_envelope {
+    #[derive(Clone, PartialEq, prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag = "5")]
+        WorkspaceState(super::WorkspaceState),
+    }
+}
 
 pub(super) fn load_workspace() -> WorkspaceState {
     load_workspace_result().unwrap_or_else(|error| {
@@ -18,29 +37,77 @@ pub(super) fn load_workspace() -> WorkspaceState {
 
 fn load_workspace_result() -> Result<WorkspaceState, String> {
     let path = workspace_path()?;
-    load_workspace_from_path(&path)
+    if path.is_file() {
+        return load_workspace_from_path(&path);
+    }
+    let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
+    if !legacy.is_file() {
+        return Ok(default_workspace());
+    }
+    let workspace = load_legacy_workspace_from_path(&legacy)?;
+    match save_workspace_to_path(&workspace, &path) {
+        Ok(()) => {
+            if let Err(error) = fs::remove_file(&legacy)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!("Axiusflow legacy workspace cleanup deferred: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "Axiusflow workspace migration could not persist the current format: {error}"
+            );
+        }
+    }
+    Ok(workspace)
+}
+
+fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let length = usize::try_from(metadata.len())
+        .map_err(|_| "workspace file length exceeds platform capacity".to_string())?;
+    if length == 0 || length > MAXIMUM_WORKSPACE_FILE_BYTES + 4 {
+        return Err("workspace file exceeds the local persistence bound".to_string());
+    }
+    fs::read(path).map_err(|error| error.to_string())
 }
 
 fn load_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(default_workspace());
+    let bytes = read_bounded(path)?;
+    if bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
+        return Err("workspace file exceeds the local persistence bound".to_string());
+    }
+    WorkspaceState::decode(bytes.as_slice())
+        .map(sanitize_workspace)
+        .map_err(|error| error.to_string())
+}
+
+fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
+    let bytes = read_bounded(path)?;
+    if bytes.len() < 5 {
+        return Err("legacy workspace frame is truncated".to_string());
+    }
+    let declared = u32::from_be_bytes(
+        bytes[..4]
+            .try_into()
+            .map_err(|_| "legacy workspace frame header is invalid".to_string())?,
+    );
+    let declared = usize::try_from(declared)
+        .map_err(|_| "legacy workspace frame length is invalid".to_string())?;
+    if declared == 0 || declared > MAXIMUM_WORKSPACE_FILE_BYTES || declared != bytes.len() - 4 {
+        return Err("legacy workspace frame length is invalid".to_string());
+    }
+    let envelope =
+        LegacyWorkspaceEnvelope::decode(&bytes[4..]).map_err(|error| error.to_string())?;
+    if envelope.protocol_version != LEGACY_WORKSPACE_PROTOCOL_VERSION {
+        return Err("legacy workspace protocol version is unsupported".to_string());
+    }
+    match envelope.payload {
+        Some(legacy_workspace_envelope::Payload::WorkspaceState(workspace)) => {
+            Ok(sanitize_workspace(workspace))
         }
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut decoder = EnvelopeDecoder::try_new().map_err(|error| error.to_string())?;
-    let envelopes = decoder.push(&bytes).map_err(|error| error.to_string())?;
-    let Some(workspace) = envelopes
-        .into_iter()
-        .find_map(|envelope| match envelope.payload {
-            Some(envelope::Payload::WorkspaceState(workspace)) => Some(workspace),
-            _ => None,
-        })
-    else {
-        return Err("workspace file does not contain workspace state".to_string());
-    };
-    Ok(sanitize_workspace(workspace))
+        None => Err("legacy workspace file does not contain workspace state".to_string()),
+    }
 }
 
 pub(super) fn save_workspace(workspace: &WorkspaceState) -> Result<(), String> {
@@ -54,12 +121,11 @@ fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(),
         .parent()
         .ok_or_else(|| "workspace directory is unavailable".to_string())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let bytes = encode_envelope(&Envelope {
-        protocol_version: PROTOCOL_VERSION,
-        payload: Some(envelope::Payload::WorkspaceState(workspace)),
-    })
-    .map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("frame.tmp");
+    let bytes = workspace.encode_to_vec();
+    if bytes.is_empty() || bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
+        return Err("workspace file exceeds the local persistence bound".to_string());
+    }
+    let temporary = path.with_extension("pb.tmp");
     fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
     if path.exists() {
         fs::remove_file(path).map_err(|error| error.to_string())?;
@@ -85,7 +151,6 @@ fn workspace_path() -> Result<PathBuf, String> {
         .map(|root| root.join(WORKSPACE_FILE))
         .map_err(|error| error.to_string())
 }
-
 pub(super) fn default_workspace() -> WorkspaceState {
     let instrument = InstallProviderInstrument {
         provider: "hyperliquid".to_string(),
@@ -251,6 +316,31 @@ mod tests {
         assert_eq!(restored, workspace);
 
         let parent = path.parent().expect("temporary workspace parent");
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+    #[test]
+    fn legacy_framed_workspace_remains_readable_without_a_transport_runtime() {
+        let current = temporary_workspace_path();
+        let parent = current.parent().expect("temporary workspace parent");
+        std::fs::create_dir_all(parent).expect("temporary workspace directory");
+        let legacy_path = parent.join(LEGACY_WORKSPACE_FILE);
+        let workspace = default_workspace();
+        let envelope = LegacyWorkspaceEnvelope {
+            protocol_version: LEGACY_WORKSPACE_PROTOCOL_VERSION,
+            payload: Some(legacy_workspace_envelope::Payload::WorkspaceState(
+                workspace.clone(),
+            )),
+        };
+        let payload = envelope.encode_to_vec();
+        let length = u32::try_from(payload.len()).expect("legacy payload fits");
+        let mut framed = length.to_be_bytes().to_vec();
+        framed.extend_from_slice(&payload);
+        std::fs::write(&legacy_path, framed).expect("legacy workspace writes");
+
+        let restored =
+            load_legacy_workspace_from_path(&legacy_path).expect("legacy workspace migrates");
+        assert_eq!(restored, workspace);
+
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
     }
 }

@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_engine_protocol::InstallProviderInstrument;
+use axiusflow_contracts::InstallProviderInstrument;
 use axiusflow_hyperliquid_market_adapter::{
     CandleSnapshotRequest, HyperliquidHttpConfig, NORMALIZED_PRICE_SCALE,
     NORMALIZED_QUANTITY_SCALE, fetch_candle_snapshot, hyperliquid_interval_for_period,

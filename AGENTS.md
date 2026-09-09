@@ -4,8 +4,7 @@ Instructions for coding agents working in the Axiusflow native repository.
 
 Axiusflow is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
 In-process `market_runtime` and `account_runtime` own provider sessions, canonical market/account state,
-and bounded background work; GPUI owns presentation scheduling only. The retired resident IPC engine
-must not return.
+and bounded background work; GPUI owns presentation scheduling only. A secondary local market process must not return.
 
 ## Non-negotiable core principles
 
@@ -70,7 +69,7 @@ violations and missing verification explicitly, and never describe them as satis
   or canonical candle state.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a
   second desktop-owned market-state model.
-- Do not restore `apps/engine`, `local_engine_client`, resident engine autostart, or market IPC.
+- Do not restore `apps/engine`, `local_engine_client`, a secondary market process, local process transport, or market autostart.
 - UI-thread code performs no blocking network, disk, process, or shutdown work. Background workers do
   not mutate GPUI state directly.
 - Workspace-wide `unsafe_code` remains forbidden.
@@ -159,7 +158,7 @@ Only publish/install when the maintainer asks for a release or end-to-end instal
 - After publishing, verify the live stable channel and installer hash before installing.
 - For installed-app validation, verify the active lifecycle pointer, signed manifest, installed binary
   hashes, stable/versioned launcher byte equality, and that the running desktop path points at the intended
-  immutable generation with no resident engine process or engine autostart registration.
+  immutable generation with no secondary market process or retired market autostart registration.
 - Never claim live provider, account, or visual behavior was tested unless that exact path was exercised.
 
 ## Rust and documentation conventions

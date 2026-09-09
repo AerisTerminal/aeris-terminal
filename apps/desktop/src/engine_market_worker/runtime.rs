@@ -4,8 +4,8 @@ use super::{
     ChartState, EVENT_WAIT, EndpointRecord, FeedConnectionState, MarketRuntimeEvent, MarketService,
     MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
-    initialize_catalog_endpoint, initialize_endpoint, mpsc, process_command, set_resource_class,
-    shared_market_runtime, thread,
+    handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint, mpsc,
+    process_command, set_resource_class, shared_market_runtime, thread,
 };
 
 pub(super) fn run_workers(
@@ -112,7 +112,7 @@ fn run_attached_workers(
             thread::sleep(EVENT_WAIT);
         }
         for event in events {
-            if let Err(error) = apply_received_event(event, endpoints) {
+            if let Err(error) = apply_received_event(market, client_id, event, endpoints) {
                 report_runtime_failure(endpoints, &error);
                 return Err(error);
             }
@@ -186,19 +186,14 @@ fn initialize_record(
     if record.catalog_only {
         initialize_catalog_endpoint(market, client_id, record.workspace_id, &mut record.endpoint)
     } else {
-        initialize_endpoint(
-            market,
-            client_id,
-            record.workspace_id,
-            &mut record.product,
-            record.interval,
-            &mut record.endpoint,
-        )
+        initialize_endpoint(market, client_id, record)
     }
 }
 
 /// Applies one event drained directly from the runtime-owned consumer outbox.
 fn apply_received_event(
+    market: &MarketService,
+    client_id: u64,
     (consumer_id, event): (u64, MarketRuntimeEvent),
     endpoints: &mut [EndpointRecord],
 ) -> Result<(), String> {
@@ -224,6 +219,17 @@ fn apply_received_event(
     else {
         return Ok(());
     };
+    match handle_startup_catalog_event(market, client_id, record, &event) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: error,
+            });
+            return Ok(());
+        }
+    }
     let endpoint = &mut record.endpoint;
     let (catalog, event) = classify_provider_catalog_event(event);
     let event = match catalog {
@@ -236,12 +242,10 @@ fn apply_received_event(
         None => event,
     };
     let Some(event) = event else { return Ok(()) };
-    if let MarketRuntimeEvent::ProviderState(state) = &event {
-        if state.provider != record.product.provider {
-            return Err("engine provider state identity mismatched".to_string());
-        }
-        super::ProviderConnectionState::try_from(state.state)
-            .map_err(|_| "engine returned an invalid provider state".to_string())?;
+    if let MarketRuntimeEvent::ProviderState(state) = &event
+        && state.provider != record.product.provider
+    {
+        return Err("engine provider state identity mismatched".to_string());
     }
     if complete_pending_recovery(&event, &record.product, endpoint)? {
         return Ok(());

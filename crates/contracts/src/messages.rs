@@ -1,4 +1,4 @@
-//! Shared prost DTOs for workspace persistence and in-process market metadata.
+//! Persisted workspace contracts plus strongly typed in-process market metadata.
 
 /// Persisted split direction for one workspace pane grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
@@ -19,9 +19,10 @@ pub enum WorkspacePaneKind {
 }
 
 /// Stable processing stage for actionable, redacted failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum FailureStage {
+    #[default]
     Unspecified = 0,
     ProviderHistory = 1,
     CanonicalValidation = 2,
@@ -33,11 +34,12 @@ pub enum FailureStage {
     ProviderRealtime = 13,
 }
 
-/// Machine-readable local engine fault classification.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+/// Machine-readable runtime fault classification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum EngineFaultCode {
     /// Transient failure.
+    #[default]
     Retryable = 0,
     /// Engine is offline.
     Offline = 1,
@@ -49,21 +51,14 @@ pub enum EngineFaultCode {
     CorruptLocalState = 5,
     /// Credentials were rejected.
     Unauthenticated = 7,
-    /// Peer protocol version is incompatible.
-    VersionMismatch = 9,
-    /// Peer could not keep up.
-    Backpressure = 11,
-    /// Message was invalid for the current state.
-    MalformedMessage = 13,
-    /// Frame exceeded the bound.
-    OversizedFrame = 15,
 }
 
 /// Provider connection state published by the engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ProviderConnectionState {
     /// No active provider connection.
+    #[default]
     Disconnected = 0,
     /// A connection or authentication attempt is in progress.
     Connecting = 1,
@@ -76,10 +71,11 @@ pub enum ProviderConnectionState {
 }
 
 /// Authoritative readiness state for one consumer's current series demand.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum SeriesLoadState {
     /// No usable values are present yet.
+    #[default]
     Empty = 0,
     /// Memory or provider work is in progress.
     Resolving = 1,
@@ -135,7 +131,7 @@ pub struct WorkspaceState {
     #[prost(uint32, tag = "8")]
     pub schema_revision: u32,
     // Tags 6, 7, and 9-13 are permanently retired. They described the deleted
-    // resident-process lifetime, resource-mode, and local hot-history cache.
+    // former process-lifetime, resource-mode, and hot-history-cache.
     /// Monotonic generation of user-authored workspace composition.
     #[prost(uint64, tag = "14")]
     pub layout_generation: u64,
@@ -274,75 +270,53 @@ pub struct InstallProviderInstrument {
 }
 
 /// Requests one bounded exact provider-instrument search for a market consumer.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchProviderInstruments {
-    #[prost(uint64, tag = "1")]
     pub consumer_id: u64,
-    #[prost(uint64, tag = "2")]
     pub search_generation: u64,
-    #[prost(string, tag = "3")]
     pub provider: String,
-    #[prost(string, tag = "4")]
     pub query: String,
-    #[prost(uint32, tag = "5")]
     pub maximum_results: u32,
 }
 
 /// Selects one exact instrument from the latest completed provider search.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SelectProviderInstrument {
-    #[prost(uint64, tag = "1")]
     pub consumer_id: u64,
-    #[prost(uint64, tag = "2")]
     pub selection_generation: u64,
-    #[prost(uint64, tag = "3")]
     pub search_generation: u64,
-    #[prost(string, tag = "4")]
     pub provider: String,
-    #[prost(string, tag = "5")]
     pub symbol: String,
-    #[prost(string, tag = "6")]
     pub exchange: String,
-    #[prost(string, tag = "7")]
     pub entitlement_id: String,
 }
 
 /// Bounded provider-neutral presentation metadata for one search result.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderInstrumentSummary {
-    #[prost(string, tag = "1")]
     pub symbol: String,
-    #[prost(string, tag = "2")]
     pub exchange: String,
-    #[prost(string, optional, tag = "3")]
     pub name: Option<String>,
-    #[prost(string, optional, tag = "4")]
     pub product_code: Option<String>,
-    #[prost(string, optional, tag = "5")]
     pub instrument_type: Option<String>,
-    #[prost(string, optional, tag = "6")]
     pub expiration_date: Option<String>,
 }
 
 /// Completed bounded provider-instrument search publication.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderInstrumentSearchResult {
-    #[prost(uint64, tag = "1")]
     pub consumer_id: u64,
-    #[prost(string, tag = "2")]
     pub provider: String,
-    #[prost(uint64, tag = "3")]
     pub provider_generation: u64,
-    #[prost(uint64, tag = "4")]
     pub search_generation: u64,
-    #[prost(message, repeated, tag = "5")]
     pub instruments: Vec<ProviderInstrumentSummary>,
 }
 
-/// Coarse catalog-command failure safe to expose across local IPC.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+/// Coarse catalog-command failure safe for presentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ProviderCatalogRejectionReason {
+    #[default]
     Unspecified = 0,
     SearchRejected = 1,
     SupersededSearch = 2,
@@ -354,73 +328,28 @@ pub enum ProviderCatalogRejectionReason {
 }
 
 /// Generation-fenced provider catalog command rejection.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderCatalogRejected {
-    #[prost(uint64, tag = "1")]
     pub consumer_id: u64,
-    #[prost(string, tag = "2")]
     pub provider: String,
-    #[prost(uint64, optional, tag = "3")]
     pub provider_generation: Option<u64>,
-    #[prost(uint64, tag = "4")]
     pub command_generation: u64,
-    #[prost(enumeration = "ProviderCatalogRejectionReason", tag = "5")]
-    pub reason: i32,
+    pub reason: ProviderCatalogRejectionReason,
 }
 
-/// Engine-owned provider health publication.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+/// Runtime-owned provider health publication.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderState {
-    /// Provider identifier.
-    #[prost(string, tag = "1")]
     pub provider: String,
-    /// Connection state.
-    #[prost(enumeration = "ProviderConnectionState", tag = "2")]
-    pub state: i32,
-    /// Provider session generation, or zero before the first session.
-    #[prost(uint64, tag = "3")]
+    pub state: ProviderConnectionState,
     pub generation: u64,
-    /// Optional redacted state detail.
-    #[prost(string, optional, tag = "4")]
     pub detail: Option<String>,
-    /// Most recent locally measured provider heartbeat/application-ping RTT.
-    /// Absent until a generation has produced a qualified round trip.
-    #[prost(uint64, optional, tag = "5")]
     pub transport_rtt_nanos: Option<u64>,
 }
 
-/// Redacted engine fault.
-#[derive(Clone, PartialEq, Eq, prost::Message)]
+/// Redacted runtime fault.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fault {
-    /// Fault code.
-    #[prost(enumeration = "EngineFaultCode", tag = "1")]
-    pub code: i32,
-    /// Redacted human-readable detail.
-    #[prost(string, tag = "2")]
+    pub code: EngineFaultCode,
     pub redacted_detail: String,
-}
-
-/// Versioned local workspace-persistence envelope.
-///
-/// Every former engine-control/publication tag remains permanently retired;
-/// only tag 5 (`WorkspaceState`) is written by current builds.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct Envelope {
-    /// Persistence protocol version.
-    #[prost(uint32, tag = "1")]
-    pub protocol_version: u32,
-    /// Workspace payload. Historical non-workspace envelope tags are ignored.
-    #[prost(oneof = "envelope::Payload", tags = "5")]
-    pub payload: Option<envelope::Payload>,
-}
-
-/// Envelope payloads.
-pub mod envelope {
-    /// Versioned local persistence payload.
-    #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Payload {
-        /// Workspace state. Tag 5.
-        #[prost(message, tag = "5")]
-        WorkspaceState(super::WorkspaceState),
-    }
 }

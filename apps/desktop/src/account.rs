@@ -1,7 +1,7 @@
 //! Desktop-owned account presentation over one in-process account runtime.
 //!
 //! Network and credential work stays off the GPUI thread, but there is no
-//! resident process, local socket, IPC protocol, or reconnect/replay layer.
+//! secondary process, local transport, or reconnect/replay layer.
 
 use std::{
     sync::{
@@ -13,7 +13,7 @@ use std::{
 };
 
 use axiusflow_account_runtime::{AccountService, AccountServiceConfig};
-use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthorization};
+use axiusflow_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
 pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section=profile";
@@ -77,17 +77,6 @@ pub fn fetch_account_status(service: &AccountService) -> Result<AccountView, Str
     Ok(service.account_status())
 }
 
-/// Verifies one sanitized account view for the lifecycle readiness probe.
-///
-/// # Errors
-///
-/// Returns an error when the session state is not a known protocol value.
-pub fn verify_account_readiness(view: &AccountView) -> Result<(), String> {
-    AccountSessionState::try_from(view.state)
-        .map(|_| ())
-        .map_err(|_| "candidate account service did not reach readiness".to_string())
-}
-
 /// Cancels one pending engine-owned login transaction.
 ///
 /// # Errors
@@ -118,10 +107,10 @@ pub const fn account_state_label(state: AccountSessionState) -> &'static str {
 /// Human-readable action for one sanitized account view.
 #[must_use]
 pub fn account_action_label(view: &AccountView) -> &'static str {
-    match AccountSessionState::try_from(view.state) {
-        Ok(AccountSessionState::Active | AccountSessionState::OfflineLease) => "Account",
-        Ok(AccountSessionState::Authorizing) => "Waiting for browser",
-        Ok(_) | Err(_) => "Sign in",
+    match view.state {
+        AccountSessionState::Active | AccountSessionState::OfflineLease => "Account",
+        AccountSessionState::Authorizing => "Waiting for browser",
+        _ => "Sign in",
     }
 }
 
@@ -340,7 +329,7 @@ fn unix_millis() -> u64 {
 
 fn signed_out_view() -> AccountView {
     AccountView {
-        state: AccountSessionState::SignedOut as i32,
+        state: AccountSessionState::SignedOut,
         account_id: String::new(),
         plan_id: String::new(),
         detail: String::new(),
@@ -362,7 +351,7 @@ static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
 /// How often the engine view refreshes while a browser transaction is open.
 /// Fast enough that runtime completion reaches the UI within a frame
-/// budget, slow enough to keep one bounded IPC fetch in flight. Idle
+/// budget, slow enough to keep one bounded runtime fetch in flight. Idle
 /// sessions poll slowly for restore and expiry.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INITIAL_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -411,12 +400,10 @@ impl DesktopAccount {
     /// workspace or market worker.
     #[must_use]
     pub fn authenticated(&self) -> bool {
-        self.shared.view.lock().is_ok_and(|view| {
-            matches!(
-                AccountSessionState::try_from(view.state),
-                Ok(AccountSessionState::Active)
-            )
-        })
+        self.shared
+            .view
+            .lock()
+            .is_ok_and(|view| view.state == AccountSessionState::Active)
     }
 
     /// Whether startup is still waiting for the account runtime's first
@@ -428,8 +415,7 @@ impl DesktopAccount {
                 // Generation zero is startup restoration, not a new
                 // browser transaction. The first runtime reply can arrive before
                 // refresh/link verification finishes.
-                view.request_generation == 0
-                    && view.state == AccountSessionState::Authorizing as i32
+                view.request_generation == 0 && view.state == AccountSessionState::Authorizing
             })
     }
 
@@ -528,9 +514,7 @@ impl DesktopAccount {
             .map_or_else(|_| signed_out_view(), |view| view.clone());
         AccountPresentation {
             action: account_action_label(&view),
-            state: account_state_label(
-                AccountSessionState::try_from(view.state).unwrap_or(AccountSessionState::SignedOut),
-            ),
+            state: account_state_label(view.state),
             plan: sanitized_plan_label(&view.plan_id),
             detail: view.detail.clone(),
             display_name: view.display_name.clone(),
@@ -546,8 +530,8 @@ impl DesktopAccount {
         self.shared.view.lock().map_or_else(
             |_| "starter".to_string(),
             |view| {
-                match AccountSessionState::try_from(view.state) {
-                    Ok(AccountSessionState::Active | AccountSessionState::OfflineLease) => {}
+                match view.state {
+                    AccountSessionState::Active | AccountSessionState::OfflineLease => {}
                     _ => return "starter".to_string(),
                 }
                 match view.plan_id.as_str() {
@@ -694,8 +678,8 @@ impl DesktopAccount {
     pub fn request_profile_refresh(&self) -> Result<(), String> {
         let refreshable = self.shared.view.lock().is_ok_and(|view| {
             matches!(
-                AccountSessionState::try_from(view.state),
-                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+                view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
             )
         });
         if !refreshable {
@@ -718,7 +702,7 @@ impl DesktopAccount {
     /// Applies worker results and keeps the engine view fresh. Status
     /// polling runs fast while a browser transaction is open and slowly
     /// when idle, so restored sessions and runtime expiry reach the UI
-    /// without chatty IPC. Returns whether presentation changed.
+    /// without unnecessary runtime polling. Returns whether presentation changed.
     #[must_use]
     pub fn poll(&self) -> bool {
         let mut changed = false;
@@ -900,7 +884,7 @@ fn rewind_status_poll(shared: &AccountShared) {
 }
 
 fn is_authorizing(view: &AccountView) -> bool {
-    view.state == AccountSessionState::Authorizing as i32
+    view.state == AccountSessionState::Authorizing
 }
 
 fn run_account_client_with(
@@ -961,7 +945,7 @@ mod tests {
         AccountRequest, AccountResponse, DesktopAccount, MANAGE_PROFILE_URL, account_action_label,
         account_state_label, sanitized_plan_label, unavailable_menu_state,
     };
-    use axiusflow_engine_protocol::{AccountSessionState, AccountView};
+    use axiusflow_contracts::{AccountSessionState, AccountView};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1101,7 +1085,7 @@ mod tests {
 
     fn view(state: AccountSessionState) -> AccountView {
         AccountView {
-            state: state as i32,
+            state,
             account_id: String::new(),
             plan_id: String::new(),
             detail: String::new(),
@@ -1162,9 +1146,6 @@ mod tests {
             account_action_label(&view(AccountSessionState::LeaseExpired)),
             "Sign in"
         );
-        let mut unknown = view(AccountSessionState::SignedOut);
-        unknown.state = 99;
-        assert_eq!(account_action_label(&unknown), "Sign in");
     }
 
     #[test]
@@ -1661,7 +1642,7 @@ mod tests {
 
     #[test]
     fn restart_restores_active_session_from_first_status() {
-        // A fresh desktop process against a resident signed-in engine
+        // A fresh desktop presentation against an already signed-in account runtime
         // learns the session from its startup fetch: no click needed.
         let engine = Arc::new(Mutex::new(FakeEngine {
             signed_out: view(AccountSessionState::SignedOut),

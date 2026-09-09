@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_engine_protocol::{
+use axiusflow_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
@@ -290,7 +290,7 @@ fn reject_catalog_command(
                 provider: "hyperliquid".to_string(),
                 provider_generation: Some(ws_generation.load(Ordering::Acquire).max(1)),
                 command_generation,
-                reason: ProviderCatalogRejectionReason::DispatchUnavailable as i32,
+                reason: ProviderCatalogRejectionReason::DispatchUnavailable,
             },
             selection,
         },
@@ -437,7 +437,7 @@ fn handle_catalog_select(
                     provider: "hyperliquid".to_string(),
                     provider_generation: Some(ws_generation.load(Ordering::Acquire).max(1)),
                     command_generation: selection.selection_generation,
-                    reason: ProviderCatalogRejectionReason::InstrumentUnavailable as i32,
+                    reason: ProviderCatalogRejectionReason::InstrumentUnavailable,
                 },
                 selection: true,
             },

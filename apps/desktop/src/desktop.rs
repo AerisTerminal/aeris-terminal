@@ -53,17 +53,17 @@ use axiusflow_chart_integration::{
     ChartIndicatorState, ChartSplitDirection, ChartType, ChartWorkspaceLayout, NucleusChartTheme,
     NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
+use axiusflow_contracts::{
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+};
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
     ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
     PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
-};
-use axiusflow_engine_protocol::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
@@ -2202,10 +2202,10 @@ fn run_onboarding() {
             cx.text_system()
                 .add_fonts(vec![
                     Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/HKGrotesk-Regular.ttf"
+                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Regular.ttf"
                     )),
                     Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/HKGrotesk-Bold.ttf"
+                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Bold.ttf"
                     )),
                 ])
                 .expect("the bundled HK Grotesk fonts are valid");
@@ -2241,10 +2241,10 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             cx.text_system()
                 .add_fonts(vec![
                     Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/HKGrotesk-Regular.ttf"
+                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Regular.ttf"
                     )),
                     Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/HKGrotesk-Bold.ttf"
+                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Bold.ttf"
                     )),
                 ])
                 .expect("the bundled HK Grotesk fonts are valid");

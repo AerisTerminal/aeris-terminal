@@ -1,7 +1,7 @@
 //! Headless desktop burst, backpressure, and frame-scheduling evidence.
 //!
 //! Everything measured here is **synthetic**: a fixture worker drives a real
-//! mailbox, frame gate, and client model, with no engine process, no IPC, and no
+//! mailbox, frame gate, and client model against the single-process runtime, with no
 //! provider. That makes it a bounds-and-backpressure check, not evidence that the
 //! desktop works against a venue. The only thing that can say that is the live
 //! market gate, whose result this report carries verbatim — including

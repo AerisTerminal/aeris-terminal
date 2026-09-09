@@ -1793,8 +1793,7 @@ impl WorkspaceSurface {
             return;
         }
         self.market_state.symbol_selection_pending = false;
-        let reason = ProviderCatalogRejectionReason::try_from(rejection.reason)
-            .unwrap_or(ProviderCatalogRejectionReason::Unspecified);
+        let reason = rejection.reason;
         self.symbol_message = catalog_rejection_message(reason, command, self.provider).to_string();
         self.dispatch_retained_symbol_search(cx);
     }

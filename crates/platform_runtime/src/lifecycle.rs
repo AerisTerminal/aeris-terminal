@@ -161,7 +161,8 @@ pub struct InstallationInventory {
     pub data_roots: Vec<PathBuf>,
     pub cache_roots: Vec<PathBuf>,
     pub log_roots: Vec<PathBuf>,
-    pub ipc_paths: Vec<PathBuf>,
+    #[serde(default, alias = "ipc_paths", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_cleanup_roots: Vec<PathBuf>,
     pub vault_entries: Vec<VaultEntry>,
     pub registrations: Vec<String>,
 }
@@ -922,7 +923,7 @@ fn inventory_roots(inventory: &InstallationInventory) -> Vec<PathBuf> {
     roots.extend(inventory.data_roots.iter().cloned());
     roots.extend(inventory.cache_roots.iter().cloned());
     roots.extend(inventory.log_roots.iter().cloned());
-    roots.extend(inventory.ipc_paths.iter().cloned());
+    roots.extend(inventory.legacy_cleanup_roots.iter().cloned());
     let mut roots = roots.into_iter().collect::<Vec<_>>();
     roots.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     roots
@@ -1034,7 +1035,7 @@ pub fn native_installation_inventory(
         data_roots: vec![data],
         cache_roots: vec![cache],
         log_roots: vec![logs],
-        ipc_paths: Vec::new(),
+        legacy_cleanup_roots: Vec::new(),
         vault_entries: vec![
             VaultEntry {
                 service: "com.axiusflow.terminal".to_string(),
@@ -2127,6 +2128,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_inventory_cleanup_roots_decode_without_preserving_the_old_field_name() {
+        let legacy = serde_json::json!({
+            "schema_version": INVENTORY_SCHEMA_VERSION,
+            "install_root": "install",
+            "data_roots": [],
+            "cache_roots": [],
+            "log_roots": [],
+            "ipc_paths": ["legacy-market-runtime"],
+            "vault_entries": [],
+            "registrations": []
+        });
+        let inventory: InstallationInventory =
+            serde_json::from_value(legacy).expect("legacy inventory decodes");
+        assert_eq!(
+            inventory.legacy_cleanup_roots,
+            vec![PathBuf::from("legacy-market-runtime")]
+        );
+        let current = serde_json::to_value(&inventory).expect("current inventory encodes");
+        assert!(current.get("ipc_paths").is_none());
+        assert!(current.get("legacy_cleanup_roots").is_some());
+    }
+    #[test]
     fn uninstall_is_idempotent_and_removes_exact_roots_and_vault_keys() {
         let root = temporary_root("uninstall");
         let (_, key, _) = release(&root, 1);
@@ -2134,7 +2157,7 @@ mod tests {
         let data_root = root.join("data");
         fs::create_dir_all(&install_root).expect("install root");
         fs::create_dir_all(&data_root).expect("data root");
-        fs::write(data_root.join("history"), b"encrypted").expect("history");
+        fs::write(data_root.join("workspace-state.pb"), b"workspace").expect("workspace state");
         let installer =
             ReleaseInstaller::new(&install_root, key.verifying_key(), ReleasePolicy::native(0))
                 .expect("installer");
@@ -2144,7 +2167,7 @@ mod tests {
             data_roots: vec![data_root],
             cache_roots: Vec::new(),
             log_roots: Vec::new(),
-            ipc_paths: Vec::new(),
+            legacy_cleanup_roots: Vec::new(),
             vault_entries: vec![
                 VaultEntry {
                     service: "com.axiusflow.account".to_string(),

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_engine_protocol::{
+use axiusflow_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
@@ -541,7 +541,7 @@ fn publish_catalog_callback(
                     provider: "rithmic".to_string(),
                     provider_generation: Some(provider_generation),
                     command_generation: u64::try_from(command_generation.get()).unwrap_or(u64::MAX),
-                    reason: protocol_rejection(reason) as i32,
+                    reason: protocol_rejection(reason),
                 },
                 selection,
             });
@@ -606,7 +606,7 @@ fn reject_catalog_generation(
             provider: "rithmic".to_string(),
             provider_generation,
             command_generation,
-            reason: ProviderCatalogRejectionReason::DispatchUnavailable as i32,
+            reason: ProviderCatalogRejectionReason::DispatchUnavailable,
         },
         selection,
     });
@@ -1557,7 +1557,7 @@ mod tests {
         let selection = RithmicCatalogEvent::SelectionResolved {
             consumer_id: 41,
             command_generation: 3,
-            instrument: axiusflow_engine_protocol::InstallProviderInstrument {
+            instrument: axiusflow_contracts::InstallProviderInstrument {
                 provider: "rithmic".to_string(),
                 session_generation: 7,
                 selection_generation: 3,

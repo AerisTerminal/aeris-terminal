@@ -500,7 +500,7 @@ impl Coordinator<'_> {
         };
         Some(ProviderState {
             provider: provider.to_string(),
-            state: state as i32,
+            state,
             generation: status.generation.map_or(0, |generation| generation.0.get()),
             detail: self.providers.detail(provider),
             transport_rtt_nanos: self.providers.transport_rtt_nanos(provider),
@@ -600,7 +600,7 @@ mod tests {
         HISTORY_SERIES_TARGET_BARS, HistorySnapshot, INITIAL_HISTORY_BARS, LiveHistoryState,
         MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
     };
-    use axiusflow_engine_protocol::ProviderInstrumentSearchResult;
+    use axiusflow_contracts::ProviderInstrumentSearchResult;
     use axiusflow_market_data::{
         AggressorSide, BarPeriod, EventMetadata, MarketBar, MarketTrade, QualifiedTimestamp,
     };

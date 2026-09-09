@@ -98,16 +98,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aead"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
-dependencies = [
- "crypto-common 0.2.2",
- "inout 0.2.2",
-]
-
-[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -607,7 +597,7 @@ name = "axiusflow_account_runtime"
 version = "0.2.1"
 dependencies = [
  "axiusflow_account",
- "axiusflow_engine_protocol",
+ "axiusflow_contracts",
  "axiusflow_platform_runtime",
  "base64 0.23.1",
  "ed25519-dalek",
@@ -643,6 +633,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiusflow_contracts"
+version = "0.2.1"
+dependencies = [
+ "prost",
+]
+
+[[package]]
 name = "axiusflow_design_system"
 version = "0.2.1"
 
@@ -653,8 +650,8 @@ dependencies = [
  "axiusflow_account_runtime",
  "axiusflow_application",
  "axiusflow_chart_integration",
+ "axiusflow_contracts",
  "axiusflow_design_system",
- "axiusflow_engine_protocol",
  "axiusflow_instruments",
  "axiusflow_market_data",
  "axiusflow_market_runtime",
@@ -666,20 +663,13 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "num-traits",
+ "prost",
  "reqwest_client",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sysinfo 0.39.6",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "axiusflow_engine_protocol"
-version = "0.2.1"
-dependencies = [
- "axiusflow_transport",
- "prost",
 ]
 
 [[package]]
@@ -700,19 +690,6 @@ name = "axiusflow_instruments"
 version = "0.2.1"
 
 [[package]]
-name = "axiusflow_local_storage"
-version = "0.2.1"
-dependencies = [
- "axiusflow_provider_history",
- "chacha20poly1305",
- "getrandom 0.4.3",
- "hmac 0.13.0",
- "rusqlite",
- "sha2 0.11.0",
- "zeroize",
-]
-
-[[package]]
 name = "axiusflow_market_data"
 version = "0.2.1"
 
@@ -729,7 +706,7 @@ dependencies = [
 name = "axiusflow_market_runtime"
 version = "0.2.1"
 dependencies = [
- "axiusflow_engine_protocol",
+ "axiusflow_contracts",
  "axiusflow_hyperliquid_market_adapter",
  "axiusflow_market_data",
  "axiusflow_market_engine",
@@ -778,7 +755,6 @@ version = "0.2.1"
 name = "axiusflow_rithmic_protocol_adapter"
 version = "0.2.1"
 dependencies = [
- "axiusflow_local_storage",
  "axiusflow_market_data",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
@@ -807,10 +783,6 @@ dependencies = [
  "axiusflow_market_data",
  "gpui",
 ]
-
-[[package]]
-name = "axiusflow_transport"
-version = "0.2.1"
 
 [[package]]
 name = "backtrace"
@@ -1162,23 +1134,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
- "cipher 0.5.2",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
- "zeroize",
-]
-
-[[package]]
-name = "chacha20poly1305"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
-dependencies = [
- "aead",
- "chacha20",
- "cipher 0.5.2",
- "poly1305",
- "zeroize",
 ]
 
 [[package]]
@@ -1212,7 +1169,6 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
- "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout 0.2.2",
 ]
@@ -2154,18 +2110,6 @@ dependencies = [
  "smallvec",
  "zune-inflate",
 ]
-
-[[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fastrand"
@@ -3735,17 +3679,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsqlite3-sys"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
-dependencies = [
- "cc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5001,16 +4934,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
-name = "poly1305"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
-dependencies = [
- "cpufeatures 0.3.1",
- "universal-hash",
-]
-
-[[package]]
 name = "polycool"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5782,19 +5705,6 @@ checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rusqlite"
-version = "0.40.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
-dependencies = [
- "bitflags 2.13.1",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "libsqlite3-sys",
- "smallvec",
 ]
 
 [[package]]
@@ -7341,16 +7251,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
-name = "universal-hash"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
-dependencies = [
- "crypto-common 0.2.2",
- "ctutils",
-]
-
-[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7513,12 +7413,6 @@ dependencies = [
  "sval_ref",
  "sval_serde",
 ]
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"

@@ -34,11 +34,11 @@ use super::{
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
 use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
-use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
-use axiusflow_engine_protocol::{
+use axiusflow_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
     SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
+use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
 use axiusflow_market_data::ChartInterval;
 use axiusflow_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
@@ -97,7 +97,7 @@ fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
     );
     let refreshed = browser
         .begin_search("")
-        .expect("resident-provider catalog permits a fresh empty listing query");
+        .expect("runtime provider catalog permits a fresh empty listing query");
     assert_eq!(refreshed.query, "");
     assert!(browser.search_pending());
     assert!(browser.reject_search(refreshed.request_id));
@@ -635,7 +635,7 @@ fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
             .as_nanos()
     );
     let directory = std::env::temp_dir().join(unique);
-    let path = directory.join("workspace-state.frame");
+    let path = directory.join("workspace-state.pb");
     let workspace = saved_workspace_boot_fixture();
 
     super::local_state::save_workspace_fixture(&workspace, &path).expect("workspace fixture saves");

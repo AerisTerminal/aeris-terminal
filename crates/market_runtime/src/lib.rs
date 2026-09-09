@@ -1,8 +1,7 @@
 //! In-process market runtime.
 //!
 //! Axiusflow owns provider connections, canonical market state, on-demand
-//! history, and realtime fanout inside the desktop process. There is no local
-//! socket, resident process, transport protocol, or restart-replay layer here.
+//! history, and realtime fanout inside the desktop process. There is no secondary local process, serialized runtime transport, or restart-replay layer here.
 
 mod hyperliquid_history;
 mod hyperliquid_realtime;
@@ -26,7 +25,7 @@ pub struct MarketOrderBookSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketProviderInstrumentSelection {
     pub consumer_id: axiusflow_market_engine::ConsumerId,
-    pub instrument: axiusflow_engine_protocol::InstallProviderInstrument,
+    pub instrument: axiusflow_contracts::InstallProviderInstrument,
     pub command_generation: u64,
 }
 
@@ -36,7 +35,7 @@ pub struct MarketSeriesState {
     pub consumer_id: axiusflow_market_engine::ConsumerId,
     pub generation: axiusflow_market_engine::GenerationId,
     pub series: Option<axiusflow_market_data::BarSeriesKey>,
-    pub state: axiusflow_engine_protocol::SeriesLoadState,
+    pub state: axiusflow_contracts::SeriesLoadState,
     pub detail: Option<String>,
 }
 
@@ -45,8 +44,8 @@ pub struct MarketSeriesState {
 pub struct MarketDemandError {
     pub consumer_id: axiusflow_market_engine::ConsumerId,
     pub generation: axiusflow_market_engine::GenerationId,
-    pub code: axiusflow_engine_protocol::EngineFaultCode,
-    pub stage: axiusflow_engine_protocol::FailureStage,
+    pub code: axiusflow_contracts::EngineFaultCode,
+    pub stage: axiusflow_contracts::FailureStage,
     pub detail: String,
     pub series: Option<axiusflow_market_data::BarSeriesKey>,
     pub cause: String,
@@ -55,21 +54,21 @@ pub struct MarketDemandError {
 
 /// Direct in-process market event delivered from the runtime to desktop panes.
 ///
-/// This deliberately is not a transport envelope. The variants are ordinary
+/// This is an ordinary typed in-process event boundary. The variants are
 /// typed Rust values shared in one process; no framing, decoding, request IDs,
-/// or reconnect replay exists on this boundary.
+/// or process-reconnect replay exists on this boundary.
 #[derive(Clone, Debug)]
 pub enum MarketRuntimeEvent {
-    ProviderState(axiusflow_engine_protocol::ProviderState),
+    ProviderState(axiusflow_contracts::ProviderState),
     SeriesSnapshot(axiusflow_market_engine::ConsumerPublication),
     SeriesUpdate(axiusflow_market_engine::ConsumerSeriesUpdate),
     SeriesState(MarketSeriesState),
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
-    ProviderInstrumentSearchResult(axiusflow_engine_protocol::ProviderInstrumentSearchResult),
+    ProviderInstrumentSearchResult(axiusflow_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
-    ProviderCatalogRejected(axiusflow_engine_protocol::ProviderCatalogRejected),
-    Fault(axiusflow_engine_protocol::Fault),
+    ProviderCatalogRejected(axiusflow_contracts::ProviderCatalogRejected),
+    Fault(axiusflow_contracts::Fault),
 }
 
 pub use axiusflow_market_engine::{

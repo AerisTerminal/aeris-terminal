@@ -289,7 +289,6 @@ mod tests {
             "crates/account_runtime/Cargo.toml",
             "crates/domain/instruments/Cargo.toml",
             "crates/domain/market_data/Cargo.toml",
-            "crates/local_storage/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
         ] {
@@ -310,6 +309,9 @@ mod tests {
             "apps/engine",
             "crates/local_engine_client",
             "crates/local_history",
+            "crates/local_storage",
+            "crates/engine_protocol",
+            "crates/transport",
             "crates/desktop_market_runtime",
             "crates/desktop_provider_runtime",
         ] {
@@ -318,12 +320,7 @@ mod tests {
                 "retired architecture boundary {retired} must not return"
             );
         }
-        for replacement in [
-            "market_runtime",
-            "account_runtime",
-            "local_storage",
-            "engine_protocol",
-        ] {
+        for replacement in ["market_runtime", "account_runtime", "contracts"] {
             assert!(
                 repository_root()
                     .join("crates")
@@ -490,8 +487,7 @@ mod tests {
             "tools/run_rithmic_protocol_conformance.sh",
             "crates/provider_history/tests/provider_history_conformance.rs",
             "crates/provider_history/tests/handoff_conformance.rs",
-            "crates/local_storage/tests/history_store_lifecycle.rs",
-            "crates/engine_protocol/tests/protocol.rs",
+            "crates/contracts/tests/contracts.rs",
             "crates/market_runtime/src/market_service/tests.rs",
             "apps/desktop/src/readiness_conformance.rs",
         ] {
@@ -657,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn market_core_manifests_exclude_ipc_and_runtime_dependencies() {
+    fn market_core_manifests_exclude_process_and_runtime_dependencies() {
         assert_dependencies_are(
             "crates/application/Cargo.toml",
             &["axiusflow_instruments", "axiusflow_market_data", "sha2"],
@@ -729,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_has_only_desktop_and_engine_applications() {
+    fn workspace_has_exactly_one_application_process() {
         let applications = fs::read_dir(repository_root().join("apps"))
             .expect("apps directory is readable")
             .filter_map(|entry| {
@@ -800,7 +796,6 @@ mod tests {
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"
                 .to_string(),
-            "crates/local_storage/src/model.rs::KeyRevocationEvidence".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::CredentialVault".to_string(),
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
             "crates/platform_runtime/src/lifecycle.rs::LifecycleHooks".to_string(),
@@ -827,8 +822,8 @@ mod tests {
     }
 
     #[test]
-    fn local_market_protocol_excludes_trading_execution_commands() {
-        let protocol = manifest("crates/engine_protocol/src/messages.rs");
+    fn market_contracts_exclude_trading_execution_commands() {
+        let protocol = manifest("crates/contracts/src/messages.rs");
         for forbidden in [
             "CancelOrder",
             "ExecutionReport",
@@ -842,7 +837,7 @@ mod tests {
         ] {
             assert!(
                 !protocol.contains(forbidden),
-                "market-data IPC must not add future execution message {forbidden}"
+                "market-data contracts must not add future execution message {forbidden}"
             );
         }
     }
@@ -868,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn production_excludes_shared_memory_ipc() {
+    fn production_excludes_cross_process_shared_memory() {
         for path in workspace_manifests()
             .into_iter()
             .chain(production_rust_sources())
@@ -886,7 +881,7 @@ mod tests {
             ] {
                 assert!(
                     !contents.contains(forbidden),
-                    "{} must not introduce shared-memory IPC primitive {forbidden}",
+                    "{} must not introduce cross-process shared-memory primitive {forbidden}",
                     path.display()
                 );
             }
@@ -894,11 +889,11 @@ mod tests {
     }
 
     #[test]
-    fn local_ipc_manifests_exclude_public_server_dependencies() {
+    fn in_process_runtime_manifests_exclude_server_dependencies() {
         for retired in ["apps/engine", "crates/local_engine_client"] {
             assert!(
                 !repository_root().join(retired).exists(),
-                "retired IPC boundary {retired} returned"
+                "retired cross-process boundary {retired} returned"
             );
         }
         for relative in [
@@ -909,7 +904,7 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "interprocess",
+                    concat!("inter", "process"),
                     "actix",
                     "axum",
                     "hyper",
@@ -917,6 +912,56 @@ mod tests {
                     "tonic",
                     "warp",
                 ],
+            );
+        }
+    }
+    #[test]
+    fn desktop_startup_catalog_resolution_stays_event_driven() {
+        let source = manifest("apps/desktop/src/engine_market_worker/selection_commands.rs");
+        for required in [
+            "StartupResolution::Searching",
+            "handle_startup_catalog_event",
+            "market.search_provider_instruments",
+            "market.select_provider_instrument",
+        ] {
+            assert!(
+                source.contains(required),
+                "startup catalog path lost {required}"
+            );
+        }
+        for forbidden in [
+            "STARTUP_CATALOG_RESOLUTION_TIMEOUT",
+            "poll_market_event_until",
+            "recv_timeout",
+            "thread::sleep",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "startup catalog path must not block the shared workspace worker through {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_persistence_has_no_general_transport_layer() {
+        assert!(!repository_root().join("crates/transport").exists());
+        let contracts = manifest("crates/contracts/Cargo.toml");
+        assert!(!contracts.contains("transport"));
+        let local = manifest("apps/desktop/src/desktop/local_state.rs");
+        for forbidden in ["EnvelopeDecoder", "encode_envelope", "BoundedBinaryFrame"] {
+            assert!(
+                !local.contains(forbidden),
+                "workspace persistence reintroduced transport framing through {forbidden}"
+            );
+        }
+        for required in [
+            "WorkspaceState::decode",
+            "workspace.encode_to_vec()",
+            "LegacyWorkspaceEnvelope",
+        ] {
+            assert!(
+                local.contains(required),
+                "workspace persistence lost {required}"
             );
         }
     }
@@ -979,11 +1024,13 @@ mod tests {
         }
     }
     #[test]
-    fn local_history_is_the_engine_consumed_storage_boundary() {
-        assert!(
-            !repository_root().join("crates/local_history").exists(),
-            "retired market-history persistence crate returned"
-        );
+    fn market_history_is_on_demand_and_nonpersistent() {
+        for retired in ["crates/local_history", "crates/local_storage"] {
+            assert!(
+                !repository_root().join(retired).exists(),
+                "retired market-history persistence boundary {retired} returned"
+            );
+        }
         let market = manifest("crates/market_runtime/Cargo.toml");
         assert!(
             market.contains("axiusflow_provider_history"),
@@ -1005,7 +1052,7 @@ mod tests {
         );
     }
     #[test]
-    fn resident_market_contracts_remain_explicit_and_provider_neutral() {
+    fn in_process_market_contracts_remain_explicit_and_provider_neutral() {
         let demand = manifest("crates/market_engine/src/demand.rs");
         assert!(
             demand.contains("pub(crate) fn set_viewport")
@@ -1058,12 +1105,7 @@ mod tests {
                 "market runtime registry lost {contract}"
             );
         }
-        for root in [
-            "apps/desktop/src",
-            "crates/market_engine/src",
-            "crates/local_storage/src",
-            "crates/ui",
-        ] {
+        for root in ["apps/desktop/src", "crates/market_engine/src", "crates/ui"] {
             for path in production_sources_under(root) {
                 let contents = fs::read_to_string(&path).expect("source");
                 let production = production_prefix(&contents);
@@ -1138,8 +1180,9 @@ mod tests {
                 "local workspace persistence lost {contract}"
             );
         }
-        let messages = manifest("crates/engine_protocol/src/messages.rs");
-        assert!(messages.contains("only tag 5 (`WorkspaceState`) is written by current builds"));
+        let local = manifest("apps/desktop/src/desktop/local_state.rs");
+        assert!(local.contains("WorkspaceState::decode") && local.contains("encode_to_vec"));
+        assert!(local.contains("LEGACY_WORKSPACE_FILE"));
     }
     #[test]
     fn signed_transactional_lifecycle_remains_platform_owned() {
@@ -1251,7 +1294,6 @@ mod tests {
         let mut sources = Vec::new();
         for root in [
             "crates/platform_runtime/src",
-            "crates/local_storage/src",
             "crates/market_runtime/src",
             "crates/account_runtime/src",
             "apps/desktop/src",
@@ -1563,10 +1605,10 @@ mod tests {
         const ACCOUNT_ALLOWED_PREFIXES: &[&str] = &[
             "crates/domain/account/src/",
             "crates/account_runtime/src/",
-            "crates/engine_protocol/src/account.rs",
-            "crates/engine_protocol/src/lib.rs",
-            "crates/engine_protocol/src/messages.rs",
-            "crates/engine_protocol/tests/",
+            "crates/contracts/src/account.rs",
+            "crates/contracts/src/lib.rs",
+            "crates/contracts/src/messages.rs",
+            "crates/contracts/tests/",
             "crates/platform_runtime/src/browser.rs",
             "apps/desktop/src/account.rs",
             "apps/desktop/src/desktop.rs",
@@ -1629,8 +1671,8 @@ mod tests {
         assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("axiusflow_account"));
     }
     #[test]
-    fn account_protocol_versions_and_tags_remain_pinned() {
-        let account = manifest("crates/engine_protocol/src/account.rs");
+    fn account_contracts_remain_plain_bounded_values() {
+        let account = manifest("crates/contracts/src/account.rs");
         for contract in [
             "pub struct BeginLogin",
             "pub struct CancelLogin",
@@ -1645,6 +1687,9 @@ mod tests {
                 "account DTO boundary lost {contract}"
             );
         }
+        assert!(!account.contains("prost::Message"));
+        assert!(!account.contains("#[prost"));
+
         for secret in [
             "refresh_token",
             "access_token",
@@ -1660,8 +1705,14 @@ mod tests {
                 "sanitized account DTO exposes {secret}"
             );
         }
-        let messages = manifest("crates/engine_protocol/src/messages.rs");
-        assert!(messages.contains("only tag 5 (`WorkspaceState`) is written by current builds"));
-        assert!(messages.contains("tags = \"5\""));
+        let messages = manifest("crates/contracts/src/messages.rs");
+        let runtime_market = messages
+            .split("/// Requests one bounded exact provider-instrument search")
+            .nth(1)
+            .expect("runtime market contract section exists");
+        assert!(!runtime_market.contains("prost::Message"));
+        assert!(!runtime_market.contains("#[prost"));
+        assert!(messages.contains("Tags 6, 7, and 9-13 are permanently retired"));
+        assert!(!messages.contains("pub struct Envelope"));
     }
 }

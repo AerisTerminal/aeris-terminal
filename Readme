@@ -1,22 +1,26 @@
 # Axiusflow
 
-Axiusflow is a local-first professional trading terminal. It is a native Rust desktop for live market data, charting, market-depth workflows, and local history, with a path to safe execution.
+Axiusflow is a local-first professional trading terminal. It is one native Rust/GPUI desktop process for live market data, charting, market-depth workflows, on-demand history, account state, and a path to safe execution.
 
-It belongs in the same product category as MotiveWave and ATAS: a workstation that runs on the trader's machine, not a browser app and not a remote Axiusflow service.
+It belongs in the same product category as MotiveWave and ATAS: a workstation that runs on the trader's machine rather than a browser application or an Axiusflow-hosted trading service.
 
 ## What ships today
 
 - Native Windows, macOS, and Linux desktop
-- A resident local engine that owns provider sessions, canonical series, encrypted history, and publication
+- One in-process market runtime that owns provider sessions, canonical series, bounded history, realtime handoff, and publication
+- One in-process account runtime for native authentication and entitlement state
 - Professional charting through [Nucleus Charts](https://github.com/NucleusCharts/financial-charts), consumed as a pinned Git dependency
-- Rithmic market data
-- Chart types, drawings, DOM, and multi-pane workspaces
+- Rithmic and Hyperliquid market-data integrations
+- Chart types, drawings, indicators, order-book workflows, and multi-pane workspaces
+- Bounded, on-demand provider history with no persisted market-history cache
 
-Closing the window keeps the engine warm by default. Settings can instead keep markets live after the last UI client detaches, or shut the engine down completely.
+Provider sessions are shared across panes. Symbol, timeframe, viewport, tab, and layout changes update demand without creating a runtime per chart or reconnecting a healthy provider session.
+
+Workspace layout is persisted locally. Market history is not: the market runtime owns a bounded in-memory working set and reloads provider history on demand.
 
 ## Requirements
 
-- Rust 1.97.1, pinned in `rust-toolchain.toml`
+- Rust 1.98.1, pinned in `rust-toolchain.toml`
 - On Linux, the desktop libraries installed by `tools/setup_linux_desktop.sh`
 
 Nucleus Charts is a separate repository. Do not clone it into this workspace; Cargo fetches the pinned revision.
@@ -29,11 +33,17 @@ From the repository root:
 cargo run --release --package axiusflow_desktop
 ```
 
-The desktop starts or reconnects to the per-user local engine. Use `--workspace-tabs` for a persisted tab and split-pane shell, or `--multi-chart` for independent chart windows.
+Use `--workspace-tabs` for the persisted tab and split-pane shell, or `--multi-chart` for independent chart windows.
+
+## Architecture
+
+`market_runtime` and `account_runtime` run inside the desktop process. `MarketEngine` is the single canonical market-demand/state owner; provider adapters stay behind `market_runtime`, and GPUI owns presentation scheduling only. Runtime queues and working sets are bounded, and stale provider, consumer, selection, and publication generations are rejected at their ownership boundaries.
+
+Workspace/account/market DTOs live in `crates/contracts`. They are ordinary in-process or persistence contracts, not a process transport layer.
 
 ## Documentation
 
-- [AGENTS.md](AGENTS.md) — engineering and delivery rules for work in this repository
+- [AGENTS.md](AGENTS.md) — engineering, architecture, verification, and release rules
 
 ## License
 

@@ -14,7 +14,7 @@ use super::{
 /// Applies one series-readiness transition, reporting a live handoff to the UI.
 /// Turns the engine's load state into the state the chart presents.
 ///
-/// The engine is explicit that a series serving retained local history is
+/// The engine is explicit that a series serving retained canonical history is
 /// `Partial`, not ready. Dropping that on the floor is what showed a stale chart
 /// as current for the seconds before provider coverage landed, and then jumped.
 /// Once the series has gone live the same `Partial` means something else — a
@@ -259,8 +259,7 @@ pub(super) fn apply_provider_state(
         return Ok(());
     }
     let provider_name = provider_display_name(expected_provider);
-    let provider_state = ProviderConnectionState::try_from(state.state)
-        .map_err(|_| "engine returned an invalid provider state".to_string())?;
+    let provider_state = state.state;
     let (connection, detail) = match provider_state {
         ProviderConnectionState::Disconnected => (
             FeedConnectionState::Disconnected,

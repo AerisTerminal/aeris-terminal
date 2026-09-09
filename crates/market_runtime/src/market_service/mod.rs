@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::MarketRuntimeEvent;
-use axiusflow_engine_protocol::{
+use axiusflow_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
     SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,

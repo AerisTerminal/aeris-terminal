@@ -84,7 +84,7 @@ impl OnboardingApp {
                     continue;
                 }
                 {
-                    // IPC, workspace restore, preferences, and provider worker
+                    // runtime startup, workspace restore, preferences, and provider worker
                     // startup must never block the window's event loop.
                     let configured = cx
                         .background_executor()

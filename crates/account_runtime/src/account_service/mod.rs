@@ -20,7 +20,7 @@ use std::{
 };
 
 use axiusflow_account::{AccountId, PlanId};
-use axiusflow_engine_protocol::{AccountSessionState, AccountView, LoginAuthorization};
+use axiusflow_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
@@ -288,7 +288,7 @@ impl AccountService {
         }
         state.restore_allowed = false;
         state.view = AccountView {
-            state: AccountSessionState::Active as i32,
+            state: AccountSessionState::Active,
             account_id: account_id.as_str().to_string(),
             plan_id: plan.as_str().to_string(),
             detail: "signed in".to_string(),
@@ -336,12 +336,9 @@ impl AccountService {
     /// Cached lease state never opens the platform.
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.state.lock().is_ok_and(|state| {
-            matches!(
-                AccountSessionState::try_from(state.view.state),
-                Ok(AccountSessionState::Active)
-            )
-        })
+        self.state
+            .lock()
+            .is_ok_and(|state| state.view.state == AccountSessionState::Active)
     }
 
     /// Resolves cached OIDC endpoints, refreshing them from discovery once.
@@ -512,7 +509,7 @@ impl AccountService {
     ///
     /// Local deletion happens synchronously so a concurrent login cannot
     /// observe stale material; server-side revocation follows on a bounded
-    /// worker with the in-memory refresh copy and never blocks IPC.
+    /// worker with the in-memory refresh copy and never blocks the coordinator.
     #[must_use]
     pub fn sign_out(&self) -> AccountView {
         let vault = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE);
@@ -542,7 +539,7 @@ impl AccountService {
         let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
         let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
         // Revocation reuses already-cached endpoints only: sign-out never
-        // performs discovery on the IPC path.
+        // performs discovery on the coordinator path.
         let cached = self
             .endpoints
             .lock()
@@ -787,7 +784,7 @@ impl AccountService {
         let generation = state.last_generation;
         state.pending = None;
         state.view = AccountView {
-            state: AccountSessionState::Active as i32,
+            state: AccountSessionState::Active,
             account_id: account_id.as_str().to_string(),
             plan_id: plan.as_str().to_string(),
             detail: "signed in".to_string(),
@@ -808,8 +805,8 @@ impl AccountService {
     fn is_current(&self, generation: u64) -> bool {
         self.state.lock().is_ok_and(|state| {
             state.last_generation == generation
-                && (state.view.state == AccountSessionState::Active as i32
-                    || state.view.state == AccountSessionState::OfflineLease as i32)
+                && (state.view.state == AccountSessionState::Active
+                    || state.view.state == AccountSessionState::OfflineLease)
         })
     }
 
@@ -894,8 +891,8 @@ impl AccountService {
         if state.last_generation != generation
             || state.view.account_id != expected_account.as_str()
             || !matches!(
-                AccountSessionState::try_from(state.view.state),
-                Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+                state.view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
             )
         {
             return false;
@@ -915,8 +912,8 @@ impl AccountService {
             return;
         }
         let current = state.view.state;
-        let active = AccountSessionState::Active as i32;
-        let offline = AccountSessionState::OfflineLease as i32;
+        let active = AccountSessionState::Active;
+        let offline = AccountSessionState::OfflineLease;
         if current != active && current != offline {
             return;
         }
@@ -940,7 +937,7 @@ impl AccountService {
                 note_lease("offline-covered");
             }
             lease::RefreshOutcome::Unavailable => {
-                state.view.state = AccountSessionState::ReauthenticationRequired as i32;
+                state.view.state = AccountSessionState::ReauthenticationRequired;
                 state.view.detail = "sign-in expired; sign in again".to_string();
                 note_lease("unavailable");
             }
@@ -989,8 +986,8 @@ impl AccountService {
 
 fn claim_profile_refresh(view: &AccountView, in_flight: &AtomicBool) -> Option<u64> {
     if !matches!(
-        AccountSessionState::try_from(view.state),
-        Ok(AccountSessionState::Active | AccountSessionState::OfflineLease)
+        view.state,
+        AccountSessionState::Active | AccountSessionState::OfflineLease
     ) {
         return None;
     }
@@ -1005,7 +1002,7 @@ fn claim_profile_refresh(view: &AccountView, in_flight: &AtomicBool) -> Option<u
 /// and failure can never leak a previous user's profile.
 fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> AccountView {
     AccountView {
-        state: state as i32,
+        state,
         account_id: String::new(),
         plan_id: String::new(),
         detail: detail.to_string(),
@@ -1156,8 +1153,8 @@ where
             let secret = Zeroizing::new(compact.as_bytes().to_vec());
             let current = service.state.lock().is_ok_and(|state| {
                 state.last_generation == generation
-                    && (state.view.state == AccountSessionState::Active as i32
-                        || state.view.state == AccountSessionState::OfflineLease as i32)
+                    && (state.view.state == AccountSessionState::Active
+                        || state.view.state == AccountSessionState::OfflineLease)
                     && vault.store(LEASE_VAULT_KEY, secret.as_slice()).is_ok()
             });
             if current {
@@ -1232,8 +1229,8 @@ where
         let secret = Zeroizing::new(rotated.as_bytes().to_vec());
         let _ = service.state.lock().map(|state| {
             if state.last_generation == generation
-                && (state.view.state == AccountSessionState::Active as i32
-                    || state.view.state == AccountSessionState::OfflineLease as i32)
+                && (state.view.state == AccountSessionState::Active
+                    || state.view.state == AccountSessionState::OfflineLease)
             {
                 let _ = vault.store(REFRESH_VAULT_KEY, secret.as_slice());
             }
@@ -1393,7 +1390,7 @@ mod tests {
         oidc::{self, AccountProfile, VerifiedTokens},
     };
     use axiusflow_account::{AccountId, PlanId};
-    use axiusflow_engine_protocol::{AccountSessionState, AccountView};
+    use axiusflow_contracts::{AccountSessionState, AccountView};
     use axiusflow_platform_runtime::CredentialVault;
     use std::{
         collections::HashMap,
@@ -1471,7 +1468,7 @@ mod tests {
         let service = service();
         {
             let mut state = service.state.lock().expect("account state locks");
-            state.view.state = AccountSessionState::OfflineLease as i32;
+            state.view.state = AccountSessionState::OfflineLease;
         }
         assert!(!service.is_authenticated());
 
@@ -1480,7 +1477,7 @@ mod tests {
             .lock()
             .expect("account state locks")
             .view
-            .state = AccountSessionState::Active as i32;
+            .state = AccountSessionState::Active;
         assert!(service.is_authenticated());
     }
 
@@ -1488,7 +1485,7 @@ mod tests {
     fn profile_refresh_claims_only_one_current_signed_in_request() {
         let in_flight = AtomicBool::new(false);
         let signed_out = AccountView {
-            state: AccountSessionState::SignedOut as i32,
+            state: AccountSessionState::SignedOut,
             account_id: String::new(),
             plan_id: String::new(),
             detail: String::new(),
@@ -1501,7 +1498,7 @@ mod tests {
         assert!(!in_flight.load(Ordering::Acquire));
 
         let active = AccountView {
-            state: AccountSessionState::Active as i32,
+            state: AccountSessionState::Active,
             account_id: "acct_01".to_string(),
             request_generation: 7,
             ..signed_out
@@ -1521,7 +1518,7 @@ mod tests {
             state.last_generation = 9;
             state.restore_allowed = false;
             state.view = AccountView {
-                state: AccountSessionState::Active as i32,
+                state: AccountSessionState::Active,
                 account_id: account.as_str().to_string(),
                 plan_id: "starter".to_string(),
                 detail: "signed in".to_string(),
@@ -1562,8 +1559,7 @@ mod tests {
         assert_eq!(still_current.plan_id, "pro");
         assert_eq!(still_current.display_name, "new");
 
-        service.state.lock().expect("state locks").view.state =
-            AccountSessionState::SignedOut as i32;
+        service.state.lock().expect("state locks").view.state = AccountSessionState::SignedOut;
         assert!(!service.apply_linked_profile(
             9,
             &account,
@@ -1635,7 +1631,7 @@ mod tests {
         assert!(!failed.is_authenticated());
         assert_eq!(
             failed.account_status().state,
-            AccountSessionState::ReauthenticationRequired as i32
+            AccountSessionState::ReauthenticationRequired
         );
 
         let unavailable = service();
@@ -1651,7 +1647,7 @@ mod tests {
         assert!(!unavailable.is_authenticated());
         assert_eq!(
             unavailable.account_status().state,
-            AccountSessionState::TerminalError as i32
+            AccountSessionState::TerminalError
         );
 
         let retired = service();
@@ -1704,7 +1700,7 @@ mod tests {
         assert!(!service.is_authenticated());
         assert_eq!(
             service.account_status().state,
-            AccountSessionState::TerminalError as i32
+            AccountSessionState::TerminalError
         );
     }
 
@@ -1763,7 +1759,7 @@ mod tests {
         );
         assert_eq!(
             unavailable.account_status().state,
-            AccountSessionState::TerminalError as i32
+            AccountSessionState::TerminalError
         );
         let retired = service();
         let (account, plan, profile, tokens) = verified_restore("acct_restore", None);
@@ -1792,7 +1788,7 @@ mod tests {
         assert!(service.begin_login(1).is_err());
         assert_eq!(
             service.account_status().state,
-            AccountSessionState::TerminalError as i32
+            AccountSessionState::TerminalError
         );
     }
 
@@ -1816,7 +1812,7 @@ mod tests {
         service.cancel_login(4).expect("cancel succeeds");
         assert_eq!(
             service.account_status().state,
-            AccountSessionState::SignedOut as i32
+            AccountSessionState::SignedOut
         );
         assert!(
             service
@@ -1866,7 +1862,7 @@ mod tests {
         service.fail_generation(8, "stale worker result");
         assert_eq!(
             service.account_status().state,
-            AccountSessionState::Authorizing as i32
+            AccountSessionState::Authorizing
         );
         service.cancel_login(9).expect("cancel succeeds");
         let vault = MemoryVault::default();
@@ -1881,7 +1877,7 @@ mod tests {
         // A retired callback restores nothing: neither state nor another
         // user's profile may leak into the current session.
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert_eq!(view.state, AccountSessionState::SignedOut);
         assert!(view.display_name.is_empty());
         assert!(view.email.is_empty());
         assert!(view.photo_url.is_empty());
@@ -1901,7 +1897,7 @@ mod tests {
             &vault,
         );
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::Active as i32);
+        assert_eq!(view.state, AccountSessionState::Active);
         assert_eq!(view.account_id, "acct_01");
         assert_eq!(view.plan_id, "pro");
         assert_eq!(view.display_name, "ada");
@@ -1925,7 +1921,7 @@ mod tests {
         // Failure is actionable and carries no session: a partial login
         // never renders as success.
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::TerminalError as i32);
+        assert_eq!(view.state, AccountSessionState::TerminalError);
         assert!(view.account_id.is_empty());
         assert!(view.display_name.is_empty());
         assert!(view.email.is_empty());
@@ -1965,7 +1961,7 @@ mod tests {
             &vault,
         );
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::Active as i32);
+        assert_eq!(view.state, AccountSessionState::Active);
         assert_eq!(view.account_id, "acct_02");
         assert_eq!(view.display_name, "bob");
         assert_eq!(view.email, "bob@example.com");
@@ -1993,10 +1989,7 @@ mod tests {
             Some("refresh-value"),
             &vault,
         );
-        assert_eq!(
-            service.account_status().state,
-            AccountSessionState::Active as i32
-        );
+        assert_eq!(service.account_status().state, AccountSessionState::Active);
         assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_some());
         assert!(vault.load(DEVICE_VAULT_KEY).expect("load reads").is_some());
         // Drop the cached endpoints so no revocation worker touches the
@@ -2009,7 +2002,7 @@ mod tests {
         // Seed a profile first: sign-out must clear it with the session.
         service.state.lock().expect("state locks").view.display_name = "ada".to_string();
         let view = service.sign_out_with(&vault);
-        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert_eq!(view.state, AccountSessionState::SignedOut);
         assert!(view.account_id.is_empty());
         assert!(view.display_name.is_empty());
         assert!(view.email.is_empty());
@@ -2021,7 +2014,7 @@ mod tests {
         assert!(vault.load(DEVICE_VAULT_KEY).expect("load reads").is_some());
         assert_eq!(
             service.account_status().state,
-            AccountSessionState::SignedOut as i32
+            AccountSessionState::SignedOut
         );
         // A retired completion after sign-out cannot resurrect the session.
         service.complete_with_tokens(
@@ -2033,7 +2026,7 @@ mod tests {
             &vault,
         );
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert_eq!(view.state, AccountSessionState::SignedOut);
         assert!(view.display_name.is_empty());
     }
 
@@ -2055,7 +2048,7 @@ mod tests {
         // Current-generation warmup updates the plan and stays Active.
         service.apply_lease_outcome(51, RefreshOutcome::Refreshed(PlanId::Elite));
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::Active as i32);
+        assert_eq!(view.state, AccountSessionState::Active);
         assert_eq!(view.plan_id, "elite");
         // A late warmup from a retired generation lands after sign-out:
         // it must not resurrect identity, plan, or access.
@@ -2067,7 +2060,7 @@ mod tests {
         service.sign_out_with(&vault);
         service.apply_lease_outcome(51, RefreshOutcome::Refreshed(PlanId::Elite));
         let view = service.account_status();
-        assert_eq!(view.state, AccountSessionState::SignedOut as i32);
+        assert_eq!(view.state, AccountSessionState::SignedOut);
         assert!(view.account_id.is_empty());
         assert!(view.plan_id.is_empty());
         assert!(view.display_name.is_empty());
