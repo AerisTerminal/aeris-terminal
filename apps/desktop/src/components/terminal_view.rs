@@ -592,6 +592,7 @@ pub(super) fn terminal_root(
         market_worker,
         lifecycle,
         chart_chrome,
+        None,
         window,
         cx,
     );
@@ -704,6 +705,7 @@ pub(super) fn workspace_tabs_root(
                     pane.worker,
                     lifecycle,
                     chart_chrome,
+                    persisted.chart.clone(),
                     window,
                     cx,
                 ),

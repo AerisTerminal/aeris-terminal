@@ -60,6 +60,7 @@ impl NucleusChartView {
             self.locked_drawings.remove(&id);
         }
         self.invalidate_series_frame();
+        self.mark_user_state_changed();
         true
     }
     pub(super) fn editing_text_value(&self) -> Option<String> {
@@ -198,6 +199,7 @@ impl NucleusChartView {
         if changed {
             self.engine.drawing_drag_end();
             self.invalidate_series_frame();
+            self.mark_user_state_changed();
         }
         changed
     }
@@ -230,6 +232,7 @@ impl NucleusChartView {
         if changed {
             self.engine.drawing_drag_end();
             self.invalidate_series_frame();
+            self.mark_user_state_changed();
         }
         changed
     }
@@ -242,16 +245,21 @@ impl NucleusChartView {
                 self.locked_drawings.remove(&id);
             }
             self.invalidate_series_frame();
+            self.mark_user_state_changed();
         }
         removed
     }
     /// Removes every committed drawing.
     pub fn clear_drawings(&mut self) {
+        let changed = !self.engine.drawings().is_empty();
         self.engine.set_editing_drawing(None);
         self.cancel_drawing_gesture();
         self.engine.clear_drawings();
         self.locked_drawings.clear();
         self.invalidate_series_frame();
+        if changed {
+            self.mark_user_state_changed();
+        }
     }
     /// Returns whether a committed drawing edit can be reversed.
     #[must_use]
@@ -296,6 +304,7 @@ impl NucleusChartView {
                 .any(|drawing| drawing.id == *locked)
         });
         self.invalidate_series_frame();
+        self.mark_user_state_changed();
         true
     }
     pub(super) fn drawing_modifiers(modifiers: Modifiers) -> DrawingModifiers {
@@ -340,6 +349,7 @@ impl NucleusChartView {
         self.cursor_style = CursorStyle::Crosshair;
         self.engine.crosshair_ohlc_magnet = false;
         self.invalidate_series_frame();
+        self.mark_user_state_changed();
         true
     }
     pub(super) fn pop_path_anchor(&mut self) -> bool {
@@ -433,6 +443,8 @@ impl NucleusChartView {
                     self.engine.crosshair_ohlc_magnet = false;
                     if placing_text && let Ok(id) = DrawingId::try_from(result) {
                         self.begin_text_edit(id);
+                    } else {
+                        self.mark_user_state_changed();
                     }
                 }
                 result != 0
@@ -466,6 +478,7 @@ impl NucleusChartView {
                 self.engine.drawing_drag_to(pane_x, y, modifiers);
             } else {
                 self.engine.drawing_drag_end();
+                self.mark_user_state_changed();
             }
             return true;
         }
@@ -488,11 +501,13 @@ impl NucleusChartView {
             self.drawing_tool = ChartDrawingTool::Cursor;
             self.cursor_style = CursorStyle::Crosshair;
             self.engine.crosshair_ohlc_magnet = false;
+            self.mark_user_state_changed();
             return true;
         }
         if self.engine.drawing_drag_active() {
             self.engine.drawing_drag_to(pane_x, y, modifiers);
             self.engine.drawing_drag_end();
+            self.mark_user_state_changed();
             return true;
         }
         false

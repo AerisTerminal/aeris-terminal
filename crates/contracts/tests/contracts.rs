@@ -41,6 +41,7 @@ fn workspace_tab() -> WorkspaceTabState {
             viewport_end_unix_nanos: Some(2),
             size_basis_points: 10_000,
             generation: 4,
+            chart: None,
         }],
         active_pane_id: 7,
         generation: 6,

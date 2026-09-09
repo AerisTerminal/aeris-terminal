@@ -141,9 +141,9 @@ impl AccountService {
     /// Creates the production account service and attempts a server-verified
     /// restore from native-vault refresh material on a bounded worker.
     ///
-    /// Cached entitlement state never authenticates startup. Until the refresh
-    /// grant, ID-token verification, and canonical account link all succeed,
-    /// the service remains unauthenticated and reports restoration in progress.
+    /// A previously verified, still-valid offline lease may cover startup while
+    /// the online refresh/link path runs. Cached access is revalidated against
+    /// the last verified signing directory and native device binding first.
     #[must_use]
     pub fn new_restoring(config: AccountServiceConfig) -> Self {
         let service = Self::new(config);
@@ -176,13 +176,22 @@ impl AccountService {
             );
             return;
         };
+        let cached_expiry = self.restore_cached_lease(&vault);
+        let cached_session = cached_expiry.is_some();
         let refresh_token = match vault.load(REFRESH_VAULT_KEY) {
             Ok(Some(bytes)) => String::from_utf8(bytes)
                 .ok()
                 .filter(|token| !token.is_empty())
                 .map(Zeroizing::new),
             Ok(None) => {
-                self.complete_restore_without_session(AccountSessionState::SignedOut, "signed out");
+                if !cached_session {
+                    self.complete_restore_without_session(
+                        AccountSessionState::SignedOut,
+                        "signed out",
+                    );
+                } else if let Some(expires_at) = cached_expiry {
+                    self.spawn_cached_lease_expiry_worker(expires_at);
+                }
                 return;
             }
             Err(_) => {
@@ -190,6 +199,9 @@ impl AccountService {
                     AccountSessionState::TerminalError,
                     "credential storage is unavailable; retry sign-in",
                 );
+                if let Some(expires_at) = cached_expiry {
+                    self.spawn_cached_lease_expiry_worker(expires_at);
+                }
                 return;
             }
         };
@@ -214,6 +226,14 @@ impl AccountService {
                 link_subject(endpoints, &agent, &tokens.id_token, &tokens.subject)
             })
         }) else {
+            if self
+                .state
+                .lock()
+                .is_ok_and(|state| state.view.state == AccountSessionState::OfflineLease)
+                && let Some(expires_at) = cached_expiry
+            {
+                self.spawn_cached_lease_expiry_worker(expires_at);
+            }
             return;
         };
         self.refresh_lease_once(0, &tokens, &account_id, &agent, &vault);
@@ -222,6 +242,96 @@ impl AccountService {
             .name("axiusflow-account-lease".to_string())
             .spawn(move || service.run_lease_worker(0))
             .ok();
+    }
+
+    fn restore_cached_lease<V>(&self, vault: &V) -> Option<u64>
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let compact = lease::load_cached(vault, LEASE_VAULT_KEY)?;
+        let directory = vault
+            .load(LEASE_DIRECTORY_VAULT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|encoded| serde_json::from_slice::<Vec<LeaseKey>>(&encoded).ok())
+            .filter(|keys| !keys.is_empty())?;
+        let device_id = vault
+            .load(DEVICE_VAULT_KEY)
+            .ok()
+            .flatten()
+            .filter(|key| !key.is_empty())
+            .map(|key| device_id_for_key(&key))?;
+        let Ok(account_id) = lease::untrusted_account_id(&compact) else {
+            return None;
+        };
+        let now = unix_now();
+        let Ok(claims) =
+            lease::validate_compact(&compact, &directory, &account_id, &device_id, now)
+        else {
+            return None;
+        };
+        if claims.expires_at().saturating_sub(now) > LEASE_OFFLINE_VALIDITY_SECONDS {
+            return None;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return None;
+        }
+        let Ok(mut cached_keys) = self.lease_keys.lock() else {
+            return None;
+        };
+        cached_keys.clone_from(&directory);
+        drop(cached_keys);
+        state.view = AccountView {
+            state: AccountSessionState::OfflineLease,
+            account_id: account_id.as_str().to_string(),
+            plan_id: claims.plan().as_str().to_string(),
+            detail: "signed in with cached access; reconnecting to refresh".to_string(),
+            request_generation: 0,
+            display_name: String::new(),
+            email: String::new(),
+            photo_url: String::new(),
+        };
+        Some(claims.expires_at())
+    }
+
+    fn spawn_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
+        let service = self.clone();
+        std::thread::Builder::new()
+            .name("axiusflow-account-cached-expiry".to_string())
+            .spawn(move || service.run_cached_lease_expiry_worker(expires_at_unix_seconds))
+            .ok();
+    }
+
+    fn run_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
+        while unix_now() < expires_at_unix_seconds {
+            if !self.state.lock().is_ok_and(|state| {
+                state.last_generation == 0
+                    && state.pending.is_none()
+                    && state.view.state == AccountSessionState::OfflineLease
+            }) {
+                return;
+            }
+            let remaining = expires_at_unix_seconds.saturating_sub(unix_now());
+            std::thread::sleep(Duration::from_secs(remaining.clamp(1, 60)));
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation == 0
+            && state.pending.is_none()
+            && state.view.state == AccountSessionState::OfflineLease
+        {
+            let generation = state.last_generation;
+            state.view = cleared_view(
+                AccountSessionState::ReauthenticationRequired,
+                generation,
+                "cached sign-in expired; reconnect and sign in again",
+            );
+        }
     }
 
     fn apply_online_restore<V>(
@@ -305,6 +415,13 @@ impl AccountService {
             return;
         };
         if state.last_generation == 0 && state.pending.is_none() && state.restore_allowed {
+            if state.view.state == AccountSessionState::OfflineLease
+                && target == AccountSessionState::TerminalError
+            {
+                state.restore_allowed = false;
+                state.view.detail = detail.to_string();
+                return;
+            }
             state.restore_allowed = false;
             state.view = cleared_view(target, 0, detail);
         }
@@ -332,13 +449,15 @@ impl AccountService {
         }
     }
 
-    /// Returns whether a browser-confirmed online session is installed.
-    /// Cached lease state never opens the platform.
+    /// Returns whether a verified online or cached-offline session is installed.
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| state.view.state == AccountSessionState::Active)
+        self.state.lock().is_ok_and(|state| {
+            matches!(
+                state.view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            )
+        })
     }
 
     /// Resolves cached OIDC endpoints, refreshing them from discovery once.
@@ -1464,13 +1583,13 @@ mod tests {
     }
 
     #[test]
-    fn only_online_active_state_authenticates() {
+    fn verified_online_and_cached_offline_states_authenticate() {
         let service = service();
         {
             let mut state = service.state.lock().expect("account state locks");
             state.view.state = AccountSessionState::OfflineLease;
         }
-        assert!(!service.is_authenticated());
+        assert!(service.is_authenticated());
 
         service
             .state
@@ -1479,6 +1598,34 @@ mod tests {
             .view
             .state = AccountSessionState::Active;
         assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn transient_online_restore_failure_does_not_discard_cached_access() {
+        let service = service();
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.view = AccountView {
+                state: AccountSessionState::OfflineLease,
+                account_id: "acct_01".to_string(),
+                plan_id: "pro".to_string(),
+                detail: "cached access".to_string(),
+                request_generation: 0,
+                display_name: String::new(),
+                email: String::new(),
+                photo_url: String::new(),
+            };
+        }
+
+        service.complete_restore_without_session(
+            AccountSessionState::TerminalError,
+            "online verification is temporarily unavailable",
+        );
+        assert!(service.is_authenticated());
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::OfflineLease
+        );
     }
 
     #[test]

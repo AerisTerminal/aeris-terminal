@@ -56,8 +56,9 @@ use axiusflow_chart_integration::{
 use axiusflow_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartIndicatorState,
+    WorkspaceChartState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
@@ -558,6 +559,9 @@ struct WorkspaceSurface {
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
     retained_chart_presentation: RetainedChartPresentation,
+    restored_chart_state: Option<WorkspaceChartState>,
+    chart_persistence_dirty: bool,
+    last_chart_user_state_revision: u64,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
@@ -583,6 +587,8 @@ struct WorkspaceMarketState {
 struct RetainedChartPresentation {
     indicators: Vec<ChartIndicatorState>,
     price_precision: Option<u8>,
+    chart_state: Option<WorkspaceChartState>,
+    instrument_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -804,6 +810,12 @@ impl ProviderConnectionPresentation {
 fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
+            let user_state_revision = chart.read(cx).user_state_revision();
+            if user_state_revision != app.last_chart_user_state_revision {
+                app.last_chart_user_state_revision = user_state_revision;
+                app.chart_persistence_dirty = true;
+                cx.notify();
+            }
             let (activate, request) = chart.update(cx, |chart, _| {
                 (
                     chart.take_activate_request(),
@@ -1610,6 +1622,7 @@ fn workspace_surface_entity(
     market_worker: MarketDataWorker,
     lifecycle: &DesktopLifecycle,
     chart_chrome: chart_chrome::ChartChromePreferences,
+    restored_chart_state: Option<WorkspaceChartState>,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<WorkspaceSurface> {
@@ -1635,6 +1648,7 @@ fn workspace_surface_entity(
             indicator_input,
             timeframe_input,
             chart_chrome,
+            restored_chart_state,
         )
     });
     lifecycle.register_terminal(&workspace);
@@ -1875,6 +1889,7 @@ fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<Workspace
                                 })
                                 .unwrap_or(1),
                             generation: workspace.generation.max(1),
+                            chart: surface.workspace_chart_state(cx),
                         })
                     })
                     .collect(),

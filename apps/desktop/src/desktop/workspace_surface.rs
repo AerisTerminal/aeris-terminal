@@ -3,6 +3,104 @@
 use super::*;
 
 impl WorkspaceSurface {
+    pub(super) fn take_chart_persistence_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.chart_persistence_dirty)
+    }
+
+    pub(super) fn workspace_chart_state(&self, cx: &App) -> Option<WorkspaceChartState> {
+        let Some(chart) = self.chart.as_ref() else {
+            return self.restored_chart_state.clone();
+        };
+        let chart = chart.read(cx);
+        if !chart.has_market_data() {
+            return self.restored_chart_state.clone();
+        }
+        let nucleus_state_json = match chart.export_semantic_state_json() {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("Axiusflow drawings could not be serialized: {error}");
+                return self.restored_chart_state.clone();
+            }
+        };
+        let price_axis = chart
+            .price_axis_menu_state(0, false)
+            .or_else(|| chart.price_axis_menu_state(0, true))
+            .map(|state| WorkspacePriceAxisState {
+                flags: u32::from(state.flags),
+                mode: u32::from(state.mode),
+                left: state.left,
+                precision: state.precision.map(u32::from),
+            });
+        Some(WorkspaceChartState {
+            chart_type: chart.chart_type().identifier().to_string(),
+            nucleus_state_json,
+            indicators: chart
+                .indicator_states()
+                .into_iter()
+                .map(|state| WorkspaceChartIndicatorState {
+                    kind: state.indicator.identifier().to_string(),
+                    visible: state.visible,
+                })
+                .collect(),
+            price_axis,
+            locked_drawing_ids: chart.locked_drawing_ids(),
+            crosshair_mode: u32::from(chart.crosshair_mode()),
+        })
+    }
+
+    fn apply_restored_chart_state(
+        chart: &Entity<NucleusChartView>,
+        state: &WorkspaceChartState,
+        restore_drawings: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let indicators = state
+            .indicators
+            .iter()
+            .filter_map(|item| {
+                ChartIndicator::from_identifier(&item.kind).map(|indicator| ChartIndicatorState {
+                    indicator,
+                    visible: item.visible,
+                })
+            })
+            .take(ChartIndicator::ALL.len())
+            .collect::<Vec<_>>();
+        let chart_type = ChartType::from_identifier(&state.chart_type);
+        let price_axis = state.price_axis.as_ref().and_then(|axis| {
+            Some(PriceAxisMenuState {
+                flags: u16::try_from(axis.flags).ok()?,
+                mode: u8::try_from(axis.mode).ok()?.min(3),
+                left: axis.left,
+                precision: axis.precision.and_then(|value| u8::try_from(value).ok()),
+            })
+        });
+        let drawing_json = state.nucleus_state_json.clone();
+        let locked = state.locked_drawing_ids.clone();
+        let crosshair_mode = u8::try_from(state.crosshair_mode)
+            .ok()
+            .filter(|mode| *mode <= 3);
+        chart.update(cx, |chart, _| {
+            if let Some(chart_type) = chart_type {
+                chart.set_chart_type(chart_type);
+            }
+            if let Err(error) = chart.restore_indicator_states(&indicators) {
+                eprintln!("Axiusflow persisted indicators could not be restored: {error}");
+            }
+            if restore_drawings
+                && !drawing_json.is_empty()
+                && let Err(error) = chart.import_semantic_state_json(&drawing_json, &locked)
+            {
+                eprintln!("Axiusflow persisted drawings could not be restored: {error}");
+            }
+            if let Some(price_axis) = price_axis {
+                let _ = chart.restore_price_axis_menu_state(price_axis);
+            }
+            if let Some(mode) = crosshair_mode {
+                let _ = chart.set_crosshair_mode(mode);
+            }
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         cx: &mut Context<Self>,
@@ -13,6 +111,7 @@ impl WorkspaceSurface {
         indicator_input: Entity<InputState>,
         timeframe_input: Entity<InputState>,
         chart_chrome: chart_chrome::ChartChromePreferences,
+        restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
         let restored_rithmic = match &startup {
@@ -106,6 +205,9 @@ impl WorkspaceSurface {
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
             retained_chart_presentation: RetainedChartPresentation::default(),
+            restored_chart_state,
+            chart_persistence_dirty: false,
+            last_chart_user_state_revision: 0,
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
             #[cfg(feature = "diagnostics")]
@@ -849,12 +951,17 @@ impl WorkspaceSurface {
                 let chart = cx
                     .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
                 self.apply_chart_chrome_to_chart(&chart, cx);
-                self.apply_retained_indicators_to_chart(&chart, cx);
+                if let Some(restored) = self.restored_chart_state.take() {
+                    Self::apply_restored_chart_state(&chart, &restored, true, cx);
+                } else {
+                    self.apply_retained_chart_state_to_chart(&chart, cx);
+                }
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
                     });
                 }
+                self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
                 self.rithmic_switch = RithmicSwitchState::Initializing;
@@ -1256,6 +1363,11 @@ impl WorkspaceSurface {
             return;
         }
         self.rithmic_previous_selection = Some((self.product.clone(), self.interval));
+        // Capture presentation against the chart's current instrument before
+        // mutating the pending selection. Timeframe replacement can reuse
+        // drawings; a symbol replacement must not carry price-anchored drawings
+        // onto another instrument.
+        self.retain_chart_presentation(cx);
         if let Some(interval) = self.rithmic_pending_interval.take() {
             self.interval = interval;
         }
@@ -1274,7 +1386,6 @@ impl WorkspaceSurface {
         } else {
             RithmicSwitchState::Idle
         };
-        self.retain_chart_presentation(cx);
         self.restored_viewport = None;
         self.last_persisted_viewport = None;
         self.chart_state = ChartState::Loading;
@@ -1515,7 +1626,29 @@ impl WorkspaceSurface {
             self.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
             self.retained_chart_presentation.price_precision =
                 chart.read(cx).selected_price_precision();
+            self.retained_chart_presentation.chart_state = self.workspace_chart_state(cx);
+            self.retained_chart_presentation.instrument_id = self
+                .product
+                .as_ref()
+                .map(|product| product.instrument_id.clone());
         }
+    }
+
+    fn apply_retained_chart_state_to_chart(
+        &self,
+        chart: &Entity<NucleusChartView>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = &self.retained_chart_presentation.chart_state {
+            let same_instrument = self
+                .product
+                .as_ref()
+                .map(|product| product.instrument_id.as_str())
+                == self.retained_chart_presentation.instrument_id.as_deref();
+            Self::apply_restored_chart_state(chart, state, same_instrument, cx);
+            return;
+        }
+        self.apply_retained_indicators_to_chart(chart, cx);
     }
 
     fn apply_retained_indicators_to_chart(

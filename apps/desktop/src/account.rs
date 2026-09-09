@@ -400,10 +400,12 @@ impl DesktopAccount {
     /// workspace or market worker.
     #[must_use]
     pub fn authenticated(&self) -> bool {
-        self.shared
-            .view
-            .lock()
-            .is_ok_and(|view| view.state == AccountSessionState::Active)
+        self.shared.view.lock().is_ok_and(|view| {
+            matches!(
+                view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            )
+        })
     }
 
     /// Whether startup is still waiting for the account runtime's first
@@ -1665,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_offline_lease_does_not_open_the_platform() {
+    fn verified_cached_offline_lease_keeps_the_platform_open() {
         let (session, engine) = scripted_session();
         let mut offline = view(AccountSessionState::OfflineLease);
         offline.account_id = "acct_01".to_string();
@@ -1676,7 +1678,7 @@ mod tests {
             session.presentation().state == account_state_label(AccountSessionState::OfflineLease)
         });
 
-        assert!(!session.authenticated());
+        assert!(session.authenticated());
     }
 
     #[test]

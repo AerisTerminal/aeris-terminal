@@ -166,6 +166,56 @@ pub struct WorkspacePaneState {
     /// Per-pane selection/layout generation.
     #[prost(uint64, tag = "9")]
     pub generation: u64,
+    /// Durable user-authored chart presentation and drawing state.
+    #[prost(message, optional, tag = "10")]
+    pub chart: Option<WorkspaceChartState>,
+}
+
+/// Durable chart state owned by one workspace pane.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceChartState {
+    /// Stable Axiusflow chart-type identifier.
+    #[prost(string, tag = "1")]
+    pub chart_type: String,
+    /// Bounded Nucleus semantic drawing document. It contains committed
+    /// drawings only, never market history, series, indicator definitions, or
+    /// renderer/runtime caches.
+    #[prost(string, tag = "2")]
+    pub nucleus_state_json: String,
+    /// Host-owned native indicators in stable creation order.
+    #[prost(message, repeated, tag = "3")]
+    pub indicators: Vec<WorkspaceChartIndicatorState>,
+    /// Stable product price-axis customization.
+    #[prost(message, optional, tag = "4")]
+    pub price_axis: Option<WorkspacePriceAxisState>,
+    /// Drawing locks are host interaction state keyed by Nucleus drawing id.
+    #[prost(uint32, repeated, tag = "5")]
+    pub locked_drawing_ids: Vec<u32>,
+    /// Stable Nucleus crosshair mode (normal, magnet, hidden, or OHLC magnet).
+    #[prost(uint32, tag = "6")]
+    pub crosshair_mode: u32,
+}
+
+/// Durable host-owned state for one native indicator instance.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceChartIndicatorState {
+    #[prost(string, tag = "1")]
+    pub kind: String,
+    #[prost(bool, tag = "2")]
+    pub visible: bool,
+}
+
+/// Durable product price-axis customization for one chart pane.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspacePriceAxisState {
+    #[prost(uint32, tag = "1")]
+    pub flags: u32,
+    #[prost(uint32, tag = "2")]
+    pub mode: u32,
+    #[prost(bool, tag = "3")]
+    pub left: bool,
+    #[prost(uint32, optional, tag = "4")]
+    pub precision: Option<u32>,
 }
 
 /// Persisted binary split tree for one workspace tab.

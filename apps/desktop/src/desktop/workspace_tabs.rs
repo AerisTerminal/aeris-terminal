@@ -22,7 +22,13 @@ impl TerminalApp {
                 pane.surface.update(cx, |surface, _| {
                     surface.set_market_message_wake(market_frame_wake.callback());
                 });
-                cx.observe(&pane.surface, |_, _, cx| cx.notify()).detach();
+                cx.observe(&pane.surface, |app, surface, cx| {
+                    if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
+                        app.persist_workspace_layout_if_changed(cx);
+                    }
+                    cx.notify();
+                })
+                .detach();
             }
         }
         let active = init
@@ -851,6 +857,7 @@ impl TerminalApp {
             pane.worker,
             &self.lifecycle,
             self.chart_chrome_for_new_surface(cx),
+            None,
             window,
             cx,
         );
@@ -859,7 +866,13 @@ impl TerminalApp {
             workspace.set_market_message_wake(self.market_frame_wake.callback());
             let _ = workspace_cx;
         });
-        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+        cx.observe(&surface, |app, surface, cx| {
+            if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
+                app.persist_workspace_layout_if_changed(cx);
+            }
+            cx.notify();
+        })
+        .detach();
         self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
         self.workspaces.push(WorkspaceTab {
             id: workspace_id,
@@ -939,6 +952,7 @@ impl TerminalApp {
             pane.worker,
             &self.lifecycle,
             self.chart_chrome_for_new_surface(cx),
+            None,
             window,
             cx,
         );
@@ -948,7 +962,13 @@ impl TerminalApp {
             surface.set_market_message_wake(self.market_frame_wake.callback());
             surface.select_drawing_tool(drawing_tool, surface_cx);
         });
-        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+        cx.observe(&surface, |app, surface, cx| {
+            if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
+                app.persist_workspace_layout_if_changed(cx);
+            }
+            cx.notify();
+        })
+        .detach();
         let workspace = &mut self.workspaces[self.active];
         let source_pane_id = workspace.panes[workspace.active_pane].id;
         if let Err(error) = workspace

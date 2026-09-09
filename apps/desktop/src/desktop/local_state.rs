@@ -10,7 +10,7 @@ use prost::Message as _;
 const WORKSPACE_FILE: &str = "workspace-state.pb";
 const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
 const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
-const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 3 * 1_048_576;
+const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct LegacyWorkspaceEnvelope {
@@ -183,6 +183,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         viewport_end_unix_nanos: None,
         size_basis_points: 10_000,
         generation: 1,
+        chart: None,
     };
     WorkspaceState {
         provider: "hyperliquid".to_string(),
@@ -221,6 +222,9 @@ pub(super) fn sanitize_workspace(workspace: WorkspaceState) -> WorkspaceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiusflow_contracts::{
+        WorkspaceChartIndicatorState, WorkspaceChartState, WorkspacePriceAxisState,
+    };
 
     fn temporary_workspace_path() -> PathBuf {
         let unique = format!(
@@ -252,6 +256,22 @@ mod tests {
         first.pane_id = 7;
         first.consumer_id = 17;
         first.size_basis_points = 4_000;
+        first.chart = Some(WorkspaceChartState {
+            chart_type: "bars".to_string(),
+            nucleus_state_json: r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":0.0,"price":42000.0}]}]"#.to_string(),
+            indicators: vec![WorkspaceChartIndicatorState {
+                kind: "rsi".to_string(),
+                visible: true,
+            }],
+            price_axis: Some(WorkspacePriceAxisState {
+                flags: 1 | 2 | 64,
+                mode: 0,
+                left: false,
+                precision: Some(2),
+            }),
+            locked_drawing_ids: vec![1],
+            crosshair_mode: 1,
+        });
         let instrument = first.instrument.as_mut().expect("default instrument");
         instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
         instrument.provider_symbol = "ETH".to_string();

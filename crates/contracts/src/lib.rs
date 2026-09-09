@@ -15,6 +15,7 @@ pub use messages::{
     EngineFaultCode, FailureStage, Fault, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
-    SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    SeriesCadence, SeriesKey, SeriesLoadState, WorkspaceChartIndicatorState, WorkspaceChartState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAxisState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };

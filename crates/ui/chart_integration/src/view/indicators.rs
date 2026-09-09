@@ -57,6 +57,7 @@ impl NucleusChartView {
         }
         self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
+        self.mark_user_state_changed();
         Ok(ids)
     }
     /// Returns active indicator instances without engine-local series identities.
@@ -170,6 +171,7 @@ impl NucleusChartView {
             }
         }
         self.invalidate_series_layout();
+        self.mark_user_state_changed();
         true
     }
     /// Builds the price-series row, which carries the OHLC readout.
@@ -345,6 +347,7 @@ impl NucleusChartView {
         }
         if changed {
             self.invalidate_series_layout();
+            self.mark_user_state_changed();
         }
         changed
     }
@@ -360,6 +363,7 @@ impl NucleusChartView {
         };
         if removed {
             self.invalidate_series_layout();
+            self.mark_user_state_changed();
         }
         removed
     }
@@ -408,11 +412,17 @@ impl NucleusChartView {
         values: bool,
         price_lines: bool,
     ) {
+        let changed = self.indicator_name_labels.visible() != names
+            || self.indicator_value_labels.visible() != values
+            || self.indicator_price_lines.visible() != price_lines;
         self.indicator_name_labels = IndicatorLabels::from_visible(names);
         self.indicator_value_labels = IndicatorLabels::from_visible(values);
         self.indicator_price_lines = IndicatorLabels::from_visible(price_lines);
         self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
+        if changed {
+            self.mark_user_state_changed();
+        }
     }
     pub(super) fn toggle_indicator_name_labels(&mut self) -> bool {
         self.apply_indicator_chrome_preferences(

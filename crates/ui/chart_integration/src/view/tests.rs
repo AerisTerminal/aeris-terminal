@@ -1496,6 +1496,53 @@ fn anchored_drawing_tools_commit_real_nucleus_drawings_and_return_to_cursor() {
 }
 
 #[test]
+fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
+    let mut source = interactive_chart();
+    source
+        .add_indicator(ChartIndicator::Rsi)
+        .expect("RSI creates its oscillator pane");
+    source.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+    assert!(source.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default(), 1,));
+    let main_id = source
+        .selected_drawing_id()
+        .expect("main drawing is selected");
+    assert!(source.set_selected_drawing_locked(true));
+    let oscillator_id = source
+        .engine
+        .add_drawing(
+            DrawingKind::HorizontalLine,
+            1,
+            vec![nucleuscharts_engine::DrawingPoint {
+                logical: 10.0,
+                price: 50.0,
+            }],
+            None,
+        )
+        .expect("oscillator drawing creates");
+    source.engine.set_selected_drawing(Some(oscillator_id));
+    assert!(source.set_selected_drawing_locked(true));
+    let json = source
+        .export_semantic_state_json()
+        .expect("drawings export");
+    let locked = source.locked_drawing_ids();
+    assert!(locked.contains(&main_id));
+    assert!(locked.contains(&oscillator_id));
+
+    let mut restored = interactive_chart();
+    restored
+        .add_indicator(ChartIndicator::Rsi)
+        .expect("RSI recreates its oscillator pane");
+    restored
+        .import_semantic_state_json(&json, &locked)
+        .expect("drawings restore");
+
+    assert_eq!(restored.drawing_count(), 2);
+    assert_eq!(restored.engine.drawings()[0].pane_index, 0);
+    assert_eq!(restored.engine.drawings()[1].pane_index, 1);
+    assert_eq!(restored.drawings_lock_summary().locked_count, 2);
+}
+
+#[test]
 fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
     let mut chart = interactive_chart();
     chart.set_drawing_tool(ChartDrawingTool::TrendLine);

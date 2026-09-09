@@ -110,7 +110,6 @@ pub fn validate_compact(
 ///
 /// Returns a redacted error when the compact value or account identity is
 /// malformed or exceeds its bounds.
-#[cfg(test)]
 pub fn untrusted_account_id(compact: &str) -> Result<AccountId, String> {
     if compact.is_empty() || compact.len() > MAXIMUM_LEASE_BYTES {
         return Err(lease_failure());

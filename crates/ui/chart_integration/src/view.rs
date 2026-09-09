@@ -111,6 +111,43 @@ impl ChartIndicator {
         Self::Atr,
     ];
 
+    /// Returns the durable workspace identifier for this indicator kind.
+    #[must_use]
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::Volume => "volume",
+            Self::Vwap => "vwap",
+            Self::Sma => "sma",
+            Self::Ema => "ema",
+            Self::EmaRibbon => "ema_ribbon",
+            Self::Wma => "wma",
+            Self::Bollinger => "bollinger",
+            Self::Rsi => "rsi",
+            Self::Macd => "macd",
+            Self::Stochastic => "stochastic",
+            Self::Atr => "atr",
+        }
+    }
+
+    /// Parses a durable workspace indicator identifier.
+    #[must_use]
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        Some(match value {
+            "volume" => Self::Volume,
+            "vwap" => Self::Vwap,
+            "sma" => Self::Sma,
+            "ema" => Self::Ema,
+            "ema_ribbon" => Self::EmaRibbon,
+            "wma" => Self::Wma,
+            "bollinger" => Self::Bollinger,
+            "rsi" => Self::Rsi,
+            "macd" => Self::Macd,
+            "stochastic" => Self::Stochastic,
+            "atr" => Self::Atr,
+            _ => return None,
+        })
+    }
+
     /// Returns the user-facing legacy catalog label.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -630,6 +667,9 @@ pub struct NucleusChartView {
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
+    /// Monotonic revision of stable user-authored chart presentation state.
+    /// Market-data updates, hover, cursor and transient gestures never touch it.
+    user_state_revision: u64,
     /// The pending one-second self-wake. Held so only one is ever in flight.
     clock_tick: Option<Task<()>>,
     #[cfg(feature = "diagnostics")]
@@ -707,6 +747,7 @@ impl NucleusChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            user_state_revision: 0,
             clock_tick: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
@@ -810,6 +851,7 @@ impl NucleusChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            user_state_revision: 0,
             clock_tick: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
@@ -1029,9 +1071,96 @@ impl NucleusChartView {
             PriceAxisMenuAction::SetPrecision(precision) => self.set_price_precision(precision),
         };
         if applied {
+            self.mark_user_state_changed();
             self.invalidate_series_layout();
         }
         applied
+    }
+
+    /// Restores a previously captured stable price-axis state by replaying the
+    /// same public actions used by the menu, so Nucleus remains authoritative.
+    pub fn restore_price_axis_menu_state(&mut self, desired: PriceAxisMenuState) -> bool {
+        let mut current = self
+            .price_axis_menu_state(0, false)
+            .or_else(|| self.price_axis_menu_state(0, true));
+        let Some(mut current_state) = current else {
+            return false;
+        };
+        if current_state.left != desired.left {
+            let _ = self.apply_price_axis_menu_action(
+                0,
+                current_state.left,
+                PriceAxisMenuAction::SetLeft(desired.left),
+            );
+            current = self.price_axis_menu_state(0, desired.left);
+            let Some(next) = current else {
+                return false;
+            };
+            current_state = next;
+        }
+        let flags = [
+            (
+                PriceAxisMenuState::PRICE_LINE,
+                PriceAxisMenuAction::TogglePriceLine,
+            ),
+            (
+                PriceAxisMenuState::LAST_VALUE,
+                PriceAxisMenuAction::ToggleLastValue,
+            ),
+            (PriceAxisMenuState::TITLE, PriceAxisMenuAction::ToggleTitle),
+            (
+                PriceAxisMenuState::COUNTDOWN,
+                PriceAxisMenuAction::ToggleCountdown,
+            ),
+            (
+                PriceAxisMenuState::INDICATOR_NAMES,
+                PriceAxisMenuAction::ToggleIndicatorNameLabels,
+            ),
+            (
+                PriceAxisMenuState::INDICATOR_VALUES,
+                PriceAxisMenuAction::ToggleIndicatorValueLabels,
+            ),
+            (
+                PriceAxisMenuState::INDICATOR_PRICE_LINES,
+                PriceAxisMenuAction::ToggleIndicatorPriceLines,
+            ),
+            (
+                PriceAxisMenuState::AUTO_SCALE,
+                PriceAxisMenuAction::ToggleAutoScale,
+            ),
+            (
+                PriceAxisMenuState::INVERT_SCALE,
+                PriceAxisMenuAction::ToggleInvertScale,
+            ),
+            (
+                PriceAxisMenuState::BID_ASK,
+                PriceAxisMenuAction::ToggleBidAsk,
+            ),
+            (
+                PriceAxisMenuState::ALIGN_LABELS,
+                PriceAxisMenuAction::ToggleAlignLabels,
+            ),
+        ];
+        for (flag, action) in flags {
+            if current_state.enabled(flag) != desired.enabled(flag) {
+                let _ = self.apply_price_axis_menu_action(0, desired.left, action);
+            }
+        }
+        if current_state.mode != desired.mode {
+            let _ = self.apply_price_axis_menu_action(
+                0,
+                desired.left,
+                PriceAxisMenuAction::SetMode(desired.mode),
+            );
+        }
+        if current_state.precision != desired.precision {
+            let _ = self.apply_price_axis_menu_action(
+                0,
+                desired.left,
+                PriceAxisMenuAction::SetPrecision(desired.precision),
+            );
+        }
+        true
     }
 
     /// Selects a Nucleus-owned theme without changing chart data or viewport.
@@ -1471,8 +1600,117 @@ impl NucleusChartView {
 
     /// Applies a built-in Nucleus price-series kind without changing market data.
     pub fn set_chart_type(&mut self, chart_type: ChartType) {
+        if self.chart_type == chart_type {
+            return;
+        }
         self.chart_type = chart_type;
         self.apply_price_series_kind();
+        self.mark_user_state_changed();
+    }
+
+    /// Returns the stable configured crosshair mode, excluding pointer position
+    /// and temporary modifier-driven OHLC magnet state.
+    #[must_use]
+    pub fn crosshair_mode(&self) -> u8 {
+        self.engine.options.get().crosshair.mode
+    }
+
+    /// Applies one stable Nucleus crosshair mode.
+    pub fn set_crosshair_mode(&mut self, mode: u8) -> bool {
+        if mode > 3 || self.crosshair_mode() == mode {
+            return false;
+        }
+        let patch = serde_json::json!({ "crosshair": { "mode": mode } }).to_string();
+        if self.engine.apply_options(&patch).is_err() {
+            return false;
+        }
+        self.mark_user_state_changed();
+        true
+    }
+
+    /// Monotonic revision of durable user-authored presentation state.
+    #[must_use]
+    pub const fn user_state_revision(&self) -> u64 {
+        self.user_state_revision
+    }
+
+    fn mark_user_state_changed(&mut self) {
+        self.user_state_revision = self.user_state_revision.saturating_add(1);
+    }
+
+    /// Exports Nucleus-owned committed drawing semantics in z-order. Market data,
+    /// indicator definitions and renderer/runtime state are intentionally absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Nucleus cannot serialize its bounded drawing state.
+    pub fn export_semantic_state_json(&self) -> Result<String, String> {
+        Ok(self.engine.drawings_json())
+    }
+
+    /// Restores committed drawings after indicator panes have been recreated.
+    /// Lock ids are remapped because Nucleus deliberately allocates fresh local
+    /// drawing handles instead of accepting persisted runtime handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the persisted JSON is malformed, exceeds the
+    /// drawing bound, references an invalid pane/kind, or Nucleus rejects it.
+    pub fn import_semantic_state_json(
+        &mut self,
+        json: &str,
+        locked_ids: &[u32],
+    ) -> Result<(), String> {
+        const MAXIMUM_PERSISTED_DRAWINGS: usize = 10_000;
+        let items = serde_json::from_str::<Vec<serde_json::Value>>(json)
+            .map_err(|_| "persisted drawing state is malformed".to_string())?;
+        if items.len() > MAXIMUM_PERSISTED_DRAWINGS {
+            return Err("persisted drawing count exceeds the chart bound".to_string());
+        }
+        self.engine.clear_drawings();
+        self.locked_drawings.clear();
+        for item in items {
+            let old_id = item
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or_else(|| "persisted drawing id is invalid".to_string())?;
+            let kind = item
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .and_then(nucleuscharts_engine::DrawingKind::from_name)
+                .ok_or_else(|| "persisted drawing kind is invalid".to_string())?;
+            let pane_index = item
+                .get("pane_index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|pane| usize::try_from(pane).ok())
+                .ok_or_else(|| "persisted drawing pane is invalid".to_string())?;
+            let points = item
+                .get("points")
+                .cloned()
+                .ok_or_else(|| "persisted drawing anchors are missing".to_string())?;
+            let points = serde_json::from_value::<Vec<nucleuscharts_engine::DrawingPoint>>(points)
+                .map_err(|_| "persisted drawing anchors are invalid".to_string())?;
+            let options = serde_json::to_string(&item)
+                .map_err(|_| "persisted drawing options are invalid".to_string())?;
+            let new_id = self
+                .engine
+                .add_drawing(kind, pane_index, points, Some(&options))
+                .ok_or_else(|| "persisted drawing could not be restored".to_string())?;
+            if locked_ids.contains(&old_id) {
+                self.locked_drawings.insert(new_id);
+            }
+        }
+        self.invalidate_series_layout();
+        Ok(())
+    }
+
+    /// Returns stable drawing locks in deterministic id order.
+    #[must_use]
+    pub fn locked_drawing_ids(&self) -> Vec<u32> {
+        let mut ids = self.locked_drawings.iter().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     fn apply_price_series_kind(&mut self) {

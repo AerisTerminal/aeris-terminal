@@ -16,7 +16,9 @@ It belongs in the same product category as MotiveWave and ATAS: a workstation th
 
 Provider sessions are shared across panes. Symbol, timeframe, viewport, tab, and layout changes update demand without creating a runtime per chart or reconnecting a healthy provider session.
 
-Workspace layout is persisted locally. Market history is not: the market runtime owns a bounded in-memory working set and reloads provider history on demand.
+Workspace state is persisted locally, including pane layout, selected markets and timeframes, chart type, native indicators, drawings, viewport, and stable price-axis customization. Pointer position, hover/selection state, active drawing gestures, and market history remain transient. The market runtime owns a bounded in-memory history working set and reloads provider history on demand.
+
+A previously verified, still-valid device-bound account lease can cover a transient startup outage while online session restoration is unavailable. Explicit credential rejection or lease expiry still requires sign-in again.
 
 ## Requirements
 
