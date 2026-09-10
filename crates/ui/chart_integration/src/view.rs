@@ -20,8 +20,7 @@ use gpui::{
 };
 use nucleuscharts_engine::{
     BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
-    DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS, FeatureSeriesOptionsPatch,
-    NativePrimitiveId, PriceScaleTarget,
+    DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PriceScaleTarget,
 };
 use nucleuscharts_render::color::Color;
 use nucleuscharts_render::draw_list::Prim;
@@ -285,14 +284,13 @@ impl ChartType {
             .find(|chart_type| chart_type.identifier() == value.trim())
     }
 
-    pub(crate) const fn series_kind(self) -> Option<nucleuscharts_engine::SeriesKind> {
+    pub(crate) const fn series_kind(self) -> nucleuscharts_engine::SeriesKind {
         match self {
-            Self::Candles => Some(nucleuscharts_engine::SeriesKind::Candlestick),
-            Self::Bars => Some(nucleuscharts_engine::SeriesKind::Bar),
-            Self::Line => Some(nucleuscharts_engine::SeriesKind::Line),
-            Self::Area => Some(nucleuscharts_engine::SeriesKind::Area),
-            Self::Baseline => Some(nucleuscharts_engine::SeriesKind::Baseline),
-            Self::BrushableArea => None,
+            Self::Candles => nucleuscharts_engine::SeriesKind::Candlestick,
+            Self::Bars => nucleuscharts_engine::SeriesKind::Bar,
+            Self::Line => nucleuscharts_engine::SeriesKind::Line,
+            Self::Area | Self::BrushableArea => nucleuscharts_engine::SeriesKind::Area,
+            Self::Baseline => nucleuscharts_engine::SeriesKind::Baseline,
         }
     }
 }
@@ -1735,7 +1733,7 @@ impl NucleusChartView {
         if self.brushable_line_width.is_none() {
             self.brushable_line_width = self
                 .engine
-                .feature_series_options_json(0)
+                .series_options_json(0)
                 .and_then(|options| serde_json::from_str::<serde_json::Value>(&options).ok())
                 .and_then(|options| options["line_width"].as_f64());
         }
@@ -1747,6 +1745,7 @@ impl NucleusChartView {
             let _ = self.engine.clear_delta_tooltip(id);
             let _ = self.engine.remove_native_primitive(id);
         }
+        let _ = self.engine.clear_area_brush_state(0);
         self.brushable_line_width = None;
         if matches!(self.drag, Some(ChartDrag::BrushableRange)) {
             self.drag = None;
@@ -1778,16 +1777,7 @@ impl NucleusChartView {
                 Vec::new(),
             ),
         };
-        let _ = self.engine.apply_feature_series_options(
-            0,
-            FeatureSeriesOptionsPatch {
-                line_color: Some(base_style.line_color),
-                top_color: Some(base_style.top_color),
-                bottom_color: Some(base_style.bottom_color),
-                brush_ranges: Some(ranges),
-                ..FeatureSeriesOptionsPatch::default()
-            },
-        );
+        let _ = self.engine.set_area_brush_state(0, base_style, ranges);
     }
 
     const fn brush_style(
@@ -1806,7 +1796,10 @@ impl NucleusChartView {
 
     fn begin_brushable_range(&mut self, pane_x: f64, y: f64) {
         self.end_drag(pane_x, y);
-        if self.engine.delta_tooltip_mouse_down(pane_x) {
+        if self
+            .engine
+            .delta_tooltip_mouse_down_with_shift(pane_x, true)
+        {
             self.drag = Some(ChartDrag::BrushableRange);
             self.sync_brushable_range();
         }

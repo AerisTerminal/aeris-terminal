@@ -3,10 +3,7 @@
 use crate::bridge::MergedChartData;
 use crate::view::ChartType;
 use axiusflow_application::{ProvenancedMarketBar, ReplaySnapshot};
-use nucleuscharts_engine::{
-    ChartEngine, FeatureDataPoint, FeatureSeriesKind, FeatureSeriesOptionsPatch, FeatureValue,
-    PriceScaleTarget, SeriesKind,
-};
+use nucleuscharts_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
 use num_traits::ToPrimitive;
 use std::num::NonZeroUsize;
 
@@ -183,23 +180,7 @@ pub(crate) fn apply_merged_chart_data(
     for (time, ohlc, _) in &rows {
         product_bars.update_bar(*time, *ohlc);
     }
-    let accepted = if chart_type == ChartType::BrushableArea {
-        rows.iter()
-            .filter(|(time, ohlc, _)| {
-                engine
-                    .update_feature_series_data(
-                        0,
-                        FeatureDataPoint {
-                            time: *time,
-                            value: Some(FeatureValue::BrushableArea { value: ohlc[3] }),
-                        },
-                    )
-                    .is_ok()
-            })
-            .count()
-    } else {
-        engine.update_series_bars(0, rows.iter().map(|(time, ohlc, _)| (*time, *ohlc)))
-    };
+    let accepted = engine.update_series_bars(0, rows.iter().map(|(time, ohlc, _)| (*time, *ohlc)));
     debug_assert_eq!(accepted, update.accepted_deltas().len());
     let accepted_volume =
         engine.update_series_bars(volume_series, rows.into_iter().map(|(_, _, volume)| volume));
@@ -221,51 +202,22 @@ pub(crate) fn install_product_price_series(
     chart_type: ChartType,
     product_bars: &ProductPriceBars,
 ) {
+    apply_product_series_kind(engine, chart_type);
     if product_bars.is_empty() {
-        if chart_type == ChartType::BrushableArea {
-            engine.configure_feature_series(
-                0,
-                FeatureSeriesKind::BrushableArea,
-                FeatureSeriesOptionsPatch::default(),
-            );
-        } else {
-            apply_product_series_kind(engine, chart_type);
-        }
         return;
     }
-    if chart_type == ChartType::BrushableArea {
-        engine.configure_feature_series(
-            0,
-            FeatureSeriesKind::BrushableArea,
-            FeatureSeriesOptionsPatch::default(),
-        );
-        let points = product_bars
-            .times
-            .iter()
-            .zip(product_bars.close.iter())
-            .map(|(&time, &value)| FeatureDataPoint {
-                time,
-                value: Some(FeatureValue::BrushableArea { value }),
-            })
-            .collect();
-        let _ = engine.set_feature_series_data(0, points);
-    } else {
-        apply_product_series_kind(engine, chart_type);
-        let _ = engine.set_series_data(
-            0,
-            &product_bars.times,
-            &product_bars.open,
-            &product_bars.high,
-            &product_bars.low,
-            &product_bars.close,
-        );
-    }
+    let _ = engine.set_series_data(
+        0,
+        &product_bars.times,
+        &product_bars.open,
+        &product_bars.high,
+        &product_bars.low,
+        &product_bars.close,
+    );
 }
 
 fn apply_product_series_kind(engine: &mut ChartEngine, chart_type: ChartType) {
-    if let Some(kind) = chart_type.series_kind() {
-        engine.convert_series_kind(0, kind);
-    }
+    engine.convert_series_kind(0, chart_type.series_kind());
 }
 
 pub(crate) fn install_replay_with_deltas(

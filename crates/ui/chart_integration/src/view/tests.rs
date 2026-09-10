@@ -178,7 +178,7 @@ fn selected_price_precision_survives_snapshot_install_and_restores_a_replacement
 }
 
 #[test]
-fn brushable_area_uses_nucleus_feature_series_and_restores_ohlc() {
+fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
@@ -191,16 +191,13 @@ fn brushable_area_uses_nucleus_feature_series_and_restores_ohlc() {
     assert_eq!(chart.chart_type(), ChartType::BrushableArea);
     assert_eq!(
         series_entry(&chart, 0).kind,
-        nucleuscharts_engine::SeriesKind::Feature
+        nucleuscharts_engine::SeriesKind::Area
     );
-    assert_eq!(
-        chart.engine.feature_series_kind(0),
-        Some(nucleuscharts_engine::FeatureSeriesKind::BrushableArea)
-    );
+    assert_eq!(chart.engine.feature_series_kind(0), None);
     let nucleus_line_width = serde_json::from_str::<serde_json::Value>(
         &chart
             .engine
-            .feature_series_options_json(0)
+            .series_options_json(0)
             .expect("brushable options"),
     )
     .expect("brushable options are JSON")["line_width"]
@@ -211,26 +208,26 @@ fn brushable_area_uses_nucleus_feature_series_and_restores_ohlc() {
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
     let start = chart.engine.time_scale.index_to_coordinate(2);
     let end = chart.engine.time_scale.index_to_coordinate(8);
-    chart.begin_drag(start, 200.0, 1);
+    chart.begin_drag(start, 200.0, 1, false);
+    assert!(matches!(chart.drag, Some(ChartDrag::Pane { .. })));
+    chart.end_drag(start, 200.0);
+    chart.begin_drag(start, 200.0, 1, true);
     assert_eq!(chart.drag, Some(ChartDrag::BrushableRange));
     chart.drag_to(end, 200.0);
     chart.end_drag(end, 200.0);
     assert!(chart.drag.is_none());
-    let options = chart
-        .engine
-        .feature_series_options_json(0)
-        .expect("brushable options");
-    let options =
-        serde_json::from_str::<serde_json::Value>(&options).expect("brushable options are JSON");
-    assert_eq!(options["line_width"].as_f64(), Some(nucleus_line_width));
-    let ranges = options["brush_ranges"]
-        .as_array()
-        .expect("brushable ranges are an array");
-    assert!(!ranges.is_empty());
-    assert!(
-        ranges
-            .iter()
-            .all(|range| { range["style"]["line_width"].as_f64() == Some(nucleus_line_width) })
+    let selected = chart
+        .brushable_tooltip
+        .and_then(|id| chart.engine.delta_tooltip_active_range(id))
+        .expect("shift-drag installs a comparison range");
+    assert!(selected.from < selected.to);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &chart.engine.series_options_json(0).expect("area options")
+        )
+        .expect("area options are JSON")["line_width"]
+            .as_f64(),
+        Some(nucleus_line_width)
     );
 
     chart.set_chart_type(ChartType::Candles);
@@ -830,7 +827,7 @@ fn wheel_zoom_and_horizontal_scroll_mutate_nucleus_without_refitting() {
 #[test]
 fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, 200.0, 1);
+    chart.begin_drag(300.0, 200.0, 1, false);
     assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
     assert_eq!(chart.engine.crosshair, Some((300.0, 200.0)));
     let offset = chart.engine.right_offset();
@@ -888,7 +885,7 @@ fn empty_chart_has_no_copy_price() {
 #[test]
 fn axes_drag_and_double_click_reset_through_nucleus() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1);
+    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
     assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
     chart.drag_to(340.0, chart.engine.pane_h + 10.0);
     chart.end_drag(340.0, chart.engine.pane_h + 10.0);
@@ -901,7 +898,7 @@ fn axes_drag_and_double_click_reset_through_nucleus() {
             .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
         Some(true)
     );
-    chart.begin_drag(right_axis_x, 200.0, 1);
+    chart.begin_drag(right_axis_x, 200.0, 1, false);
     assert!(matches!(
         chart.drag,
         Some(ChartDrag::PriceAxis {
@@ -934,7 +931,7 @@ fn axes_drag_and_double_click_reset_through_nucleus() {
     let locked_range = chart
         .engine
         .price_scale_visible_range_for(0, PriceScaleTarget::Right);
-    chart.begin_drag(300.0, 200.0, 1);
+    chart.begin_drag(300.0, 200.0, 1, false);
     assert!(matches!(
         chart.drag,
         Some(ChartDrag::Pane {
@@ -961,7 +958,7 @@ fn axes_drag_and_double_click_reset_through_nucleus() {
     chart.engine.time_scale.end_scroll();
     let offset = chart.engine.right_offset();
     assert!(offset.abs() > f64::EPSILON);
-    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 2);
+    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 2, false);
     assert!(chart.engine.right_offset().abs() < offset.abs());
     assert!(chart.drag.is_none());
 }
@@ -1827,7 +1824,7 @@ fn cursor_mode_still_falls_through_to_chart_pan_on_a_drawing_miss() {
     let mut chart = interactive_chart();
     assert!(!chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
 
-    chart.begin_drag(300.0, 200.0, 1);
+    chart.begin_drag(300.0, 200.0, 1, false);
 
     assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
 }
@@ -1868,7 +1865,7 @@ fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
 #[test]
 fn native_pointer_state_ends_a_drag_when_mouse_up_was_lost() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, 200.0, 1);
+    chart.begin_drag(300.0, 200.0, 1, false);
     assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
 
     chart.move_pointer(340.0, 200.0, false, DrawingModifiers::default());
@@ -1895,7 +1892,7 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
     assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
     assert_eq!(chart.engine.separator_hover, Some(0));
 
-    chart.begin_drag(300.0, separator_y, 1);
+    chart.begin_drag(300.0, separator_y, 1, false);
     assert!(matches!(
         chart.drag,
         Some(ChartDrag::PaneSeparator { index: 0, .. })
@@ -1917,7 +1914,7 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
 #[test]
 fn escape_cancels_every_active_gesture_and_clears_pointer_state() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1);
+    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
     assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
 
     assert!(chart.apply_key("escape", false));
@@ -1937,7 +1934,7 @@ fn pointer_cursor_truthfully_tracks_chart_and_axis_gestures() {
     chart.update_cursor(chart.engine.pane_w + 1.0, 200.0);
     assert_eq!(chart.cursor_style, CursorStyle::ResizeUpDown);
 
-    chart.begin_drag(300.0, 200.0, 1);
+    chart.begin_drag(300.0, 200.0, 1, false);
     assert_eq!(chart.cursor_style, CursorStyle::ClosedHand);
     chart.end_drag(300.0, 200.0);
     assert_eq!(chart.cursor_style, CursorStyle::Crosshair);

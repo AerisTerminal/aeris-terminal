@@ -131,7 +131,7 @@ impl NucleusChartView {
         self.engine.price_axis_start_scale(pane, target, y);
         self.drag = Some(ChartDrag::PriceAxis { pane, target });
     }
-    pub(super) fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize) {
+    pub(super) fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize, shift: bool) {
         self.end_drag(pane_x, y);
         let pane = self.engine.pane_index_at_y(y);
         if click_count >= 2 {
@@ -160,6 +160,7 @@ impl NucleusChartView {
         } else if pane_x >= 0.0 && y >= 0.0 && y <= self.engine.pane_h {
             if self.chart_type == ChartType::BrushableArea
                 && self.drawing_tool == ChartDrawingTool::Cursor
+                && shift
             {
                 self.begin_brushable_range(pane_x, y);
                 return;
@@ -362,7 +363,7 @@ impl NucleusChartView {
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
         if self.separator_at(y).is_some() {
-            self.begin_drag(pane_x, y, event.click_count);
+            self.begin_drag(pane_x, y, event.click_count, event.modifiers.shift);
         } else if !self.pointer_on_axis(pane_x, y)
             && self.drawing_pointer_down(
                 pane_x,
@@ -382,7 +383,7 @@ impl NucleusChartView {
             self.update_cursor(pane_x, y);
             self.update_crosshair(pane_x, y);
         } else {
-            self.begin_drag(pane_x, y, event.click_count);
+            self.begin_drag(pane_x, y, event.click_count, event.modifiers.shift);
         }
         cx.stop_propagation();
         cx.notify();
