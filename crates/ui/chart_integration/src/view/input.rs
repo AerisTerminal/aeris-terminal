@@ -362,7 +362,11 @@ impl NucleusChartView {
         self.pending_activate = ActivationRequest::Pending;
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
-        if self.separator_at(y).is_some() {
+        if self.engine.activate_alert_create_at(pane_x, y) {
+            self.drag = None;
+            self.cursor_style = CursorStyle::PointingHand;
+            self.invalidate_series_frame();
+        } else if self.separator_at(y).is_some() {
             self.begin_drag(pane_x, y, event.click_count, event.modifiers.shift);
         } else if !self.pointer_on_axis(pane_x, y)
             && self.drawing_pointer_down(

@@ -66,6 +66,34 @@ fn visible_series_point(chart: &NucleusChartView, id: u32) -> (f64, f64) {
 }
 
 #[test]
+fn crosshair_alert_action_reaches_the_host_with_nucleus_price_context() {
+    let mut chart = interactive_chart();
+    let price = chart
+        .engine
+        .series_data(0)
+        .last()
+        .expect("fixture price")
+        .close;
+    let y = chart
+        .engine
+        .series_price_to_coordinate(0, price)
+        .expect("price coordinate");
+    chart.engine.crosshair = Some((chart.engine.pane_w / 2.0, y));
+    let action_x = (-100..=4_096)
+        .map(f64::from)
+        .find(|x| chart.engine.alert_create_hit_at(*x, y))
+        .expect("alert action is hit-testable");
+    assert!(chart.engine.activate_alert_create_at(action_x, y));
+    let requests = chart.take_alert_create_requests();
+    assert_eq!(requests.len(), 1);
+    assert!((requests[0].price - price).abs() < f64::EPSILON);
+    assert_eq!(
+        requests[0].condition,
+        nucleuscharts_engine::AlertCondition::Crossing
+    );
+}
+
+#[test]
 fn empty_chart_surface_accepts_its_first_real_snapshot() {
     let mut chart = NucleusChartView::empty();
     assert!(!chart.has_market_data());

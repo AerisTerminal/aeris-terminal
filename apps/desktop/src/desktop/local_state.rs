@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use axiusflow_contracts::{
-    InstallProviderInstrument, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
+    SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
 use prost::Message as _;
 
@@ -212,9 +213,37 @@ pub(super) fn default_workspace() -> WorkspaceState {
     }
 }
 
-pub(super) fn sanitize_workspace(workspace: WorkspaceState) -> WorkspaceState {
+pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceState {
     if workspace.workspace_tabs.is_empty() {
         return default_workspace();
+    }
+    for pane in workspace
+        .workspace_tabs
+        .iter_mut()
+        .flat_map(|tab| tab.panes.iter_mut())
+    {
+        let Some(chart) = &mut pane.chart else {
+            continue;
+        };
+        let mut ids = std::collections::BTreeSet::new();
+        chart.price_alerts.retain(|alert| {
+            !alert.id.is_empty()
+                && alert.id.len() <= 128
+                && ids.insert(alert.id.clone())
+                && alert.instrument.as_ref().is_some_and(|instrument| {
+                    !instrument.provider.is_empty()
+                        && !instrument.instrument_id.is_empty()
+                        && !instrument.entitlement_id.is_empty()
+                        && instrument.price_scale <= 18
+                })
+                && PriceAlertCondition::try_from(alert.condition).is_ok()
+                && PriceAlertFrequency::try_from(alert.frequency).is_ok()
+                && PriceAlertStatus::try_from(alert.status).is_ok()
+                && alert.price_scale_side <= 2
+        });
+        chart
+            .price_alerts
+            .truncate(axiusflow_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
     }
     workspace
 }
@@ -223,7 +252,8 @@ pub(super) fn sanitize_workspace(workspace: WorkspaceState) -> WorkspaceState {
 mod tests {
     use super::*;
     use axiusflow_contracts::{
-        WorkspaceChartIndicatorState, WorkspaceChartState, WorkspacePriceAxisState,
+        WorkspaceChartIndicatorState, WorkspaceChartState, WorkspacePriceAlertState,
+        WorkspacePriceAxisState,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -236,6 +266,20 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique).join(WORKSPACE_FILE)
+    }
+
+    fn price_alert(instrument: InstallProviderInstrument) -> WorkspacePriceAlertState {
+        WorkspacePriceAlertState {
+            id: "alert-1".to_string(),
+            instrument: Some(instrument),
+            price: 350_000_000_000,
+            pane_index: 0,
+            price_scale_side: 0,
+            condition: PriceAlertCondition::CrossingUp as i32,
+            frequency: PriceAlertFrequency::OnlyOnce as i32,
+            status: PriceAlertStatus::Active as i32,
+            created_at_unix_nanos: 42,
+        }
     }
 
     #[test]
@@ -271,11 +315,19 @@ mod tests {
             }),
             locked_drawing_ids: vec![1],
             crosshair_mode: 1,
+            price_alerts: Vec::new(),
         });
         let instrument = first.instrument.as_mut().expect("default instrument");
         instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
         instrument.provider_symbol = "ETH".to_string();
         instrument.display_symbol = "ETH-PERP".to_string();
+        let alert_instrument = instrument.clone();
+        first
+            .chart
+            .as_mut()
+            .expect("chart state")
+            .price_alerts
+            .push(price_alert(alert_instrument));
         let series = first.series.as_mut().expect("default series");
         series.instrument_id = instrument.instrument_id.clone();
         series.cadence = SeriesCadence::FixedSeconds as i32;

@@ -13,6 +13,12 @@ mod workspace;
 pub use axiusflow_application::ReplayRecoveryCommand;
 pub use bridge::ChartBridgeMetrics;
 pub use nucleuscharts_engine::ChartTheme as NucleusChartTheme;
+pub use nucleuscharts_engine::{
+    AlertCondition as ChartAlertCondition, AlertCreateRequest as ChartAlertCreateRequest,
+    AlertFrequency as ChartAlertFrequency, AlertId as ChartAlertId, AlertLine as ChartAlertLine,
+    AlertLineStatus as ChartAlertLineStatus, AlertPriceScale as ChartAlertPriceScale,
+    AlertSnapshot as ChartAlertSnapshot,
+};
 pub use view::{
     ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator, ChartIndicatorError,
     ChartIndicatorState, ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction,

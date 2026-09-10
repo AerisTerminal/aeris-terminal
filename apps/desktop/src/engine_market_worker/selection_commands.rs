@@ -2,11 +2,11 @@
 
 use super::{
     ChartState, ConsumerResourceClass, EndpointRecord, FeedConnectionState,
-    InstallProviderInstrument, MarketRuntimeEvent, MarketService, MarketWorkerCommand,
-    MarketWorkerMessage, ProviderInstrumentSummary, RITHMIC_CATALOG_READY_MESSAGE,
-    STARTUP_CATALOG_COMMAND_GENERATION, SearchProviderInstruments, SelectProviderInstrument,
-    StartupResolution, WorkerEndpoint, cancel_pending_recovery, chart_streams,
-    provider_display_name, retire_endpoint, send_recovery, series_key,
+    InstallProviderInstrument, MarketPriceAlert, MarketRuntimeEvent, MarketService,
+    MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
+    RITHMIC_CATALOG_READY_MESSAGE, STARTUP_CATALOG_COMMAND_GENERATION, SearchProviderInstruments,
+    SelectProviderInstrument, StartupResolution, WorkerEndpoint, cancel_pending_recovery,
+    chart_streams, provider_display_name, retire_endpoint, send_recovery, series_key,
 };
 
 pub(super) fn initialize_catalog_endpoint(
@@ -339,10 +339,28 @@ pub(super) fn process_command(
         MarketWorkerCommand::ResourceClass(resource_class) => {
             set_resource_class(market, client_id, endpoint, resource_class)
         }
+        MarketWorkerCommand::ReplacePriceAlerts(alerts) => {
+            replace_price_alerts(market, client_id, endpoint, &alerts)
+        }
         MarketWorkerCommand::Shutdown => {
             retire_endpoint(market, client_id, endpoint);
             Ok(())
         }
+    }
+}
+
+fn replace_price_alerts(
+    market: &MarketService,
+    client_id: u64,
+    endpoint: &WorkerEndpoint,
+    alerts: &[MarketPriceAlert],
+) -> Result<(), String> {
+    match market.replace_price_alerts(client_id, endpoint.consumer_id, alerts) {
+        Ok(()) => Ok(()),
+        Err(error) => endpoint
+            .messages
+            .send(MarketWorkerMessage::PriceAlertSyncFailed(error))
+            .map_err(|error| error.to_string()),
     }
 }
 

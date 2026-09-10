@@ -9,6 +9,34 @@ pub mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
 
+/// Maximum durable alerts owned by one market consumer.
+pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
+
+/// One bounded, fixed-point price alert evaluated by the market coordinator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketPriceAlert {
+    pub id: String,
+    pub instrument: axiusflow_contracts::InstallProviderInstrument,
+    pub price: i64,
+    pub condition: axiusflow_contracts::PriceAlertCondition,
+    pub frequency: axiusflow_contracts::PriceAlertFrequency,
+    pub active: bool,
+}
+
+/// Exact trade observation that satisfied one runtime-owned price alert.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketPriceAlertTrigger {
+    pub consumer_id: axiusflow_market_engine::ConsumerId,
+    pub alert_id: String,
+    pub instrument: axiusflow_contracts::InstallProviderInstrument,
+    pub threshold_price: i64,
+    pub observed_price: i64,
+    pub condition: axiusflow_contracts::PriceAlertCondition,
+    pub frequency: axiusflow_contracts::PriceAlertFrequency,
+    pub observed_unix_nanos: i64,
+    pub remains_active: bool,
+}
+
 /// Direct in-process order-book image for one consumer generation.
 ///
 /// The canonical depth publication is owned and validated by the market-data
@@ -65,6 +93,7 @@ pub enum MarketRuntimeEvent {
     SeriesState(MarketSeriesState),
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
+    PriceAlertTriggered(MarketPriceAlertTrigger),
     ProviderInstrumentSearchResult(axiusflow_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
     ProviderCatalogRejected(axiusflow_contracts::ProviderCatalogRejected),

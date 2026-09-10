@@ -109,6 +109,33 @@ pub enum SeriesCadence {
     CalendarMonths = 5,
 }
 
+/// Durable comparison applied to an observed trade price.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum PriceAlertCondition {
+    Crossing = 0,
+    CrossingUp = 1,
+    CrossingDown = 2,
+    GreaterThan = 3,
+    LessThan = 4,
+}
+
+/// Durable trigger policy for a price alert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum PriceAlertFrequency {
+    OnlyOnce = 0,
+    EveryTime = 1,
+}
+
+/// Durable lifecycle state for a price alert line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum PriceAlertStatus {
+    Active = 0,
+    Triggered = 1,
+}
+
 /// Persisted workspace state.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct WorkspaceState {
@@ -194,6 +221,33 @@ pub struct WorkspaceChartState {
     /// Stable Nucleus crosshair mode (normal, magnet, hidden, or OHLC magnet).
     #[prost(uint32, tag = "6")]
     pub crosshair_mode: u32,
+    /// Bounded host-owned price alerts. Nucleus renders these values but does
+    /// not evaluate them or deliver operating-system notifications.
+    #[prost(message, repeated, tag = "7")]
+    pub price_alerts: Vec<WorkspacePriceAlertState>,
+}
+
+/// Durable price alert created from a chart crosshair action.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspacePriceAlertState {
+    #[prost(string, tag = "1")]
+    pub id: String,
+    #[prost(message, optional, tag = "2")]
+    pub instrument: Option<InstallProviderInstrument>,
+    #[prost(sint64, tag = "3")]
+    pub price: i64,
+    #[prost(uint32, tag = "4")]
+    pub pane_index: u32,
+    #[prost(uint32, tag = "5")]
+    pub price_scale_side: u32,
+    #[prost(enumeration = "PriceAlertCondition", tag = "6")]
+    pub condition: i32,
+    #[prost(enumeration = "PriceAlertFrequency", tag = "7")]
+    pub frequency: i32,
+    #[prost(enumeration = "PriceAlertStatus", tag = "8")]
+    pub status: i32,
+    #[prost(sint64, tag = "9")]
+    pub created_at_unix_nanos: i64,
 }
 
 /// Durable host-owned state for one native indicator instance.

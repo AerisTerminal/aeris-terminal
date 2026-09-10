@@ -133,9 +133,66 @@ pub(super) fn apply_pushed_event(
                 .map_err(|error| error.to_string())?;
             Ok(())
         }
+        MarketRuntimeEvent::PriceAlertTriggered(trigger) => {
+            if trigger.consumer_id.0.get() != consumer_id {
+                return Err("engine price-alert identity mismatched".to_string());
+            }
+            dispatch_native_price_alert(&trigger);
+            messages
+                .send(MarketWorkerMessage::PriceAlertTriggered(trigger))
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
         MarketRuntimeEvent::Fault(fault) => Err(fault.redacted_detail),
         _ => Err("engine returned an unexpected pushed market event".to_string()),
     }
+}
+
+fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
+    let scale = trigger.instrument.price_scale;
+    let threshold = fixed_price_text(trigger.threshold_price, scale);
+    let observed = fixed_price_text(trigger.observed_price, scale);
+    let body = format!(
+        "{} {} {}. Last trade: {}.",
+        trigger.instrument.display_symbol,
+        price_alert_condition_phrase(trigger.condition),
+        threshold,
+        observed
+    );
+    let notification =
+        axiusflow_platform_runtime::NativeUserNotification::try_new("Axiusflow price alert", body);
+    match notification.and_then(axiusflow_platform_runtime::try_send_user_notification) {
+        Ok(()) => {}
+        Err(error) => eprintln!("Axiusflow price alert notification was not delivered: {error}"),
+    }
+}
+
+const fn price_alert_condition_phrase(
+    condition: axiusflow_contracts::PriceAlertCondition,
+) -> &'static str {
+    match condition {
+        axiusflow_contracts::PriceAlertCondition::Crossing => "crossed",
+        axiusflow_contracts::PriceAlertCondition::CrossingUp => "crossed up through",
+        axiusflow_contracts::PriceAlertCondition::CrossingDown => "crossed down through",
+        axiusflow_contracts::PriceAlertCondition::GreaterThan => "moved above",
+        axiusflow_contracts::PriceAlertCondition::LessThan => "moved below",
+    }
+}
+
+fn fixed_price_text(value: i64, scale: u32) -> String {
+    let scale = scale.min(18);
+    if scale == 0 {
+        return value.to_string();
+    }
+    let factor = 10_i128.pow(scale);
+    let magnitude = i128::from(value).abs();
+    let whole = magnitude / factor;
+    let fraction = magnitude % factor;
+    let sign = if value < 0 { "-" } else { "" };
+    format!(
+        "{sign}{whole}.{fraction:0width$}",
+        width = usize::try_from(scale).unwrap_or(18)
+    )
 }
 
 fn apply_realtime_snapshot(

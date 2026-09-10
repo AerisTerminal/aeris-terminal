@@ -17,7 +17,8 @@ use axiusflow_contracts::{
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::OrderBookFrame;
 use axiusflow_market_runtime::{
-    MarketConsumerResourceClass as ConsumerResourceClass, MarketRuntimeEvent,
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
+    MarketPriceAlertTrigger, MarketRuntimeEvent,
 };
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
@@ -266,6 +267,8 @@ pub enum MarketWorkerMessage {
     },
     ProviderCatalog(ProviderCatalogEvent),
     OrderBook(OrderBookFrame),
+    PriceAlertTriggered(MarketPriceAlertTrigger),
+    PriceAlertSyncFailed(String),
     EngineSwitchMarker {
         sequence: u64,
     },
@@ -577,6 +580,7 @@ pub enum MarketWorkerCommand {
     ChartViewport(ChartViewportUpdate),
     DepthVisible(bool),
     ResourceClass(ConsumerResourceClass),
+    ReplacePriceAlerts(Vec<MarketPriceAlert>),
     Shutdown,
 }
 
@@ -774,6 +778,7 @@ pub struct MarketDataWorker {
     depth_visible: Option<Arc<Mutex<Option<bool>>>>,
     provider_selection: Option<Arc<Mutex<Option<SelectProviderInstrument>>>>,
     engine_selection: Option<Arc<Mutex<Option<Box<EngineSelectionRequest>>>>>,
+    price_alerts: Option<Arc<Mutex<Option<Vec<MarketPriceAlert>>>>>,
     messages: Option<MarketWorkerReceiver>,
     shutdown_complete: Option<Receiver<()>>,
     connected: bool,
@@ -796,6 +801,7 @@ impl MarketDataWorker {
             depth_visible: None,
             provider_selection: None,
             engine_selection: None,
+            price_alerts: None,
             messages: Some(messages),
             shutdown_complete: Some(shutdown_complete),
             connected: true,
@@ -834,6 +840,51 @@ impl MarketDataWorker {
         self.provider_selection = Some(provider_selection);
         self.engine_selection = Some(engine_selection);
         self
+    }
+
+    /// Installs a coalescing slot for complete price-alert snapshots.
+    #[must_use]
+    pub fn with_price_alert_slot(
+        mut self,
+        price_alerts: Arc<Mutex<Option<Vec<MarketPriceAlert>>>>,
+    ) -> Self {
+        self.price_alerts = Some(price_alerts);
+        self
+    }
+
+    /// Replaces the runtime-owned alert definitions without blocking GPUI.
+    ///
+    /// The latest complete snapshot wins, so rapid edits stay bounded and can
+    /// never leave the runtime with a partial set.
+    ///
+    /// # Errors
+    /// Returns the snapshot when the market worker is disconnected.
+    pub fn try_replace_price_alerts(
+        &self,
+        alerts: Vec<MarketPriceAlert>,
+    ) -> Result<(), TrySendError<Vec<MarketPriceAlert>>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(alerts));
+        };
+        if let Some(slot) = &self.price_alerts {
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(alerts);
+            return Ok(());
+        }
+        commands
+            .try_send(MarketWorkerCommand::ReplacePriceAlerts(alerts))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::ReplacePriceAlerts(alerts)) => {
+                    TrySendError::Full(alerts)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::ReplacePriceAlerts(alerts)) => {
+                    TrySendError::Disconnected(alerts)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("alert send errors retain the alert snapshot")
+                }
+            })
     }
 
     /// Requests a Rithmic selection without blocking.
@@ -1061,7 +1112,8 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
-                    | MarketWorkerCommand::ResourceClass(_),
+                    | MarketWorkerCommand::ResourceClass(_)
+                    | MarketWorkerCommand::ReplacePriceAlerts(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
@@ -1070,7 +1122,8 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
-                    | MarketWorkerCommand::ResourceClass(_),
+                    | MarketWorkerCommand::ResourceClass(_)
+                    | MarketWorkerCommand::ReplacePriceAlerts(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }

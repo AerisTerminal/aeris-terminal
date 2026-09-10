@@ -2,6 +2,31 @@
 
 use super::*;
 
+fn restore_price_alerts(
+    restored_chart_state: Option<&WorkspaceChartState>,
+    market_worker: &MarketDataWorker,
+) -> (Vec<WorkspacePriceAlertState>, Option<String>) {
+    let alerts = restored_chart_state
+        .map(|state| state.price_alerts.clone())
+        .unwrap_or_default();
+    let message = (!alerts.is_empty())
+        .then(|| {
+            market_worker
+                .try_replace_price_alerts(runtime_price_alerts(&alerts))
+                .err()
+        })
+        .flatten()
+        .map(|_| "Price alerts could not be queued for live monitoring".to_string());
+    (alerts, message)
+}
+
+fn chart_bridge_label(chart: Option<&Entity<NucleusChartView>>, cx: &App) -> String {
+    chart.map_or_else(
+        || "bridge awaiting snapshot".to_string(),
+        |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
+    )
+}
+
 impl WorkspaceSurface {
     pub(super) fn take_chart_persistence_dirty(&mut self) -> bool {
         std::mem::take(&mut self.chart_persistence_dirty)
@@ -45,6 +70,7 @@ impl WorkspaceSurface {
             price_axis,
             locked_drawing_ids: chart.locked_drawing_ids(),
             crosshair_mode: u32::from(chart.crosshair_mode()),
+            price_alerts: self.price_alerts.clone(),
         })
     }
 
@@ -132,11 +158,11 @@ impl WorkspaceSurface {
             provider,
             product,
         } = terminal_startup_state(startup, cx);
+        let (price_alerts, price_alert_message) =
+            restore_price_alerts(restored_chart_state.as_ref(), &market_worker);
         initialize_chart_chrome(chart.as_ref(), chart_chrome, cx);
-        let bridge_label = chart.as_ref().map_or_else(
-            || "bridge awaiting snapshot".to_string(),
-            |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
-        );
+        replace_chart_price_alert_lines(chart.as_ref(), &price_alerts, product.as_ref(), cx);
+        let bridge_label = chart_bridge_label(chart.as_ref(), cx);
         observe_chart(chart.as_ref(), cx);
         let order_book = cx.new(move |_| ReadOnlyOrderBookView::new(theme));
         Self {
@@ -208,6 +234,9 @@ impl WorkspaceSurface {
             restored_chart_state,
             chart_persistence_dirty: false,
             last_chart_user_state_revision: 0,
+            price_alerts,
+            price_alert_dialog: None,
+            price_alert_message,
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
             #[cfg(feature = "diagnostics")]
@@ -956,6 +985,12 @@ impl WorkspaceSurface {
                 } else {
                     self.apply_retained_chart_state_to_chart(&chart, cx);
                 }
+                replace_chart_price_alert_lines(
+                    Some(&chart),
+                    &self.price_alerts,
+                    self.product.as_ref(),
+                    cx,
+                );
                 if let Some((start, end)) = self.restored_viewport {
                     chart.update(cx, |chart, _| {
                         chart.set_visible_time_range_unix_nanos(start, end);
@@ -1219,6 +1254,13 @@ impl WorkspaceSurface {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.replace_frame(frame, order_book_cx)
                 });
+            }
+            MarketWorkerMessage::PriceAlertTriggered(trigger) => {
+                self.apply_price_alert_trigger(&trigger, cx);
+            }
+            MarketWorkerMessage::PriceAlertSyncFailed(error) => {
+                self.price_alert_message = Some(error);
+                cx.notify();
             }
             MarketWorkerMessage::ChartViewport {
                 start_unix_nanos,

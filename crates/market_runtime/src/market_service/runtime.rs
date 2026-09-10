@@ -1083,6 +1083,33 @@ impl MarketService {
         })
     }
 
+    /// Transactionally replaces one consumer's bounded price-alert set.
+    ///
+    /// Alert conditions are evaluated by the coordinator against accepted
+    /// trade prices. Provider demand is shared with ordinary chart demand.
+    ///
+    /// # Errors
+    /// Returns an error for invalid ownership, instrument metadata, capacity,
+    /// or an unavailable coordinator.
+    pub fn replace_price_alerts(
+        &self,
+        client_id: u64,
+        consumer_id: u64,
+        alerts: &[crate::MarketPriceAlert],
+    ) -> Result<(), String> {
+        for alert in alerts {
+            validate_provider_instrument(&alert.instrument)?;
+        }
+        self.request(|reply| {
+            Ok(Command::ReplacePriceAlerts(
+                ClientId(id(client_id)?),
+                ConsumerId(id(consumer_id)?),
+                alerts.to_vec(),
+                reply,
+            ))
+        })
+    }
+
     /// Drains at most one bounded market publication for an owned consumer.
     ///
     /// # Errors

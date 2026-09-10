@@ -180,6 +180,7 @@ impl ConsumerEvents {
             .or_else(|| self.series.pop_front())
             .or_else(|| self.series_state.take())
             .or_else(|| self.demand_error.take())
+            .or_else(|| self.price_alerts.pop_front())
             .or_else(|| self.order_book.take())
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
@@ -195,6 +196,26 @@ impl ConsumerEvents {
     pub(super) fn clear_series(&mut self) {
         self.series.clear();
         self.series_overflowed = false;
+    }
+
+    /// Queues the newest trigger per alert identity. This preserves every
+    /// distinct alert while bounding repeated crossings during a slow UI frame.
+    pub(super) fn publish_price_alert(&mut self, event: MarketRuntimeEvent) {
+        let MarketRuntimeEvent::PriceAlertTriggered(next) = event else {
+            return;
+        };
+        if let Some(queued) = self.price_alerts.iter_mut().find(|queued| {
+            matches!(
+                queued,
+                MarketRuntimeEvent::PriceAlertTriggered(current)
+                    if current.alert_id == next.alert_id
+            )
+        }) {
+            *queued = MarketRuntimeEvent::PriceAlertTriggered(next);
+        } else {
+            self.price_alerts
+                .push_back(MarketRuntimeEvent::PriceAlertTriggered(next));
+        }
     }
 
     /// Queues one incremental bar update.

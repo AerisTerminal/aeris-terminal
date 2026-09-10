@@ -47,6 +47,9 @@ use crate::rithmic_realtime::{
     RithmicRealtimeDemand, RithmicRealtimeEvent,
 };
 
+mod alerts;
+use alerts::PriceAlertRegistry;
+
 const COMMAND_CAPACITY: usize = 64;
 const HISTORY_CAPACITY: usize = 8;
 const REALTIME_CAPACITY: usize = 2_048;
@@ -142,6 +145,12 @@ enum Command {
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
     InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
+    ReplacePriceAlerts(
+        ClientId,
+        ConsumerId,
+        Vec<crate::MarketPriceAlert>,
+        Reply<()>,
+    ),
     Poll(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
     PollClient(
         ClientId,
@@ -287,6 +296,7 @@ struct ConsumerEvents {
     series_state: Option<MarketRuntimeEvent>,
     demand_error: Option<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
+    price_alerts: VecDeque<MarketRuntimeEvent>,
     catalog_search: Option<MarketRuntimeEvent>,
     catalog_selection: Option<MarketRuntimeEvent>,
 }

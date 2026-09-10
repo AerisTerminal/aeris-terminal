@@ -220,6 +220,15 @@ pub(super) fn workspace_pane_element(
         .to_string(),
         theme,
     });
+    let price_alert_dialog = surface.price_alert_dialog.as_ref().map(|dialog| {
+        price_alert_dialog_layer(
+            pane.surface.clone(),
+            dialog,
+            &surface.price_alerts,
+            surface.price_alert_message.as_deref(),
+            theme,
+        )
+    });
     let workspace_id = workspace.id;
     let pane_focus = pane.focus.clone();
     let select_terminal = terminal.clone();
@@ -255,6 +264,7 @@ pub(super) fn workspace_pane_element(
             cx.stop_propagation();
         })
         .child(content)
+        .children(price_alert_dialog)
         .into_any_element()
 }
 

@@ -3,9 +3,9 @@ use super::{
     ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
     DemandWaiter, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
     InstallProviderInstrument, Instant, MarketEngine, MarketServiceStatus, MarketStream, Ordering,
-    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
-    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
-    REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
+    PriceAlertRegistry, ProviderConnectionState, ProviderDispatch, ProviderGeneration,
+    ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry,
+    ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
     RithmicLiveHandoff, RithmicRealtimeDemand, StreamRequirements, authorize_consumer, thread,
 };
 use crate::MarketRuntimeEvent;
@@ -59,6 +59,7 @@ fn run_coordinator(
         rithmic_live: BTreeMap::new(),
         hyperliquid_live: BTreeMap::new(),
         order_books: BTreeMap::new(),
+        price_alerts: PriceAlertRegistry::default(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_searches: BTreeMap::new(),
@@ -163,6 +164,9 @@ pub(super) struct Coordinator<'a> {
     pub(super) rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
     pub(super) hyperliquid_live: BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
+    /// Bounded alert definitions, baselines, and trigger evaluation. Provider
+    /// workers remain shared with ordinary market demand.
+    pub(super) price_alerts: PriceAlertRegistry,
     pub(super) catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     pub(super) catalog_sessions: BTreeMap<String, u64>,
     /// Latest accepted provider-catalog command generation per consumer/provider.
@@ -194,7 +198,10 @@ pub(super) struct Coordinator<'a> {
 
 impl Coordinator<'_> {
     pub(super) fn detach_client(&mut self, client_id: ClientId) {
+        let mut removed_consumer = false;
         for consumer_id in self.engine.detach_client(client_id) {
+            removed_consumer = true;
+            self.price_alerts.remove_consumer(consumer_id);
             self.events.remove(&consumer_id);
             self.consumer_clients.remove(&consumer_id);
             self.catalog_searches
@@ -202,6 +209,10 @@ impl Coordinator<'_> {
             self.catalog_selections
                 .retain(|(candidate, _), _| *candidate != consumer_id);
             self.remove_waiter(consumer_id);
+        }
+        if removed_consumer {
+            let _ = self.send_rithmic_demand();
+            self.hyperliquid_demand_dirty = true;
         }
     }
 
@@ -298,6 +309,19 @@ impl Coordinator<'_> {
             }
             Command::InstallProviderInstrument(instrument, reply) => {
                 let _ = reply.send(self.install_provider_instrument(&instrument));
+            }
+            Command::ReplacePriceAlerts(client_id, consumer_id, alerts, reply) => {
+                let result =
+                    authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
+                        self.price_alerts
+                            .replace_consumer_alerts(consumer_id, alerts)
+                    });
+                if result.is_ok() {
+                    let _ = self.send_rithmic_demand();
+                    self.hyperliquid_demand_dirty = true;
+                    self.stop_realtime_if_idle();
+                }
+                let _ = reply.send(result);
             }
             Command::Poll(client_id, consumer_id, reply) => {
                 self.handle_poll(client_id, consumer_id, &reply);
@@ -412,8 +436,11 @@ impl Coordinator<'_> {
             .retain(|(candidate, _), _| *candidate != consumer_id);
         self.catalog_selections
             .retain(|(candidate, _), _| *candidate != consumer_id);
+        self.price_alerts.remove_consumer(consumer_id);
         self.remove_waiter(consumer_id);
         self.engine.remove_consumer(consumer_id);
+        let _ = self.send_rithmic_demand();
+        self.hyperliquid_demand_dirty = true;
         self.release_unused_live_market_data();
         Ok(())
     }
@@ -702,6 +729,7 @@ mod tests {
             rithmic_live: BTreeMap::new(),
             hyperliquid_live: BTreeMap::new(),
             order_books: BTreeMap::new(),
+            price_alerts: PriceAlertRegistry::default(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             catalog_searches: BTreeMap::new(),

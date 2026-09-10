@@ -19,8 +19,9 @@ use gpui::{
     Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use nucleuscharts_engine::{
-    BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions, DrawingId,
-    DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PriceScaleTarget,
+    AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
+    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS,
+    NativePrimitiveId, PriceScaleTarget,
 };
 use nucleuscharts_render::color::Color;
 use nucleuscharts_render::draw_list::Prim;
@@ -1611,6 +1612,24 @@ impl NucleusChartView {
     #[must_use]
     pub fn crosshair_mode(&self) -> u8 {
         self.engine.options.get().crosshair.mode
+    }
+
+    /// Drains host-facing alert-create requests produced by Nucleus's
+    /// crosshair action chip.
+    pub fn take_alert_create_requests(&mut self) -> Vec<AlertCreateRequest> {
+        self.engine.take_alert_create_requests()
+    }
+
+    /// Replaces the chart-local alert indicators from host-authoritative state.
+    ///
+    /// # Errors
+    /// Returns an error when Nucleus rejects invalid or over-capacity lines.
+    pub fn replace_price_alert_lines(&mut self, snapshot: AlertSnapshot) -> Result<(), String> {
+        self.engine
+            .set_alert_snapshot(snapshot)
+            .map_err(|error| error.to_string())?;
+        self.invalidate_series_frame();
+        Ok(())
     }
 
     /// Applies one stable Nucleus crosshair mode.

@@ -12,6 +12,7 @@ mod network_notifications;
 mod power_notifications;
 mod release_identity;
 mod session_shutdown;
+mod user_notifications;
 
 pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;
@@ -40,4 +41,7 @@ pub use power_notifications::{
 pub use release_identity::{ReleaseIdentity, current_release_identity};
 pub use session_shutdown::{
     NativeSessionShutdownCancellation, NativeSessionShutdownMonitor, SessionShutdownError,
+};
+pub use user_notifications::{
+    NativeUserNotification, NativeUserNotificationError, try_send_user_notification,
 };

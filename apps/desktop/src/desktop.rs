@@ -28,6 +28,8 @@ mod local_state;
 mod native_ui;
 #[path = "onboarding.rs"]
 mod onboarding;
+#[path = "components/price_alert_dialog.rs"]
+mod price_alert_dialog;
 #[cfg(any(test, feature = "diagnostics"))]
 #[path = "readiness_conformance.rs"]
 mod readiness_conformance;
@@ -49,16 +51,19 @@ use assets::UiIcon as HugeIcon;
 #[cfg(feature = "diagnostics")]
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
+    ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
+    ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator,
     ChartIndicatorState, ChartSplitDirection, ChartType, ChartWorkspaceLayout, NucleusChartTheme,
     NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartIndicatorState,
-    WorkspaceChartState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+    ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
+    SeriesKey, WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceLayoutState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
@@ -68,6 +73,9 @@ use axiusflow_desktop::market_worker::{
 };
 use axiusflow_market_data::{ChartAggregation, ChartInterval};
 use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
+use axiusflow_market_runtime::{
+    MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger,
+};
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
 #[cfg(test)]
@@ -120,6 +128,9 @@ use native_ui::{
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
+use price_alert_dialog::{
+    price_alert_dialog_layer, replace_chart_price_alert_lines, runtime_price_alerts,
+};
 use reqwest_client::ReqwestClient;
 use std::{
     borrow::Cow,
@@ -562,12 +573,23 @@ struct WorkspaceSurface {
     restored_chart_state: Option<WorkspaceChartState>,
     chart_persistence_dirty: bool,
     last_chart_user_state_revision: u64,
+    price_alerts: Vec<WorkspacePriceAlertState>,
+    price_alert_dialog: Option<PriceAlertDialogState>,
+    price_alert_message: Option<String>,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
+}
+
+#[derive(Clone)]
+struct PriceAlertDialogState {
+    request: ChartAlertCreateRequest,
+    instrument: InstallProviderInstrument,
+    condition: PriceAlertCondition,
+    frequency: PriceAlertFrequency,
 }
 
 #[derive(Default)]
@@ -822,6 +844,11 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                     chart.take_context_menu_request(),
                 )
             });
+            let alert_request = chart
+                .update(cx, |chart, _| chart.take_alert_create_requests())
+                .into_iter()
+                .last();
+            let had_alert_request = alert_request.is_some();
             if activate {
                 app.pending_pane_activate = PaneActivationRequest::Pending;
             }
@@ -829,7 +856,10 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
             if let Some(request) = request {
                 app.pending_chart_context_menu = Some(request);
             }
-            if activate || had_menu {
+            if let Some(request) = alert_request {
+                app.open_price_alert_dialog(request);
+            }
+            if activate || had_menu || had_alert_request {
                 cx.notify();
             }
             if chart.read(cx).has_market_data() {

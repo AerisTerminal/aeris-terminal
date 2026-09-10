@@ -828,6 +828,17 @@ impl Coordinator<'_> {
             demand.quotes |= streams.contains(MarketStream::Quotes);
             demand.order_book |= streams.contains(MarketStream::Depth);
         }
+        for instrument in self.price_alerts.active_instruments("rithmic") {
+            instruments
+                .entry(instrument.instrument_id.clone())
+                .and_modify(|demand| demand.trades = true)
+                .or_insert(RithmicInstrumentDemand {
+                    instrument,
+                    trades: true,
+                    quotes: false,
+                    order_book: false,
+                });
+        }
         Ok(RithmicRealtimeDemand {
             instruments: instruments
                 .into_values()
@@ -836,7 +847,7 @@ impl Coordinator<'_> {
         })
     }
 
-    fn send_rithmic_demand(&mut self) -> Result<(), String> {
+    pub(super) fn send_rithmic_demand(&mut self) -> Result<(), String> {
         if !self.providers.rithmic_realtime_enabled() {
             return Ok(());
         }
@@ -966,7 +977,9 @@ impl Coordinator<'_> {
                     .is_some_and(|pending| pending.0.get() == generation)
                 {
                     self.rithmic_stop_pending = None;
-                    if !self.rithmic_live.is_empty() {
+                    if !self.rithmic_live.is_empty()
+                        || self.price_alerts.has_active_provider("rithmic")
+                    {
                         self.rithmic_demand = None;
                         self.rithmic_pending_demand = None;
                         let _ = self.send_rithmic_demand();
@@ -991,7 +1004,10 @@ impl Coordinator<'_> {
                 } else {
                     self.rithmic_recovering(generation, "Rithmic live session is recovering");
                 }
-                if auto_recover && !self.rithmic_live.is_empty() {
+                if auto_recover
+                    && (!self.rithmic_live.is_empty()
+                        || self.price_alerts.has_active_provider("rithmic"))
+                {
                     let _ = self.send_rithmic_demand();
                 }
             }
@@ -1048,7 +1064,10 @@ impl Coordinator<'_> {
                     .is_some_and(|pending| pending.0.get() == generation)
                 {
                     self.hyperliquid_stop_pending = None;
-                    if !self.hyperliquid_live.is_empty() || !self.order_books.is_empty() {
+                    if !self.hyperliquid_live.is_empty()
+                        || !self.order_books.is_empty()
+                        || self.price_alerts.has_active_provider("hyperliquid")
+                    {
                         self.hyperliquid_engaged = false;
                         self.hyperliquid_demand_dirty = true;
                         self.hyperliquid_recovering(
@@ -1238,6 +1257,7 @@ impl Coordinator<'_> {
             }
             return;
         }
+        self.evaluate_price_alert_trade(trade);
         let instrument_id = trade.metadata.instrument_id.clone();
         let trade_changed = self
             .order_books
@@ -1281,6 +1301,10 @@ impl Coordinator<'_> {
             != Some(generation)
         {
             return;
+        }
+        self.price_alerts.reset_provider_baselines("hyperliquid");
+        if self.price_alerts.has_active_provider("hyperliquid") {
+            self.hyperliquid_demand_dirty = true;
         }
         if self
             .engine
@@ -1436,6 +1460,7 @@ impl Coordinator<'_> {
             }
             return;
         }
+        self.evaluate_price_alert_trade(trade);
         let instrument_id = trade.metadata.instrument_id.clone();
         let trade_changed = self
             .order_books
@@ -1484,6 +1509,46 @@ impl Coordinator<'_> {
             .contains_key(&(series.clone(), generation))
         {
             let _ = self.enqueue_history_recovery(series, generation);
+        }
+    }
+
+    fn evaluate_price_alert_trade(&mut self, trade: &MarketTrade) {
+        let instrument = self
+            .price_alerts
+            .active_instruments(&trade.metadata.provider_id)
+            .into_iter()
+            .find(|instrument| {
+                instrument.instrument_id == trade.metadata.instrument_id
+                    && instrument.entitlement_id == trade.metadata.entitlement_id
+            });
+        let Some(instrument) = instrument else {
+            return;
+        };
+        let observed_unix_nanos = trade
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
+        let triggers = self.price_alerts.evaluate(
+            &instrument,
+            trade.metadata.session_generation,
+            trade.metadata.source_sequence,
+            trade.price,
+            observed_unix_nanos,
+        );
+        let demand_changed = triggers.iter().any(|trigger| !trigger.remains_active);
+        for trigger in triggers {
+            if let Some(events) = self.events.get_mut(&trigger.consumer_id) {
+                events.publish_price_alert(crate::MarketRuntimeEvent::PriceAlertTriggered(trigger));
+            }
+        }
+        if demand_changed {
+            if trade.metadata.provider_id == "rithmic" {
+                let _ = self.send_rithmic_demand();
+            } else if trade.metadata.provider_id == "hyperliquid" {
+                self.hyperliquid_demand_dirty = true;
+            }
+            self.stop_realtime_if_idle();
         }
     }
 
@@ -1576,6 +1641,7 @@ impl Coordinator<'_> {
         {
             return;
         }
+        self.price_alerts.reset_provider_baselines("rithmic");
         if self
             .engine
             .set_provider_health("rithmic", generation, ProviderHealth::Recovering)
@@ -1616,6 +1682,7 @@ impl Coordinator<'_> {
         {
             return;
         }
+        self.price_alerts.reset_provider_baselines("rithmic");
         if self
             .engine
             .set_provider_health("rithmic", generation, ProviderHealth::Failed)
@@ -1748,6 +1815,21 @@ impl Coordinator<'_> {
                 interval: live.interval.clone(),
             });
             trades.insert(mapping);
+        }
+        for instrument in self.price_alerts.active_instruments("hyperliquid") {
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            ) else {
+                continue;
+            };
+            trades.insert(HyperliquidInstrumentDemand {
+                wire_coin: instrument.provider_symbol,
+                instrument_id: instrument.instrument_id,
+                entitlement_id: instrument.entitlement_id,
+                price_scale,
+                quantity_scale,
+            });
         }
         let mut books = BTreeSet::new();
         for ((provider, _), book) in &self.order_books {
@@ -1916,6 +1998,7 @@ impl Coordinator<'_> {
     }
     pub(super) fn stop_realtime_if_idle(&mut self) {
         if self.rithmic_live.is_empty()
+            && !self.price_alerts.has_active_provider("rithmic")
             && self.rithmic_demand.is_some()
             && self.rithmic_stop_pending.is_none()
             && let Some(generation) = self
@@ -1934,6 +2017,7 @@ impl Coordinator<'_> {
             }
         }
         if self.hyperliquid_live.is_empty()
+            && !self.price_alerts.has_active_provider("hyperliquid")
             && self.hyperliquid_engaged
             && self.hyperliquid_stop_pending.is_none()
             && let Some(generation) = self

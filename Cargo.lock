@@ -734,6 +734,7 @@ dependencies = [
  "ed25519-dalek",
  "embed-resource",
  "keyring",
+ "notify-rust",
  "semver",
  "serde",
  "serde_json",

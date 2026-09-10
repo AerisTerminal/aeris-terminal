@@ -72,6 +72,7 @@ fn run_attached_workers(
             process_pending_foreground_selection(market, client_id, record);
             process_pending_resource_class(market, client_id, &mut record.endpoint);
             process_pending_depth_visibility(market, client_id, &mut record.endpoint);
+            process_pending_price_alerts(market, client_id, record);
             match record.endpoint.commands.try_recv() {
                 Ok(command) => {
                     if let Err(error) = process_command(market, client_id, record, command) {
@@ -318,6 +319,27 @@ fn process_pending_depth_visibility(
                 message: error,
             });
         }
+    }
+}
+
+fn process_pending_price_alerts(
+    market: &MarketService,
+    client_id: u64,
+    record: &mut EndpointRecord,
+) {
+    let pending = record
+        .endpoint
+        .pending_price_alerts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(alerts) = pending {
+        let _ = process_command(
+            market,
+            client_id,
+            record,
+            MarketWorkerCommand::ReplacePriceAlerts(alerts),
+        );
     }
 }
 

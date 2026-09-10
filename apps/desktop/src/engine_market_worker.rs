@@ -31,8 +31,9 @@ use axiusflow_instruments::{
 use axiusflow_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
 pub(super) use axiusflow_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError,
-    MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState,
-    MarketSeriesUpdate, MarketService, MarketStream, SeriesTailOperation, StreamRequirements,
+    MarketOrderBookSnapshot, MarketPriceAlert, MarketPriceAlertTrigger, MarketRuntimeEvent,
+    MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService, MarketStream,
+    SeriesTailOperation, StreamRequirements,
 };
 use axiusflow_observability::FeedConnectionState;
 
@@ -371,6 +372,7 @@ struct WorkerEndpoint {
     pending_provider_selection: Arc<Mutex<Option<axiusflow_contracts::SelectProviderInstrument>>>,
     pending_engine_selection:
         Arc<Mutex<Option<Box<axiusflow_desktop::market_worker::EngineSelectionRequest>>>>,
+    pending_price_alerts: Arc<Mutex<Option<Vec<MarketPriceAlert>>>>,
     shutdown: mpsc::SyncSender<()>,
     pending_recovery: Option<ReplayRecoveryCommand>,
     /// Set once the engine has reported this demand generation live. After that
@@ -456,6 +458,7 @@ fn worker_endpoint(
     let pending_depth_visible = Arc::new(Mutex::new(None));
     let pending_provider_selection = Arc::new(Mutex::new(None));
     let pending_engine_selection = Arc::new(Mutex::new(None));
+    let pending_price_alerts = Arc::new(Mutex::new(None));
     let worker = WorkspaceMarketPane {
         workspace_id,
         pane_id,
@@ -473,7 +476,8 @@ fn worker_endpoint(
         .with_foreground_selection_slots(
             Arc::clone(&pending_provider_selection),
             Arc::clone(&pending_engine_selection),
-        ),
+        )
+        .with_price_alert_slot(Arc::clone(&pending_price_alerts)),
     };
     let endpoint = EndpointRecord {
         workspace_id,
@@ -489,6 +493,7 @@ fn worker_endpoint(
             pending_depth_visible,
             pending_provider_selection,
             pending_engine_selection,
+            pending_price_alerts,
             shutdown: shutdown_tx,
             pending_recovery: None,
             live: false,
