@@ -26,7 +26,7 @@ edition = "2024"
 license = "Proprietary"
 publish = false
 rust-version = "1.98.1"
-version = "0.2.2"
+version = "0.2.3"
 
 [workspace.dependencies]
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
@@ -65,9 +65,9 @@ protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }
-nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "011a86b9e3b28646bca531fc3dd7053731ea65f0", version = "=0.1.0" }
-nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "011a86b9e3b28646bca531fc3dd7053731ea65f0", version = "=0.1.0" }
-nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "011a86b9e3b28646bca531fc3dd7053731ea65f0", version = "=0.1.0", features = ["gpui-backend"] }
+nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "f11bf5d592658e8194ae8494c99b9d78430da85a", version = "=0.1.0" }
+nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "f11bf5d592658e8194ae8494c99b9d78430da85a", version = "=0.1.0" }
+nucleuscharts_render_gpui = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "f11bf5d592658e8194ae8494c99b9d78430da85a", version = "=0.1.0", features = ["gpui-backend"] }
 
 [patch.crates-io]
 # Nucleus Charts pins the published `gpui = 0.2.2`; replace it with the exact same reviewed Git
