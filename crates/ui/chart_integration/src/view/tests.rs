@@ -41,7 +41,7 @@ fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
     let options = chart.engine.options.get();
     assert_eq!(options.layout.background.color, surface);
     assert_eq!(options.layout.text_color, foreground);
-    assert_eq!(options.layout.font_family, "HK Grotesk, sans-serif");
+    assert_eq!(options.layout.font_family, "DM Sans, sans-serif");
     assert_eq!(options.grid.vert_lines.color, border);
     assert_eq!(options.crosshair.vert_line.color, crosshair);
     assert_eq!(

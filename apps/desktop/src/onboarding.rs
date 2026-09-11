@@ -254,7 +254,7 @@ fn session_verification_surface(window: &Window, theme: &AxiusflowTheme) -> gpui
         .justify_center()
         .bg(gpui_color(colors.surface))
         .text_color(gpui_color(colors.text_primary))
-        .font_family("HK Grotesk")
+        .font_family("DM Sans")
         .child(onboarding_title_bar(window, theme))
         .child(
             div()
@@ -377,7 +377,7 @@ pub(super) fn onboarding_surface(
             .justify_center()
             .bg(gpui_color(colors.surface))
             .text_color(gpui_color(colors.text_primary))
-            .font_family("HK Grotesk")
+            .font_family("DM Sans")
             .child(onboarding_title_bar(window, theme))
             .child(
                 div()

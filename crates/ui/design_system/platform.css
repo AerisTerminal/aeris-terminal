@@ -1,16 +1,8 @@
 @font-face {
-  font-family: "HK Grotesk";
-  src: url("./assets/fonts/HKGrotesk-Regular.ttf") format("truetype");
+  font-family: "DM Sans";
+  src: url("./assets/fonts/DMSans-Variable.ttf") format("truetype");
   font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "HK Grotesk";
-  src: url("./assets/fonts/HKGrotesk-Bold.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 700;
+  font-weight: 100 1000;
   font-display: swap;
 }
 
@@ -18,7 +10,7 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --font-sans: "HK Grotesk", sans-serif;
+  --font-sans: "DM Sans", sans-serif;
 
   /* Surfaces */
   --surface: #ffffff;

@@ -169,7 +169,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::close_window))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
-            .font_family("HK Grotesk")
+            .font_family("DM Sans")
             .children(title_bar)
             .child(header)
             .child(
@@ -232,6 +232,10 @@ struct WorkspaceTabRenderState {
     drag_enabled: bool,
     drag_translation: Option<f32>,
     theme: AxiusflowTheme,
+}
+
+const fn workspace_tab_close_drag_enabled(workspace_count: usize) -> bool {
+    workspace_count > 1
 }
 
 fn workspace_tab_close_button(
@@ -480,13 +484,11 @@ fn workspace_tab(
             })
         })
         .child(content)
-        .child(workspace_tab_close_button(
-            terminal.clone(),
-            tab_id,
-            index,
-            &label,
-            &theme,
-        ))
+        .children(
+            workspace_tab_close_drag_enabled(state.workspace_count).then(|| {
+                workspace_tab_close_button(terminal.clone(), tab_id, index, &label, &theme)
+            }),
+        )
         .into_any_element()
 }
 
@@ -499,6 +501,7 @@ pub(super) fn workspace_tab_strip(
     let enabled = state.enabled;
     let theme = state.theme;
     let colors = theme.colors;
+    let close_drag_enabled = workspace_tab_close_drag_enabled(workspaces.len());
     let tabs = workspaces.iter().enumerate().map(|(index, workspace)| {
         workspace_tab(
             terminal,
@@ -507,12 +510,10 @@ pub(super) fn workspace_tab_strip(
                 index,
                 active: state.active,
                 workspace_count: workspaces.len(),
-                drag_enabled: enabled,
-                drag_translation: workspace_drag_translation(
-                    state.workspace_drag,
-                    workspace.id,
-                    index,
-                ),
+                drag_enabled: enabled && close_drag_enabled,
+                drag_translation: close_drag_enabled
+                    .then(|| workspace_drag_translation(state.workspace_drag, workspace.id, index))
+                    .flatten(),
                 theme,
             },
             cx,
@@ -756,4 +757,17 @@ pub(super) fn workspace_tabs_root(
         window,
         cx,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_tab_close_drag_enabled;
+
+    #[test]
+    fn workspace_tab_close_and_drag_require_multiple_tabs() {
+        assert!(!workspace_tab_close_drag_enabled(0));
+        assert!(!workspace_tab_close_drag_enabled(1));
+        assert!(workspace_tab_close_drag_enabled(2));
+        assert!(workspace_tab_close_drag_enabled(3));
+    }
 }

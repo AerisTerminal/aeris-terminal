@@ -290,8 +290,8 @@ const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
 const QUICK_TIMEFRAME_POPUP_TOP: f32 = 64.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
-const CHART_SETTINGS_PANEL_WIDTH: f32 = 640.0;
-const CHART_SETTINGS_PANEL_HEIGHT: f32 = 500.0;
+const CHART_SETTINGS_PANEL_WIDTH: f32 = 700.0;
+const CHART_SETTINGS_PANEL_HEIGHT: f32 = 540.0;
 const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 164.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
@@ -2395,15 +2395,10 @@ fn run_onboarding() {
             install_platform_http_client(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
-                .add_fonts(vec![
-                    Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Regular.ttf"
-                    )),
-                    Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Bold.ttf"
-                    )),
-                ])
-                .expect("the bundled HK Grotesk fonts are valid");
+                .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                    "../../../crates/ui/design_system/assets/fonts/DMSans-Variable.ttf"
+                ))])
+                .expect("the bundled DM Sans fonts are valid");
             let options = desktop_window_options(0, cx);
             cx.open_window(options, |window, cx| {
                 let screen = cx.new(|_| onboarding::OnboardingApp::new());
@@ -2434,15 +2429,10 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             install_platform_http_client(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
-                .add_fonts(vec![
-                    Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Regular.ttf"
-                    )),
-                    Cow::Borrowed(include_bytes!(
-                        "../../../crates/ui/design_system/assets/fonts/HKGrotesk-Bold.ttf"
-                    )),
-                ])
-                .expect("the bundled HK Grotesk fonts are valid");
+                .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                    "../../../crates/ui/design_system/assets/fonts/DMSans-Variable.ttf"
+                ))])
+                .expect("the bundled DM Sans fonts are valid");
             mount_desktop(configured, lifecycle, None, cx);
         });
 }

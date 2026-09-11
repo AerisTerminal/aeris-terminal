@@ -841,7 +841,7 @@ impl NucleusChartView {
         engine.set_theme(theme);
         engine
             .options
-            .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
+            .apply_str(r#"{"layout":{"fontFamily":"DM Sans, sans-serif"}}"#)
             .expect("the default chart font options are valid");
         let volume_series = install_volume_series(&mut engine);
         Self {
@@ -931,7 +931,7 @@ impl NucleusChartView {
         engine.set_theme(theme);
         engine
             .options
-            .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
+            .apply_str(r#"{"layout":{"fontFamily":"DM Sans, sans-serif"}}"#)
             .expect("the default chart font options are valid");
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
@@ -1306,7 +1306,7 @@ impl NucleusChartView {
         self.engine.set_theme(theme);
         self.engine
             .options
-            .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
+            .apply_str(r#"{"layout":{"fontFamily":"DM Sans, sans-serif"}}"#)
             .expect("the default chart font options are valid");
         self.invalidate_series_layout();
     }

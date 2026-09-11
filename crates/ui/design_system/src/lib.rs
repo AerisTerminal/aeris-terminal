@@ -669,7 +669,9 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"HK Grotesk\", sans-serif;",
+            "--font-sans: \"DM Sans\", sans-serif;",
+            "DMSans-Variable.ttf",
+            "font-weight: 100 1000;",
             "font-synthesis: none;",
             "font-weight: 400;",
             "outline: 2px solid var(--ring);",

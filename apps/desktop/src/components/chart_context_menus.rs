@@ -1,5 +1,16 @@
 use super::*;
 
+#[derive(Clone)]
+struct ChartSettingsDrag {
+    cursor_offset: gpui::Point<Pixels>,
+}
+
+impl Render for ChartSettingsDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
     2.0 + CHART_CONTEXT_MENU_ROW_HEIGHT * rows + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
@@ -639,6 +650,7 @@ pub(super) fn chart_settings_menu_layer(
 ) -> AnyElement {
     let origin = clamp_chart_settings_origin(menu.position, viewport);
     let dismiss = terminal.clone();
+    let move_terminal = terminal.clone();
     let content = match section {
         ChartSettingsSection::Series => {
             chart_series_settings(terminal, menu, snapshot, color_picker, theme)
@@ -660,6 +672,19 @@ pub(super) fn chart_settings_menu_layer(
                 terminal.close_chart_settings_menu(terminal_cx);
             });
             cx.stop_propagation();
+        })
+        .on_drag_move::<ChartSettingsDrag>(move |event, _, cx| {
+            let drag = event.drag(cx);
+            let next =
+                chart_settings_drag_origin(event.event.position, drag.cursor_offset, viewport);
+            move_terminal.update(cx, |terminal, terminal_cx| {
+                if let Some(menu) = terminal.chart_settings_menu.as_mut()
+                    && menu.position != next
+                {
+                    menu.position = next;
+                    terminal_cx.notify();
+                }
+            });
         })
         .child(chart_settings_panel(
             terminal, origin, section, snapshot, content, theme,
@@ -687,9 +712,8 @@ fn chart_settings_panel(
         .flex_col()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
-        .border_color(gpui_color(colors.border))
+        .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface))
-        .shadow_lg()
         .occlude()
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .child(chart_settings_header(terminal, section, snapshot, theme))
@@ -720,58 +744,65 @@ fn chart_settings_header(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let terminal = terminal.clone();
+    let close_terminal = terminal.clone();
+    let drag = ChartSettingsDrag {
+        cursor_offset: point(px(0.0), px(0.0)),
+    };
     div()
-        .h(px(56.0))
+        .h(px(58.0))
         .flex_none()
         .flex()
         .items_center()
         .justify_between()
-        .px_4()
+        .pr_3()
         .border_b_1()
         .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(gpui_color(colors.text_primary))
-                        .child("Chart settings"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(format!(
-                            "{} · {}",
-                            snapshot.chart_type.label(),
-                            section.label()
-                        )),
-                ),
-        )
-        .child(
-            div()
-                .id("chart_settings_close")
-                .size(px(28.0))
+                .id("chart_settings_drag_handle")
+                .h_full()
+                .flex_1()
+                .min_w_0()
+                .pl_4()
                 .flex()
                 .items_center()
-                .justify_center()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .cursor_pointer()
-                .text_color(gpui_color(colors.icon))
-                .hover(|item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-                .on_click(move |_, _, cx| {
-                    terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.close_chart_settings_menu(terminal_cx);
-                    });
-                    cx.stop_propagation();
+                .on_drag(drag, move |_, cursor_offset, _, cx| {
+                    cx.new(|_| ChartSettingsDrag { cursor_offset })
                 })
-                .child("×"),
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(gpui_color(colors.text_primary))
+                                .child("Chart settings"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(gpui_color(colors.text_muted))
+                                .child(format!(
+                                    "{} · {}",
+                                    snapshot.chart_type.label(),
+                                    section.label()
+                                )),
+                        ),
+                ),
         )
+        .child(chrome_close_button(
+            "chart_settings_close",
+            theme,
+            move |_, cx| {
+                close_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_chart_settings_menu(terminal_cx);
+                });
+            },
+        ))
 }
 
 fn clamp_chart_settings_origin(
@@ -790,6 +821,17 @@ fn clamp_chart_settings_origin(
             .y
             .max(margin)
             .min((viewport.height - height - margin).max(margin)),
+    )
+}
+
+fn chart_settings_drag_origin(
+    pointer: gpui::Point<Pixels>,
+    cursor_offset: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    clamp_chart_settings_origin(
+        point(pointer.x - cursor_offset.x, pointer.y - cursor_offset.y),
+        viewport,
     )
 }
 
@@ -822,7 +864,7 @@ fn chart_settings_sidebar(
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .cursor_pointer()
                 .when(active, |item| {
                     item.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
@@ -1488,7 +1530,7 @@ fn settings_color_row(
                         .child(
                             div()
                                 .size(px(22.0))
-                                .rounded(px(5.0))
+                                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                                 .border_1()
                                 .border_color(gpui_color(colors.input_border))
                                 .bg(color),
@@ -1539,7 +1581,7 @@ fn settings_color_palette(
                 .id(("chart_palette_color", index))
                 .size(px(24.0))
                 .p(px(if selected { 2.0 } else { 1.0 }))
-                .rounded(px(6.0))
+                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .border_1()
                 .border_color(gpui_color(if selected {
                     colors.primary
@@ -1557,7 +1599,7 @@ fn settings_color_palette(
                 .child(
                     div()
                         .size_full()
-                        .rounded(px(4.0))
+                        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                         .bg(chart_css_color(value, colors.text_secondary)),
                 ),
         );
@@ -1640,7 +1682,9 @@ fn settings_choice_row(
         .items_center()
         .gap_1()
         .p(px(2.0))
-        .rounded(px(6.0))
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.input_border))
         .bg(gpui_color(colors.input_fill));
     for (index, (choice, selected, action)) in choices.iter().copied().enumerate() {
         let terminal = terminal.clone();
@@ -1653,7 +1697,7 @@ fn settings_choice_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.0))
+                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .cursor_pointer()
                 .text_xs()
                 .text_color(gpui_color(if selected {
@@ -2144,4 +2188,40 @@ fn account_menu_row(
             }
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chart_settings_drag_preserves_grab_offset_and_clamps_to_viewport() {
+        let viewport = size(px(1_400.0), px(1_000.0));
+        let offset = point(px(120.0), px(24.0));
+
+        assert_eq!(
+            chart_settings_drag_origin(point(px(520.0), px(300.0)), offset, viewport),
+            point(px(400.0), px(276.0))
+        );
+        assert_eq!(
+            chart_settings_drag_origin(point(px(20.0), px(20.0)), offset, viewport),
+            point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
+        );
+        assert_eq!(
+            chart_settings_drag_origin(point(px(1_500.0), px(1_200.0)), offset, viewport),
+            point(
+                px(1_400.0 - CHART_SETTINGS_PANEL_WIDTH - OVERLAY_EDGE_MARGIN),
+                px(1_000.0 - CHART_SETTINGS_PANEL_HEIGHT - OVERLAY_EDGE_MARGIN),
+            )
+        );
+    }
+
+    #[test]
+    fn chart_settings_origin_stays_recoverable_in_small_viewports() {
+        let viewport = size(px(480.0), px(320.0));
+        assert_eq!(
+            clamp_chart_settings_origin(point(px(300.0), px(220.0)), viewport),
+            point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
+        );
+    }
 }
