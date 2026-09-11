@@ -54,16 +54,19 @@ use axiusflow_chart_integration::{
     ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
     ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator,
-    ChartIndicatorState, ChartSplitDirection, ChartType, ChartWorkspaceLayout, NucleusChartTheme,
+    ChartIndicatorState, ChartSplitDirection, ChartStudyOutputDescriptor, ChartStudyPaneTarget,
+    ChartStudyPlotKind, ChartStudyScaleTarget, ChartType, ChartWorkspaceLayout, NucleusChartTheme,
     NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesKey, WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceLayoutState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    SeriesKey, WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
+    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, workspace_study_setting_state,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
@@ -71,10 +74,15 @@ use axiusflow_desktop::market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
     PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
-use axiusflow_market_data::{ChartAggregation, ChartInterval};
+use axiusflow_market_data::{BarSeriesKey, ChartAggregation, ChartInterval};
 use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
+use axiusflow_market_runtime::study::{
+    NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
+    StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettingValue,
+};
 use axiusflow_market_runtime::{
-    MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger,
+    MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,
+    StreamRequirements,
 };
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
@@ -135,7 +143,7 @@ use reqwest_client::ReqwestClient;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     pin::Pin,
     rc::Rc,
     sync::{
@@ -540,6 +548,7 @@ struct WorkspaceSurface {
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
     indicator_message: Option<String>,
+    studies: RuntimeStudiesState,
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
@@ -590,6 +599,55 @@ struct PriceAlertDialogState {
     instrument: InstallProviderInstrument,
     condition: PriceAlertCondition,
     frequency: PriceAlertFrequency,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeStudyState {
+    study_id: StudyInstanceId,
+    persisted: WorkspaceChartStudyState,
+    resolved_chart_series: Option<BarSeriesKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingRuntimeStudyState {
+    persisted: WorkspaceChartStudyState,
+    resolved_chart_series: Option<BarSeriesKey>,
+    remove_on_registration: bool,
+    persist_on_registration: bool,
+    blocked: bool,
+}
+
+struct RuntimeStudiesState {
+    active: Vec<RuntimeStudyState>,
+    pending: HashMap<u64, PendingRuntimeStudyState>,
+    reinitializing: HashMap<StudyInstanceId, BarSeriesKey>,
+    removing: HashSet<StudyInstanceId>,
+    deferred: Vec<PendingRuntimeStudyState>,
+    next_local_id: u64,
+}
+
+impl Default for RuntimeStudiesState {
+    fn default() -> Self {
+        Self {
+            active: Vec::new(),
+            pending: HashMap::new(),
+            reinitializing: HashMap::new(),
+            removing: HashSet::new(),
+            deferred: Vec::new(),
+            next_local_id: 1,
+        }
+    }
+}
+
+impl RuntimeStudiesState {
+    fn allocate_local_id(&mut self) -> Option<u64> {
+        let local_id = self.next_local_id;
+        if local_id == 0 {
+            return None;
+        }
+        self.next_local_id = self.next_local_id.checked_add(1).unwrap_or(0);
+        Some(local_id)
+    }
 }
 
 #[derive(Default)]

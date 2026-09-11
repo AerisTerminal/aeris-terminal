@@ -21,14 +21,14 @@ use gpui::{
 use nucleuscharts_engine::{
     AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
     DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS,
-    NativePrimitiveId, PriceScaleTarget,
+    NativePrimitiveId, PaneId, PriceScaleTarget,
 };
 use nucleuscharts_render::color::Color;
 use nucleuscharts_render::draw_list::Prim;
 use nucleuscharts_render_gpui::backend::measure_text;
 use nucleuscharts_render_gpui::{GpuiChartRenderer, NucleusViewport, PreparedNucleusFrame};
 use num_traits::ToPrimitive;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
@@ -48,6 +48,44 @@ const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
 const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
 const TEXT_EDIT_PAD: f32 = 4.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChartStudySeriesState {
+    series_id: u32,
+    generation: u64,
+}
+
+/// Scalar plot family requested by a runtime study output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartStudyPlotKind {
+    Line,
+    Histogram,
+    Area,
+}
+
+/// Chart-host pane placement for one runtime study output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartStudyPaneTarget {
+    Price,
+    Dedicated { group: u8 },
+}
+
+/// Chart-host scale placement inside a study output's pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartStudyScaleTarget {
+    Primary,
+    Left,
+    Overlay,
+}
+
+/// Borrowed semantic presentation contract for one scalar study output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChartStudyOutputDescriptor<'a> {
+    pub title: &'a str,
+    pub plot: ChartStudyPlotKind,
+    pub pane: ChartStudyPaneTarget,
+    pub scale: ChartStudyScaleTarget,
+}
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
@@ -223,6 +261,32 @@ impl fmt::Display for ChartIndicatorError {
 }
 
 impl std::error::Error for ChartIndicatorError {}
+
+/// Failure to project one runtime-owned scalar study output into Nucleus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartStudyOutputError {
+    LengthMismatch,
+    UnsupportedTimestampPrecision,
+    NonIncreasingTimestamp,
+    InvalidValue,
+    InstallationRejected,
+}
+
+impl fmt::Display for ChartStudyOutputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::LengthMismatch => "study timestamps and values must have the same length",
+            Self::UnsupportedTimestampPrecision => {
+                "Nucleus scalar series currently require whole-second study timestamps"
+            }
+            Self::NonIncreasingTimestamp => "study output timestamps must strictly increase",
+            Self::InvalidValue => "study output contains a value Nucleus cannot render",
+            Self::InstallationRejected => "Nucleus rejected the study output series",
+        })
+    }
+}
+
+impl std::error::Error for ChartStudyOutputError {}
 
 /// Product-owned price-series presentation forwarded to Nucleus `SeriesKind`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -486,6 +550,7 @@ enum LegendItem {
     Asset,
     Volume,
     Indicator(u32),
+    Study { study_id: u64, series_id: u32 },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -514,6 +579,7 @@ impl LegendItem {
             Self::Asset => 0,
             Self::Volume => 1,
             Self::Indicator(binding) => u64::from(binding) + 2,
+            Self::Study { series_id, .. } => (1_u64 << 63) | u64::from(series_id),
         }
     }
 }
@@ -660,6 +726,8 @@ pub struct NucleusChartView {
     price_precision_override: Option<u8>,
     chart_type: ChartType,
     product_bars: ProductPriceBars,
+    study_series: BTreeMap<(u64, usize), ChartStudySeriesState>,
+    study_panes: BTreeMap<(u64, u8), PaneId>,
     brushable_tooltip: Option<NativePrimitiveId>,
     brushable_line_width: Option<f64>,
     pending_brush_point: Option<(f64, f64)>,
@@ -740,6 +808,8 @@ impl NucleusChartView {
             price_precision_override: None,
             chart_type: ChartType::Candles,
             product_bars: ProductPriceBars::default(),
+            study_series: BTreeMap::new(),
+            study_panes: BTreeMap::new(),
             brushable_tooltip: None,
             brushable_line_width: None,
             pending_brush_point: None,
@@ -844,6 +914,8 @@ impl NucleusChartView {
             price_precision_override: None,
             chart_type: ChartType::Candles,
             product_bars,
+            study_series: BTreeMap::new(),
+            study_panes: BTreeMap::new(),
             brushable_tooltip: None,
             brushable_line_width: None,
             pending_brush_point: None,
@@ -2397,3 +2469,4 @@ mod tests;
 mod drawings;
 mod indicators;
 mod input;
+mod studies;

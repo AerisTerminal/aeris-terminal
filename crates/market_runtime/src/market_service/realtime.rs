@@ -783,6 +783,7 @@ impl Coordinator<'_> {
                 // is not contiguous with its bounded historical window.
                 break;
             }
+            let exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
             let publications = self
                 .engine
                 .install_realtime_tail(generation, series, price_scale, quantity_scale, bar, true)
@@ -790,6 +791,19 @@ impl Coordinator<'_> {
             for publication in publications {
                 if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                     events.publish_series_update(series_update_message(&publication));
+                }
+            }
+            match self.studies.execute_live_market_change(
+                &self.engine,
+                series,
+                exchange_timestamp_unix_nanos,
+            ) {
+                Ok(executed) => self.publish_study_outputs(&executed),
+                Err(error) => {
+                    // Study failure is isolated from canonical market publication.
+                    // A user calculation must never force provider recovery or make
+                    // an accepted market tail look discontinuous.
+                    eprintln!("Axiusflow live study execution failed: {error}");
                 }
             }
         }

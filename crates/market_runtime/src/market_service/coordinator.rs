@@ -2,13 +2,17 @@ use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
     ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
     DemandWaiter, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
-    InstallProviderInstrument, Instant, MarketEngine, MarketServiceStatus, MarketStream, Ordering,
-    PriceAlertRegistry, ProviderConnectionState, ProviderDispatch, ProviderGeneration,
-    ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry,
-    ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
-    RithmicLiveHandoff, RithmicRealtimeDemand, StreamRequirements, authorize_consumer, thread,
+    InstallProviderInstrument, Instant, MAXIMUM_STUDIES, MAXIMUM_STUDY_DEPENDENCIES,
+    MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT, MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
+    MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS, MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine,
+    MarketServiceStatus, MarketStream, NonZeroUsize, Ordering, PriceAlertRegistry,
+    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
+    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
+    REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
+    RithmicLiveHandoff, RithmicRealtimeDemand, StreamRequirements, StudyMarketLeaseChangeKind,
+    StudyRuntime, StudyRuntimeConfig, authorize_consumer, thread,
 };
-use crate::MarketRuntimeEvent;
+use crate::{MarketRuntimeEvent, MarketStudyOutputSnapshot};
 
 pub(super) struct OwnedCoordinatorChannels {
     pub(super) commands: Receiver<Command>,
@@ -45,6 +49,23 @@ fn run_coordinator(
 ) {
     let mut coordinator = Coordinator {
         engine,
+        studies: StudyRuntime::new(StudyRuntimeConfig {
+            maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).unwrap_or(NonZeroUsize::MIN),
+            maximum_dependencies_per_study: NonZeroUsize::new(MAXIMUM_STUDY_DEPENDENCIES)
+                .unwrap_or(NonZeroUsize::MIN),
+            maximum_outputs_per_study: NonZeroUsize::new(MAXIMUM_STUDY_OUTPUTS)
+                .unwrap_or(NonZeroUsize::MIN),
+            maximum_points_per_output: NonZeroUsize::new(MAXIMUM_STUDY_POINTS_PER_OUTPUT)
+                .unwrap_or(NonZeroUsize::MIN),
+            maximum_total_output_points: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS)
+                .unwrap_or(NonZeroUsize::MIN),
+            maximum_state_bytes_per_study: NonZeroUsize::new(
+                MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
+            )
+            .unwrap_or(NonZeroUsize::MIN),
+            maximum_total_state_bytes: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_STATE_BYTES)
+                .unwrap_or(NonZeroUsize::MIN),
+        }),
         providers,
         attached: BTreeSet::new(),
         consumer_clients: BTreeMap::new(),
@@ -142,6 +163,7 @@ pub(super) fn drain_shutdown_provider_events(coordinator: &mut Coordinator<'_>) 
 
 pub(super) struct Coordinator<'a> {
     pub(super) engine: MarketEngine,
+    pub(super) studies: StudyRuntime,
     pub(super) providers: ProviderDispatch<'a>,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
@@ -199,8 +221,10 @@ pub(super) struct Coordinator<'a> {
 impl Coordinator<'_> {
     pub(super) fn detach_client(&mut self, client_id: ClientId) {
         let mut removed_consumer = false;
+        let mut removed_study = false;
         for consumer_id in self.engine.detach_client(client_id) {
             removed_consumer = true;
+            removed_study |= !self.studies.remove_consumer(consumer_id).is_empty();
             self.price_alerts.remove_consumer(consumer_id);
             self.events.remove(&consumer_id);
             self.consumer_clients.remove(&consumer_id);
@@ -209,6 +233,9 @@ impl Coordinator<'_> {
             self.catalog_selections
                 .retain(|(candidate, _), _| *candidate != consumer_id);
             self.remove_waiter(consumer_id);
+        }
+        if removed_study && let Err(error) = self.reconcile_study_market_data() {
+            eprintln!("Axiusflow study cleanup failed during client detach: {error}");
         }
         if removed_consumer {
             let _ = self.send_rithmic_demand();
@@ -301,6 +328,18 @@ impl Coordinator<'_> {
                     &reply,
                 );
             }
+            Command::RegisterStudy(client_id, consumer_id, registration, reply) => {
+                let result = self.handle_register_study(client_id, consumer_id, registration);
+                let _ = reply.send(result);
+            }
+            Command::ReinitializeStudy(client_id, study_id, registration, reply) => {
+                let result = self.handle_reinitialize_study(client_id, study_id, registration);
+                let _ = reply.send(result);
+            }
+            Command::RemoveStudy(client_id, study_id, reply) => {
+                let result = self.handle_remove_study(client_id, study_id);
+                let _ = reply.send(result);
+            }
             Command::SearchProviderInstruments(client_id, search, reply) => {
                 self.handle_provider_search(client_id, search, &reply);
             }
@@ -357,12 +396,15 @@ impl Coordinator<'_> {
                 // through after the class change. Canonical depth remains
                 // runtime-owned and is republished on Foreground restore.
                 events.order_book = None;
+                events.study_outputs.clear();
             }
             Ok(())
         });
         self.reconcile_order_books();
         if resource_class.publishes_ui() {
             self.publish_order_book_to_consumer(consumer_id);
+            let studies = self.studies.owned_studies(consumer_id);
+            self.publish_study_outputs(&studies);
         }
         self.release_unused_live_market_data();
         let _ = reply.send(result);
@@ -430,6 +472,7 @@ impl Coordinator<'_> {
         consumer_id: ConsumerId,
     ) -> Result<(), String> {
         authorize_consumer(&self.engine, client_id, consumer_id)?;
+        let removed_studies = self.studies.remove_consumer(consumer_id);
         self.events.remove(&consumer_id);
         self.consumer_clients.remove(&consumer_id);
         self.catalog_searches
@@ -439,10 +482,189 @@ impl Coordinator<'_> {
         self.price_alerts.remove_consumer(consumer_id);
         self.remove_waiter(consumer_id);
         self.engine.remove_consumer(consumer_id);
+        if !removed_studies.is_empty() {
+            self.reconcile_study_market_data()?;
+        }
         let _ = self.send_rithmic_demand();
         self.hyperliquid_demand_dirty = true;
         self.release_unused_live_market_data();
         Ok(())
+    }
+
+    fn handle_register_study(
+        &mut self,
+        client_id: ClientId,
+        consumer_id: ConsumerId,
+        registration: super::NativeStudyRegistration,
+    ) -> Result<super::StudyInstanceId, String> {
+        authorize_consumer(&self.engine, client_id, consumer_id)?;
+        let study_id = self
+            .studies
+            .register_native_for_consumer(consumer_id, registration)
+            .map_err(|error| error.to_string())?;
+        let prepared = self.reconcile_study_market_data().and_then(|()| {
+            self.studies
+                .execute_ready(&self.engine, study_id)
+                .map_err(|error| error.to_string())
+        });
+        match prepared {
+            Ok(executed) => {
+                if executed {
+                    self.publish_study_outputs(&[study_id]);
+                }
+            }
+            Err(error) => {
+                let _ = self.studies.remove_subtree(study_id);
+                let _ = self.reconcile_study_market_data();
+                return Err(error);
+            }
+        }
+        Ok(study_id)
+    }
+
+    fn handle_remove_study(
+        &mut self,
+        client_id: ClientId,
+        study_id: super::StudyInstanceId,
+    ) -> Result<Vec<super::StudyInstanceId>, String> {
+        let owner = self
+            .studies
+            .owner(study_id)
+            .ok_or_else(|| "study instance is unavailable".to_string())?;
+        authorize_consumer(&self.engine, client_id, owner)?;
+        let removed = self
+            .studies
+            .remove_subtree(study_id)
+            .map_err(|error| error.to_string())?;
+        if let Some(events) = self.events.get_mut(&owner) {
+            events.publish_study_removed(owner, &removed);
+        }
+        self.reconcile_study_market_data()?;
+        Ok(removed)
+    }
+
+    fn handle_reinitialize_study(
+        &mut self,
+        client_id: ClientId,
+        study_id: super::StudyInstanceId,
+        registration: super::NativeStudyRegistration,
+    ) -> Result<Vec<super::StudyInstanceId>, String> {
+        let owner = self
+            .studies
+            .owner(study_id)
+            .ok_or_else(|| "study instance is unavailable".to_string())?;
+        authorize_consumer(&self.engine, client_id, owner)?;
+        let checkpoint = self
+            .studies
+            .checkpoint_subtree(study_id)
+            .map_err(|error| error.to_string())?;
+        let affected = self
+            .studies
+            .reinitialize_native_for_consumer(owner, study_id, registration)
+            .map_err(|error| error.to_string())?;
+
+        let prepared = self.reconcile_study_market_data().and_then(|()| {
+            self.studies
+                .execute_ready_subtree(&self.engine, study_id)
+                .map_err(|error| error.to_string())
+        });
+        match prepared {
+            Ok(executed) => {
+                if let Some(events) = self.events.get_mut(&owner) {
+                    events.publish_study_invalidated(owner, &affected);
+                }
+                self.publish_study_outputs(&executed);
+                Ok(affected)
+            }
+            Err(error) => {
+                self.studies.restore_subtree_checkpoint(checkpoint);
+                if let Err(rollback_error) = self.reconcile_study_market_data() {
+                    eprintln!("Axiusflow study reinitialization rollback failed: {rollback_error}");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn publish_study_outputs(&mut self, study_ids: &[super::StudyInstanceId]) {
+        for &study_id in study_ids {
+            let Some(owner) = self.studies.owner(study_id) else {
+                continue;
+            };
+            if !self
+                .engine
+                .current_demand(owner)
+                .is_some_and(|demand| demand.resource_class.publishes_ui())
+            {
+                continue;
+            }
+            let Some(definition) = self.studies.definition(study_id) else {
+                continue;
+            };
+            let study_identifier = definition.identifier.clone();
+            let outputs = definition.outputs.clone();
+            for (output_index, output) in outputs.into_iter().enumerate() {
+                let output_id = super::StudyOutputId {
+                    study_id,
+                    output_index,
+                };
+                let Some(series) = self.studies.output_series(output_id).cloned() else {
+                    continue;
+                };
+                if let Some(events) = self.events.get_mut(&owner) {
+                    events.publish_study_output(MarketRuntimeEvent::StudyOutputSnapshot(
+                        MarketStudyOutputSnapshot {
+                            consumer_id: owner,
+                            study_id,
+                            output_id,
+                            study_identifier: study_identifier.clone(),
+                            output,
+                            series,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    fn reconcile_study_market_data(&mut self) -> Result<(), String> {
+        let changes = self
+            .studies
+            .reconcile_market_leases(&mut self.engine)
+            .map_err(|error| error.to_string())?;
+        self.reconcile_order_books();
+
+        for change in &changes {
+            match change.kind {
+                StudyMarketLeaseChangeKind::Acquired => {
+                    self.prepare_study_market_series(&change.series, change.streams)?;
+                }
+                StudyMarketLeaseChangeKind::Updated => {
+                    self.ensure_realtime(&change.series)?;
+                }
+                StudyMarketLeaseChangeKind::Released => {}
+            }
+        }
+        self.release_unused_live_market_data();
+        Ok(())
+    }
+
+    fn prepare_study_market_series(
+        &mut self,
+        series: &BarSeriesKey,
+        streams: StreamRequirements,
+    ) -> Result<(), String> {
+        let provider_generation = self.provider_generation_for_series(series)?;
+        self.ensure_realtime(series)?;
+        if !streams.contains(MarketStream::Bars) {
+            return Ok(());
+        }
+        if let Some(snapshot) = self.engine.series_snapshot(series) {
+            self.prepare_cached_demand(series, provider_generation, &snapshot)?;
+            return Ok(());
+        }
+        self.enqueue_history_recovery(series, provider_generation)
+            .map_err(str::to_string)
     }
 
     pub(super) fn reconcile_order_books(&mut self) {
@@ -627,6 +849,11 @@ mod tests {
         HISTORY_SERIES_TARGET_BARS, HistorySnapshot, INITIAL_HISTORY_BARS, LiveHistoryState,
         MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
     };
+    use crate::study::{
+        NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
+        StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
+        StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettings,
+    };
     use axiusflow_contracts::ProviderInstrumentSearchResult;
     use axiusflow_market_data::{
         AggressorSide, BarPeriod, EventMetadata, MarketBar, MarketTrade, QualifiedTimestamp,
@@ -710,9 +937,77 @@ mod tests {
         }
     }
 
+    fn study_definition(series: BarSeriesKey) -> StudyDefinition {
+        StudyDefinition {
+            identifier: "test.study".to_string(),
+            dependencies: vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            settings: Vec::new(),
+            outputs: vec![StudyOutputSpec {
+                identifier: "value".to_string(),
+                title: "Test Study".to_string(),
+                plot: StudyPlotKind::Line,
+                pane: StudyPaneTarget::Price,
+                scale: StudyScaleTarget::Primary,
+            }],
+            invalidation: StudyInvalidationPolicy::SameRange,
+        }
+    }
+
+    fn calculate_test_study(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let output = context
+            .output(0)
+            .ok_or_else(|| "test study output is unavailable".to_string())?;
+        if !output.is_empty() {
+            output.set(0, None)?;
+        }
+        Ok(())
+    }
+
+    fn calculate_failing_study(_context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        Err("intentional reinitialization failure".to_string())
+    }
+
+    fn study_registration(series: BarSeriesKey) -> NativeStudyRegistration {
+        let definition = study_definition(series);
+        NativeStudyRegistration {
+            settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
+            definition,
+            program: NativeStudyProgram {
+                calculate: calculate_test_study,
+                state_factory: None,
+            },
+        }
+    }
+
+    fn failing_study_registration(series: BarSeriesKey) -> NativeStudyRegistration {
+        let mut registration = study_registration(series);
+        registration.program.calculate = calculate_failing_study;
+        registration
+    }
+
     fn coordinator() -> Coordinator<'static> {
         Coordinator {
             engine: super::super::configured_engine().expect("configured engine"),
+            studies: StudyRuntime::new(StudyRuntimeConfig {
+                maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).expect("study bound"),
+                maximum_dependencies_per_study: NonZeroUsize::new(MAXIMUM_STUDY_DEPENDENCIES)
+                    .expect("dependency bound"),
+                maximum_outputs_per_study: NonZeroUsize::new(MAXIMUM_STUDY_OUTPUTS)
+                    .expect("output bound"),
+                maximum_points_per_output: NonZeroUsize::new(MAXIMUM_STUDY_POINTS_PER_OUTPUT)
+                    .expect("output point bound"),
+                maximum_total_output_points: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS)
+                    .expect("total output point bound"),
+                maximum_state_bytes_per_study: NonZeroUsize::new(
+                    MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
+                )
+                .expect("study state bound"),
+                maximum_total_state_bytes: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_STATE_BYTES)
+                    .expect("total study state bound"),
+            }),
             providers: ProviderDispatch {
                 records: BTreeMap::new(),
             },
@@ -1110,6 +1405,261 @@ mod tests {
                 .provider,
             Some(MarketRuntimeEvent::ProviderState(ref state)) if state.generation == 3
         ));
+    }
+
+    #[test]
+    fn study_registration_uses_shared_engine_lease_and_removal_releases_runtime_work() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(selected.session_generation)),
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("canonical history installs");
+
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration(selected_series.clone()),
+            )
+            .expect("study registers");
+        assert_eq!(coordinator.studies.owner(study_id), Some(owner));
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+        assert_eq!(
+            coordinator
+                .engine
+                .subscription_status(&selected_series)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, StreamRequirements::BARS))
+        );
+        assert!(coordinator.rithmic_live.contains_key(&selected_series));
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop(),
+            Some(MarketRuntimeEvent::StudyOutputSnapshot(snapshot))
+                if snapshot.consumer_id == owner
+                    && snapshot.study_id == study_id
+                    && snapshot.output_id == study_id.output(0)
+                    && snapshot.study_identifier == "test.study"
+                    && snapshot.output.title == "Test Study"
+                    && snapshot.series.generation() == 1
+        ));
+
+        assert_eq!(
+            coordinator
+                .handle_remove_study(client(1), study_id)
+                .expect("study removes"),
+            vec![study_id]
+        );
+        assert!(coordinator.studies.is_empty());
+        assert_eq!(coordinator.engine.data_lease_count(), 0);
+        assert!(!coordinator.engine.has_subscription(&selected_series));
+        assert!(!coordinator.rithmic_live.contains_key(&selected_series));
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop(),
+            Some(MarketRuntimeEvent::StudyRemoved(removed))
+                if removed.consumer_id == owner && removed.study_ids == [study_id]
+        ));
+    }
+
+    #[test]
+    fn study_reinitialization_preserves_runtime_identity_and_republishes_output() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(selected.session_generation)),
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("canonical history installs");
+
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration(selected_series.clone()),
+            )
+            .expect("study registers");
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop(),
+            Some(MarketRuntimeEvent::StudyOutputSnapshot(_))
+        ));
+
+        assert_eq!(
+            coordinator
+                .handle_reinitialize_study(
+                    client(1),
+                    study_id,
+                    study_registration(selected_series.clone()),
+                )
+                .expect("study reinitializes"),
+            vec![study_id]
+        );
+        assert_eq!(coordinator.studies.owner(study_id), Some(owner));
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+        assert!(coordinator.engine.has_subscription(&selected_series));
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop(),
+            Some(MarketRuntimeEvent::StudyOutputsInvalidated(invalidated))
+                if invalidated.consumer_id == owner && invalidated.study_ids == [study_id]
+        ));
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop(),
+            Some(MarketRuntimeEvent::StudyOutputSnapshot(snapshot))
+                if snapshot.study_id == study_id
+                    && snapshot.output_id == study_id.output(0)
+                    && snapshot.series.generation() == 2
+        ));
+    }
+
+    #[test]
+    fn failed_study_reinitialization_restores_runtime_state_without_public_invalidation() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(selected.session_generation)),
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("canonical history installs");
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration(selected_series.clone()),
+            )
+            .expect("study registers");
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop(),
+            Some(MarketRuntimeEvent::StudyOutputSnapshot(_))
+        ));
+        let committed = coordinator
+            .studies
+            .output_series(study_id.output(0))
+            .expect("committed output")
+            .clone();
+
+        assert!(
+            coordinator
+                .handle_reinitialize_study(
+                    client(1),
+                    study_id,
+                    failing_study_registration(selected_series.clone()),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            coordinator.studies.output_series(study_id.output(0)),
+            Some(&committed)
+        );
+        assert_eq!(coordinator.studies.owner(study_id), Some(owner));
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+        assert!(coordinator.engine.has_subscription(&selected_series));
+        assert!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .expect("consumer outbox")
+                .pop()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn removing_consumer_also_releases_every_owned_study_lease() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(selected.session_generation)),
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("canonical history installs");
+        coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration(selected_series.clone()),
+            )
+            .expect("study registers");
+
+        coordinator
+            .handle_remove(client(1), owner)
+            .expect("consumer removes");
+        assert!(coordinator.studies.is_empty());
+        assert_eq!(coordinator.engine.data_lease_count(), 0);
+        assert!(!coordinator.engine.has_subscription(&selected_series));
+        assert!(!coordinator.rithmic_live.contains_key(&selected_series));
     }
 
     #[test]

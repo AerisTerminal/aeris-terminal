@@ -12,7 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::MarketRuntimeEvent;
+use crate::{
+    MarketRuntimeEvent,
+    study::{
+        MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE, MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE,
+        NativeStudyRegistration, StudyInstanceId, StudyMarketLeaseChangeKind, StudyOutputId,
+        StudyRuntime, StudyRuntimeConfig,
+    },
+};
 use axiusflow_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
@@ -67,6 +74,9 @@ const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 64;
+const MAXIMUM_STUDIES: usize = MAXIMUM_CONSUMERS * 16;
+const MAXIMUM_STUDY_DEPENDENCIES: usize = MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE;
+const MAXIMUM_STUDY_OUTPUTS: usize = MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE;
 /// Upper bound for one provider history request. Retained chart history itself
 /// is managed separately by the canonical working-window watermarks below.
 const MAXIMUM_HISTORY_BARS_PER_REQUEST: usize = 8_192;
@@ -76,6 +86,15 @@ const HISTORY_SERIES_TARGET_BARS: usize = 12_288;
 const HISTORY_SERIES_HIGH_WATERMARK: usize = 16_384;
 /// Global canonical bar ceiling. Provider/live buffers are independently bounded.
 const MAXIMUM_STORED_BARS: usize = MAXIMUM_SERIES * HISTORY_SERIES_HIGH_WATERMARK;
+const MAXIMUM_STUDY_POINTS_PER_OUTPUT: usize = HISTORY_SERIES_HIGH_WATERMARK;
+const MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS: usize = MAXIMUM_STORED_BARS;
+// Stateful formulas may retain one transfer buffer per declared output in
+// addition to sparse recursive checkpoints. Bound one instance at twice the
+// worst-case f64 transfer footprint for the canonical per-series watermark,
+// while the runtime-wide cap prevents many studies from multiplying that peak.
+const MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE: usize =
+    MAXIMUM_STUDY_OUTPUTS * HISTORY_SERIES_HIGH_WATERMARK * size_of::<f64>() * 2;
+const MAXIMUM_STUDY_TOTAL_STATE_BYTES: usize = 64 * 1024 * 1024;
 const INITIAL_HISTORY_BARS: usize = 600;
 const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
@@ -142,6 +161,19 @@ enum Command {
         StreamRequirements,
         Reply<()>,
     ),
+    RegisterStudy(
+        ClientId,
+        ConsumerId,
+        NativeStudyRegistration,
+        Reply<StudyInstanceId>,
+    ),
+    ReinitializeStudy(
+        ClientId,
+        StudyInstanceId,
+        NativeStudyRegistration,
+        Reply<Vec<StudyInstanceId>>,
+    ),
+    RemoveStudy(ClientId, StudyInstanceId, Reply<Vec<StudyInstanceId>>),
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
     InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
@@ -295,6 +327,13 @@ struct ConsumerEvents {
     series_overflowed: bool,
     series_state: Option<MarketRuntimeEvent>,
     demand_error: Option<MarketRuntimeEvent>,
+    /// Latest immutable snapshot per study output. A newer generation fully
+    /// supersedes an older queued image for the same output.
+    study_outputs: BTreeMap<StudyOutputId, MarketRuntimeEvent>,
+    study_invalidated: Option<MarketRuntimeEvent>,
+    /// Removal is infrequent and subtree-sized. Consecutive removals are merged
+    /// into one bounded event before reaching presentation.
+    study_removed: Option<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
     price_alerts: VecDeque<MarketRuntimeEvent>,
     catalog_search: Option<MarketRuntimeEvent>,

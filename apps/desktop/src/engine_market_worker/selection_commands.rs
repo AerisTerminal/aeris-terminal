@@ -269,46 +269,15 @@ pub(super) fn process_command(
             request.consumer_id = endpoint.consumer_id;
             market.select_provider_instrument(client_id, request)
         }
-        MarketWorkerCommand::EngineSelect(request) => {
-            *startup_resolution = None;
-            let series = match series_key(&request.product, request.interval) {
-                Ok(series) => series,
-                Err(error) => {
-                    let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                        state: ChartState::Error,
-                        message: error,
-                    });
-                    return Ok(());
-                }
-            };
-            cancel_pending_recovery(
-                endpoint,
-                "market recovery was superseded by a new market selection",
-            )?;
-            let _ = endpoint
-                .messages
-                .send(MarketWorkerMessage::EngineSwitchMarker {
-                    sequence: request.sequence,
-                });
-            let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Loading,
-                message: format!(
-                    "Loading {} history",
-                    provider_display_name(&request.product.provider)
-                ),
-            });
-            endpoint.live = false;
-            endpoint.active_generation = request.sequence;
-            product.clone_from(&request.product);
-            *interval = request.interval;
-            market.set_demand(
-                client_id,
-                endpoint.consumer_id,
-                request.sequence,
-                &series,
-                chart_streams(endpoint.depth_visible),
-            )
-        }
+        MarketWorkerCommand::EngineSelect(request) => process_engine_select(
+            market,
+            client_id,
+            product,
+            interval,
+            endpoint,
+            startup_resolution,
+            &request,
+        ),
         MarketWorkerCommand::Recovery(command) => {
             send_recovery(market, client_id, product, *interval, endpoint, command)
         }
@@ -342,10 +311,146 @@ pub(super) fn process_command(
         MarketWorkerCommand::ReplacePriceAlerts(alerts) => {
             replace_price_alerts(market, client_id, endpoint, &alerts)
         }
+        command @ (MarketWorkerCommand::RegisterStudy(_)
+        | MarketWorkerCommand::ReinitializeStudy(_)
+        | MarketWorkerCommand::RemoveStudy(_)) => {
+            process_study_command(market, client_id, endpoint, command)
+        }
         MarketWorkerCommand::Shutdown => {
             retire_endpoint(market, client_id, endpoint);
             Ok(())
         }
+    }
+}
+
+fn process_engine_select(
+    market: &MarketService,
+    client_id: u64,
+    product: &mut InstallProviderInstrument,
+    interval: &mut axiusflow_market_data::ChartInterval,
+    endpoint: &mut WorkerEndpoint,
+    startup_resolution: &mut Option<StartupResolution>,
+    request: &axiusflow_desktop::market_worker::EngineSelectionRequest,
+) -> Result<(), String> {
+    *startup_resolution = None;
+    let series = match series_key(&request.product, request.interval) {
+        Ok(series) => series,
+        Err(error) => {
+            let _ = endpoint.messages.send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: error,
+            });
+            return Ok(());
+        }
+    };
+    cancel_pending_recovery(
+        endpoint,
+        "market recovery was superseded by a new market selection",
+    )?;
+    let _ = endpoint
+        .messages
+        .send(MarketWorkerMessage::EngineSwitchMarker {
+            sequence: request.sequence,
+        });
+    let _ = endpoint.messages.send(MarketWorkerMessage::State {
+        state: ChartState::Loading,
+        message: format!(
+            "Loading {} history",
+            provider_display_name(&request.product.provider)
+        ),
+    });
+    endpoint.live = false;
+    endpoint.active_generation = request.sequence;
+    product.clone_from(&request.product);
+    *interval = request.interval;
+    market.set_demand(
+        client_id,
+        endpoint.consumer_id,
+        request.sequence,
+        &series,
+        chart_streams(endpoint.depth_visible),
+    )
+}
+
+fn process_study_command(
+    market: &MarketService,
+    client_id: u64,
+    endpoint: &WorkerEndpoint,
+    command: MarketWorkerCommand,
+) -> Result<(), String> {
+    match command {
+        MarketWorkerCommand::RegisterStudy(request) => {
+            register_study(market, client_id, endpoint, *request)
+        }
+        MarketWorkerCommand::ReinitializeStudy(request) => {
+            reinitialize_study(market, client_id, endpoint, *request)
+        }
+        MarketWorkerCommand::RemoveStudy(study_id) => {
+            remove_study(market, client_id, endpoint, study_id)
+        }
+        _ => unreachable!("only study commands reach study dispatch"),
+    }
+}
+
+fn reinitialize_study(
+    market: &MarketService,
+    client_id: u64,
+    endpoint: &WorkerEndpoint,
+    request: axiusflow_desktop::market_worker::StudyReinitializationRequest,
+) -> Result<(), String> {
+    match market.reinitialize_study(client_id, request.study_id, request.registration) {
+        Ok(_) => endpoint
+            .messages
+            .send(MarketWorkerMessage::StudyReinitialized {
+                study_id: request.study_id,
+            })
+            .map_err(|error| error.to_string()),
+        Err(message) => endpoint
+            .messages
+            .send(MarketWorkerMessage::StudyReinitializationFailed {
+                study_id: request.study_id,
+                message,
+            })
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn register_study(
+    market: &MarketService,
+    client_id: u64,
+    endpoint: &WorkerEndpoint,
+    request: axiusflow_desktop::market_worker::StudyRegistrationRequest,
+) -> Result<(), String> {
+    match market.register_study(client_id, endpoint.consumer_id, request.registration) {
+        Ok(study_id) => endpoint
+            .messages
+            .send(MarketWorkerMessage::StudyRegistered {
+                request_sequence: request.sequence,
+                study_id,
+            })
+            .map_err(|error| error.to_string()),
+        Err(message) => endpoint
+            .messages
+            .send(MarketWorkerMessage::StudyRegistrationFailed {
+                request_sequence: request.sequence,
+                message,
+            })
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn remove_study(
+    market: &MarketService,
+    client_id: u64,
+    endpoint: &WorkerEndpoint,
+    study_id: axiusflow_market_runtime::study::StudyInstanceId,
+) -> Result<(), String> {
+    match market.remove_study(client_id, study_id) {
+        Ok(_) => Ok(()),
+        Err(message) => endpoint
+            .messages
+            .send(MarketWorkerMessage::StudyRemovalFailed { study_id, message })
+            .map_err(|error| error.to_string()),
     }
 }
 

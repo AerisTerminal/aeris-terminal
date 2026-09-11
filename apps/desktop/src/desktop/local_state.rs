@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    SeriesCadence, SeriesKey, WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind,
+    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyMarketStream, WorkspaceTabState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -262,16 +263,146 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         chart
             .price_alerts
             .truncate(axiusflow_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
+        chart.studies = sanitize_studies(std::mem::take(&mut chart.studies));
     }
     workspace
+}
+
+fn sanitize_studies(studies: Vec<WorkspaceChartStudyState>) -> Vec<WorkspaceChartStudyState> {
+    let mut last_local_id = 0;
+    let mut prior_outputs =
+        std::collections::BTreeMap::<u64, std::collections::BTreeSet<String>>::new();
+    let mut sanitized = Vec::with_capacity(studies.len());
+    for study in studies {
+        if !valid_study_header(&study, last_local_id)
+            || !valid_study_settings(&study)
+            || !valid_study_outputs(&study)
+            || !valid_study_dependencies(&study, &prior_outputs)
+        {
+            continue;
+        }
+        last_local_id = study.local_id;
+        prior_outputs.insert(
+            study.local_id,
+            study.output_identifiers.iter().cloned().collect(),
+        );
+        sanitized.push(study);
+    }
+    sanitized
+}
+
+fn valid_study_header(study: &WorkspaceChartStudyState, last_local_id: u64) -> bool {
+    study.local_id > last_local_id
+        && !study.identifier.is_empty()
+        && study.identifier.len() <= axiusflow_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
+        && study.implementation_revision != 0
+        && study.settings.len() <= axiusflow_market_runtime::study::MAXIMUM_STUDY_SETTINGS
+        && study.dependencies.len()
+            <= axiusflow_market_runtime::study::MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE
+        && study.output_identifiers.len()
+            <= axiusflow_market_runtime::study::MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE
+}
+
+fn valid_study_settings(study: &WorkspaceChartStudyState) -> bool {
+    let mut identifiers = std::collections::BTreeSet::new();
+    study.settings.iter().all(|setting| {
+        !setting.identifier.is_empty()
+            && setting.identifier.len()
+                <= axiusflow_market_runtime::study::MAXIMUM_STUDY_SETTING_IDENTIFIER_BYTES
+            && identifiers.insert(setting.identifier.as_str())
+            && setting.value.as_ref().is_some_and(|value| match value {
+                workspace_study_setting_state::Value::Boolean(_)
+                | workspace_study_setting_state::Value::Integer(_) => true,
+                workspace_study_setting_state::Value::Decimal(value) => {
+                    value.scale
+                        <= u32::from(
+                            axiusflow_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE,
+                        )
+                }
+                workspace_study_setting_state::Value::Text(value)
+                | workspace_study_setting_state::Value::Choice(value) => {
+                    value.len() <= axiusflow_market_runtime::study::MAXIMUM_STUDY_SETTING_TEXT_BYTES
+                }
+            })
+    })
+}
+
+fn valid_study_outputs(study: &WorkspaceChartStudyState) -> bool {
+    if study.output_identifiers.is_empty() {
+        return false;
+    }
+    let mut identifiers = std::collections::BTreeSet::new();
+    study.output_identifiers.iter().all(|identifier| {
+        !identifier.is_empty()
+            && identifier.len() <= axiusflow_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
+            && identifiers.insert(identifier.as_str())
+    })
+}
+
+fn valid_study_dependencies(
+    study: &WorkspaceChartStudyState,
+    prior_outputs: &std::collections::BTreeMap<u64, std::collections::BTreeSet<String>>,
+) -> bool {
+    study.dependencies.iter().all(|dependency| {
+        let Ok(kind) = WorkspaceStudyDependencyKind::try_from(dependency.kind) else {
+            return false;
+        };
+        match kind {
+            WorkspaceStudyDependencyKind::CurrentChartSeries => {
+                dependency.series.is_none()
+                    && dependency.study_local_id == 0
+                    && dependency.output_identifier.is_empty()
+                    && valid_study_streams(&dependency.streams)
+            }
+            WorkspaceStudyDependencyKind::ExplicitSeries => {
+                dependency.series.as_ref().is_some_and(valid_study_series)
+                    && dependency.study_local_id == 0
+                    && dependency.output_identifier.is_empty()
+                    && valid_study_streams(&dependency.streams)
+            }
+            WorkspaceStudyDependencyKind::StudyOutput => {
+                dependency.streams.is_empty()
+                    && dependency.series.is_none()
+                    && dependency.study_local_id != 0
+                    && prior_outputs
+                        .get(&dependency.study_local_id)
+                        .is_some_and(|outputs| outputs.contains(&dependency.output_identifier))
+            }
+            WorkspaceStudyDependencyKind::Unspecified => false,
+        }
+    })
+}
+
+fn valid_study_streams(streams: &[i32]) -> bool {
+    if streams.is_empty() {
+        return false;
+    }
+    let mut distinct = std::collections::BTreeSet::new();
+    streams.iter().all(|stream| {
+        WorkspaceStudyMarketStream::try_from(*stream).is_ok_and(|stream| {
+            stream != WorkspaceStudyMarketStream::Unspecified && distinct.insert(stream as i32)
+        })
+    })
+}
+
+fn valid_study_series(series: &SeriesKey) -> bool {
+    !series.provider.is_empty()
+        && !series.instrument_id.is_empty()
+        && !series.entitlement_id.is_empty()
+        && series.definition_revision != 0
+        && series.cadence_value != 0
+        && SeriesCadence::try_from(series.cadence)
+            .is_ok_and(|cadence| cadence != SeriesCadence::Unspecified)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axiusflow_contracts::{
-        WorkspaceChartIndicatorState, WorkspaceChartState, WorkspacePriceAlertState,
-        WorkspacePriceAxisState,
+        WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
+        WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceStudyDecimalState,
+        WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+        WorkspaceStudySettingState, workspace_study_setting_state,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -300,6 +431,86 @@ mod tests {
         }
     }
 
+    fn persisted_sma_study(local_id: u64, period: i64, visible: bool) -> WorkspaceChartStudyState {
+        WorkspaceChartStudyState {
+            local_id,
+            identifier: axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
+            implementation_revision: axiusflow_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+            settings: vec![WorkspaceStudySettingState {
+                identifier: axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                value: Some(workspace_study_setting_state::Value::Integer(period)),
+            }],
+            dependencies: vec![WorkspaceStudyDependencyState {
+                kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                ..WorkspaceStudyDependencyState::default()
+            }],
+            visible,
+            output_identifiers: vec![
+                axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            ],
+        }
+    }
+
+    fn persisted_bollinger_study(local_id: u64, visible: bool) -> WorkspaceChartStudyState {
+        WorkspaceChartStudyState {
+            local_id,
+            identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER.to_string(),
+            implementation_revision: axiusflow_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
+            settings: vec![
+                WorkspaceStudySettingState {
+                    identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING.to_string(),
+                    value: Some(workspace_study_setting_state::Value::Integer(20)),
+                },
+                WorkspaceStudySettingState {
+                    identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING
+                        .to_string(),
+                    value: Some(workspace_study_setting_state::Value::Decimal(
+                        WorkspaceStudyDecimalState {
+                            mantissa: 2,
+                            scale: 0,
+                        },
+                    )),
+                },
+            ],
+            dependencies: vec![WorkspaceStudyDependencyState {
+                kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                ..WorkspaceStudyDependencyState::default()
+            }],
+            visible,
+            output_identifiers: vec![
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+            ],
+        }
+    }
+
+    fn round_trip_chart_state() -> WorkspaceChartState {
+        WorkspaceChartState {
+            chart_type: "bars".to_string(),
+            nucleus_state_json: r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":0.0,"price":42000.0}]}]"#.to_string(),
+            indicators: vec![WorkspaceChartIndicatorState {
+                kind: "rsi".to_string(),
+                visible: true,
+            }],
+            price_axis: Some(WorkspacePriceAxisState {
+                flags: 1 | 2 | 64,
+                mode: 0,
+                left: false,
+                precision: Some(2),
+            }),
+            locked_drawing_ids: vec![1],
+            crosshair_mode: 1,
+            price_alerts: Vec::new(),
+            studies: vec![
+                persisted_sma_study(1, 50, false),
+                persisted_bollinger_study(2, true),
+            ],
+        }
+    }
+
     #[test]
     fn workspace_file_round_trip_preserves_layout_symbol_and_timeframe() {
         let path = temporary_workspace_path();
@@ -318,23 +529,7 @@ mod tests {
         first.pane_id = 7;
         first.consumer_id = 17;
         first.size_basis_points = 4_000;
-        first.chart = Some(WorkspaceChartState {
-            chart_type: "bars".to_string(),
-            nucleus_state_json: r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":0.0,"price":42000.0}]}]"#.to_string(),
-            indicators: vec![WorkspaceChartIndicatorState {
-                kind: "rsi".to_string(),
-                visible: true,
-            }],
-            price_axis: Some(WorkspacePriceAxisState {
-                flags: 1 | 2 | 64,
-                mode: 0,
-                left: false,
-                precision: Some(2),
-            }),
-            locked_drawing_ids: vec![1],
-            crosshair_mode: 1,
-            price_alerts: Vec::new(),
-        });
+        first.chart = Some(round_trip_chart_state());
         let instrument = first.instrument.as_mut().expect("default instrument");
         instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
         instrument.provider_symbol = "ETH".to_string();
@@ -407,6 +602,61 @@ mod tests {
 
         let parent = path.parent().expect("temporary workspace parent");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn sanitizer_keeps_only_dependency_ordered_study_graph() {
+        let mut workspace = default_workspace();
+        let chart = workspace.workspace_tabs[0].panes[0]
+            .chart
+            .get_or_insert_with(WorkspaceChartState::default);
+        chart.studies = vec![
+            persisted_sma_study(1, 20, true),
+            WorkspaceChartStudyState {
+                local_id: 2,
+                identifier: axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
+                implementation_revision: axiusflow_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+                settings: vec![WorkspaceStudySettingState {
+                    identifier: axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                    value: Some(workspace_study_setting_state::Value::Integer(5)),
+                }],
+                dependencies: vec![WorkspaceStudyDependencyState {
+                    kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
+                    study_local_id: 1,
+                    output_identifier: "sma".to_string(),
+                    ..WorkspaceStudyDependencyState::default()
+                }],
+                visible: true,
+                output_identifiers: vec!["sma".to_string()],
+            },
+            WorkspaceChartStudyState {
+                local_id: 3,
+                identifier: axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
+                implementation_revision: axiusflow_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+                settings: vec![WorkspaceStudySettingState {
+                    identifier: axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                    value: Some(workspace_study_setting_state::Value::Integer(5)),
+                }],
+                dependencies: vec![WorkspaceStudyDependencyState {
+                    kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
+                    study_local_id: 4,
+                    output_identifier: "sma".to_string(),
+                    ..WorkspaceStudyDependencyState::default()
+                }],
+                visible: true,
+                output_identifiers: vec!["sma".to_string()],
+            },
+        ];
+
+        let sanitized = sanitize_workspace(workspace);
+        let studies = &sanitized.workspace_tabs[0].panes[0]
+            .chart
+            .as_ref()
+            .expect("chart remains")
+            .studies;
+        assert_eq!(studies.len(), 2);
+        assert_eq!(studies[0].local_id, 1);
+        assert_eq!(studies[1].local_id, 2);
     }
     #[test]
     fn legacy_framed_workspace_remains_readable_without_a_transport_runtime() {

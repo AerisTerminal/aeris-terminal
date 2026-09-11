@@ -958,6 +958,12 @@ impl Coordinator<'_> {
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
+        match self.studies.execute_ready_for_market(&self.engine, series) {
+            Ok(executed) => self.publish_study_outputs(&executed),
+            Err(error) => {
+                eprintln!("Axiusflow study execution after history install failed: {error}");
+            }
+        }
         self.history_confirmed_empty
             .remove(&(series.clone(), generation));
         // Re-check visible coverage after every successful non-empty install.

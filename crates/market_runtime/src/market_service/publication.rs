@@ -4,7 +4,10 @@ use super::{
     ProviderGeneration, ProviderOrderBook, REALTIME_DRAIN_BUDGET, Reply, SeriesLoadState,
     SeriesTailOperation, authorize_consumer,
 };
-use crate::{MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState};
+use crate::{
+    MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState,
+    MarketStudyOutputsInvalidated, MarketStudyRemoved,
+};
 
 pub(super) fn fail_waiters(
     events: &mut BTreeMap<ConsumerId, ConsumerEvents>,
@@ -178,6 +181,9 @@ impl ConsumerEvents {
         self.provider
             .take()
             .or_else(|| self.series.pop_front())
+            .or_else(|| self.study_invalidated.take())
+            .or_else(|| self.study_outputs.pop_first().map(|(_, event)| event))
+            .or_else(|| self.study_removed.take())
             .or_else(|| self.series_state.take())
             .or_else(|| self.demand_error.take())
             .or_else(|| self.price_alerts.pop_front())
@@ -196,6 +202,83 @@ impl ConsumerEvents {
     pub(super) fn clear_series(&mut self) {
         self.series.clear();
         self.series_overflowed = false;
+    }
+
+    /// Keeps only the newest immutable publication for one study output.
+    pub(super) fn publish_study_output(&mut self, event: MarketRuntimeEvent) {
+        let MarketRuntimeEvent::StudyOutputSnapshot(snapshot) = &event else {
+            return;
+        };
+        self.study_outputs.insert(snapshot.output_id, event);
+    }
+
+    /// Removes queued output images for a deleted subtree and merges the
+    /// presentation removal notice with any earlier unconsumed removal.
+    pub(super) fn publish_study_removed(
+        &mut self,
+        consumer_id: ConsumerId,
+        removed: &[super::StudyInstanceId],
+    ) {
+        if removed.is_empty() {
+            return;
+        }
+        let removed_set = removed
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        self.study_outputs
+            .retain(|output, _| !removed_set.contains(&output.study_id));
+
+        let mut study_ids = match self.study_removed.take() {
+            Some(MarketRuntimeEvent::StudyRemoved(previous))
+                if previous.consumer_id == consumer_id =>
+            {
+                previous.study_ids
+            }
+            _ => Vec::new(),
+        };
+        study_ids.extend(removed.iter().copied());
+        study_ids.sort_unstable();
+        study_ids.dedup();
+        self.study_removed = Some(MarketRuntimeEvent::StudyRemoved(MarketStudyRemoved {
+            consumer_id,
+            study_ids,
+        }));
+    }
+
+    /// Clears queued output images for a reinitialized subtree while preserving
+    /// its live runtime definitions and merges consecutive invalidations.
+    pub(super) fn publish_study_invalidated(
+        &mut self,
+        consumer_id: ConsumerId,
+        invalidated: &[super::StudyInstanceId],
+    ) {
+        if invalidated.is_empty() {
+            return;
+        }
+        let invalidated_set = invalidated
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        self.study_outputs
+            .retain(|output, _| !invalidated_set.contains(&output.study_id));
+        let mut study_ids = match self.study_invalidated.take() {
+            Some(MarketRuntimeEvent::StudyOutputsInvalidated(previous))
+                if previous.consumer_id == consumer_id =>
+            {
+                previous.study_ids
+            }
+            _ => Vec::new(),
+        };
+        study_ids.extend(invalidated.iter().copied());
+        study_ids.sort_unstable();
+        study_ids.dedup();
+        self.study_invalidated = Some(MarketRuntimeEvent::StudyOutputsInvalidated(
+            MarketStudyOutputsInvalidated {
+                consumer_id,
+                study_ids,
+            },
+        ));
     }
 
     /// Queues the newest trigger per alert identity. This preserves every

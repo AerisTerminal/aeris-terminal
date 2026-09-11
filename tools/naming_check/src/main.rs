@@ -376,9 +376,10 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "011a86b9e3b28646bca531fc3dd7053731ea65f0";
+        let expected_revision = "f11bf5d592658e8194ae8494c99b9d78430da85a";
         for dependency in [
             "nucleuscharts_engine",
+            "nucleuscharts_indicators",
             "nucleuscharts_render",
             "nucleuscharts_render_gpui",
         ] {
@@ -393,6 +394,12 @@ mod tests {
         for path in workspace_manifests() {
             let relative = relative_string(&path);
             let contents = fs::read_to_string(&path).expect("manifest");
+            if contents.contains("nucleuscharts_indicators.workspace") {
+                assert_eq!(
+                    relative, "crates/study_sdk/Cargo.toml",
+                    "pure Nucleus TA must enter Axiusflow only through the Study SDK facade"
+                );
+            }
             if contents.contains("nucleuscharts_engine.workspace")
                 || contents.contains("nucleuscharts_render.workspace")
                 || contents.contains("nucleuscharts_render_gpui.workspace")

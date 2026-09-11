@@ -16,9 +16,11 @@ use axiusflow_contracts::{
 };
 use axiusflow_market_data::ChartInterval;
 use axiusflow_market_data::OrderBookFrame;
+use axiusflow_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use axiusflow_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
-    MarketPriceAlertTrigger, MarketRuntimeEvent,
+    MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
+    MarketStudyOutputsInvalidated, MarketStudyRemoved,
 };
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_observability::FeedDiagnosticsSnapshot;
@@ -251,6 +253,9 @@ impl MarketPublicationGeneration {
 
 pub enum MarketWorkerMessage {
     Update(MarketWorkerPublication),
+    StudyOutput(MarketStudyOutputSnapshot),
+    StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
+    StudyRemoved(MarketStudyRemoved),
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
     Recovery {
         request_id: u64,
@@ -269,6 +274,25 @@ pub enum MarketWorkerMessage {
     OrderBook(OrderBookFrame),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     PriceAlertSyncFailed(String),
+    StudyRegistered {
+        request_sequence: u64,
+        study_id: StudyInstanceId,
+    },
+    StudyReinitialized {
+        study_id: StudyInstanceId,
+    },
+    StudyRegistrationFailed {
+        request_sequence: u64,
+        message: String,
+    },
+    StudyReinitializationFailed {
+        study_id: StudyInstanceId,
+        message: String,
+    },
+    StudyRemovalFailed {
+        study_id: StudyInstanceId,
+        message: String,
+    },
     EngineSwitchMarker {
         sequence: u64,
     },
@@ -361,6 +385,36 @@ impl MarketWorkerSender {
         if !self.mailbox.receiver_alive.load(Ordering::Acquire) {
             return Err(MarketWorkerSendError::Disconnected);
         }
+        if let MarketWorkerMessage::StudyOutput(next) = &message
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::StudyOutput(current)
+                        if current.output_id == next.output_id
+                )
+            })
+        {
+            queue[index] = message;
+            return Ok(());
+        }
+        if let MarketWorkerMessage::StudyRemoved(removed) = &message {
+            queue.retain(|queued| {
+                !matches!(
+                    queued,
+                    MarketWorkerMessage::StudyOutput(output)
+                        if removed.study_ids.contains(&output.study_id)
+                )
+            });
+        }
+        if let MarketWorkerMessage::StudyOutputsInvalidated(invalidated) = &message {
+            queue.retain(|queued| {
+                !matches!(
+                    queued,
+                    MarketWorkerMessage::StudyOutput(output)
+                        if invalidated.study_ids.contains(&output.study_id)
+                )
+            });
+        }
         if matches!(message, MarketWorkerMessage::Diagnostics(_)) {
             if let Some(index) = queue
                 .iter()
@@ -416,7 +470,9 @@ impl MarketWorkerSender {
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
-        MarketWorkerMessage::Update(_) | MarketWorkerMessage::OrderBook(_)
+        MarketWorkerMessage::Update(_)
+            | MarketWorkerMessage::StudyOutput(_)
+            | MarketWorkerMessage::OrderBook(_)
     )
 }
 
@@ -581,7 +637,22 @@ pub enum MarketWorkerCommand {
     DepthVisible(bool),
     ResourceClass(ConsumerResourceClass),
     ReplacePriceAlerts(Vec<MarketPriceAlert>),
+    RegisterStudy(Box<StudyRegistrationRequest>),
+    ReinitializeStudy(Box<StudyReinitializationRequest>),
+    RemoveStudy(StudyInstanceId),
     Shutdown,
+}
+
+#[derive(Clone)]
+pub struct StudyRegistrationRequest {
+    pub sequence: u64,
+    pub registration: NativeStudyRegistration,
+}
+
+#[derive(Clone)]
+pub struct StudyReinitializationRequest {
+    pub study_id: StudyInstanceId,
+    pub registration: NativeStudyRegistration,
 }
 
 #[derive(Clone, Debug)]
@@ -784,6 +855,7 @@ pub struct MarketDataWorker {
     connected: bool,
     ui_diagnostics: Option<UiDiagnosticsSender>,
     engine_selection_sequence: Option<Arc<AtomicU64>>,
+    study_request_sequence: AtomicU64,
 }
 
 impl MarketDataWorker {
@@ -807,6 +879,7 @@ impl MarketDataWorker {
             connected: true,
             ui_diagnostics,
             engine_selection_sequence,
+            study_request_sequence: AtomicU64::new(0),
         }
     }
 
@@ -883,6 +956,121 @@ impl MarketDataWorker {
                 }
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                     unreachable!("alert send errors retain the alert snapshot")
+                }
+            })
+    }
+
+    /// Queues one trusted native study registration without blocking GPUI.
+    ///
+    /// The returned sequence is acknowledged by either `StudyRegistered` or
+    /// `StudyRegistrationFailed`, so callers never infer runtime ownership from
+    /// whether an output happened to be ready immediately.
+    ///
+    /// # Errors
+    /// Returns the complete request when the bounded command mailbox is full or
+    /// disconnected.
+    pub fn try_register_study(
+        &self,
+        registration: NativeStudyRegistration,
+    ) -> Result<u64, TrySendError<Box<StudyRegistrationRequest>>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(Box::new(
+                StudyRegistrationRequest {
+                    sequence: 0,
+                    registration,
+                },
+            )));
+        };
+        let next = self
+            .study_request_sequence
+            .load(Ordering::Acquire)
+            .saturating_add(1);
+        let request = Box::new(StudyRegistrationRequest {
+            sequence: next,
+            registration,
+        });
+        commands
+            .try_send(MarketWorkerCommand::RegisterStudy(request))
+            .map_err(|error| {
+                let (full, command) = match error {
+                    TrySendError::Full(command) => (true, command),
+                    TrySendError::Disconnected(command) => (false, command),
+                };
+                let MarketWorkerCommand::RegisterStudy(request) = command else {
+                    unreachable!("study registration errors retain the study request");
+                };
+                if full {
+                    TrySendError::Full(request)
+                } else {
+                    TrySendError::Disconnected(request)
+                }
+            })?;
+        self.study_request_sequence.store(next, Ordering::Release);
+        Ok(next)
+    }
+
+    /// Queues removal of one runtime-owned study subtree.
+    ///
+    /// Successful removal is acknowledged by the ordinary `StudyRemoved`
+    /// publication containing the complete dependency subtree.
+    ///
+    /// # Errors
+    /// Returns the study identity when the bounded worker command lane is full or
+    /// disconnected.
+    pub fn try_remove_study(
+        &self,
+        study_id: StudyInstanceId,
+    ) -> Result<(), TrySendError<StudyInstanceId>> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(study_id));
+        };
+        commands
+            .try_send(MarketWorkerCommand::RemoveStudy(study_id))
+            .map_err(|error| match error {
+                TrySendError::Full(MarketWorkerCommand::RemoveStudy(study_id)) => {
+                    TrySendError::Full(study_id)
+                }
+                TrySendError::Disconnected(MarketWorkerCommand::RemoveStudy(study_id)) => {
+                    TrySendError::Disconnected(study_id)
+                }
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    unreachable!("study removal errors retain the study identity")
+                }
+            })
+    }
+
+    /// Replaces one study's static inputs/settings/program while preserving its
+    /// runtime identity and chart-local output identity.
+    ///
+    /// # Errors
+    /// Returns the complete request when the bounded worker command lane is full
+    /// or disconnected.
+    pub fn try_reinitialize_study(
+        &self,
+        study_id: StudyInstanceId,
+        registration: NativeStudyRegistration,
+    ) -> Result<(), TrySendError<Box<StudyReinitializationRequest>>> {
+        let request = Box::new(StudyReinitializationRequest {
+            study_id,
+            registration,
+        });
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(TrySendError::Disconnected(request));
+        };
+        commands
+            .try_send(MarketWorkerCommand::ReinitializeStudy(request))
+            .map_err(|error| {
+                let (full, command) = match error {
+                    TrySendError::Full(command) => (true, command),
+                    TrySendError::Disconnected(command) => (false, command),
+                };
+                let MarketWorkerCommand::ReinitializeStudy(request) = command else {
+                    unreachable!("study reinitialization errors retain the study request");
+                };
+                if full {
+                    TrySendError::Full(request)
+                } else {
+                    TrySendError::Disconnected(request)
                 }
             })
     }
@@ -1113,7 +1301,10 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_)
-                    | MarketWorkerCommand::ReplacePriceAlerts(_),
+                    | MarketWorkerCommand::ReplacePriceAlerts(_)
+                    | MarketWorkerCommand::RegisterStudy(_)
+                    | MarketWorkerCommand::ReinitializeStudy(_)
+                    | MarketWorkerCommand::RemoveStudy(_),
                 )
                 | TrySendError::Disconnected(
                     MarketWorkerCommand::Shutdown
@@ -1123,7 +1314,10 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_)
-                    | MarketWorkerCommand::ReplacePriceAlerts(_),
+                    | MarketWorkerCommand::ReplacePriceAlerts(_)
+                    | MarketWorkerCommand::RegisterStudy(_)
+                    | MarketWorkerCommand::ReinitializeStudy(_)
+                    | MarketWorkerCommand::RemoveStudy(_),
                 ) => {
                     unreachable!("recovery send errors retain the recovery command")
                 }
@@ -1365,8 +1559,12 @@ mod tests {
         SearchProviderInstruments, SelectProviderInstrument,
     };
     use axiusflow_market_data::OrderBookFrame;
-    use axiusflow_market_data::{ChartInterval, OrderBookRecoveryReason, OrderBookState};
+    use axiusflow_market_data::{
+        BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
+    };
+    use axiusflow_market_runtime::study::StudyInstanceId;
     use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
+    use axiusflow_study_sdk::builtins;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
@@ -1385,6 +1583,16 @@ mod tests {
                 ..
             }) => Some(tail.operation()),
             _ => None,
+        }
+    }
+
+    fn study_series() -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:ESU6".to_string(),
+            entitlement_id: "rithmic-test:CME:ESU6".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
         }
     }
 
@@ -2764,6 +2972,59 @@ mod tests {
                 .expect("shutdown acknowledgement sends");
         });
         drop(worker);
+        shutdown.join().expect("shutdown observer exits");
+    }
+
+    #[test]
+    fn study_commands_preserve_registration_sequence_and_runtime_identity() {
+        let (command_tx, command_rx) = mpsc::sync_channel(4);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
+        let registration = builtins::sma(
+            study_series(),
+            NonZeroUsize::new(20).unwrap_or(NonZeroUsize::MIN),
+        )
+        .expect("SMA registration is valid");
+
+        assert_eq!(
+            worker
+                .try_register_study(registration.clone())
+                .expect("study registration enters the bounded command lane"),
+            1
+        );
+        let study_id = StudyInstanceId::try_from_u64(7).expect("study identity");
+        worker
+            .try_reinitialize_study(study_id, registration)
+            .expect("study reinitialization enters the bounded command lane");
+        worker
+            .try_remove_study(study_id)
+            .expect("study removal enters the bounded command lane");
+
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::RegisterStudy(request)) if request.sequence == 1
+        ));
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::ReinitializeStudy(request)) if request.study_id == study_id
+        ));
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::RemoveStudy(received)) if received == study_id
+        ));
+
+        let shutdown = thread::spawn(move || {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::Shutdown)
+            ));
+            shutdown_tx
+                .send(())
+                .expect("shutdown acknowledgement sends");
+        });
+        assert!(worker.shutdown_and_wait());
         shutdown.join().expect("shutdown observer exits");
     }
 

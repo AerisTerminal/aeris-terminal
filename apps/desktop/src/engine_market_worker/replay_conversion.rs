@@ -246,7 +246,7 @@ pub(super) fn snapshot_instrument(
     }
 }
 
-pub(super) fn series_key(
+pub(crate) fn series_key(
     product: &InstallProviderInstrument,
     interval: ChartInterval,
 ) -> Result<BarSeriesKey, String> {

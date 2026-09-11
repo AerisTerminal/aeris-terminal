@@ -3,14 +3,15 @@ use super::{
     COMMAND_CAPACITY, ClientId, Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
     Duration, GenerationId, HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource,
     InstallProviderInstrument, Instant, LiveHyperliquidHistory, LiveRithmicHistory, MarketEngine,
-    MarketRuntime, MarketService, MarketServiceStatus, Mutex, Ordering, OwnedCoordinatorChannels,
-    ProviderCatalogChannelSet, ProviderCatalogChannels, ProviderCatalogCommand,
-    ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
-    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRealtimeDispatch,
-    ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry,
-    ProviderRuntimeSpec, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply,
-    RithmicCatalogControl, RithmicRealtimeControl, RithmicRealtimeEvent, SearchProviderInstruments,
-    SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, SyncSender, TrySendError,
+    MarketRuntime, MarketService, MarketServiceStatus, Mutex, NativeStudyRegistration, Ordering,
+    OwnedCoordinatorChannels, ProviderCatalogChannelSet, ProviderCatalogChannels,
+    ProviderCatalogCommand, ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch,
+    ProviderDispatchRecord, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
+    ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
+    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, RithmicRealtimeControl,
+    RithmicRealtimeEvent, SearchProviderInstruments, SelectProviderInstrument,
+    StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
     Viewport, WorkspaceId, configured_engine, configured_reconnect_delay, id, mpsc,
     spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
     try_send_rithmic_catalog, validate_provider_instrument, validate_provider_search,
@@ -1028,6 +1029,75 @@ impl MarketService {
         })
     }
 
+    /// Registers one native study instance anchored to an owned market consumer.
+    ///
+    /// Study dependencies may request several canonical series, but those data
+    /// requirements are reconciled through runtime-owned engine leases rather
+    /// than additional presentation consumers.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, ownership, study definition,
+    /// provider capability, bounded capacity, or coordinator failure.
+    pub fn register_study(
+        &self,
+        client_id: u64,
+        consumer_id: u64,
+        registration: NativeStudyRegistration,
+    ) -> Result<StudyInstanceId, String> {
+        self.request(|reply| {
+            Ok(Command::RegisterStudy(
+                ClientId(id(client_id)?),
+                ConsumerId(id(consumer_id)?),
+                registration,
+                reply,
+            ))
+        })
+    }
+
+    /// Reinitializes one owned study in place after a declared input or setting
+    /// change while preserving its stable instance/output identities.
+    ///
+    /// # Errors
+    /// Returns an error for ownership, definition, provider-demand, execution,
+    /// or coordinator failure. Runtime state rolls back when preparation fails.
+    pub fn reinitialize_study(
+        &self,
+        client_id: u64,
+        study_id: StudyInstanceId,
+        registration: NativeStudyRegistration,
+    ) -> Result<Vec<StudyInstanceId>, String> {
+        self.request(|reply| {
+            Ok(Command::ReinitializeStudy(
+                ClientId(id(client_id)?),
+                study_id,
+                registration,
+                reply,
+            ))
+        })
+    }
+
+    /// Removes one owned study and every downstream study that depends on it.
+    ///
+    /// Released market dependencies are removed from the same authoritative
+    /// provider subscription set used by charts.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, ownership, unknown study, or
+    /// coordinator failure.
+    pub fn remove_study(
+        &self,
+        client_id: u64,
+        study_id: StudyInstanceId,
+    ) -> Result<Vec<StudyInstanceId>, String> {
+        self.request(|reply| {
+            Ok(Command::RemoveStudy(
+                ClientId(id(client_id)?),
+                study_id,
+                reply,
+            ))
+        })
+    }
+
     /// Schedules one bounded exact provider-instrument search for an owned consumer.
     ///
     /// # Errors
@@ -1163,5 +1233,180 @@ impl MarketService {
         reply_rx
             .recv()
             .map_err(|_| "market engine coordinator stopped before replying".to_string())?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::study::{
+        NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
+        StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
+        StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettings,
+    };
+    use axiusflow_market_data::{BarPeriod, MarketBar};
+
+    struct RecordingStudyHistory {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl HistorySource for RecordingStudyHistory {
+        fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.series.instrument_id.clone());
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: vec![
+                    MarketBar {
+                        source_sequence: 1,
+                        exchange_timestamp_seconds: 1_700_000_000,
+                        exchange_timestamp_unix_nanos: 1_700_000_000_000_000_000,
+                        open: 10_000,
+                        high: 10_200,
+                        low: 9_900,
+                        close: 10_100,
+                        volume: 100,
+                    },
+                    MarketBar {
+                        source_sequence: 2,
+                        exchange_timestamp_seconds: 1_700_000_060,
+                        exchange_timestamp_unix_nanos: 1_700_000_060_000_000_000,
+                        open: 10_100,
+                        high: 10_300,
+                        low: 10_000,
+                        close: 10_200,
+                        volume: 120,
+                    },
+                ],
+                forming: None,
+                handoff_boundary_unix_nanos: Some(1_700_000_060_000_000_000),
+            })
+        }
+    }
+
+    fn study_instrument() -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: "rithmic".to_string(),
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            provider_symbol: "MNQU6".to_string(),
+            display_symbol: "MNQ Sep 2026".to_string(),
+            venue_id: "CME".to_string(),
+            price_scale: 2,
+            quantity_scale: 0,
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            price_increment: Some(25),
+        }
+    }
+
+    fn study_series() -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQU6".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        }
+    }
+
+    fn study_definition(series: BarSeriesKey) -> StudyDefinition {
+        StudyDefinition {
+            identifier: "runtime.history.study".to_string(),
+            dependencies: vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            settings: Vec::new(),
+            outputs: vec![StudyOutputSpec {
+                identifier: "value".to_string(),
+                title: "Runtime History Study".to_string(),
+                plot: StudyPlotKind::Line,
+                pane: StudyPaneTarget::Price,
+                scale: StudyScaleTarget::Primary,
+            }],
+            invalidation: StudyInvalidationPolicy::SameRange,
+        }
+    }
+
+    fn calculate_test_study(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let output = context
+            .output(0)
+            .ok_or_else(|| "test study output is unavailable".to_string())?;
+        if !output.is_empty() {
+            output.set(0, None)?;
+        }
+        Ok(())
+    }
+
+    fn study_registration(series: BarSeriesKey) -> NativeStudyRegistration {
+        let definition = study_definition(series);
+        NativeStudyRegistration {
+            settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
+            definition,
+            program: NativeStudyProgram {
+                calculate: calculate_test_study,
+                state_factory: None,
+            },
+        }
+    }
+
+    #[test]
+    fn uncached_study_dependency_uses_existing_bounded_history_worker() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let service = MarketService::start_composed(vec![ProviderRuntimeSpec::rithmic(
+            Box::new(RecordingStudyHistory {
+                calls: Arc::clone(&calls),
+            }),
+            false,
+        )])
+        .expect("test runtime starts");
+        service.attach(1).expect("client attaches");
+        service
+            .register_consumer(1, 1, 1)
+            .expect("consumer registers");
+        service
+            .install_provider_instrument(&study_instrument())
+            .expect("instrument installs");
+
+        let study_id = service
+            .register_study(1, 1, study_registration(study_series()))
+            .expect("study registers without waiting for provider history");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let called = !calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
+            let status = service.status().expect("runtime status");
+            if called && status.retained_bars >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "study dependency did not complete through provider history worker"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["instrument:rithmic:CME:MNQU6".to_string()]
+        );
+        assert_eq!(
+            service.remove_study(1, study_id).expect("study removes"),
+            vec![study_id]
+        );
+        service.remove_consumer(1, 1).expect("consumer removes");
+        service.detach(1).expect("client detaches");
+        service
+            .shutdown(Duration::from_secs(2))
+            .expect("test runtime shuts down");
     }
 }

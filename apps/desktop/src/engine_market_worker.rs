@@ -560,13 +560,12 @@ fn worker_identity(provider: &str) -> (&'static str, &'static str) {
 
 #[path = "engine_market_worker/replay_conversion.rs"]
 mod replay_conversion;
-pub(crate) use replay_conversion::runtime_order_book_frame;
 #[cfg(test)]
 use replay_conversion::{replay_bar_definition, snapshot_instrument};
 use replay_conversion::{
     replay_runtime_snapshot, replay_runtime_tail_update, runtime_generation_from_snapshot,
-    series_key,
 };
+pub(crate) use replay_conversion::{runtime_order_book_frame, series_key};
 
 fn default_product(product_id: &str) -> InstallProviderInstrument {
     InstallProviderInstrument {

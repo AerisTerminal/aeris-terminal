@@ -4,6 +4,7 @@
 //! storage, threads, or global mutable state. The desktop runtime owns one `MarketEngine`
 //! and passes ordinary typed commands and canonical provider results into it.
 
+mod data_lease;
 mod demand;
 mod provider_manager;
 mod publication;
@@ -21,6 +22,7 @@ pub use series_store::{SeriesSnapshot, SeriesTailOperation};
 pub use subscription_registry::SubscriptionStatus;
 
 use axiusflow_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
+use data_lease::DataLeaseRegistry;
 use demand::DemandRegistry;
 use provider_manager::ProviderManager;
 use publication::PublicationManager;
@@ -40,6 +42,13 @@ pub struct WorkspaceId(pub NonZeroU64);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConsumerId(pub NonZeroU64);
+
+/// Runtime-owned identity for one non-presentation market-data lease.
+///
+/// Data leases participate in the same authoritative shared subscription set as
+/// chart consumers without becoming fake UI consumers or receiving publications.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MarketDataLeaseId(pub NonZeroU64);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GenerationId(pub NonZeroU64);
@@ -107,6 +116,11 @@ pub enum EngineError {
     ConsumerLimitExceeded {
         maximum: NonZeroUsize,
     },
+    DataLeaseLimitExceeded {
+        maximum: NonZeroUsize,
+    },
+    DataLeaseIdentityExhausted,
+    UnknownDataLease(MarketDataLeaseId),
     EmptyStreamRequirements,
     StaleConsumerGeneration {
         consumer_id: ConsumerId,
@@ -180,6 +194,19 @@ impl fmt::Display for EngineError {
             Self::ConsumerLimitExceeded { maximum } => {
                 write!(formatter, "consumer limit {maximum} exceeded")
             }
+            Self::DataLeaseLimitExceeded { maximum } => {
+                write!(formatter, "market data lease limit {maximum} exceeded")
+            }
+            Self::DataLeaseIdentityExhausted => {
+                formatter.write_str("market data lease identity exhausted")
+            }
+            Self::UnknownDataLease(lease_id) => {
+                write!(
+                    formatter,
+                    "market data lease {} is not registered",
+                    lease_id.0
+                )
+            }
             Self::EmptyStreamRequirements => {
                 formatter.write_str("consumer demand must request at least one stream")
             }
@@ -230,6 +257,7 @@ impl Error for EngineError {
 
 pub struct MarketEngine {
     demands: DemandRegistry,
+    data_leases: DataLeaseRegistry,
     providers: ProviderManager,
     series: SeriesStore,
     subscriptions: SubscriptionRegistry,
@@ -241,6 +269,10 @@ impl MarketEngine {
     pub fn new(config: MarketEngineConfig) -> Self {
         Self {
             demands: DemandRegistry::new(config.maximum_consumers),
+            // A lease is a reference to one canonical series. Reusing the canonical
+            // series bound keeps internal demand finite without inventing another
+            // independently tuned capacity.
+            data_leases: DataLeaseRegistry::new(config.maximum_series),
             providers: ProviderManager::new(),
             series: SeriesStore::new(config.maximum_series, config.maximum_bars),
             subscriptions: SubscriptionRegistry::new(),
@@ -497,6 +529,117 @@ impl MarketEngine {
             );
         }
         Ok(true)
+    }
+
+    /// Acquires one runtime-owned non-presentation data lease.
+    ///
+    /// Leases share the exact provider subscription registry used by ordinary
+    /// consumers, but they do not allocate a consumer, viewport, publication
+    /// queue, or UI generation. This is the internal demand boundary for work
+    /// such as studies that can require several canonical series at once.
+    ///
+    /// A cached canonical snapshot is returned when one already exists. The
+    /// caller remains responsible for scheduling provider history when it does
+    /// not, because provider I/O is composed by `market_runtime`.
+    ///
+    /// # Errors
+    /// Returns an error for invalid series, empty/unsupported stream sets, or
+    /// exhaustion of the engine's bounded lease capacity.
+    pub fn acquire_data_lease(
+        &mut self,
+        series: &BarSeriesKey,
+        streams: StreamRequirements,
+    ) -> Result<(MarketDataLeaseId, Option<Arc<SeriesSnapshot>>), EngineError> {
+        series.validate()?;
+        if streams.is_empty() {
+            return Err(EngineError::EmptyStreamRequirements);
+        }
+        self.providers
+            .verify_streams(&series.provider_id, streams)?;
+        let lease_id = self.data_leases.acquire(series.clone(), streams)?;
+        self.subscriptions
+            .replace_lease(lease_id, None, series, streams);
+        Ok((lease_id, self.series.get(series)))
+    }
+
+    /// Replaces the series and stream requirements for one existing runtime lease.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown lease, invalid series, empty/unsupported
+    /// streams, or provider capability mismatch.
+    pub fn update_data_lease(
+        &mut self,
+        lease_id: MarketDataLeaseId,
+        series: &BarSeriesKey,
+        streams: StreamRequirements,
+    ) -> Result<Option<Arc<SeriesSnapshot>>, EngineError> {
+        series.validate()?;
+        if streams.is_empty() {
+            return Err(EngineError::EmptyStreamRequirements);
+        }
+        self.providers
+            .verify_streams(&series.provider_id, streams)?;
+        let previous = self
+            .data_leases
+            .current(lease_id)
+            .cloned()
+            .ok_or(EngineError::UnknownDataLease(lease_id))?;
+        if previous.series == *series && previous.streams == streams {
+            return Ok(self.series.get(series));
+        }
+        self.data_leases
+            .replace(lease_id, series.clone(), streams)?;
+        self.subscriptions.replace_lease(
+            lease_id,
+            Some((&previous.series, previous.streams)),
+            series,
+            streams,
+        );
+        Ok(self.series.get(series))
+    }
+
+    /// Releases one runtime-owned data lease and only the provider demand that
+    /// no remaining consumer or lease still requires.
+    #[must_use]
+    pub fn release_data_lease(&mut self, lease_id: MarketDataLeaseId) -> bool {
+        let Some(removed) = self.data_leases.remove(lease_id) else {
+            return false;
+        };
+        self.subscriptions.remove_lease(lease_id, &removed.series);
+        true
+    }
+
+    /// Returns one current runtime-owned data lease.
+    #[must_use]
+    pub fn data_lease(
+        &self,
+        lease_id: MarketDataLeaseId,
+    ) -> Option<(&BarSeriesKey, StreamRequirements)> {
+        self.data_leases
+            .current(lease_id)
+            .map(|lease| (&lease.series, lease.streams))
+    }
+
+    /// Returns the number of live runtime-owned market-data leases.
+    #[must_use]
+    pub fn data_lease_count(&self) -> usize {
+        self.data_leases.len()
+    }
+
+    /// Returns the fixed runtime-owned lease capacity.
+    #[must_use]
+    pub const fn maximum_data_leases(&self) -> NonZeroUsize {
+        self.data_leases.maximum()
+    }
+
+    /// Verifies that `additional` new runtime leases can be allocated without
+    /// mutating engine state.
+    ///
+    /// # Errors
+    /// Returns an error when the bounded lease capacity or monotonic lease-ID
+    /// space cannot satisfy the requested acquisitions.
+    pub fn preflight_data_lease_acquisitions(&self, additional: usize) -> Result<(), EngineError> {
+        self.data_leases.preflight_acquisitions(additional)
     }
 
     /// Returns the bounded retained viewport intents for one canonical series.
@@ -821,7 +964,13 @@ impl MarketEngine {
     /// that consumer has temporarily released its upstream subscription.
     #[must_use]
     pub fn demanded_series(&self) -> Vec<BarSeriesKey> {
-        self.demands.referenced_series()
+        self.demands
+            .referenced_series()
+            .into_iter()
+            .chain(self.data_leases.referenced_series().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     #[must_use]
@@ -1782,6 +1931,90 @@ mod tests {
         assert_eq!(engine.detach_client(ClientId(nonzero(1))), vec![id(1)]);
         assert!(!engine.has_subscription(&eth));
         assert!(engine.current_demand(id(3)).is_some());
+    }
+
+    #[test]
+    fn data_leases_share_authoritative_subscriptions_without_becoming_consumers() {
+        let mut engine = engine(2, 2, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand_with_streams(id(1), generation(1), &btc, StreamRequirements::BARS)
+            .expect("chart demand installs");
+
+        let study_streams = StreamRequirements::BARS.with(MarketStream::Trades);
+        let (study_lease, cached) = engine
+            .acquire_data_lease(&btc, study_streams)
+            .expect("study lease installs");
+        assert!(cached.is_none());
+        assert_eq!(
+            engine.subscription_status(&btc),
+            Some(SubscriptionStatus {
+                consumer_count: 1,
+                streams: study_streams,
+            })
+        );
+        assert_eq!(engine.metrics().active_consumers, 1);
+        assert_eq!(engine.data_lease(study_lease), Some((&btc, study_streams)));
+
+        assert!(engine.release_data_lease(study_lease));
+        assert_eq!(
+            engine.subscription_status(&btc),
+            Some(SubscriptionStatus {
+                consumer_count: 1,
+                streams: StreamRequirements::BARS,
+            })
+        );
+        assert!(!engine.release_data_lease(study_lease));
+    }
+
+    #[test]
+    fn data_lease_returns_and_protects_canonical_cache_without_publication_state() {
+        let mut engine = engine(1, 2, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+
+        let (study_lease, cached) = engine
+            .acquire_data_lease(&btc, StreamRequirements::BARS)
+            .expect("lease installs");
+        let cached = cached.expect("canonical snapshot is returned");
+        assert_eq!(cached.bars.len(), 2);
+        assert_eq!(engine.metrics().active_consumers, 0);
+        assert_eq!(engine.demanded_series(), vec![btc.clone()]);
+        assert!(
+            engine
+                .evict_unsubscribed_series(0, 0, &engine.demanded_series())
+                .is_empty()
+        );
+
+        assert!(engine.release_data_lease(study_lease));
+        assert_eq!(
+            engine.evict_unsubscribed_series(0, 0, &engine.demanded_series()),
+            vec![btc]
+        );
+    }
+
+    #[test]
+    fn data_lease_capacity_is_bounded_by_canonical_series_capacity() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        let eth = series("rithmic:spot:ETH-USD");
+        let (study_lease, _) = engine
+            .acquire_data_lease(&btc, StreamRequirements::BARS)
+            .expect("first lease installs");
+        assert!(matches!(
+            engine.acquire_data_lease(&eth, StreamRequirements::BARS),
+            Err(EngineError::DataLeaseLimitExceeded { .. })
+        ));
+        assert_eq!(engine.data_lease_count(), 1);
+        assert_eq!(
+            engine.data_lease(study_lease).map(|(series, _)| series),
+            Some(&btc)
+        );
+        assert!(engine.has_subscription(&btc));
+        assert!(!engine.has_subscription(&eth));
     }
 
     #[test]

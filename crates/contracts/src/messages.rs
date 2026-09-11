@@ -136,6 +136,27 @@ pub enum PriceAlertStatus {
     Triggered = 1,
 }
 
+/// Durable source kind for one native study dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceStudyDependencyKind {
+    Unspecified = 0,
+    CurrentChartSeries = 1,
+    ExplicitSeries = 2,
+    StudyOutput = 3,
+}
+
+/// Durable market stream requested by one native study market dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WorkspaceStudyMarketStream {
+    Unspecified = 0,
+    Bars = 1,
+    Trades = 2,
+    Quotes = 3,
+    Depth = 4,
+}
+
 /// Persisted workspace state.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct WorkspaceState {
@@ -225,6 +246,90 @@ pub struct WorkspaceChartState {
     /// not evaluate them or deliver operating-system notifications.
     #[prost(message, repeated, tag = "7")]
     pub price_alerts: Vec<WorkspacePriceAlertState>,
+    /// Host-owned native study graph in stable creation/dependency order.
+    #[prost(message, repeated, tag = "8")]
+    pub studies: Vec<WorkspaceChartStudyState>,
+}
+
+/// Durable host-owned state for one native Study Runtime instance.
+///
+/// `local_id` is a monotonically increasing creation identity stable only
+/// inside this chart document. Runtime-assigned `StudyInstanceId` values are
+/// deliberately never persisted.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceChartStudyState {
+    #[prost(uint64, tag = "1")]
+    pub local_id: u64,
+    /// Stable SDK implementation identifier such as `builtin.sma`.
+    #[prost(string, tag = "2")]
+    pub identifier: String,
+    /// Version of the implementation's durable settings/dependency contract.
+    #[prost(uint32, tag = "3")]
+    pub implementation_revision: u32,
+    #[prost(message, repeated, tag = "4")]
+    pub settings: Vec<WorkspaceStudySettingState>,
+    #[prost(message, repeated, tag = "5")]
+    pub dependencies: Vec<WorkspaceStudyDependencyState>,
+    #[prost(bool, tag = "6")]
+    pub visible: bool,
+    /// Stable output interface captured for dependency restoration/migration.
+    #[prost(string, repeated, tag = "7")]
+    pub output_identifiers: Vec<String>,
+}
+
+/// Durable static dependency for one native study.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudyDependencyState {
+    #[prost(enumeration = "WorkspaceStudyDependencyKind", tag = "1")]
+    pub kind: i32,
+    /// Required only for market dependencies.
+    #[prost(enumeration = "WorkspaceStudyMarketStream", repeated, tag = "2")]
+    pub streams: Vec<i32>,
+    /// Required only for an explicit market series. Current-chart dependencies
+    /// intentionally resolve against the pane's current selection at runtime.
+    #[prost(message, optional, tag = "3")]
+    pub series: Option<SeriesKey>,
+    /// Required only for a prior study-output dependency.
+    #[prost(uint64, tag = "4")]
+    pub study_local_id: u64,
+    /// Stable output identifier on `study_local_id`.
+    #[prost(string, tag = "5")]
+    pub output_identifier: String,
+}
+
+/// Durable exact decimal used by a typed native study setting.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudyDecimalState {
+    #[prost(sint64, tag = "1")]
+    pub mantissa: i64,
+    #[prost(uint32, tag = "2")]
+    pub scale: u32,
+}
+
+/// Durable typed setting value for one native study.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceStudySettingState {
+    #[prost(string, tag = "1")]
+    pub identifier: String,
+    #[prost(oneof = "workspace_study_setting_state::Value", tags = "2, 3, 4, 5, 6")]
+    pub value: Option<workspace_study_setting_state::Value>,
+}
+
+pub mod workspace_study_setting_state {
+    /// Exact persisted setting value; the oneof preserves type across upgrades.
+    #[derive(Clone, PartialEq, Eq, prost::Oneof)]
+    pub enum Value {
+        #[prost(bool, tag = "2")]
+        Boolean(bool),
+        #[prost(sint64, tag = "3")]
+        Integer(i64),
+        #[prost(message, tag = "4")]
+        Decimal(super::WorkspaceStudyDecimalState),
+        #[prost(string, tag = "5")]
+        Text(String),
+        #[prost(string, tag = "6")]
+        Choice(String),
+    }
 }
 
 /// Durable price alert created from a chart crosshair action.

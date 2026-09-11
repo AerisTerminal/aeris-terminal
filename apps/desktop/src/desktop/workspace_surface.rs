@@ -27,6 +27,408 @@ fn chart_bridge_label(chart: Option<&Entity<NucleusChartView>>, cx: &App) -> Str
     )
 }
 
+fn initial_symbol_browser() -> rithmic_shell::RithmicSymbolBrowser {
+    rithmic_shell::RithmicSymbolBrowser::rithmic_catalog_awaiting_search(
+        std::num::NonZeroUsize::MIN,
+        "",
+    )
+}
+
+fn restored_market_selection(
+    startup: &MarketWorkerStartup,
+) -> Option<(ChartInterval, Option<(i64, i64)>)> {
+    match startup {
+        MarketWorkerStartup::Loading(startup) => {
+            Some((startup.interval, startup.restored_viewport))
+        }
+        MarketWorkerStartup::Rithmic => None,
+    }
+}
+
+const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
+    match plot {
+        StudyPlotKind::Line => ChartStudyPlotKind::Line,
+        StudyPlotKind::Histogram => ChartStudyPlotKind::Histogram,
+        StudyPlotKind::Area => ChartStudyPlotKind::Area,
+    }
+}
+
+const fn chart_study_pane(pane: StudyPaneTarget) -> ChartStudyPaneTarget {
+    match pane {
+        StudyPaneTarget::Price => ChartStudyPaneTarget::Price,
+        StudyPaneTarget::Dedicated { group } => ChartStudyPaneTarget::Dedicated { group },
+    }
+}
+
+const fn chart_study_scale(scale: StudyScaleTarget) -> ChartStudyScaleTarget {
+    match scale {
+        StudyScaleTarget::Primary => ChartStudyScaleTarget::Primary,
+        StudyScaleTarget::Left => ChartStudyScaleTarget::Left,
+        StudyScaleTarget::Overlay => ChartStudyScaleTarget::Overlay,
+    }
+}
+
+const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
+    matches!(
+        indicator,
+        ChartIndicator::Sma | ChartIndicator::Wma | ChartIndicator::Bollinger
+    )
+}
+
+fn persisted_legacy_indicator_states(
+    states: impl IntoIterator<Item = ChartIndicatorState>,
+) -> Vec<WorkspaceChartIndicatorState> {
+    states
+        .into_iter()
+        .filter(|state| !runtime_managed_indicator(state.indicator))
+        .map(|state| WorkspaceChartIndicatorState {
+            kind: state.indicator.identifier().to_string(),
+            visible: state.visible,
+        })
+        .collect()
+}
+
+fn runtime_study_count(studies: &RuntimeStudiesState) -> usize {
+    studies
+        .active
+        .iter()
+        .filter(|state| !studies.removing.contains(&state.study_id))
+        .count()
+        + studies
+            .pending
+            .values()
+            .filter(|state| !state.remove_on_registration)
+            .count()
+        + studies.deferred.len()
+}
+
+fn discard_unregistered_runtime_studies(studies: &mut RuntimeStudiesState) -> bool {
+    let changed = !studies.deferred.is_empty()
+        || studies
+            .pending
+            .values()
+            .any(|state| !state.remove_on_registration);
+    for pending in studies.pending.values_mut() {
+        pending.remove_on_registration = true;
+    }
+    studies.deferred.clear();
+    changed
+}
+
+fn runtime_study_registration(
+    state: &WorkspaceChartStudyState,
+    current_series: &BarSeriesKey,
+    active: &[RuntimeStudyState],
+) -> Result<NativeStudyRegistration, String> {
+    let dependencies = state
+        .dependencies
+        .iter()
+        .map(|dependency| runtime_study_dependency(dependency, current_series, active))
+        .collect::<Result<Vec<_>, _>>()?;
+    let settings = state
+        .settings
+        .iter()
+        .map(|setting| {
+            let value = setting
+                .value
+                .as_ref()
+                .ok_or_else(|| format!("study setting {} has no value", setting.identifier))?;
+            Ok((
+                setting.identifier.clone(),
+                runtime_study_setting_value(value)?,
+            ))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?;
+    let registration = axiusflow_study_sdk::restore_native_registration(
+        &state.identifier,
+        state.implementation_revision,
+        dependencies,
+        settings,
+    )
+    .map_err(|error| error.to_string())?;
+    let output_identifiers = registration
+        .definition
+        .outputs
+        .iter()
+        .map(|output| output.identifier.as_str())
+        .collect::<Vec<_>>();
+    if output_identifiers
+        != state
+            .output_identifiers
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    {
+        return Err(format!(
+            "study {} output interface no longer matches this workspace",
+            state.identifier
+        ));
+    }
+    Ok(registration)
+}
+
+fn runtime_study_setting_value(
+    value: &workspace_study_setting_state::Value,
+) -> Result<StudySettingValue, String> {
+    Ok(match value {
+        workspace_study_setting_state::Value::Boolean(value) => StudySettingValue::Boolean(*value),
+        workspace_study_setting_state::Value::Integer(value) => StudySettingValue::Integer(*value),
+        workspace_study_setting_state::Value::Decimal(value) => {
+            StudySettingValue::Decimal(StudyDecimal {
+                mantissa: value.mantissa,
+                scale: u8::try_from(value.scale)
+                    .map_err(|_| "study decimal scale is out of range".to_string())?,
+            })
+        }
+        workspace_study_setting_state::Value::Text(value) => StudySettingValue::Text(value.clone()),
+        workspace_study_setting_state::Value::Choice(value) => {
+            StudySettingValue::Choice(value.clone())
+        }
+    })
+}
+
+fn runtime_study_streams(streams: &[i32]) -> Result<StreamRequirements, String> {
+    let mut requirements = StreamRequirements::NONE;
+    for stream in streams {
+        let stream = WorkspaceStudyMarketStream::try_from(*stream)
+            .map_err(|_| "study market dependency contains an unknown stream".to_string())?;
+        let stream = match stream {
+            WorkspaceStudyMarketStream::Bars => MarketStream::Bars,
+            WorkspaceStudyMarketStream::Trades => MarketStream::Trades,
+            WorkspaceStudyMarketStream::Quotes => MarketStream::Quotes,
+            WorkspaceStudyMarketStream::Depth => MarketStream::Depth,
+            WorkspaceStudyMarketStream::Unspecified => {
+                return Err("study market dependency contains an unspecified stream".to_string());
+            }
+        };
+        requirements = requirements.with(stream);
+    }
+    if requirements.is_empty() {
+        return Err("study market dependency has no streams".to_string());
+    }
+    Ok(requirements)
+}
+
+fn runtime_study_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
+    let cadence = SeriesCadence::try_from(series.cadence)
+        .map_err(|_| "study series cadence is unknown".to_string())?;
+    let period = match cadence {
+        SeriesCadence::FixedSeconds => axiusflow_market_data::BarPeriod::time(series.cadence_value),
+        SeriesCadence::Trades => axiusflow_market_data::BarPeriod::tick(series.cadence_value),
+        SeriesCadence::SessionDays => {
+            axiusflow_market_data::BarPeriod::session(series.cadence_value)
+        }
+        SeriesCadence::CalendarWeeks => {
+            axiusflow_market_data::BarPeriod::week(series.cadence_value)
+        }
+        SeriesCadence::CalendarMonths => {
+            axiusflow_market_data::BarPeriod::month(series.cadence_value)
+        }
+        SeriesCadence::Unspecified => {
+            return Err("study series cadence is unspecified".to_string());
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let series = BarSeriesKey {
+        provider_id: series.provider.clone(),
+        instrument_id: series.instrument_id.clone(),
+        entitlement_id: series.entitlement_id.clone(),
+        period,
+        definition_version: series.definition_revision,
+    };
+    series.validate().map_err(|error| error.to_string())?;
+    Ok(series)
+}
+
+fn runtime_study_dependency(
+    dependency: &WorkspaceStudyDependencyState,
+    current_series: &BarSeriesKey,
+    active: &[RuntimeStudyState],
+) -> Result<StudyDependency, String> {
+    match WorkspaceStudyDependencyKind::try_from(dependency.kind)
+        .map_err(|_| "study dependency kind is unknown".to_string())?
+    {
+        WorkspaceStudyDependencyKind::CurrentChartSeries => {
+            Ok(StudyDependency::Market(StudyMarketInput {
+                series: current_series.clone(),
+                streams: runtime_study_streams(&dependency.streams)?,
+            }))
+        }
+        WorkspaceStudyDependencyKind::ExplicitSeries => {
+            let series = dependency
+                .series
+                .as_ref()
+                .ok_or_else(|| "study explicit-series dependency has no series".to_string())?;
+            Ok(StudyDependency::Market(StudyMarketInput {
+                series: runtime_study_series(series)?,
+                streams: runtime_study_streams(&dependency.streams)?,
+            }))
+        }
+        WorkspaceStudyDependencyKind::StudyOutput => {
+            let upstream = active
+                .iter()
+                .find(|state| state.persisted.local_id == dependency.study_local_id)
+                .ok_or_else(|| {
+                    format!(
+                        "study dependency {} has not been restored yet",
+                        dependency.study_local_id
+                    )
+                })?;
+            let output_index = upstream
+                .persisted
+                .output_identifiers
+                .iter()
+                .position(|identifier| identifier == &dependency.output_identifier)
+                .ok_or_else(|| {
+                    format!(
+                        "study dependency output {} is unavailable",
+                        dependency.output_identifier
+                    )
+                })?;
+            Ok(StudyDependency::Output(
+                upstream.study_id.output(output_index),
+            ))
+        }
+        WorkspaceStudyDependencyKind::Unspecified => {
+            Err("study dependency kind is unspecified".to_string())
+        }
+    }
+}
+
+fn runtime_study_uses_current_chart(state: &WorkspaceChartStudyState) -> bool {
+    state.dependencies.iter().any(|dependency| {
+        WorkspaceStudyDependencyKind::try_from(dependency.kind)
+            .is_ok_and(|kind| kind == WorkspaceStudyDependencyKind::CurrentChartSeries)
+    })
+}
+
+fn legacy_runtime_study(
+    local_id: u64,
+    indicator: ChartIndicator,
+    visible: bool,
+) -> Option<WorkspaceChartStudyState> {
+    let (identifier, implementation_revision, settings, output_identifiers) = match indicator {
+        ChartIndicator::Sma => (
+            axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+            vec![WorkspaceStudySettingState {
+                identifier: axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                value: Some(workspace_study_setting_state::Value::Integer(
+                    axiusflow_study_sdk::BUILTIN_SMA_DEFAULT_PERIOD,
+                )),
+            }],
+            vec![axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string()],
+        ),
+        ChartIndicator::Wma => (
+            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
+            vec![WorkspaceStudySettingState {
+                identifier: axiusflow_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
+                value: Some(workspace_study_setting_state::Value::Integer(
+                    axiusflow_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
+                )),
+            }],
+            vec![axiusflow_study_sdk::BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string()],
+        ),
+        ChartIndicator::Bollinger => (
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
+            vec![
+                WorkspaceStudySettingState {
+                    identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING.to_string(),
+                    value: Some(workspace_study_setting_state::Value::Integer(
+                        axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_PERIOD,
+                    )),
+                },
+                WorkspaceStudySettingState {
+                    identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING
+                        .to_string(),
+                    value: Some(workspace_study_setting_state::Value::Decimal(
+                        WorkspaceStudyDecimalState {
+                            mantissa: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION
+                                .mantissa,
+                            scale: u32::from(
+                                axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.scale,
+                            ),
+                        },
+                    )),
+                },
+            ],
+            vec![
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+            ],
+        ),
+        _ => return None,
+    };
+    Some(WorkspaceChartStudyState {
+        local_id,
+        identifier: identifier.to_string(),
+        implementation_revision,
+        settings,
+        dependencies: vec![WorkspaceStudyDependencyState {
+            kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+            streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+            ..WorkspaceStudyDependencyState::default()
+        }],
+        visible,
+        output_identifiers,
+    })
+}
+
+fn persisted_runtime_studies(
+    restored_chart_state: Option<&WorkspaceChartState>,
+) -> Vec<PendingRuntimeStudyState> {
+    let Some(state) = restored_chart_state else {
+        return Vec::new();
+    };
+    let persisted = if state.studies.is_empty() {
+        state
+            .indicators
+            .iter()
+            .filter_map(|item| {
+                let indicator = ChartIndicator::from_identifier(&item.kind)?;
+                runtime_managed_indicator(indicator).then_some((indicator, item.visible))
+            })
+            .enumerate()
+            .filter_map(|(index, (indicator, visible))| {
+                legacy_runtime_study(index as u64 + 1, indicator, visible)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        state.studies.clone()
+    };
+    persisted
+        .into_iter()
+        .map(|persisted| PendingRuntimeStudyState {
+            persisted,
+            resolved_chart_series: None,
+            remove_on_registration: false,
+            persist_on_registration: false,
+            blocked: false,
+        })
+        .collect()
+}
+
+fn restored_runtime_studies(
+    restored_chart_state: Option<&WorkspaceChartState>,
+) -> RuntimeStudiesState {
+    let deferred = persisted_runtime_studies(restored_chart_state);
+    let next_local_id = deferred
+        .iter()
+        .map(|state| state.persisted.local_id)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .unwrap_or(0);
+    RuntimeStudiesState {
+        deferred,
+        next_local_id,
+        ..RuntimeStudiesState::default()
+    }
+}
+
 impl WorkspaceSurface {
     pub(super) fn take_chart_persistence_dirty(&mut self) -> bool {
         std::mem::take(&mut self.chart_persistence_dirty)
@@ -56,21 +458,44 @@ impl WorkspaceSurface {
                 left: state.left,
                 precision: state.precision.map(u32::from),
             });
+        let indicators = persisted_legacy_indicator_states(chart.indicator_states());
+        let mut studies = self
+            .studies
+            .active
+            .iter()
+            .filter(|state| !self.studies.removing.contains(&state.study_id))
+            .map(|state| {
+                let mut persisted = state.persisted.clone();
+                persisted.visible = chart
+                    .study_visible(state.study_id.get())
+                    .unwrap_or(persisted.visible);
+                persisted
+            })
+            .chain(
+                self.studies
+                    .pending
+                    .values()
+                    .filter(|state| !state.remove_on_registration)
+                    .map(|state| state.persisted.clone()),
+            )
+            .chain(
+                self.studies
+                    .deferred
+                    .iter()
+                    .filter(|state| !state.remove_on_registration)
+                    .map(|state| state.persisted.clone()),
+            )
+            .collect::<Vec<_>>();
+        studies.sort_by_key(|state| state.local_id);
         Some(WorkspaceChartState {
             chart_type: chart.chart_type().identifier().to_string(),
             nucleus_state_json,
-            indicators: chart
-                .indicator_states()
-                .into_iter()
-                .map(|state| WorkspaceChartIndicatorState {
-                    kind: state.indicator.identifier().to_string(),
-                    visible: state.visible,
-                })
-                .collect(),
+            indicators,
             price_axis,
             locked_drawing_ids: chart.locked_drawing_ids(),
             crosshair_mode: u32::from(chart.crosshair_mode()),
             price_alerts: self.price_alerts.clone(),
+            studies,
         })
     }
 
@@ -89,6 +514,7 @@ impl WorkspaceSurface {
                     visible: item.visible,
                 })
             })
+            .filter(|state| !runtime_managed_indicator(state.indicator))
             .take(ChartIndicator::ALL.len())
             .collect::<Vec<_>>();
         let chart_type = ChartType::from_identifier(&state.chart_type);
@@ -140,12 +566,7 @@ impl WorkspaceSurface {
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
         let theme = AxiusflowTheme::dark();
-        let restored_rithmic = match &startup {
-            MarketWorkerStartup::Loading(startup) => {
-                Some((startup.interval, startup.restored_viewport))
-            }
-            MarketWorkerStartup::Rithmic => None,
-        };
+        let restored_rithmic = restored_market_selection(&startup);
         let TerminalStartupState {
             chart,
             chart_state,
@@ -158,6 +579,8 @@ impl WorkspaceSurface {
             provider,
             product,
         } = terminal_startup_state(startup, cx);
+        let interval = restored_rithmic.map_or(ChartInterval::Minute1, |restored| restored.0);
+        let studies = restored_runtime_studies(restored_chart_state.as_ref());
         let (price_alerts, price_alert_message) =
             restore_price_alerts(restored_chart_state.as_ref(), &market_worker);
         initialize_chart_chrome(chart.as_ref(), chart_chrome, cx);
@@ -186,15 +609,9 @@ impl WorkspaceSurface {
             connection_state,
             connection_message,
             provider_transport_rtt_nanos: None,
-            // Both runtime-backed providers support the empty catalog query
-            // used to populate the instrument menu. A successful selection
-            // consumes its one-shot search authorization, so reopening the
-            // menu must be able to issue another empty listing request instead
-            // of leaving Hyperliquid with an empty, non-refreshable browser.
-            symbol_browser: rithmic_shell::RithmicSymbolBrowser::rithmic_catalog_awaiting_search(
-                std::num::NonZeroUsize::MIN,
-                "",
-            ),
+            // Both runtime providers support the empty catalog query. Reopening
+            // the menu must remain refreshable after a successful selection.
+            symbol_browser: initial_symbol_browser(),
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
             series_message: "Select a symbol before choosing a series".to_string(),
@@ -202,6 +619,7 @@ impl WorkspaceSurface {
             indicator_input,
             timeframe_input,
             indicator_message: None,
+            studies,
             chrome_overlay: None,
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
@@ -219,7 +637,7 @@ impl WorkspaceSurface {
             provider,
             product,
             rithmic_switch: RithmicSwitchState::Idle,
-            interval: restored_rithmic.map_or(ChartInterval::Minute1, |restored| restored.0),
+            interval,
             rithmic_pending_interval: None,
             rithmic_pending_product: None,
             rithmic_pending_sequence: None,
@@ -999,6 +1417,7 @@ impl WorkspaceSurface {
                 self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
+                self.synchronize_runtime_studies(cx);
                 self.rithmic_switch = RithmicSwitchState::Initializing;
                 ChartState::Ready
             }
@@ -1255,6 +1674,37 @@ impl WorkspaceSurface {
                     order_book.replace_frame(frame, order_book_cx)
                 });
             }
+            MarketWorkerMessage::StudyOutput(snapshot) => {
+                self.apply_study_output(&snapshot, cx);
+            }
+            MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
+                self.apply_study_invalidated(&invalidated, cx);
+            }
+            MarketWorkerMessage::StudyRemoved(removed) => {
+                self.apply_study_removed(&removed, cx);
+            }
+            MarketWorkerMessage::StudyRegistered {
+                request_sequence,
+                study_id,
+            } => self.apply_study_registered(request_sequence, study_id, cx),
+            MarketWorkerMessage::StudyReinitialized { study_id } => {
+                self.apply_study_reinitialized(study_id, cx);
+            }
+            MarketWorkerMessage::StudyRegistrationFailed {
+                request_sequence,
+                message,
+            } => self.apply_study_registration_failed(request_sequence, message, cx),
+            MarketWorkerMessage::StudyReinitializationFailed { study_id, message } => {
+                self.studies.reinitializing.remove(&study_id);
+                self.indicator_message = Some(message);
+                cx.notify();
+            }
+            MarketWorkerMessage::StudyRemovalFailed { study_id, message } => {
+                self.studies.removing.remove(&study_id);
+                self.indicator_message = Some(message);
+                self.chart_persistence_dirty = true;
+                cx.notify();
+            }
             MarketWorkerMessage::PriceAlertTriggered(trigger) => {
                 self.apply_price_alert_trigger(&trigger, cx);
             }
@@ -1279,6 +1729,319 @@ impl WorkspaceSurface {
                 }
             }
         }
+    }
+
+    fn current_runtime_series(&self) -> Result<BarSeriesKey, String> {
+        let product = self
+            .product
+            .as_ref()
+            .ok_or_else(|| "market selection is unavailable for this study".to_string())?;
+        engine_market_worker::series_key(product, self.interval)
+    }
+
+    fn enqueue_runtime_study(
+        &mut self,
+        mut state: PendingRuntimeStudyState,
+    ) -> Result<u64, Box<(PendingRuntimeStudyState, String)>> {
+        let current_series = match self.current_runtime_series() {
+            Ok(series) => series,
+            Err(error) => return Err(Box::new((state, error))),
+        };
+        let registration = match runtime_study_registration(
+            &state.persisted,
+            &current_series,
+            &self.studies.active,
+        ) {
+            Ok(registration) => registration,
+            Err(error) => {
+                state.blocked = true;
+                return Err(Box::new((state, error)));
+            }
+        };
+        state.resolved_chart_series =
+            runtime_study_uses_current_chart(&state.persisted).then_some(current_series);
+        match self.market_worker.try_register_study(registration) {
+            Ok(sequence) => {
+                self.studies.pending.insert(sequence, state);
+                Ok(sequence)
+            }
+            Err(TrySendError::Full(_)) => Err(Box::new((
+                state,
+                "Study request queue is busy; try again".to_string(),
+            ))),
+            Err(TrySendError::Disconnected(_)) => Err(Box::new((
+                state,
+                "Study runtime is unavailable".to_string(),
+            ))),
+        }
+    }
+
+    fn dispatch_deferred_runtime_studies(&mut self, cx: &mut Context<Self>) {
+        if self.studies.deferred.is_empty()
+            || self.chart.is_none()
+            || !self.studies.pending.is_empty()
+            || self.studies.deferred[0].blocked
+        {
+            return;
+        }
+        let state = self.studies.deferred.remove(0);
+        if let Err(error) = self.enqueue_runtime_study(state) {
+            let (state, message) = *error;
+            self.studies.deferred.insert(0, state);
+            self.indicator_message = Some(message);
+        }
+        if !self.studies.deferred.is_empty() {
+            cx.notify();
+        }
+    }
+
+    fn queue_runtime_study_reinitialization(
+        &mut self,
+        study_id: StudyInstanceId,
+        series: BarSeriesKey,
+    ) -> Result<(), String> {
+        let persisted = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == study_id)
+            .map(|state| state.persisted.clone())
+            .ok_or_else(|| "study is no longer active".to_string())?;
+        let registration = runtime_study_registration(&persisted, &series, &self.studies.active)?;
+        match self
+            .market_worker
+            .try_reinitialize_study(study_id, registration)
+        {
+            Ok(()) => {
+                self.studies.reinitializing.insert(study_id, series);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                Err("Study reinitialization queue is busy; retrying".to_string())
+            }
+            Err(TrySendError::Disconnected(_)) => Err("Study runtime is unavailable".to_string()),
+        }
+    }
+
+    fn synchronize_runtime_studies(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_deferred_runtime_studies(cx);
+        let Ok(series) = self.current_runtime_series() else {
+            return;
+        };
+        let stale = self
+            .studies
+            .active
+            .iter()
+            .filter(|state| {
+                runtime_study_uses_current_chart(&state.persisted)
+                    && state.resolved_chart_series.as_ref() != Some(&series)
+                    && !self.studies.removing.contains(&state.study_id)
+                    && !self.studies.reinitializing.contains_key(&state.study_id)
+            })
+            .map(|state| state.study_id)
+            .collect::<Vec<_>>();
+        for study_id in stale {
+            if let Err(message) =
+                self.queue_runtime_study_reinitialization(study_id, series.clone())
+            {
+                self.indicator_message = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
+    fn apply_study_registered(
+        &mut self,
+        request_sequence: u64,
+        study_id: StudyInstanceId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.studies.pending.remove(&request_sequence) else {
+            return;
+        };
+        let runtime_state = RuntimeStudyState {
+            study_id,
+            persisted: state.persisted.clone(),
+            resolved_chart_series: state.resolved_chart_series,
+        };
+        if state.remove_on_registration {
+            self.studies.active.push(runtime_state);
+            match self.market_worker.try_remove_study(study_id) {
+                Ok(()) => {
+                    self.studies.removing.insert(study_id);
+                }
+                Err(_) => {
+                    self.indicator_message =
+                        Some("Study removal queue is busy or unavailable".to_string());
+                }
+            }
+            self.chart_persistence_dirty = true;
+            cx.notify();
+            return;
+        }
+        self.studies.active.push(runtime_state);
+        if state.persist_on_registration {
+            self.chart_persistence_dirty = true;
+        }
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.set_study_visible(study_id.get(), state.persisted.visible) {
+                    chart_cx.notify();
+                }
+            });
+        }
+        self.indicator_message = None;
+        self.synchronize_runtime_studies(cx);
+        cx.notify();
+    }
+
+    fn apply_study_registration_failed(
+        &mut self,
+        request_sequence: u64,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.studies.pending.remove(&request_sequence) else {
+            return;
+        };
+        if state.persist_on_registration {
+            self.chart_persistence_dirty = true;
+        }
+        if state.remove_on_registration {
+            self.indicator_message = None;
+            cx.notify();
+            return;
+        }
+        if !state.persist_on_registration {
+            let mut state = state;
+            state.blocked = true;
+            self.studies.deferred.insert(0, state);
+        }
+        self.indicator_message = Some(message);
+        cx.notify();
+    }
+
+    fn apply_study_reinitialized(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
+        let Some(series) = self.studies.reinitializing.get(&study_id).cloned() else {
+            return;
+        };
+        if let Some(state) = self
+            .studies
+            .active
+            .iter_mut()
+            .find(|state| state.study_id == study_id)
+        {
+            state.resolved_chart_series = Some(series);
+        }
+        self.indicator_message = None;
+        cx.notify();
+    }
+
+    fn apply_study_output(
+        &self,
+        snapshot: &axiusflow_market_runtime::MarketStudyOutputSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if self.studies.reinitializing.contains_key(&snapshot.study_id) {
+            return;
+        }
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        let visible = chart
+            .read(cx)
+            .study_visible(snapshot.study_id.get())
+            .or_else(|| {
+                self.studies
+                    .active
+                    .iter()
+                    .find(|state| state.study_id == snapshot.study_id)
+                    .map(|state| state.persisted.visible)
+            });
+        chart.update(cx, |chart, chart_cx| {
+            match chart.install_study_output(
+                snapshot.study_id.get(),
+                snapshot.output_id.output_index,
+                ChartStudyOutputDescriptor {
+                    title: &snapshot.output.title,
+                    plot: chart_study_plot(snapshot.output.plot),
+                    pane: chart_study_pane(snapshot.output.pane),
+                    scale: chart_study_scale(snapshot.output.scale),
+                },
+                snapshot.series.generation(),
+                snapshot.series.timestamps(),
+                snapshot.series.values(),
+            ) {
+                Ok(true) => {
+                    if let Some(visible) = visible {
+                        chart.set_study_visible(snapshot.study_id.get(), visible);
+                    }
+                    chart_cx.notify();
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("Axiusflow study output could not be displayed: {error}");
+                }
+            }
+        });
+    }
+
+    fn apply_study_removed(
+        &mut self,
+        removed: &axiusflow_market_runtime::MarketStudyRemoved,
+        cx: &mut Context<Self>,
+    ) {
+        let study_ids = removed
+            .study_ids
+            .iter()
+            .map(|study_id| study_id.get())
+            .collect::<Vec<_>>();
+        let removed_runtime = removed.study_ids.iter().any(|study_id| {
+            self.studies
+                .active
+                .iter()
+                .any(|state| state.study_id == *study_id)
+        });
+        self.studies
+            .active
+            .retain(|state| !removed.study_ids.contains(&state.study_id));
+        for study_id in &removed.study_ids {
+            self.studies.reinitializing.remove(study_id);
+            self.studies.removing.remove(study_id);
+        }
+        if removed_runtime {
+            self.chart_persistence_dirty = true;
+        }
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.remove_study_outputs(&study_ids) {
+                    chart_cx.notify();
+                }
+            });
+        }
+    }
+
+    fn apply_study_invalidated(
+        &mut self,
+        invalidated: &axiusflow_market_runtime::MarketStudyOutputsInvalidated,
+        cx: &mut Context<Self>,
+    ) {
+        for study_id in &invalidated.study_ids {
+            self.studies.reinitializing.remove(study_id);
+        }
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        let study_ids = invalidated
+            .study_ids
+            .iter()
+            .map(|study_id| study_id.get())
+            .collect::<Vec<_>>();
+        chart.update(cx, |chart, chart_cx| {
+            if chart.remove_study_outputs(&study_ids) {
+                chart_cx.notify();
+            }
+        });
     }
 
     fn apply_market_state_message(
@@ -1502,6 +2265,7 @@ impl WorkspaceSurface {
         }
         self.dispatch_recovery(cx);
         self.dispatch_retained_symbol_search(cx);
+        self.synchronize_runtime_studies(cx);
 
         let status = self.chart.as_ref().map_or_else(
             || "bridge awaiting snapshot".to_string(),
@@ -1665,6 +2429,11 @@ impl WorkspaceSurface {
         if let Some(chart) = &self.chart
             && chart.read(cx).has_market_data()
         {
+            for state in &mut self.studies.active {
+                if let Some(visible) = chart.read(cx).study_visible(state.study_id.get()) {
+                    state.persisted.visible = visible;
+                }
+            }
             self.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
             self.retained_chart_presentation.price_precision =
                 chart.read(cx).selected_price_precision();
@@ -2128,15 +2897,39 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn clear_indicators(&mut self, cx: &mut Context<Self>) {
+        let mut runtime_removal_queued = false;
+        let study_ids = self
+            .studies
+            .active
+            .iter()
+            .filter(|state| !self.studies.removing.contains(&state.study_id))
+            .map(|state| state.study_id)
+            .collect::<Vec<_>>();
+        for study_id in study_ids {
+            match self.market_worker.try_remove_study(study_id) {
+                Ok(()) => {
+                    self.studies.removing.insert(study_id);
+                    runtime_removal_queued = true;
+                }
+                Err(_) => {
+                    self.indicator_message =
+                        Some("Study removal queue is busy or unavailable".to_string());
+                }
+            }
+        }
+        let unregistered_removed = discard_unregistered_runtime_studies(&mut self.studies);
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 if chart.clear_indicators() {
                     chart_cx.notify();
                 }
             });
-            self.retain_chart_presentation(cx);
-            cx.notify();
         }
+        if runtime_removal_queued || unregistered_removed {
+            self.chart_persistence_dirty = true;
+        }
+        self.retain_chart_presentation(cx);
+        cx.notify();
     }
 
     pub(super) fn add_indicator(
@@ -2150,12 +2943,51 @@ impl WorkspaceSurface {
             return false;
         };
         let maximum = current_plan_limits().indicators_per_chart;
-        if chart.read(cx).indicator_states().len() >= maximum {
+        let runtime_count = runtime_study_count(&self.studies);
+        if chart.read(cx).indicator_states().len() + runtime_count >= maximum {
             self.indicator_message = Some(format!(
                 "Your plan supports at most {maximum} indicators per chart"
             ));
             cx.notify();
             return false;
+        }
+        if runtime_managed_indicator(indicator) {
+            if let Err(message) = self.current_runtime_series() {
+                self.indicator_message = Some(message);
+                cx.notify();
+                return false;
+            }
+            let Some(local_id) = self.studies.allocate_local_id() else {
+                self.indicator_message = Some("Study identity space is exhausted".to_string());
+                cx.notify();
+                return false;
+            };
+            let Some(persisted) = legacy_runtime_study(local_id, indicator, true) else {
+                self.indicator_message = Some("Study implementation is unavailable".to_string());
+                cx.notify();
+                return false;
+            };
+            let state = PendingRuntimeStudyState {
+                persisted,
+                resolved_chart_series: None,
+                remove_on_registration: false,
+                persist_on_registration: true,
+                blocked: false,
+            };
+            return match self.enqueue_runtime_study(state) {
+                Ok(_) => {
+                    self.indicator_message = None;
+                    self.chart_persistence_dirty = true;
+                    cx.notify();
+                    true
+                }
+                Err(error) => {
+                    let (_, message) = *error;
+                    self.indicator_message = Some(message);
+                    cx.notify();
+                    false
+                }
+            };
         }
         let result = chart.update(cx, |chart, chart_cx| {
             let result = chart.add_indicator(indicator);
@@ -2197,5 +3029,243 @@ impl WorkspaceSurface {
             .map_or_else(DrawingToolbarState::default, |chart| {
                 DrawingToolbarState::from_chart(chart.read(cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_bounded_window_indicators_are_restored_by_the_runtime_owner_only() {
+        let state = WorkspaceChartState {
+            indicators: vec![
+                WorkspaceChartIndicatorState {
+                    kind: "sma".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "wma".to_string(),
+                    visible: true,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "bollinger".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "rsi".to_string(),
+                    visible: true,
+                },
+            ],
+            ..WorkspaceChartState::default()
+        };
+        let restored = persisted_runtime_studies(Some(&state));
+        assert_eq!(restored.len(), 3);
+        assert_eq!(
+            restored[0].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER
+        );
+        assert!(!restored[0].persisted.visible);
+        assert_eq!(
+            restored[1].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER
+        );
+        assert!(restored[1].persisted.visible);
+        assert_eq!(
+            restored[2].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
+        );
+        assert!(!restored[2].persisted.visible);
+        assert_eq!(
+            restored[2].persisted.output_identifiers,
+            vec![
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+            ]
+        );
+        assert!(restored.iter().all(|state| {
+            runtime_study_uses_current_chart(&state.persisted)
+                && state.resolved_chart_series.is_none()
+                && !state.remove_on_registration
+                && !state.persist_on_registration
+                && !state.blocked
+        }));
+    }
+
+    #[test]
+    fn durable_study_graph_suppresses_legacy_runtime_indicator_migration() {
+        let durable = legacy_runtime_study(7, ChartIndicator::Wma, true).expect("WMA study");
+        let state = WorkspaceChartState {
+            studies: vec![durable.clone()],
+            indicators: vec![WorkspaceChartIndicatorState {
+                kind: "bollinger".to_string(),
+                visible: false,
+            }],
+            ..WorkspaceChartState::default()
+        };
+
+        let restored = persisted_runtime_studies(Some(&state));
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].persisted, durable);
+    }
+
+    #[test]
+    fn bounded_window_picker_indicators_are_runtime_managed() {
+        assert!(runtime_managed_indicator(ChartIndicator::Sma));
+        assert!(runtime_managed_indicator(ChartIndicator::Wma));
+        assert!(runtime_managed_indicator(ChartIndicator::Bollinger));
+        assert!(!runtime_managed_indicator(ChartIndicator::Rsi));
+    }
+
+    #[test]
+    fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
+        let persisted = persisted_legacy_indicator_states([
+            ChartIndicatorState {
+                indicator: ChartIndicator::Sma,
+                visible: true,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Wma,
+                visible: false,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Bollinger,
+                visible: true,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Rsi,
+                visible: false,
+            },
+        ]);
+
+        assert_eq!(
+            persisted,
+            vec![WorkspaceChartIndicatorState {
+                kind: "rsi".to_string(),
+                visible: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_study_plan_count_excludes_removing_and_cancelled_pending_instances() {
+        let first = StudyInstanceId::try_from_u64(1).expect("first study id");
+        let removing = StudyInstanceId::try_from_u64(2).expect("removing study id");
+        let mut studies = RuntimeStudiesState {
+            active: vec![
+                RuntimeStudyState {
+                    study_id: first,
+                    persisted: legacy_runtime_study(1, ChartIndicator::Wma, true)
+                        .expect("WMA study"),
+                    resolved_chart_series: None,
+                },
+                RuntimeStudyState {
+                    study_id: removing,
+                    persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
+                        .expect("Bollinger study"),
+                    resolved_chart_series: None,
+                },
+            ],
+            ..RuntimeStudiesState::default()
+        };
+        studies.removing.insert(removing);
+        studies.pending.insert(
+            3,
+            PendingRuntimeStudyState {
+                persisted: legacy_runtime_study(3, ChartIndicator::Wma, true).expect("WMA study"),
+                resolved_chart_series: None,
+                remove_on_registration: false,
+                persist_on_registration: true,
+                blocked: false,
+            },
+        );
+        studies.pending.insert(
+            4,
+            PendingRuntimeStudyState {
+                persisted: legacy_runtime_study(4, ChartIndicator::Bollinger, true)
+                    .expect("Bollinger study"),
+                resolved_chart_series: None,
+                remove_on_registration: true,
+                persist_on_registration: true,
+                blocked: false,
+            },
+        );
+        studies.deferred.push(PendingRuntimeStudyState {
+            persisted: legacy_runtime_study(5, ChartIndicator::Bollinger, true)
+                .expect("Bollinger study"),
+            resolved_chart_series: None,
+            remove_on_registration: false,
+            persist_on_registration: false,
+            blocked: false,
+        });
+
+        assert_eq!(runtime_study_count(&studies), 3);
+    }
+
+    #[test]
+    fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work() {
+        let mut studies = RuntimeStudiesState::default();
+        studies.pending.insert(
+            1,
+            PendingRuntimeStudyState {
+                persisted: legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study"),
+                resolved_chart_series: None,
+                remove_on_registration: false,
+                persist_on_registration: true,
+                blocked: false,
+            },
+        );
+        studies.deferred.push(PendingRuntimeStudyState {
+            persisted: legacy_runtime_study(2, ChartIndicator::Bollinger, true)
+                .expect("Bollinger study"),
+            resolved_chart_series: None,
+            remove_on_registration: false,
+            persist_on_registration: false,
+            blocked: false,
+        });
+
+        assert!(discard_unregistered_runtime_studies(&mut studies));
+        assert!(studies.deferred.is_empty());
+        assert!(
+            studies
+                .pending
+                .values()
+                .all(|state| state.remove_on_registration)
+        );
+        assert!(!discard_unregistered_runtime_studies(&mut studies));
+    }
+
+    #[test]
+    fn durable_study_output_dependency_resolves_to_the_restored_runtime_identity() {
+        let series = BarSeriesKey {
+            provider_id: "hyperliquid".to_string(),
+            instrument_id: "hyperliquid:perp:BTC".to_string(),
+            entitlement_id: "hyperliquid-public".to_string(),
+            period: axiusflow_market_data::BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        };
+        let upstream_id = StudyInstanceId::try_from_u64(7).expect("runtime study id");
+        let upstream = RuntimeStudyState {
+            study_id: upstream_id,
+            persisted: legacy_runtime_study(1, ChartIndicator::Sma, true).expect("SMA study"),
+            resolved_chart_series: Some(series.clone()),
+        };
+        let mut downstream = legacy_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
+        downstream.dependencies = vec![WorkspaceStudyDependencyState {
+            kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
+            study_local_id: 1,
+            output_identifier: axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            ..WorkspaceStudyDependencyState::default()
+        }];
+
+        let registration = runtime_study_registration(&downstream, &series, &[upstream])
+            .expect("durable output dependency resolves");
+
+        assert_eq!(
+            registration.definition.dependencies,
+            vec![StudyDependency::Output(upstream_id.output(0))]
+        );
     }
 }

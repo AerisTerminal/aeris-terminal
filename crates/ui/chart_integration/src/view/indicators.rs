@@ -134,9 +134,15 @@ impl NucleusChartView {
     /// Returns whether any native indicator or the reusable volume series is currently shown.
     #[must_use]
     pub fn has_indicators(&self) -> bool {
+        let study_series = self
+            .study_series
+            .values()
+            .map(|state| state.series_id)
+            .collect::<HashSet<_>>();
         self.engine.series_entries().iter().any(|series| {
             !series.removed
                 && series.id != 0
+                && !study_series.contains(&series.id)
                 && (series.id != self.volume_series || self.volume_legend.is_present())
         })
     }
@@ -155,11 +161,18 @@ impl NucleusChartView {
         {
             self.engine.set_selected_series(None);
         }
+        let study_series = self
+            .study_series
+            .values()
+            .map(|state| state.series_id)
+            .collect::<HashSet<_>>();
         let ids: Vec<u32> = self
             .engine
             .series_entries()
             .iter()
-            .filter(|series| !series.removed && series.id != 0)
+            .filter(|series| {
+                !series.removed && series.id != 0 && !study_series.contains(&series.id)
+            })
             .map(|series| series.id)
             .collect();
         for id in ids {
@@ -314,9 +327,13 @@ impl NucleusChartView {
                 visible,
             });
         }
+        self.append_study_legend_rows(entries, &snapshots, &mut rows);
         rows
     }
     pub(super) fn set_legend_item_visible(&mut self, item: LegendItem, visible: bool) -> bool {
+        if let LegendItem::Study { study_id, .. } = item {
+            return self.set_study_visible(study_id, visible);
+        }
         let ids: Vec<u32> = match item {
             LegendItem::Asset => vec![0],
             LegendItem::Volume if self.volume_legend.is_present() => vec![self.volume_series],
@@ -332,6 +349,7 @@ impl NucleusChartView {
                         .is_some_and(|info| info.binding_id == binding)
                 })
                 .collect(),
+            LegendItem::Study { .. } => unreachable!("study visibility handled above"),
         };
         if ids.is_empty() {
             return false;
@@ -358,7 +376,7 @@ impl NucleusChartView {
                 self.engine.set_series_visible(self.volume_series, false);
                 true
             }
-            LegendItem::Asset | LegendItem::Volume => false,
+            LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_series(binding),
         };
         if removed {
@@ -368,12 +386,18 @@ impl NucleusChartView {
         removed
     }
     pub(super) fn indicator_series_ids(&self) -> Vec<u32> {
+        let study_series = self
+            .study_series
+            .values()
+            .map(|state| state.series_id)
+            .collect::<HashSet<_>>();
         self.engine
             .series_entries()
             .iter()
             .filter(|series| {
                 !series.removed
                     && series.id != 0
+                    && !study_series.contains(&series.id)
                     && (series.id != self.volume_series || series.visible)
             })
             .map(|series| series.id)

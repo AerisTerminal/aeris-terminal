@@ -17,6 +17,7 @@ axiusflow_design_system = { path = "../../crates/ui/design_system" }
 axiusflow_instruments = { path = "../../crates/domain/instruments" }
 axiusflow_market_data = { path = "../../crates/domain/market_data" }
 axiusflow_market_runtime = { path = "../../crates/market_runtime" }
+axiusflow_study_sdk = { path = "../../crates/study_sdk" }
 axiusflow_contracts = { path = "../../crates/contracts" }
 axiusflow_observability = { path = "../../crates/observability" }
 axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }

@@ -16,7 +16,9 @@ pub use messages::{
     PriceAlertFrequency, PriceAlertStatus, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderConnectionState, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
     ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-    SeriesLoadState, WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceLayoutState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    SeriesLoadState, WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
+    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, workspace_study_setting_state,
 };

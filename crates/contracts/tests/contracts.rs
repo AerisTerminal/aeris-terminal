@@ -1,7 +1,10 @@
 use axiusflow_contracts::{
     AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesCadence, SeriesKey, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceTabState,
+    ProviderState, SeriesCadence, SeriesKey, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -41,7 +44,25 @@ fn workspace_tab() -> WorkspaceTabState {
             viewport_end_unix_nanos: Some(2),
             size_basis_points: 10_000,
             generation: 4,
-            chart: None,
+            chart: Some(WorkspaceChartState {
+                studies: vec![WorkspaceChartStudyState {
+                    local_id: 1,
+                    identifier: "builtin.sma".into(),
+                    implementation_revision: 1,
+                    settings: vec![WorkspaceStudySettingState {
+                        identifier: "period".into(),
+                        value: Some(workspace_study_setting_state::Value::Integer(20)),
+                    }],
+                    dependencies: vec![WorkspaceStudyDependencyState {
+                        kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                        streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                        ..WorkspaceStudyDependencyState::default()
+                    }],
+                    visible: true,
+                    output_identifiers: vec!["sma".into()],
+                }],
+                ..WorkspaceChartState::default()
+            }),
         }],
         active_pane_id: 7,
         generation: 6,

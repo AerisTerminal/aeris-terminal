@@ -657,6 +657,7 @@ dependencies = [
  "axiusflow_market_runtime",
  "axiusflow_observability",
  "axiusflow_platform_runtime",
+ "axiusflow_study_sdk",
  "axiusflow_terminal_ui",
  "embed-resource",
  "getrandom 0.4.3",
@@ -773,6 +774,16 @@ dependencies = [
  "tungstenite",
  "webpki-roots 1.0.9",
  "zeroize",
+]
+
+[[package]]
+name = "axiusflow_study_sdk"
+version = "0.2.3"
+dependencies = [
+ "axiusflow_market_data",
+ "axiusflow_market_runtime",
+ "nucleuscharts_indicators",
+ "num-traits",
 ]
 
 [[package]]

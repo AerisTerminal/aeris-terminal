@@ -8,6 +8,7 @@ mod hyperliquid_realtime;
 pub mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
+pub mod study;
 
 /// Maximum durable alerts owned by one market consumer.
 pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
@@ -80,6 +81,42 @@ pub struct MarketDemandError {
     pub elapsed_millis: Option<u64>,
 }
 
+/// Latest committed scalar output for one runtime-owned study output.
+///
+/// The output arrays remain immutable `Arc`-backed study-runtime state. Delivery
+/// therefore does not copy a whole indicator on every forming-bar revision, and
+/// a newer snapshot for the same output completely supersedes an older queued
+/// one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarketStudyOutputSnapshot {
+    pub consumer_id: axiusflow_market_engine::ConsumerId,
+    pub study_id: study::StudyInstanceId,
+    pub output_id: study::StudyOutputId,
+    pub study_identifier: String,
+    pub output: study::StudyOutputSpec,
+    pub series: study::StudyOutputSeries,
+}
+
+/// Study instances removed from one chart consumer.
+///
+/// Explicit removal can delete a dependency subtree. The complete bounded set is
+/// published so presentation can discard every chart-local output without
+/// reconstructing runtime dependency state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketStudyRemoved {
+    pub consumer_id: axiusflow_market_engine::ConsumerId,
+    pub study_ids: Vec<study::StudyInstanceId>,
+}
+
+/// Study outputs that became invalid because the instance was reinitialized in
+/// place. Definitions/identities remain live; presentation should clear these
+/// output series until replacement snapshots arrive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketStudyOutputsInvalidated {
+    pub consumer_id: axiusflow_market_engine::ConsumerId,
+    pub study_ids: Vec<study::StudyInstanceId>,
+}
+
 /// Direct in-process market event delivered from the runtime to desktop panes.
 ///
 /// This is an ordinary typed in-process event boundary. The variants are
@@ -93,6 +130,9 @@ pub enum MarketRuntimeEvent {
     SeriesState(MarketSeriesState),
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
+    StudyOutputSnapshot(MarketStudyOutputSnapshot),
+    StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
+    StudyRemoved(MarketStudyRemoved),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     ProviderInstrumentSearchResult(axiusflow_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),

@@ -1468,6 +1468,231 @@ fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
 }
 
 #[test]
+fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly() {
+    let mut chart = NucleusChartView::empty();
+    let timestamps = [
+        60_i64 * 1_000_000_000,
+        120_i64 * 1_000_000_000,
+        180_i64 * 1_000_000_000,
+    ];
+    let first = [None, Some(20.0), Some(30.0)];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Test Study",
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+    };
+
+    assert_eq!(
+        chart.install_study_output(7, 0, descriptor, 1, &timestamps, &first),
+        Ok(true)
+    );
+    let state = chart
+        .study_series
+        .get(&(7, 0))
+        .copied()
+        .expect("study series is tracked");
+    let points = chart.engine.series_data(state.series_id);
+    assert_eq!(points.len(), 3);
+    assert!(points[0].close.is_nan());
+    assert_eq!(points[1].close.to_bits(), 20.0_f64.to_bits());
+    assert_eq!(points[2].close.to_bits(), 30.0_f64.to_bits());
+    assert_eq!(series_entry(&chart, state.series_id).title, "Test Study");
+    assert!(!series_entry(&chart, state.series_id).countdown_visible);
+    assert!(!chart.has_indicators());
+    assert_eq!(chart.study_visible(7), Some(true));
+    assert!(chart.set_study_visible(7, false));
+    assert_eq!(chart.study_visible(7), Some(false));
+
+    let duplicate_generation_values = [Some(1.0), Some(2.0), Some(3.0)];
+    assert_eq!(
+        chart.install_study_output(
+            7,
+            0,
+            descriptor,
+            1,
+            &timestamps,
+            &duplicate_generation_values,
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        chart.engine.series_data(state.series_id)[2].close.to_bits(),
+        30.0_f64.to_bits()
+    );
+
+    let newer = [Some(10.0), Some(20.0), Some(40.0)];
+    assert_eq!(
+        chart.install_study_output(7, 0, descriptor, 2, &timestamps, &newer),
+        Ok(true)
+    );
+    assert_eq!(
+        chart
+            .study_series
+            .get(&(7, 0))
+            .map(|current| current.series_id),
+        Some(state.series_id)
+    );
+    assert_eq!(
+        chart.engine.series_data(state.series_id)[2].close.to_bits(),
+        40.0_f64.to_bits()
+    );
+    assert_eq!(chart.study_visible(7), Some(false));
+    assert!(chart.legend_rows().iter().any(|row| {
+        row.item
+            == LegendItem::Study {
+                study_id: 7,
+                series_id: state.series_id,
+            }
+            && row.title == "Test Study"
+    }));
+
+    assert!(chart.remove_study_outputs(&[7]));
+    assert!(chart.study_series.is_empty());
+    assert_eq!(chart.study_visible(7), None);
+    assert!(
+        chart
+            .engine
+            .series_entries()
+            .iter()
+            .all(|series| series.id != state.series_id || series.removed)
+    );
+    assert!(!chart.remove_study_outputs(&[7]));
+}
+
+#[test]
+fn multi_output_study_legend_visibility_toggles_the_whole_study() {
+    let mut chart = NucleusChartView::empty();
+    let timestamps = [60_i64 * 1_000_000_000];
+    let values = [Some(20.0)];
+    let upper = ChartStudyOutputDescriptor {
+        title: "Bollinger Upper",
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+    };
+    let lower = ChartStudyOutputDescriptor {
+        title: "Bollinger Lower",
+        ..upper
+    };
+
+    assert_eq!(
+        chart.install_study_output(11, 0, upper, 1, &timestamps, &values),
+        Ok(true)
+    );
+    assert_eq!(
+        chart.install_study_output(11, 1, lower, 1, &timestamps, &values),
+        Ok(true)
+    );
+    let legend_item = chart
+        .legend_rows()
+        .into_iter()
+        .find(|row| row.title == "Bollinger Upper")
+        .map(|row| row.item)
+        .expect("upper study legend row");
+
+    assert!(chart.set_legend_item_visible(legend_item, false));
+    assert_eq!(chart.study_visible(11), Some(false));
+    assert!(
+        chart
+            .study_series
+            .iter()
+            .filter(|((study_id, _), _)| *study_id == 11)
+            .all(|(_, state)| !series_entry(&chart, state.series_id).visible)
+    );
+    assert!(chart.set_legend_item_visible(legend_item, true));
+    assert_eq!(chart.study_visible(11), Some(true));
+}
+
+#[test]
+fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state() {
+    let mut chart = NucleusChartView::empty();
+    let initial_series = chart.engine.series.len();
+
+    assert_eq!(
+        chart.install_study_output(
+            9,
+            0,
+            ChartStudyOutputDescriptor {
+                title: "Tick Study",
+                plot: ChartStudyPlotKind::Line,
+                pane: ChartStudyPaneTarget::Price,
+                scale: ChartStudyScaleTarget::Primary,
+            },
+            1,
+            &[1_000_000_001],
+            &[Some(1.0)],
+        ),
+        Err(ChartStudyOutputError::UnsupportedTimestampPrecision)
+    );
+    assert!(chart.study_series.is_empty());
+    assert_eq!(chart.engine.series.len(), initial_series);
+}
+
+#[test]
+fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_kinds() {
+    let mut chart = NucleusChartView::empty();
+    let timestamps = [60_i64 * 1_000_000_000, 120_i64 * 1_000_000_000];
+    let values = [Some(1.0), Some(2.0)];
+
+    assert_eq!(
+        chart.install_study_output(
+            11,
+            0,
+            ChartStudyOutputDescriptor {
+                title: "Signal",
+                plot: ChartStudyPlotKind::Line,
+                pane: ChartStudyPaneTarget::Dedicated { group: 3 },
+                scale: ChartStudyScaleTarget::Primary,
+            },
+            1,
+            &timestamps,
+            &values,
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        chart.install_study_output(
+            11,
+            1,
+            ChartStudyOutputDescriptor {
+                title: "Histogram",
+                plot: ChartStudyPlotKind::Histogram,
+                pane: ChartStudyPaneTarget::Dedicated { group: 3 },
+                scale: ChartStudyScaleTarget::Left,
+            },
+            2,
+            &timestamps,
+            &values,
+        ),
+        Ok(true)
+    );
+
+    let line = chart.study_series[&(11, 0)];
+    let histogram = chart.study_series[&(11, 1)];
+    let line_entry = series_entry(&chart, line.series_id);
+    let histogram_entry = series_entry(&chart, histogram.series_id);
+    assert_eq!(line_entry.kind, nucleuscharts_engine::SeriesKind::Line);
+    assert_eq!(
+        histogram_entry.kind,
+        nucleuscharts_engine::SeriesKind::Histogram
+    );
+    assert_ne!(line_entry.pane_index, 0);
+    assert_eq!(line_entry.pane_index, histogram_entry.pane_index);
+    assert_eq!(line_entry.price_scale_target, PriceScaleTarget::Right);
+    assert_eq!(histogram_entry.price_scale_target, PriceScaleTarget::Left);
+    let pane_id = chart.study_panes[&(11, 3)];
+    assert_eq!(
+        chart.engine.pane_index_for_id(pane_id),
+        Some(line_entry.pane_index)
+    );
+
+    assert!(chart.remove_study_outputs(&[11]));
+    assert!(!chart.study_panes.contains_key(&(11, 3)));
+    assert!(chart.engine.pane_index_for_id(pane_id).is_none());
+}
+
+#[test]
 fn indicator_metadata_matches_the_legacy_picker_copy() {
     assert_eq!(ChartIndicator::ALL.len(), 11);
     assert_eq!(ChartIndicator::Volume.label(), "Volume");
