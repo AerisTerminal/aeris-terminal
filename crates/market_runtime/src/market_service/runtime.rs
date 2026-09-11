@@ -18,6 +18,9 @@ use super::{
     validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
+use crate::hyperliquid_display_depth::{
+    HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
+};
 use crate::hyperliquid_realtime::{
     HyperliquidCatalogControl, HyperliquidRealtimeControl, HyperliquidRealtimeEvent,
 };
@@ -265,6 +268,9 @@ impl ProviderRuntimeRegistry {
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_controls, realtime_controls_rx) =
             mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
+        let (display_events_tx, display_events) = mpsc::sync_channel(REALTIME_CAPACITY);
+        let (display_controls, display_controls_rx) =
+            mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
         // One generation counter shared by the catalog thread (install
         // stamping) and the realtime thread (socket sessions). The realtime
         // thread owns it: every connection publishes its generation here.
@@ -291,6 +297,17 @@ impl ProviderRuntimeRegistry {
                 realtime_controls_rx,
                 realtime_events_tx,
                 ws_generation,
+                wake.clone(),
+                reconnect_delay,
+            ) {
+                started.cancel_and_join();
+                return Err(error);
+            }
+            if let Err(error) = Self::spawn_hyperliquid_display_depth(
+                &mut started,
+                active_workers,
+                display_controls_rx,
+                display_events_tx,
                 wake,
                 reconnect_delay,
             ) {
@@ -307,6 +324,8 @@ impl ProviderRuntimeRegistry {
                 channels: ProviderRealtimeChannelSet::Hyperliquid {
                     controls: realtime_controls,
                     events: realtime_events,
+                    display_controls,
+                    display_events,
                 },
             },
             catalog: ProviderCatalogChannels {
@@ -389,6 +408,34 @@ impl ProviderRuntimeRegistry {
         Ok(())
     }
 
+    fn spawn_hyperliquid_display_depth(
+        started: &mut StartedProviderRuntime,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+        controls: mpsc::Receiver<HyperliquidDisplayDepthControl>,
+        events: mpsc::SyncSender<HyperliquidDisplayDepthEvent>,
+        wake: ProviderCoordinatorWake,
+        reconnect_delay: Duration,
+    ) -> Result<(), String> {
+        let cancellation = Arc::clone(&started.cancellation);
+        let activity = Arc::clone(active_workers);
+        let worker = thread::Builder::new()
+            .name("axiusflow-hyperliquid-display-depth".to_string())
+            .spawn(move || {
+                let _activity =
+                    ActiveWorkerGuard::register("axiusflow-hyperliquid-display-depth", activity);
+                crate::hyperliquid_display_depth::run(
+                    &controls,
+                    &events,
+                    &cancellation,
+                    &wake,
+                    reconnect_delay,
+                );
+            })
+            .map_err(|error| error.to_string())?;
+        started.workers.push(worker);
+        Ok(())
+    }
+
     pub(super) fn dispatch(&self) -> ProviderDispatch<'_> {
         let records = self
             .records
@@ -400,11 +447,17 @@ impl ProviderRuntimeRegistry {
                     {
                         ProviderRealtimeDispatch::Rithmic { controls, events }
                     }
-                    ProviderRealtimeChannelSet::Hyperliquid { controls, events }
-                        if record.realtime.enabled =>
-                    {
-                        ProviderRealtimeDispatch::Hyperliquid { controls, events }
-                    }
+                    ProviderRealtimeChannelSet::Hyperliquid {
+                        controls,
+                        events,
+                        display_controls,
+                        display_events,
+                    } if record.realtime.enabled => ProviderRealtimeDispatch::Hyperliquid {
+                        controls,
+                        events,
+                        display_controls,
+                        display_events,
+                    },
                     _ => ProviderRealtimeDispatch::Disabled,
                 };
                 let catalog = match &record.catalog.channels {
@@ -565,6 +618,15 @@ impl ProviderDispatch<'_> {
                     .map(ProviderRuntimeEvent::HyperliquidCatalog),
                 ProviderCatalogDispatch::Rithmic { .. } | ProviderCatalogDispatch::Disabled => None,
             },
+            4 => match &self.records.get("hyperliquid")?.realtime {
+                ProviderRealtimeDispatch::Hyperliquid { display_events, .. } => display_events
+                    .try_recv()
+                    .ok()
+                    .map(ProviderRuntimeEvent::HyperliquidDisplayDepth),
+                ProviderRealtimeDispatch::Rithmic { .. } | ProviderRealtimeDispatch::Disabled => {
+                    None
+                }
+            },
             _ => None,
         }?;
         match &event {
@@ -610,7 +672,8 @@ impl ProviderDispatch<'_> {
                 }
             }
             ProviderRuntimeEvent::RithmicCatalog(_)
-            | ProviderRuntimeEvent::HyperliquidCatalog(_) => {}
+            | ProviderRuntimeEvent::HyperliquidCatalog(_)
+            | ProviderRuntimeEvent::HyperliquidDisplayDepth(_) => {}
         }
         Some(event)
     }
@@ -706,6 +769,28 @@ impl ProviderDispatch<'_> {
         }
     }
 
+    pub(super) fn send_hyperliquid_display_depth(
+        &self,
+        control: HyperliquidDisplayDepthControl,
+    ) -> Result<bool, String> {
+        let Some(controls) = self
+            .records
+            .get("hyperliquid")
+            .ok_or_else(|| "Hyperliquid display-depth worker is unavailable".to_string())?
+            .realtime
+            .hyperliquid_display_controls()
+        else {
+            return Ok(false);
+        };
+        match controls.try_send(control) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => Ok(false),
+            Err(TrySendError::Disconnected(_)) => {
+                Err("Hyperliquid display-depth worker is unavailable".to_string())
+            }
+        }
+    }
+
     pub(super) fn stop(&self, provider_id: &str) -> Result<bool, String> {
         let Some(record) = self.records.get(provider_id) else {
             return Ok(true);
@@ -720,14 +805,21 @@ impl ProviderDispatch<'_> {
                     }
                 }
             }
-            ProviderRealtimeDispatch::Hyperliquid { controls, .. } => {
-                match controls.try_send(HyperliquidRealtimeControl::Stop) {
-                    Ok(()) => Ok(true),
-                    Err(TrySendError::Full(_)) => Ok(false),
-                    Err(TrySendError::Disconnected(_)) => {
-                        Err("Hyperliquid live worker is unavailable".to_string())
-                    }
-                }
+            ProviderRealtimeDispatch::Hyperliquid {
+                controls,
+                display_controls,
+                ..
+            } => {
+                let raw_stopped = match controls.try_send(HyperliquidRealtimeControl::Stop) {
+                    Err(TrySendError::Full(_)) => false,
+                    Ok(()) | Err(TrySendError::Disconnected(_)) => true,
+                };
+                let display_stopped =
+                    match display_controls.try_send(HyperliquidDisplayDepthControl::Stop) {
+                        Err(TrySendError::Full(_)) => false,
+                        Ok(()) | Err(TrySendError::Disconnected(_)) => true,
+                    };
+                Ok(raw_stopped && display_stopped)
             }
             ProviderRealtimeDispatch::Disabled => Ok(true),
         }

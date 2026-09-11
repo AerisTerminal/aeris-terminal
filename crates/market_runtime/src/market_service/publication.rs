@@ -105,6 +105,7 @@ pub(super) fn order_book_snapshot(
     consumer_id: ConsumerId,
     generation: GenerationId,
     order_book: &ProviderOrderBook,
+    display_depth: Option<&crate::MarketDisplayDepth>,
 ) -> MarketRuntimeEvent {
     let mut publication = order_book.book.publication();
     if publication.provider_id.is_empty() {
@@ -147,6 +148,9 @@ pub(super) fn order_book_snapshot(
         consumer_id,
         generation,
         publication,
+        display_depth: display_depth
+            .filter(|display| display.provider_generation == provider_generation)
+            .cloned(),
     })
 }
 
@@ -564,8 +568,12 @@ impl Coordinator<'_> {
         if order_book.instrument.entitlement_id != series.entitlement_id {
             return;
         }
+        let display_depth = (series.provider_id == "hyperliquid")
+            .then(|| self.hyperliquid_display_depth.get(&series.instrument_id))
+            .flatten();
+        let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            events.order_book = Some(order_book_snapshot(consumer_id, generation, order_book));
+            events.order_book = Some(event);
         }
     }
 
@@ -590,9 +598,13 @@ impl Coordinator<'_> {
         else {
             return;
         };
+        let display_depth = (provider == "hyperliquid")
+            .then(|| self.hyperliquid_display_depth.get(instrument_id))
+            .flatten();
         for (consumer_id, generation) in consumers {
+            let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
             if let Some(events) = self.events.get_mut(&consumer_id) {
-                events.order_book = Some(order_book_snapshot(consumer_id, generation, order_book));
+                events.order_book = Some(event);
             }
         }
     }
@@ -735,13 +747,29 @@ mod tests {
         };
         assert!(matches!(
             order_book.book.install_snapshot(&snapshot),
-            Ok(axiusflow_market_data::OrderBookApplyOutcome::Published(_))
+            Ok(axiusflow_market_data::OrderBookApplyOutcome::Published)
         ));
 
+        let display_depth = crate::MarketDisplayDepth {
+            provider_generation: 1,
+            display_generation: 3,
+            source_sequence: 7,
+            bids: vec![axiusflow_market_data::DepthLevel {
+                price: 20_000,
+                quantity: 5,
+                order_count: Some(2),
+            }],
+            asks: vec![axiusflow_market_data::DepthLevel {
+                price: 20_050,
+                quantity: 6,
+                order_count: Some(3),
+            }],
+        };
         let event = order_book_snapshot(
             ConsumerId(std::num::NonZeroU64::MIN),
             GenerationId(std::num::NonZeroU64::MIN),
             &order_book,
+            Some(&display_depth),
         );
         let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = event else {
             panic!("order-book publication expected");
@@ -756,5 +784,6 @@ mod tests {
             snapshot.publication.asks.last().map(|level| level.price),
             Some(20_064)
         );
+        assert_eq!(snapshot.display_depth, Some(display_depth));
     }
 }

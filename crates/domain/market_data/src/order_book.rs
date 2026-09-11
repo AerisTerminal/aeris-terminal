@@ -109,7 +109,7 @@ pub struct OrderBookFrame {
 /// Result of applying a snapshot or ordered delta.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OrderBookApplyOutcome {
-    Published(Box<OrderBookPublication>),
+    Published,
     RecoveryRequired(OrderBookRecoveryReason),
     IgnoredStale,
 }
@@ -227,9 +227,7 @@ impl OrderBook {
         self.state = OrderBookState::Ready;
         self.snapshot_ready = true;
         self.required_snapshot_watermark = 0;
-        Ok(OrderBookApplyOutcome::Published(Box::new(
-            self.publication(),
-        )))
+        Ok(OrderBookApplyOutcome::Published)
     }
 
     /// Applies one exactly-next delta or discards candidate state on a gap.
@@ -325,9 +323,7 @@ impl OrderBook {
         self.revision = self.revision.saturating_add(1).max(1);
         self.state = OrderBookState::Ready;
         self.snapshot_ready = true;
-        Ok(OrderBookApplyOutcome::Published(Box::new(
-            self.publication(),
-        )))
+        Ok(OrderBookApplyOutcome::Published)
     }
 
     /// Marks a valid book stale and fails closed until a fresh covering snapshot arrives.
@@ -483,7 +479,7 @@ mod tests {
         let mut book = OrderBook::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
         assert!(matches!(
             book.install_snapshot(&snapshot(10)),
-            Ok(OrderBookApplyOutcome::Published(_))
+            Ok(OrderBookApplyOutcome::Published)
         ));
         let outcome = book
             .apply_delta(&DepthDelta {
@@ -510,13 +506,14 @@ mod tests {
     #[test]
     fn ordered_replacements_and_removals_preserve_revision_and_watermark() {
         let mut book = OrderBook::new(NonZeroUsize::new(3).unwrap_or(NonZeroUsize::MIN));
-        let OrderBookApplyOutcome::Published(initial) = book
+        let OrderBookApplyOutcome::Published = book
             .install_snapshot(&snapshot(10))
             .expect("snapshot installs")
         else {
             panic!("snapshot must publish");
         };
-        let OrderBookApplyOutcome::Published(replaced) = book
+        let initial = book.publication();
+        let OrderBookApplyOutcome::Published = book
             .apply_delta(&DepthDelta {
                 metadata: metadata(11, 1),
                 side: BookSide::Bid,
@@ -530,10 +527,11 @@ mod tests {
         else {
             panic!("replacement must publish");
         };
+        let replaced = book.publication();
         assert_eq!(replaced.revision, initial.revision + 1);
         assert_eq!(replaced.source_watermark, 11);
         assert_eq!(replaced.bids[0].quantity, 9);
-        let OrderBookApplyOutcome::Published(removed) = book
+        let OrderBookApplyOutcome::Published = book
             .apply_delta(&DepthDelta {
                 metadata: metadata(12, 1),
                 side: BookSide::Ask,
@@ -547,6 +545,7 @@ mod tests {
         else {
             panic!("removal must publish");
         };
+        let removed = book.publication();
         assert_eq!(removed.asks[0].price, 102);
         assert_eq!(removed.source_watermark, 12);
     }
@@ -606,7 +605,7 @@ mod tests {
         );
         assert!(matches!(
             book.install_snapshot(&snapshot(30)),
-            Ok(OrderBookApplyOutcome::Published(_))
+            Ok(OrderBookApplyOutcome::Published)
         ));
     }
 
@@ -650,7 +649,7 @@ mod tests {
         );
         assert!(matches!(
             book.install_snapshot(&snapshot(20)),
-            Ok(OrderBookApplyOutcome::Published(_))
+            Ok(OrderBookApplyOutcome::Published)
         ));
     }
 
@@ -755,7 +754,7 @@ mod tests {
         covering.metadata.session_generation = 4;
         assert!(matches!(
             book.install_snapshot(&covering),
-            Ok(OrderBookApplyOutcome::Published(_))
+            Ok(OrderBookApplyOutcome::Published)
         ));
     }
 
@@ -839,7 +838,7 @@ mod tests {
         ));
         assert!(matches!(
             book.install_snapshot(&snapshot(30)),
-            Ok(OrderBookApplyOutcome::Published(_))
+            Ok(OrderBookApplyOutcome::Published)
         ));
     }
 
@@ -862,7 +861,7 @@ mod tests {
         );
         assert!(matches!(
             book.install_snapshot(&snapshot(100)),
-            Ok(OrderBookApplyOutcome::Published(_))
+            Ok(OrderBookApplyOutcome::Published)
         ));
     }
 
@@ -871,7 +870,7 @@ mod tests {
         let mut book = OrderBook::new(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
         book.install_snapshot(&snapshot(10))
             .expect("snapshot installs");
-        let OrderBookApplyOutcome::Published(publication) = book
+        let OrderBookApplyOutcome::Published = book
             .apply_delta(&DepthDelta {
                 metadata: metadata(11, 1),
                 side: BookSide::Bid,
@@ -885,6 +884,7 @@ mod tests {
         else {
             panic!("out-of-range update must publish its watermark");
         };
+        let publication = book.publication();
         assert_eq!(publication.source_watermark, 11);
         assert_eq!(
             publication
@@ -904,7 +904,7 @@ mod tests {
         initial.asks[0].price = 110;
         initial.asks[1].price = 120;
         book.install_snapshot(&initial).expect("snapshot installs");
-        let OrderBookApplyOutcome::Published(publication) = book
+        let OrderBookApplyOutcome::Published = book
             .apply_delta(&DepthDelta {
                 metadata: metadata(11, 1),
                 side: BookSide::Bid,
@@ -918,6 +918,7 @@ mod tests {
         else {
             panic!("better level must publish");
         };
+        let publication = book.publication();
         assert_eq!(
             publication
                 .bids

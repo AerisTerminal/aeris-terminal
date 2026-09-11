@@ -450,13 +450,16 @@ mod tests {
     }
     #[test]
     #[ignore = "drives the live Hyperliquid public WebSocket"]
-    fn live_public_socket_connects_and_receives_book() {
+    fn live_public_socket_connects_and_receives_aggregated_book() {
         let stop = Arc::new(AtomicBool::new(false));
         let (mut socket, _) =
             HyperliquidSocket::connect(crate::HYPERLIQUID_WS_URL, Duration::from_secs(10), &stop)
                 .expect("live Hyperliquid socket connects");
         socket
-            .send_text(&crate::build_l2_subscription("BTC").expect("subscription encodes"))
+            .send_text(
+                &crate::build_aggregated_l2_subscription("BTC", 4, None)
+                    .expect("subscription encodes"),
+            )
             .expect("book subscription sends");
         socket
             .send_text(&crate::build_bbo_subscription("BTC").expect("subscription encodes"))
@@ -481,8 +484,16 @@ mod tests {
                                 1,
                             )
                             .expect("valid live depth");
-                            assert_eq!(decoded.snapshot.bids.len(), 5);
-                            assert_eq!(decoded.snapshot.asks.len(), 5);
+                            assert!(decoded.snapshot.bids.len() > 5);
+                            assert!(decoded.snapshot.asks.len() > 5);
+                            assert!(
+                                decoded.snapshot.bids.len()
+                                    <= crate::MAXIMUM_HYPERLIQUID_BOOK_LEVELS
+                            );
+                            assert!(
+                                decoded.snapshot.asks.len()
+                                    <= crate::MAXIMUM_HYPERLIQUID_BOOK_LEVELS
+                            );
                             books += 1;
                         }
                         crate::WsClientEvent::Bbo { coin, bbo } => {
@@ -507,6 +518,6 @@ mod tests {
                 Err(error) => panic!("live Hyperliquid socket failed: {error}"),
             }
         }
-        eprintln!("received {books} fast five-level books and {quotes} validated BBO updates");
+        eprintln!("received {books} standard L2 books and {quotes} validated BBO updates");
     }
 }

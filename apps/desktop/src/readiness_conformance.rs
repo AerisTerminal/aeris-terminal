@@ -672,9 +672,11 @@ fn collect_depth_gap_evidence() -> Result<DepthGapRecoveryEvidence, Box<dyn Erro
     };
     let depth_covering_snapshot_recovers = matches!(
         order_book.install_snapshot(&replacement)?,
-        OrderBookApplyOutcome::Published(publication)
-            if publication.state == OrderBookState::Ready && publication.source_watermark == 13
-    );
+        OrderBookApplyOutcome::Published
+    ) && {
+        let publication = order_book.publication();
+        publication.state == OrderBookState::Ready && publication.source_watermark == 13
+    };
     Ok(DepthGapRecoveryEvidence {
         depth_gap_clears_book,
         depth_covering_snapshot_recovers,

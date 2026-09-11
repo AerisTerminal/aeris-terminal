@@ -3,6 +3,7 @@
 //! Axiusflow owns provider connections, canonical market state, on-demand
 //! history, and realtime fanout inside the desktop process. There is no secondary local process, serialized runtime transport, or restart-replay layer here.
 
+mod hyperliquid_display_depth;
 mod hyperliquid_history;
 mod hyperliquid_realtime;
 pub mod market_service;
@@ -44,10 +45,25 @@ pub struct MarketPriceAlertTrigger {
 /// domain. Consumer and demand generation are the only routing metadata added
 /// here; display precision and UI selection identity remain presentation state.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketDisplayDepth {
+    pub provider_generation: u64,
+    pub display_generation: u64,
+    pub source_sequence: u64,
+    pub bids: Vec<axiusflow_market_data::DepthLevel>,
+    pub asks: Vec<axiusflow_market_data::DepthLevel>,
+}
+
+/// Direct in-process order-book image for one consumer generation.
+///
+/// `display_depth` is an optional provider-aggregated presentation sidecar. It
+/// never enters the canonical `OrderBook`; consumers may use it for a coarse
+/// DOM while retaining canonical raw depth for correctness and fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketOrderBookSnapshot {
     pub consumer_id: axiusflow_market_engine::ConsumerId,
     pub generation: axiusflow_market_engine::GenerationId,
     pub publication: axiusflow_market_data::OrderBookPublication,
+    pub display_depth: Option<MarketDisplayDepth>,
 }
 
 /// Direct completed provider selection for one runtime consumer.

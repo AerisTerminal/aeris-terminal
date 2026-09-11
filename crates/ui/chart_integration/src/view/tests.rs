@@ -441,6 +441,36 @@ fn visible_time_range_roundtrips_through_persistent_unix_nanos() {
 }
 
 #[test]
+fn visible_time_range_extrapolates_past_loaded_history_for_backfill() {
+    let mut chart = interactive_chart();
+    let first = chart
+        .engine
+        .series_data(0)
+        .first()
+        .and_then(|point| point.time.to_i64())
+        .expect("fixture first timestamp");
+    chart.engine.set_visible_logical_range(-20.0, 20.0);
+    let first_seconds = first.to_f64().expect("fixture timestamp converts");
+    let clamped_start = chart
+        .engine
+        .visible_time_range()
+        .expect("clamped Nucleus viewport")
+        .0;
+    assert!((clamped_start - first_seconds).abs() < f64::EPSILON);
+    let (start, _) = chart
+        .visible_time_range_unix_nanos()
+        .expect("host viewport extrapolates");
+    assert!(start < first.saturating_mul(1_000_000_000));
+}
+
+#[test]
+fn chart_series_retention_is_owned_by_market_runtime() {
+    let chart = interactive_chart();
+    assert_eq!(chart.engine.series_max_points(0), None);
+    assert_eq!(chart.engine.series_max_points(chart.volume_series), None);
+}
+
+#[test]
 fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
     let chart = NucleusChartView::empty();
     let series = &chart.engine.series[0];

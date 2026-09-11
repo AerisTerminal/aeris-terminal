@@ -28,7 +28,6 @@ use zeroize::Zeroize;
 
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAXIMUM_CONTROL_MESSAGES: usize = 64;
-const MAXIMUM_VISIBLE_BARS: usize = 300;
 const MAXIMUM_REPLAY_BARS: usize = 10_000;
 const MAXIMUM_NON_TRADING_GAP_SECONDS: u64 = 4 * 24 * 60 * 60;
 const DAILY_SESSION_PADDING_BARS: usize = 150;
@@ -69,7 +68,7 @@ pub(super) fn fetch(
     }
     validate_history_identity(series, provider_generation, installed)?;
     let interval = chart_interval(series.period)?;
-    let maximum_visible_bars = window.maximum_bars.clamp(1, MAXIMUM_VISIBLE_BARS);
+    let maximum_visible_bars = bounded_visible_bars(window.maximum_bars);
     let replay = match window.range {
         Some(range) => explicit_replay_envelope(maximum_visible_bars, range)?,
         None => replay_envelope(interval, maximum_visible_bars, SystemTime::now())?,
@@ -101,6 +100,10 @@ pub(super) fn fetch(
         forming,
         handoff_boundary_unix_nanos,
     })
+}
+
+fn bounded_visible_bars(requested: usize) -> usize {
+    requested.clamp(1, MAXIMUM_REPLAY_BARS)
 }
 
 fn validate_history_identity(
@@ -435,6 +438,7 @@ fn explicit_replay_envelope(
     if range.start_unix_nanos >= range.end_unix_nanos {
         return Err("Rithmic visible history range is empty".to_string());
     }
+    let range = align_explicit_replay_range(range)?;
     Ok(ReplayEnvelope {
         range,
         maximum_bars: NonZeroUsize::new(maximum_visible_bars.clamp(1, MAXIMUM_REPLAY_BARS))
@@ -443,6 +447,29 @@ fn explicit_replay_envelope(
         // invent an open bucket. The existing realtime handoff remains owner
         // of the forming candle while the repair replaces completed history.
         forming: FormingPlan::Closed,
+    })
+}
+
+fn align_explicit_replay_range(range: HistoryRange) -> Result<HistoryRange, String> {
+    let start_seconds = range.start_unix_nanos.div_euclid(NANOS_PER_SECOND);
+    let mut end_seconds = range.end_unix_nanos.div_euclid(NANOS_PER_SECOND);
+    if range.end_unix_nanos.rem_euclid(NANOS_PER_SECOND) != 0 {
+        end_seconds = end_seconds
+            .checked_add(1)
+            .ok_or_else(|| "Rithmic visible history range overflowed".to_string())?;
+    }
+    let start_unix_nanos = start_seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .ok_or_else(|| "Rithmic visible history range overflowed".to_string())?;
+    let end_unix_nanos = end_seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .ok_or_else(|| "Rithmic visible history range overflowed".to_string())?;
+    if start_unix_nanos >= end_unix_nanos {
+        return Err("Rithmic visible history range is empty".to_string());
+    }
+    Ok(HistoryRange {
+        start_unix_nanos,
+        end_unix_nanos,
     })
 }
 
@@ -559,5 +586,29 @@ mod tests {
         assert!(validate_history_identity(&series(), 7, &installed(3)).is_ok());
         assert!(validate_history_identity(&series(), 7, &installed(8)).is_err());
         assert!(validate_history_identity(&series(), 0, &installed(3)).is_err());
+    }
+
+    #[test]
+    fn history_budget_preserves_runtime_requests_up_to_protocol_capacity() {
+        assert_eq!(bounded_visible_bars(600), 600);
+        assert_eq!(bounded_visible_bars(8_192), 8_192);
+        assert_eq!(
+            bounded_visible_bars(MAXIMUM_REPLAY_BARS + 1),
+            MAXIMUM_REPLAY_BARS
+        );
+    }
+
+    #[test]
+    fn explicit_viewport_range_aligns_to_rithmic_whole_seconds() {
+        let replay = explicit_replay_envelope(
+            600,
+            HistoryRange {
+                start_unix_nanos: 1_234_567_890,
+                end_unix_nanos: 61_234_567_890,
+            },
+        )
+        .expect("fractional viewport range aligns");
+        assert_eq!(replay.range.start_unix_nanos, 1_000_000_000);
+        assert_eq!(replay.range.end_unix_nanos, 62_000_000_000);
     }
 }

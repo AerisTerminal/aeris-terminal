@@ -84,6 +84,7 @@ pub(crate) struct Control {
     activation: Option<Activation>,
     focus_handle: Option<FocusHandle>,
     aria_label: Option<SharedString>,
+    hover_style: Option<StyleRefinement>,
     flags: ControlFlags,
     tab_index: isize,
     content_size: Option<Pixels>,
@@ -111,6 +112,7 @@ impl Control {
             activation: None,
             focus_handle: None,
             aria_label: None,
+            hover_style: None,
             flags: ControlFlags::new(),
             tab_index: 0,
             content_size: None,
@@ -273,6 +275,12 @@ impl InteractiveElement for Control {
     fn interactivity(&mut self) -> &mut Interactivity {
         self.base.interactivity()
     }
+
+    fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        debug_assert!(self.hover_style.is_none(), "hover style already set");
+        self.hover_style = Some(f(StyleRefinement::default()));
+        self
+    }
 }
 
 impl RenderOnce for Control {
@@ -304,6 +312,8 @@ impl RenderOnce for Control {
         };
         let tooltip = self.tooltip;
         let activation = self.activation;
+        let caller_hover_style = self.hover_style;
+        let has_caller_hover_style = caller_hover_style.is_some();
         let base = self.base;
         let caller_style = self.style;
 
@@ -324,7 +334,16 @@ impl RenderOnce for Control {
             .when(policy.accepts_input(), gpui::Styled::cursor_pointer)
             .when(!policy.accepts_input(), gpui::Styled::cursor_default)
             .when_some(
-                hover_color.filter(|_| policy.accepts_input()),
+                caller_hover_style.filter(|_| policy.accepts_input()),
+                |this, caller_hover_style| {
+                    this.hover(move |mut style| {
+                        style.refine(&caller_hover_style);
+                        style
+                    })
+                },
+            )
+            .when_some(
+                hover_color.filter(|_| policy.accepts_input() && !has_caller_hover_style),
                 |this, color| this.hover(move |style| style.bg(color)),
             )
             .when_some(
@@ -380,9 +399,9 @@ fn theme_color(color: ThemeColor) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use gpui::px;
+    use gpui::{InteractiveElement, Styled, px};
 
-    use super::{ControlPolicy, control_geometry};
+    use super::{Control, ControlPolicy, control_geometry};
 
     #[test]
     fn custom_control_size_preserves_glyph_inset() {
@@ -424,5 +443,11 @@ mod tests {
         ] {
             assert!(!policy.accepts_input());
         }
+    }
+
+    #[test]
+    fn caller_hover_style_replaces_the_default_control_hover_slot() {
+        let control = Control::new("custom_hover").hover(|style| style.opacity(0.5));
+        assert!(control.hover_style.is_some());
     }
 }

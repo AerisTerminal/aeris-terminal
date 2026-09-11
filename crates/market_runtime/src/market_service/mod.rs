@@ -44,6 +44,9 @@ use axiusflow_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
 
+use crate::hyperliquid_display_depth::{
+    HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
+};
 use crate::hyperliquid_realtime::{
     HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidCandleDemand, HyperliquidCatalogControl,
     HyperliquidCatalogEvent, HyperliquidDemand, HyperliquidInstrumentDemand,
@@ -541,6 +544,8 @@ enum ProviderRealtimeChannelSet {
     Hyperliquid {
         controls: SyncSender<HyperliquidRealtimeControl>,
         events: Receiver<HyperliquidRealtimeEvent>,
+        display_controls: SyncSender<HyperliquidDisplayDepthControl>,
+        display_events: Receiver<HyperliquidDisplayDepthEvent>,
     },
 }
 
@@ -635,6 +640,8 @@ enum ProviderRealtimeDispatch<'a> {
     Hyperliquid {
         controls: &'a SyncSender<HyperliquidRealtimeControl>,
         events: &'a Receiver<HyperliquidRealtimeEvent>,
+        display_controls: &'a SyncSender<HyperliquidDisplayDepthControl>,
+        display_events: &'a Receiver<HyperliquidDisplayDepthEvent>,
     },
     Disabled,
 }
@@ -650,6 +657,17 @@ impl<'a> ProviderRealtimeDispatch<'a> {
     fn hyperliquid_controls(&self) -> Option<&'a SyncSender<HyperliquidRealtimeControl>> {
         match self {
             Self::Hyperliquid { controls, .. } => Some(controls),
+            Self::Rithmic { .. } | Self::Disabled => None,
+        }
+    }
+
+    fn hyperliquid_display_controls(
+        &self,
+    ) -> Option<&'a SyncSender<HyperliquidDisplayDepthControl>> {
+        match self {
+            Self::Hyperliquid {
+                display_controls, ..
+            } => Some(display_controls),
             Self::Rithmic { .. } | Self::Disabled => None,
         }
     }
@@ -676,6 +694,7 @@ enum ProviderRuntimeEvent {
     RithmicRealtime(RithmicRealtimeEvent),
     RithmicCatalog(RithmicCatalogEvent),
     HyperliquidRealtime(HyperliquidRealtimeEvent),
+    HyperliquidDisplayDepth(HyperliquidDisplayDepthEvent),
     HyperliquidCatalog(HyperliquidCatalogEvent),
 }
 

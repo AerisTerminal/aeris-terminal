@@ -2038,7 +2038,6 @@ mod tests {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
         let mut live = false;
-
         let outcome = apply_pushed_event(
             MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
                 consumer_id: MarketConsumerId(NonZeroU64::MIN),
@@ -2051,30 +2050,16 @@ mod tests {
                     revision: 1,
                     source_watermark: 1,
                     state: OrderBookState::Ready,
-                    bids: vec![
-                        DepthLevel {
-                            price: 7_798_670,
-                            quantity: 653_408,
-                            order_count: None,
-                        },
-                        DepthLevel {
-                            price: 7_798_514,
-                            quantity: 2_564_592,
-                            order_count: None,
-                        },
-                    ],
-                    asks: vec![
-                        DepthLevel {
-                            price: 7_798_671,
-                            quantity: 22_517_771,
-                            order_count: None,
-                        },
-                        DepthLevel {
-                            price: 7_798_727,
-                            quantity: 4_582_685,
-                            order_count: None,
-                        },
-                    ],
+                    bids: vec![DepthLevel {
+                        price: 7_798_670,
+                        quantity: 653_408,
+                        order_count: None,
+                    }],
+                    asks: vec![DepthLevel {
+                        price: 7_798_671,
+                        quantity: 22_517_771,
+                        order_count: None,
+                    }],
                     best_bid: Some(DepthLevel {
                         price: 7_798_670,
                         quantity: 653_408,
@@ -2089,6 +2074,7 @@ mod tests {
                     traded_volumes: BTreeMap::new(),
                     trade_source_watermark: 0,
                 },
+                display_depth: None,
             }),
             &PushedEventContext {
                 consumer_id: 1,
@@ -2099,7 +2085,6 @@ mod tests {
             &mut live,
             &sender,
         );
-
         assert_eq!(outcome, Ok(()));
         let (messages, _) = receiver.drain();
         let frame = messages

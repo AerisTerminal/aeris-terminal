@@ -85,7 +85,7 @@ pub fn build_trades_subscription(coin: &str) -> Result<String, String> {
     .to_string())
 }
 
-/// Builds a fast five-level L2 book subscription frame for a coin.
+/// Builds the standard public L2 book subscription frame for a coin.
 ///
 /// # Errors
 ///
@@ -94,7 +94,44 @@ pub fn build_l2_subscription(coin: &str) -> Result<String, String> {
     checked_coin(coin)?;
     Ok(serde_json::json!({
         "method": "subscribe",
-        "subscription": {"type": "l2Book", "coin": coin, "fast": true},
+        "subscription": {"type": "l2Book", "coin": coin},
+    })
+    .to_string())
+}
+
+/// Builds a provider-aggregated public L2 book subscription.
+///
+/// Hyperliquid supports two through five significant figures, with an
+/// optional 1/2/5 mantissa only for the five-significant-figure form. The
+/// returned book is still a complete provider snapshot; the aggregation only
+/// controls the price lattice represented by its bounded levels.
+///
+/// # Errors
+///
+/// Returns an error for invalid coin identity or unsupported aggregation.
+pub fn build_aggregated_l2_subscription(
+    coin: &str,
+    n_sig_figs: u8,
+    mantissa: Option<u8>,
+) -> Result<String, String> {
+    checked_coin(coin)?;
+    if !(2..=5).contains(&n_sig_figs) {
+        return Err("hyperliquid L2 significant figures are invalid".to_string());
+    }
+    if mantissa.is_some_and(|value| n_sig_figs != 5 || !matches!(value, 1 | 2 | 5)) {
+        return Err("hyperliquid L2 mantissa is invalid".to_string());
+    }
+    let mut subscription = serde_json::json!({
+        "type": "l2Book",
+        "coin": coin,
+        "nSigFigs": n_sig_figs,
+    });
+    if let Some(mantissa) = mantissa.filter(|value| *value != 1) {
+        subscription["mantissa"] = serde_json::json!(mantissa);
+    }
+    Ok(serde_json::json!({
+        "method": "subscribe",
+        "subscription": subscription,
     })
     .to_string())
 }
@@ -306,9 +343,25 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&book).expect("subscription JSON"),
             serde_json::json!({"method": "subscribe", "subscription": {
-                "type": "l2Book", "coin": "BTC", "fast": true
+                "type": "l2Book", "coin": "BTC"
             }})
         );
+        let grouped = build_aggregated_l2_subscription("BTC", 4, None).expect("grouped book");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&grouped).expect("grouped subscription JSON"),
+            serde_json::json!({"method": "subscribe", "subscription": {
+                "type": "l2Book", "coin": "BTC", "nSigFigs": 4
+            }})
+        );
+        let mantissa = build_aggregated_l2_subscription("BTC", 5, Some(5)).expect("mantissa book");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&mantissa).expect("mantissa JSON"),
+            serde_json::json!({"method": "subscribe", "subscription": {
+                "type": "l2Book", "coin": "BTC", "nSigFigs": 5, "mantissa": 5
+            }})
+        );
+        assert!(build_aggregated_l2_subscription("BTC", 1, None).is_err());
+        assert!(build_aggregated_l2_subscription("BTC", 4, Some(5)).is_err());
         assert!(build_candle_subscription("", "1m").is_err());
     }
 

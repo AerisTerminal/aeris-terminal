@@ -80,6 +80,8 @@ fn run_coordinator(
         rithmic_live: BTreeMap::new(),
         hyperliquid_live: BTreeMap::new(),
         order_books: BTreeMap::new(),
+        hyperliquid_display_depth: BTreeMap::new(),
+        hyperliquid_display_generation: 0,
         price_alerts: PriceAlertRegistry::default(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
@@ -124,7 +126,7 @@ fn run_coordinator(
 
 fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
     let mut drained = 0;
-    for lane in 0..4 {
+    for lane in 0..5 {
         for _ in 0..REALTIME_DRAIN_BUDGET {
             let Some(event) = coordinator.providers.take_event(lane) else {
                 break;
@@ -139,6 +141,9 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                 }
                 ProviderRuntimeEvent::HyperliquidRealtime(event) => {
                     coordinator.handle_hyperliquid_realtime(event);
+                }
+                ProviderRuntimeEvent::HyperliquidDisplayDepth(event) => {
+                    coordinator.handle_hyperliquid_display_depth(event);
                 }
                 ProviderRuntimeEvent::HyperliquidCatalog(event) => {
                     coordinator.handle_hyperliquid_catalog(event);
@@ -186,6 +191,11 @@ pub(super) struct Coordinator<'a> {
     pub(super) rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
     pub(super) hyperliquid_live: BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
+    /// Provider-aggregated Hyperliquid depth used only for DOM presentation.
+    /// Canonical `order_books` remain sourced from the standard full-precision
+    /// L2 subscription.
+    pub(super) hyperliquid_display_depth: BTreeMap<String, crate::MarketDisplayDepth>,
+    pub(super) hyperliquid_display_generation: u64,
     /// Bounded alert definitions, baselines, and trigger evaluation. Provider
     /// workers remain shared with ordinary market demand.
     pub(super) price_alerts: PriceAlertRegistry,
@@ -717,6 +727,18 @@ impl Coordinator<'_> {
                     .insert(identity, ProviderOrderBook::new(instrument));
             }
         }
+        let current_hyperliquid_generation = self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation)
+            .map(|generation| generation.0.get());
+        self.hyperliquid_display_depth
+            .retain(|instrument_id, display| {
+                current_hyperliquid_generation == Some(display.provider_generation)
+                    && self
+                        .order_books
+                        .contains_key(&("hyperliquid".to_string(), instrument_id.clone()))
+            });
     }
 
     pub(super) fn status(&self) -> MarketServiceStatus {
@@ -1024,6 +1046,8 @@ mod tests {
             rithmic_live: BTreeMap::new(),
             hyperliquid_live: BTreeMap::new(),
             order_books: BTreeMap::new(),
+            hyperliquid_display_depth: BTreeMap::new(),
+            hyperliquid_display_generation: 0,
             price_alerts: PriceAlertRegistry::default(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),

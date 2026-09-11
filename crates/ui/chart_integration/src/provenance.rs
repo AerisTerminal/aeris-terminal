@@ -3,7 +3,7 @@
 use axiusflow_application::{MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
-pub(crate) const DEFAULT_CHART_SERIES_MAX_POINTS: usize = 4_096;
+const DISPLAYED_PROVENANCE_MAX_ITEMS: usize = 4_096;
 
 #[derive(Debug)]
 pub(crate) struct DisplayedProvenance {
@@ -15,7 +15,7 @@ impl DisplayedProvenance {
     pub(crate) fn empty() -> Self {
         Self {
             by_source_sequence: BTreeMap::new(),
-            max_items: NonZeroUsize::new(DEFAULT_CHART_SERIES_MAX_POINTS)
+            max_items: NonZeroUsize::new(DISPLAYED_PROVENANCE_MAX_ITEMS)
                 .unwrap_or(NonZeroUsize::MIN),
         }
     }
@@ -23,7 +23,7 @@ impl DisplayedProvenance {
     pub(crate) fn from_snapshot(snapshot: &ReplaySnapshot) -> Self {
         Self::from_snapshot_with_limit(
             snapshot,
-            NonZeroUsize::new(DEFAULT_CHART_SERIES_MAX_POINTS).unwrap_or(NonZeroUsize::MIN),
+            NonZeroUsize::new(DISPLAYED_PROVENANCE_MAX_ITEMS).unwrap_or(NonZeroUsize::MIN),
         )
     }
 

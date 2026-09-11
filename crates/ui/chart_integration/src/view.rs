@@ -6,7 +6,7 @@ use crate::nucleus_bridge::{
     install_product_price_series, install_replay, install_volume_series, price_display_precision,
     replay_display_precision, replay_legend_title, replay_price_divisor, replay_quantity_divisor,
 };
-use crate::provenance::{DEFAULT_CHART_SERIES_MAX_POINTS, DisplayedProvenance};
+use crate::provenance::DisplayedProvenance;
 use axiusflow_application::ReplayRecoveryCommand;
 use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
@@ -771,12 +771,6 @@ impl NucleusChartView {
             .apply_str(r#"{"layout":{"fontFamily":"HK Grotesk, sans-serif"}}"#)
             .expect("the default chart font options are valid");
         let volume_series = install_volume_series(&mut engine);
-        let retention_applied =
-            engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
-        debug_assert!(retention_applied);
-        let volume_retention_applied =
-            engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
-        debug_assert!(volume_retention_applied);
         Self {
             engine,
             theme,
@@ -875,12 +869,6 @@ impl NucleusChartView {
             ChartType::Candles,
             &mut product_bars,
         );
-        let retention_applied =
-            engine.set_series_max_points(0, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
-        debug_assert!(retention_applied);
-        let volume_retention_applied =
-            engine.set_series_max_points(volume_series, Some(DEFAULT_CHART_SERIES_MAX_POINTS));
-        debug_assert!(volume_retention_applied);
         let data_bridge = ChartDataBridge::try_new(chart_data_queue_capacity(), replay).ok();
         debug_assert!(data_bridge.is_some());
         let mut chart = Self {
@@ -1259,7 +1247,25 @@ impl NucleusChartView {
     /// Returns the settled visible time range in Unix nanoseconds.
     #[must_use]
     pub fn visible_time_range_unix_nanos(&self) -> Option<(i64, i64)> {
-        let (start, end) = self.engine.visible_time_range()?;
+        let (clamped_start, clamped_end) = self.engine.visible_time_range()?;
+        let (logical_start, logical_end) = self.engine.visible_logical_range()?;
+        let (times, _) = self.engine.data_layer().series_data(0)?;
+        let first = times.first()?.to_f64()?;
+        let last = times.last()?.to_f64()?;
+        let first_index = self.engine.time_to_index(first, false)?.to_f64()?;
+        let last_index = self.engine.time_to_index(last, false)?.to_f64()?;
+        let logical_span = last_index - first_index;
+        let time_span = last - first;
+        let seconds_per_logical =
+            (logical_span > 0.0 && time_span > 0.0).then_some(time_span / logical_span);
+        let start = seconds_per_logical
+            .filter(|_| logical_start < first_index)
+            .map_or(clamped_start, |step| {
+                first + (logical_start - first_index) * step
+            });
+        let end = seconds_per_logical
+            .filter(|_| logical_end > last_index)
+            .map_or(clamped_end, |step| last + (logical_end - last_index) * step);
         let start = (start * 1_000_000_000.0).round().to_i64()?;
         let end = (end * 1_000_000_000.0).round().to_i64()?;
         (start < end).then_some((start, end))

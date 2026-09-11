@@ -107,7 +107,19 @@ pub(crate) fn runtime_order_book_frame(
     instrument: &InstallProviderInstrument,
     generation: u64,
 ) -> Option<OrderBookFrame> {
-    let publication = &snapshot.publication;
+    let canonical = &snapshot.publication;
+    let mut display_publication = None;
+    if let Some(display) = snapshot
+        .display_depth
+        .as_ref()
+        .filter(|display| display.provider_generation == canonical.session_generation)
+    {
+        let mut publication = canonical.clone();
+        publication.bids.clone_from(&display.bids);
+        publication.asks.clone_from(&display.asks);
+        display_publication = Some(publication);
+    }
+    let publication = display_publication.as_ref().unwrap_or(canonical);
     if snapshot.generation.0.get() != generation
         || publication.provider_id != instrument.provider
         || publication.instrument_id != instrument.instrument_id

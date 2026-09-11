@@ -11,6 +11,10 @@ use super::{
     SeriesLoadState, TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id,
     merge_live_candle, series_state_payload, series_update_message,
 };
+use crate::hyperliquid_display_depth::{
+    HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
+    HyperliquidDisplayDepthEvent,
+};
 use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
@@ -768,6 +772,84 @@ impl HyperliquidLiveHandoff {
 }
 
 impl Coordinator<'_> {
+    fn clear_hyperliquid_display_depth(&mut self) {
+        let affected = self
+            .hyperliquid_display_depth
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.hyperliquid_display_depth.clear();
+        for instrument_id in affected {
+            self.broadcast_order_book("hyperliquid", &instrument_id);
+        }
+    }
+
+    pub(super) fn handle_hyperliquid_display_depth(&mut self, event: HyperliquidDisplayDepthEvent) {
+        match event {
+            HyperliquidDisplayDepthEvent::Reset { display_generation } => {
+                if display_generation <= self.hyperliquid_display_generation {
+                    return;
+                }
+                self.hyperliquid_display_generation = display_generation;
+                self.clear_hyperliquid_display_depth();
+            }
+            HyperliquidDisplayDepthEvent::Snapshot(display) => {
+                if display.display_generation != self.hyperliquid_display_generation {
+                    return;
+                }
+                let Some(provider_generation) = self
+                    .engine
+                    .provider_status("hyperliquid")
+                    .and_then(|status| status.generation)
+                else {
+                    return;
+                };
+                if provider_generation.0.get() != display.provider_generation
+                    || display.snapshot.metadata.provider_id != "hyperliquid"
+                    || display.snapshot.metadata.session_generation != display.provider_generation
+                {
+                    return;
+                }
+                let instrument_id = display.snapshot.metadata.instrument_id.clone();
+                let Some(order_book) = self
+                    .order_books
+                    .get(&("hyperliquid".to_string(), instrument_id.clone()))
+                else {
+                    return;
+                };
+                if order_book.instrument.entitlement_id != display.snapshot.metadata.entitlement_id
+                {
+                    return;
+                }
+                let source_sequence = display.snapshot.metadata.source_sequence;
+                if self
+                    .hyperliquid_display_depth
+                    .get(&instrument_id)
+                    .is_some_and(|current| {
+                        current.provider_generation > display.provider_generation
+                            || (current.provider_generation == display.provider_generation
+                                && (current.display_generation > display.display_generation
+                                    || (current.display_generation == display.display_generation
+                                        && current.source_sequence >= source_sequence)))
+                    })
+                {
+                    return;
+                }
+                self.hyperliquid_display_depth.insert(
+                    instrument_id.clone(),
+                    crate::MarketDisplayDepth {
+                        provider_generation: display.provider_generation,
+                        display_generation: display.display_generation,
+                        source_sequence,
+                        bids: display.snapshot.bids,
+                        asks: display.snapshot.asks,
+                    },
+                );
+                self.broadcast_order_book("hyperliquid", &instrument_id);
+            }
+        }
+    }
+
     fn install_live_tails(
         &mut self,
         series: &BarSeriesKey,
@@ -1059,8 +1141,14 @@ impl Coordinator<'_> {
                 self.hyperliquid_candle(generation, &wire_coin, &interval, &candle);
             }
             HyperliquidRealtimeEvent::Trades(generation, trades) => {
+                let mut dirty_books = BTreeSet::new();
                 for trade in &trades {
-                    self.hyperliquid_trade(generation, trade);
+                    if let Some(instrument_id) = self.hyperliquid_trade(generation, trade) {
+                        dirty_books.insert(instrument_id);
+                    }
+                }
+                for instrument_id in dirty_books {
+                    self.broadcast_order_book("hyperliquid", &instrument_id);
                 }
             }
             HyperliquidRealtimeEvent::Quote(generation, quote) => {
@@ -1124,6 +1212,8 @@ impl Coordinator<'_> {
             return;
         }
         if current.is_some_and(|current| generation > current) {
+            self.clear_hyperliquid_display_depth();
+            self.hyperliquid_demand_dirty = true;
             for ((series, _), stop) in &self.history_cancellations {
                 if series.provider_id == "hyperliquid" {
                     stop.store(true, Ordering::Release);
@@ -1244,9 +1334,13 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn hyperliquid_trade(&mut self, generation: u64, trade: &MarketTrade) {
+    pub(super) fn hyperliquid_trade(
+        &mut self,
+        generation: u64,
+        trade: &MarketTrade,
+    ) -> Option<String> {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
+            return None;
         };
         if self
             .engine
@@ -1254,7 +1348,7 @@ impl Coordinator<'_> {
             .and_then(|status| status.generation)
             != Some(generation)
         {
-            return;
+            return None;
         }
         if trade.metadata.provider_id != "hyperliquid"
             || trade.metadata.session_generation != generation.0.get()
@@ -1269,7 +1363,7 @@ impl Coordinator<'_> {
                 live.buffered.clear();
                 live.pending_publications.clear();
             }
-            return;
+            return None;
         }
         self.evaluate_price_alert_trade(trade);
         let instrument_id = trade.metadata.instrument_id.clone();
@@ -1277,9 +1371,7 @@ impl Coordinator<'_> {
             .order_books
             .get_mut(&("hyperliquid".to_string(), instrument_id.clone()))
             .is_some_and(|order_book| order_book.accept_recent_trade(trade));
-        if trade_changed {
-            self.broadcast_order_book("hyperliquid", &instrument_id);
-        }
+        trade_changed.then_some(instrument_id)
     }
 
     pub(super) fn hyperliquid_series_recovering(
@@ -1317,6 +1409,8 @@ impl Coordinator<'_> {
             return;
         }
         self.price_alerts.reset_provider_baselines("hyperliquid");
+        self.clear_hyperliquid_display_depth();
+        self.hyperliquid_demand_dirty = true;
         if self.price_alerts.has_active_provider("hyperliquid") {
             self.hyperliquid_demand_dirty = true;
         }
@@ -1597,7 +1691,7 @@ impl Coordinator<'_> {
                 let trades_changed = order_book.prune_recent_trades(observed_unix_nanos);
                 let book_changed = matches!(
                     order_book.book.install_snapshot(snapshot),
-                    Ok(OrderBookApplyOutcome::Published(_)
+                    Ok(OrderBookApplyOutcome::Published
                         | OrderBookApplyOutcome::RecoveryRequired(_))
                 ) || matches!(
                     order_book.book.state(),
@@ -1871,6 +1965,62 @@ impl Coordinator<'_> {
         }
     }
 
+    fn hyperliquid_display_depth_demand(&self) -> HyperliquidDisplayDepthDemand {
+        let Some(provider_generation) = self
+            .engine
+            .provider_status("hyperliquid")
+            .and_then(|status| status.generation)
+        else {
+            return HyperliquidDisplayDepthDemand::default();
+        };
+        let mut books = BTreeSet::new();
+        for consumer_id in self.events.keys() {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            if !demand.resource_class.publishes_ui()
+                || !demand
+                    .streams
+                    .is_some_and(|streams| streams.contains(MarketStream::Depth))
+            {
+                continue;
+            }
+            let Some(series) = demand
+                .series
+                .as_ref()
+                .filter(|series| series.provider_id == "hyperliquid")
+            else {
+                continue;
+            };
+            let Some(book) = self
+                .order_books
+                .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                .filter(|book| book.instrument.entitlement_id == series.entitlement_id)
+            else {
+                continue;
+            };
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(book.instrument.price_scale),
+                u8::try_from(book.instrument.quantity_scale),
+            ) else {
+                continue;
+            };
+            books.insert(HyperliquidDisplayBookDemand {
+                instrument: HyperliquidInstrumentDemand {
+                    wire_coin: book.instrument.provider_symbol.clone(),
+                    instrument_id: book.instrument.instrument_id.clone(),
+                    entitlement_id: book.instrument.entitlement_id.clone(),
+                    price_scale,
+                    quantity_scale,
+                },
+                provider_generation: provider_generation.0.get(),
+            });
+        }
+        HyperliquidDisplayDepthDemand {
+            books: books.into_iter().collect(),
+        }
+    }
+
     /// Hands the worker the rebuilt subscription set. The worker diffs it
     /// against live subscriptions, so presentation changes never reconnect.
     pub(super) fn flush_hyperliquid_demand(&mut self) {
@@ -1878,24 +2028,28 @@ impl Coordinator<'_> {
             return;
         }
         let demand = self.hyperliquid_demand();
+        let display_demand = self.hyperliquid_display_depth_demand();
         let empty =
             demand.candles.is_empty() && demand.trades.is_empty() && demand.books.is_empty();
         if empty && !self.hyperliquid_engaged {
             self.hyperliquid_demand_dirty = false;
             return;
         }
-        match self
+        let raw = self
             .providers
-            .send_hyperliquid_realtime(HyperliquidRealtimeControl::Subscribe(demand))
-        {
-            Ok(true) => {
+            .send_hyperliquid_realtime(HyperliquidRealtimeControl::Subscribe(demand));
+        let display = self.providers.send_hyperliquid_display_depth(
+            HyperliquidDisplayDepthControl::Subscribe(display_demand),
+        );
+        match (raw, display) {
+            (Ok(true), Ok(true)) => {
                 self.hyperliquid_demand_dirty = false;
                 self.hyperliquid_engaged = !empty;
             }
             // A full channel retries on the next coordinator tick; the
             // worker coalesces to the newest set.
-            Ok(false) => {}
-            Err(_) => {
+            (Ok(false), _) | (_, Ok(false)) => {}
+            (Err(_), _) | (_, Err(_)) => {
                 self.hyperliquid_demand_dirty = false;
             }
         }
