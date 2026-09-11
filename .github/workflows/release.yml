@@ -1,0 +1,372 @@
+name: Production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      generation:
+        description: Monotonic install generation
+        required: true
+        type: string
+      minimum_launcher_version:
+        description: Oldest launcher version allowed to install this release
+        required: true
+        default: "0.2.0"
+        type: string
+      rollout_cohort:
+        description: Signed rollout namespace; keep it stable across percentage promotions
+        required: true
+        default: "all"
+        type: string
+      rollout_percentage:
+        description: Signed rollout percentage 0..100; each hold/promotion publishes a newer generation
+        required: true
+        default: "100"
+        type: string
+      health_gate_approved:
+        description: Confirm the release health gate was reviewed and approved for this promotion
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: axiusflow-production-release
+  cancel-in-progress: false
+
+jobs:
+  qualify-windows:
+    # Candidate and dependency build code runs only on the ordinary Windows
+    # build runner. Production signing keys, R2 credentials, and the signing
+    # runner are not available in this job.
+    runs-on: [self-hosted, axiusflow, windows, release-build]
+    timeout-minutes: 120
+    outputs:
+      release_sha: ${{ steps.qualified-metadata.outputs.release_sha }}
+      release_version: ${{ steps.qualified-metadata.outputs.release_version }}
+      release_verifying_key: ${{ steps.qualified-metadata.outputs.release_verifying_key }}
+      authenticode_certificate_sha1: ${{ steps.qualified-metadata.outputs.authenticode_certificate_sha1 }}
+      authenticode_timestamp_url: ${{ steps.qualified-metadata.outputs.authenticode_timestamp_url }}
+      launcher_sha256: ${{ steps.qualified-metadata.outputs.launcher_sha256 }}
+      desktop_sha256: ${{ steps.qualified-metadata.outputs.desktop_sha256 }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      AUTHENTICODE_CERTIFICATE_SHA1: ${{ vars.AUTHENTICODE_CERTIFICATE_SHA1 }}
+      AUTHENTICODE_TIMESTAMP_URL: ${{ vars.AUTHENTICODE_TIMESTAMP_URL }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require exact pushed main revision
+        shell: pwsh
+        env:
+          CHECKOUT_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw "Production releases must be dispatched from refs/heads/main, got '$env:GITHUB_REF'."
+          }
+          git checkout -B main $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to bind the release checkout to the dispatched commit.' }
+          $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:CHECKOUT_TOKEN"))
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $basic"
+          try {
+            git fetch --no-tags origin main
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to refresh origin/main.' }
+          } finally {
+            Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
+          }
+          $head = (git rev-parse HEAD).Trim()
+          $originMain = (git rev-parse origin/main).Trim()
+          $branch = (git branch --show-current).Trim()
+          $status = (git status --porcelain --untracked-files=normal | Out-String).Trim()
+          if ($branch -ne 'main') { throw "Release checkout is not main: '$branch'." }
+          if ($head -ne $env:GITHUB_SHA) { throw "Release HEAD $head does not match dispatched commit $env:GITHUB_SHA." }
+          if ($head -ne $originMain) { throw "Release HEAD $head does not match origin/main $originMain." }
+          if ($status) { throw 'Release checkout is not clean.' }
+
+      - name: Validate protected release configuration
+        shell: pwsh
+        env:
+          RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
+          HEALTH_GATE_APPROVED: ${{ inputs.health_gate_approved }}
+          RELEASE_ROLLOUT_COHORT: ${{ inputs.rollout_cohort }}
+          RELEASE_ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+        run: |
+          foreach ($required in @(
+              'RELEASE_VERIFYING_KEY_B64URL',
+              'AUTHENTICODE_CERTIFICATE_SHA1',
+              'AUTHENTICODE_TIMESTAMP_URL'
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($required))) {
+              throw "Protected release configuration '$required' is missing."
+            }
+          }
+          if ($env:AUTHENTICODE_CERTIFICATE_SHA1 -notmatch '^[0-9A-Fa-f]{40}$') {
+            throw 'AUTHENTICODE_CERTIFICATE_SHA1 must be a 40-hex certificate thumbprint.'
+          }
+          if ($env:AUTHENTICODE_TIMESTAMP_URL -notmatch '^https?://[^\s#]+$') {
+            throw 'AUTHENTICODE_TIMESTAMP_URL must name an HTTP(S) RFC 3161 endpoint.'
+          }
+          if ($env:RELEASE_VERIFYING_KEY_B64URL -notmatch '^[A-Za-z0-9_-]{43}$') {
+            throw 'RELEASE_VERIFYING_KEY_B64URL must be the 32-byte Ed25519 public key in base64url form.'
+          }
+          if ($env:HEALTH_GATE_APPROVED -ne 'true') {
+            throw 'Production release promotion requires explicit health-gate approval.'
+          }
+          if ($env:RELEASE_ROLLOUT_COHORT -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+            throw 'Release rollout cohort is invalid.'
+          }
+          $percentage = 0
+          if (-not [int]::TryParse($env:RELEASE_ROLLOUT_PERCENTAGE, [ref]$percentage) -or $percentage -lt 0 -or $percentage -gt 100) {
+            throw 'Release rollout percentage must be an integer from 0 through 100.'
+          }
+
+      - name: Authenticate private chart dependency
+        shell: pwsh
+        env:
+          NUCLEUS_CHARTS_TOKEN: ${{ secrets.NUCLEUS_CHARTS_TOKEN }}
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'axiusflow-release-gitconfig'
+          $token = [Uri]::EscapeDataString($env:NUCLEUS_CHARTS_TOKEN)
+          $contents = "[url `"https://x-access-token:$token@github.com/`"]`r`n`tinsteadOf = https://github.com/`r`n"
+          [IO.File]::WriteAllText($config, $contents, [Text.UTF8Encoding]::new($false))
+          Add-Content -Path $env:GITHUB_ENV -Value "GIT_CONFIG_GLOBAL=$config"
+
+      - name: Qualify and prebuild release without publication secrets
+        shell: pwsh
+        env:
+          RELEASE_GENERATION: ${{ inputs.generation }}
+          MINIMUM_LAUNCHER_VERSION: ${{ inputs.minimum_launcher_version }}
+          RELEASE_ROLLOUT_COHORT: ${{ inputs.rollout_cohort }}
+          RELEASE_ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+          RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
+        run: |
+          tools/publish_release.ps1 `
+            -Generation $env:RELEASE_GENERATION `
+            -MinimumLauncherVersion $env:MINIMUM_LAUNCHER_VERSION `
+            -AuthenticodeCertificateSha1 $env:AUTHENTICODE_CERTIFICATE_SHA1 `
+            -AuthenticodeTimestampUrl $env:AUTHENTICODE_TIMESTAMP_URL `
+            -ReleaseVerifyingKey $env:RELEASE_VERIFYING_KEY_B64URL `
+            -RolloutCohort $env:RELEASE_ROLLOUT_COHORT `
+            -RolloutPercentage ([byte]$env:RELEASE_ROLLOUT_PERCENTAGE) `
+            -PrebuildOnly
+
+      - name: Freeze qualified release trust and artifact hashes
+        id: qualified-metadata
+        shell: pwsh
+        env:
+          RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve qualified workspace package metadata.' }
+          $releasePackages = @($metadata.packages | Where-Object { $_.name -eq 'axiusflow_platform_runtime' })
+          if ($releasePackages.Count -ne 1) { throw 'Qualified workspace package identity is ambiguous.' }
+          $releaseVersion = [string]$releasePackages[0].version
+          if ([string]::IsNullOrWhiteSpace($releaseVersion) -or $releaseVersion -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw 'Qualified release version is invalid.'
+          }
+          $launcher = Join-Path $PWD 'target\release\axiusflow_launcher.exe'
+          $desktop = Join-Path $PWD 'target\release\axiusflow_desktop.exe'
+          foreach ($path in @($launcher, $desktop)) {
+            $item = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($item.PSIsContainer -or $item.Length -le 0) {
+              throw "Qualified release artifact '$path' is invalid."
+            }
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "release_sha=$env:GITHUB_SHA"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "release_version=$releaseVersion"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "release_verifying_key=$env:RELEASE_VERIFYING_KEY_B64URL"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "authenticode_certificate_sha1=$env:AUTHENTICODE_CERTIFICATE_SHA1"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "authenticode_timestamp_url=$env:AUTHENTICODE_TIMESTAMP_URL"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "launcher_sha256=$((Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant())"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "desktop_sha256=$((Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash.ToLowerInvariant())"
+
+      - name: Upload qualified release binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: qualified-release-binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/release/axiusflow_launcher.exe
+            target/release/axiusflow_desktop.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove job-scoped chart credential
+        if: always()
+        shell: pwsh
+        run: Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'axiusflow-release-gitconfig') -Force -ErrorAction SilentlyContinue
+
+  release-windows:
+    needs: qualify-windows
+    # Configure this environment with required reviewers before granting it
+    # release credentials or access to the dedicated signing runner.
+    environment: production-release
+    runs-on: [self-hosted, axiusflow, windows, release-signing]
+    timeout-minutes: 60
+    env:
+      AXIUSFLOW_RELEASE_ENVIRONMENT: production-release
+      AUTHENTICODE_CERTIFICATE_SHA1: ${{ needs.qualify-windows.outputs.authenticode_certificate_sha1 }}
+      AUTHENTICODE_TIMESTAMP_URL: ${{ needs.qualify-windows.outputs.authenticode_timestamp_url }}
+      AUTHENTICODE_TOOL: ${{ vars.AUTHENTICODE_TOOL || 'signtool.exe' }}
+      WRANGLER_PATH: ${{ vars.WRANGLER_PATH || 'wrangler.cmd' }}
+      ISCC_PATH: ${{ vars.ISCC_PATH || 'ISCC.exe' }}
+      RELEASE_PUBLISHER_PATH: ${{ vars.RELEASE_PUBLISHER_PATH }}
+      RELEASE_PUBLISHER_SHA256: ${{ vars.RELEASE_PUBLISHER_SHA256 }}
+    steps:
+      - name: Check out exact main source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require exact pushed main revision
+        shell: pwsh
+        env:
+          CHECKOUT_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw "Production releases must be dispatched from refs/heads/main, got '$env:GITHUB_REF'."
+          }
+          git checkout -B main $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to bind the release checkout to the dispatched commit.' }
+          $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:CHECKOUT_TOKEN"))
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $basic"
+          try {
+            git fetch --no-tags origin main
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to refresh origin/main.' }
+          } finally {
+            Remove-Item Env:GIT_CONFIG_COUNT -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_CONFIG_KEY_0 -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
+          }
+          $head = (git rev-parse HEAD).Trim()
+          $originMain = (git rev-parse origin/main).Trim()
+          $branch = (git branch --show-current).Trim()
+          $status = (git status --porcelain --untracked-files=normal | Out-String).Trim()
+          if ($branch -ne 'main') { throw "Release checkout is not main: '$branch'." }
+          if ($head -ne $env:GITHUB_SHA) { throw "Release HEAD $head does not match dispatched commit $env:GITHUB_SHA." }
+          if ($head -ne $originMain) { throw "Release HEAD $head does not match origin/main $originMain." }
+          if ($status) { throw 'Release checkout is not clean.' }
+
+      - name: Download qualified release binaries
+        uses: actions/download-artifact@v5
+        with:
+          name: qualified-release-binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/release
+
+      - name: Validate qualified artifact set
+        shell: pwsh
+        env:
+          QUALIFIED_RELEASE_SHA: ${{ needs.qualify-windows.outputs.release_sha }}
+          EXPECTED_LAUNCHER_SHA256: ${{ needs.qualify-windows.outputs.launcher_sha256 }}
+          EXPECTED_DESKTOP_SHA256: ${{ needs.qualify-windows.outputs.desktop_sha256 }}
+        run: |
+          if ($env:QUALIFIED_RELEASE_SHA -ne $env:GITHUB_SHA) {
+            throw "Qualified binaries were built from $env:QUALIFIED_RELEASE_SHA, not dispatched commit $env:GITHUB_SHA."
+          }
+          $expected = @{
+            'axiusflow_launcher.exe' = $env:EXPECTED_LAUNCHER_SHA256
+            'axiusflow_desktop.exe' = $env:EXPECTED_DESKTOP_SHA256
+          }
+          foreach ($name in $expected.Keys) {
+            $path = Join-Path $PWD "target\release\$name"
+            $item = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($item.PSIsContainer -or $item.Length -le 0) {
+              throw "Qualified release artifact '$name' is invalid."
+            }
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($expected[$name]) -or $actual -ne $expected[$name]) {
+              throw "Qualified release artifact '$name' does not match its qualification hash."
+            }
+          }
+
+      - name: Validate protected publication secrets
+        shell: pwsh
+        env:
+          RELEASE_SIGNING_KEY_B64URL: ${{ secrets.RELEASE_SIGNING_KEY_B64URL }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          foreach ($required in @(
+              'RELEASE_SIGNING_KEY_B64URL',
+              'CLOUDFLARE_ACCOUNT_ID',
+              'CLOUDFLARE_API_TOKEN',
+              'AUTHENTICODE_CERTIFICATE_SHA1',
+              'AUTHENTICODE_TIMESTAMP_URL',
+              'RELEASE_PUBLISHER_PATH',
+              'RELEASE_PUBLISHER_SHA256'
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($required))) {
+              throw "Protected publication secret '$required' is missing."
+            }
+          }
+          if ($env:RELEASE_PUBLISHER_SHA256 -notmatch '^[0-9A-Fa-f]{64}$') {
+            throw 'RELEASE_PUBLISHER_SHA256 must be the protected digest of the independently provisioned publisher.'
+          }
+          $publisher = Get-Item -LiteralPath $env:RELEASE_PUBLISHER_PATH -ErrorAction Stop
+          if ($publisher.PSIsContainer -or $publisher.Length -le 0) {
+            throw 'The independently provisioned release publisher is invalid.'
+          }
+          $actualPublisherHash = (Get-FileHash -LiteralPath $publisher.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualPublisherHash -ne $env:RELEASE_PUBLISHER_SHA256.ToLowerInvariant()) {
+            throw 'The independently provisioned release publisher does not match its protected digest.'
+          }
+
+      - name: Materialize manifest signing key for publisher
+        shell: pwsh
+        env:
+          RELEASE_SIGNING_KEY_B64URL: ${{ secrets.RELEASE_SIGNING_KEY_B64URL }}
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP "axiusflow-release-signing-key-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.b64"
+          [IO.File]::WriteAllText($keyPath, $env:RELEASE_SIGNING_KEY_B64URL, [Text.UTF8Encoding]::new($false))
+
+      - name: Publish qualified signed release
+        shell: pwsh
+        env:
+          RELEASE_GENERATION: ${{ inputs.generation }}
+          RELEASE_VERSION: ${{ needs.qualify-windows.outputs.release_version }}
+          MINIMUM_LAUNCHER_VERSION: ${{ inputs.minimum_launcher_version }}
+          RELEASE_ROLLOUT_COHORT: ${{ inputs.rollout_cohort }}
+          RELEASE_ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+          RELEASE_VERIFYING_KEY_B64URL: ${{ needs.qualify-windows.outputs.release_verifying_key }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP "axiusflow-release-signing-key-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.b64"
+          tools/publish_release.ps1 `
+            -Generation $env:RELEASE_GENERATION `
+            -ReleaseVersion $env:RELEASE_VERSION `
+            -MinimumLauncherVersion $env:MINIMUM_LAUNCHER_VERSION `
+            -SigningKeyFile $keyPath `
+            -AuthenticodeCertificateSha1 $env:AUTHENTICODE_CERTIFICATE_SHA1 `
+            -AuthenticodeTimestampUrl $env:AUTHENTICODE_TIMESTAMP_URL `
+            -AuthenticodeTool $env:AUTHENTICODE_TOOL `
+            -WranglerPath $env:WRANGLER_PATH `
+            -IsccPath $env:ISCC_PATH `
+            -ReleaseVerifyingKey $env:RELEASE_VERIFYING_KEY_B64URL `
+            -RolloutCohort $env:RELEASE_ROLLOUT_COHORT `
+            -RolloutPercentage ([byte]$env:RELEASE_ROLLOUT_PERCENTAGE) `
+            -SkipQualification `
+            -SkipBuild `
+            -PublisherPath $env:RELEASE_PUBLISHER_PATH `
+            -PublisherSha256 $env:RELEASE_PUBLISHER_SHA256 `
+            -Channel stable
+
+      - name: Remove job-scoped release secrets
+        if: always()
+        shell: pwsh
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP "axiusflow-release-signing-key-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.b64"
+          Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue

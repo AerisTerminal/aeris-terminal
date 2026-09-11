@@ -10,6 +10,9 @@
 #ifndef DesktopPath
   #error DesktopPath must be supplied by the release publisher
 #endif
+#ifndef RollbackCompatibilityPath
+  #error RollbackCompatibilityPath must be supplied by the release publisher
+#endif
 #ifndef IconPath
   #error IconPath must be supplied by the release publisher
 #endif
@@ -61,6 +64,7 @@ Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "axiusflow_launcher.exe";
 Source: "{#ManifestPath}"; DestDir: "{tmp}\AxiusflowRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
 Source: "{#LauncherPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_launcher.exe"; Flags: deleteafterinstall
 Source: "{#DesktopPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "axiusflow_desktop.exe"; Flags: deleteafterinstall
+Source: "{#RollbackCompatibilityPath}"; DestDir: "{tmp}\AxiusflowRelease\bundle"; DestName: "rollback-compatibility.json"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{autoprograms}\Axiusflow\Axiusflow"; Filename: "{app}\axiusflow_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\axiusflow_launcher.exe"; AppUserModelID: "com.axiusflow.desktop"; Comment: "Axiusflow trading terminal"

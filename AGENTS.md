@@ -153,12 +153,22 @@ Only publish/install when the maintainer asks for a release or end-to-end instal
 
 - Release from a clean, pushed `main` worktree only.
 - Read the current public stable channel first and choose the next install generation.
-- Use `tools/publish_release.ps1 -Generation <N>`; do not bypass its qualification, signing, immutable
-  upload, or public-channel verification steps.
+- Production publication is CI-authoritative: dispatch `.github/workflows/release.yml` from `main` and
+  let its unprivileged `release-build` job qualify/prebuild candidate code before approving the protected
+  `production-release` signing job. The `release-signing` runner must use an independently provisioned,
+  protected-digest release publisher and must not rebuild candidate/dependency code after Ed25519,
+  Authenticode, or R2 credentials become available. Do not publish the stable channel from
+  a workstation or invoke the release publisher with production R2 credentials outside that workflow.
+- `tools/publish_release.ps1 -Generation <N> -PackageOnly ...` is the local qualification/package path.
+  The production workflow uses `-PrebuildOnly` before secrets exist and then a prebuilt publisher with
+  `-SkipQualification -SkipBuild -PublisherPath -PublisherSha256`; do not bypass qualification,
+  trusted-publisher digest verification, public-key binding, Authenticode/RFC 3161 signing,
+  manifest/provenance signing, immutable upload, rollout policy, or public-channel verification.
 - After publishing, verify the live stable channel and installer hash before installing.
 - For installed-app validation, verify the active lifecycle pointer, signed manifest, installed binary
-  hashes, stable/versioned launcher byte equality, and that the running desktop path points at the intended
-  immutable generation with no secondary market process or retired market autostart registration.
+  hashes and Authenticode publisher/timestamp, rollback-compatibility asset, stable/versioned launcher byte
+  equality, and that the running desktop path points at the intended immutable generation with no secondary
+  market process or retired market autostart registration.
 - Never claim live provider, account, or visual behavior was tested unless that exact path was exercised.
 
 ## Rust and documentation conventions

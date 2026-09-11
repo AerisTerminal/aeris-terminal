@@ -262,11 +262,6 @@ impl TerminalApp {
         self.account_menu_open = false;
         self.account_menu_anchor = None;
         self.about_dialog_open = true;
-        if let Some(updater) = self.updater.as_mut()
-            && let Err(error) = updater.request_check()
-        {
-            eprintln!("Axiusflow update check degraded: {error}");
-        }
         cx.notify();
     }
 
@@ -286,7 +281,7 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn update_now(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn restart_to_update(&mut self, cx: &mut Context<Self>) {
         if let Some(updater) = self.updater.as_mut()
             && let Err(error) = updater.request_restart()
         {

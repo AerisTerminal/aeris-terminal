@@ -5,6 +5,7 @@
 //! private key bytes or path through an environment variable.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -13,19 +14,28 @@ use std::{
 };
 
 use axiusflow_platform_runtime::{
-    RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseChannelPointer,
-    ReleaseFile, ReleaseFileRole, ReleaseInstallerMetadata, ReleaseManifest, RolloutMetadata,
-    sign_release_manifest, verify_release_manifest_signature,
+    BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_FILENAME, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor,
+    BlockFilePlan, BlockPlan, MAXIMUM_BLOCK_PLAN_BLOCKS, MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS,
+    RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION,
+    ROLLBACK_COMPATIBILITY_FILENAME, ReleaseChannelPointer, ReleaseFile, ReleaseFileRole,
+    ReleaseInstallerMetadata, ReleaseManifest, ReleasePolicy, RollbackCompatibilityMetadata,
+    RolloutMetadata, SignedReleaseManifest, decode_and_verify_block_plan, sign_block_plan,
+    sign_release_manifest, verify_release_file, verify_release_manifest,
+    verify_release_manifest_signature,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 const DEFAULT_CHANNEL: &str = "stable";
 const DEFAULT_OUTPUT_ROOT: &str = "target/release-publish";
 const WRANGLER_MAXIMUM_OBJECT_BYTES: u64 = 315 * 1024 * 1024;
 const MAXIMUM_CHANNEL_BYTES: u64 = 1024 * 1024;
+const RELEASE_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+const RELEASE_PROVENANCE_SIGNATURE_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_PROVENANCE_V1\0";
 const PUBLIC_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
+const VERIFY_AUTHENTICODE_METADATA: &str = r"$signature = Get-AuthenticodeSignature -LiteralPath $env:AXIUSFLOW_AUTHENTICODE_PATH; if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ine $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -or $null -eq $signature.TimeStamperCertificate) { exit 1 }";
 
 fn main() {
     if let Err(error) = run(std::env::args_os().skip(1)) {
@@ -37,31 +47,48 @@ fn main() {
 #[derive(Debug)]
 struct PublisherConfig {
     signing_key_file: PathBuf,
+    expected_verifying_key: Option<VerifyingKey>,
+    skip_build: bool,
     release_identity: String,
     generation: u64,
+    release_version: String,
     minimum_version: String,
     base_url: String,
     published_at: String,
     channel: String,
+    rollout_cohort: String,
+    rollout_percentage: u8,
     output_root: PathBuf,
     r2_bucket: Option<String>,
     wrangler: OsString,
     iscc: OsString,
+    authenticode_tool: OsString,
+    authenticode_certificate_sha1: Option<String>,
+    authenticode_timestamp_url: Option<String>,
 }
 
 impl PublisherConfig {
+    #[allow(clippy::too_many_lines)]
     fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Self, String> {
         let mut signing_key_file = None;
+        let mut expected_verifying_key = None;
+        let mut skip_build = false;
         let mut release_identity = None;
         let mut generation = None;
+        let mut release_version = None;
         let mut minimum_version = None;
         let mut base_url = None;
         let mut published_at = None;
         let mut channel = DEFAULT_CHANNEL.to_string();
+        let mut rollout_cohort = "all".to_string();
+        let mut rollout_percentage = 100_u8;
         let mut output_root = PathBuf::from(DEFAULT_OUTPUT_ROOT);
         let mut r2_bucket = None;
         let mut wrangler = OsString::from("wrangler");
         let mut iscc = OsString::from("ISCC.exe");
+        let mut authenticode_tool = OsString::from("signtool.exe");
+        let mut authenticode_certificate_sha1 = None;
+        let mut authenticode_timestamp_url = None;
         let mut arguments = arguments;
         while let Some(flag) = arguments.next() {
             let flag = flag
@@ -72,6 +99,11 @@ impl PublisherConfig {
                     signing_key_file =
                         Some(PathBuf::from(required_argument(&mut arguments, &flag)?));
                 }
+                "--expected-verifying-key" => {
+                    let encoded = required_argument(&mut arguments, &flag)?;
+                    expected_verifying_key = Some(parse_verifying_key(&encoded)?);
+                }
+                "--skip-build" => skip_build = true,
                 "--release-identity" => {
                     release_identity = Some(required_argument(&mut arguments, &flag)?);
                 }
@@ -86,12 +118,29 @@ impl PublisherConfig {
                             })?,
                     );
                 }
+                "--release-version" => {
+                    release_version = Some(required_argument(&mut arguments, &flag)?);
+                }
                 "--minimum-version" => {
                     minimum_version = Some(required_argument(&mut arguments, &flag)?);
                 }
                 "--base-url" => base_url = Some(required_argument(&mut arguments, &flag)?),
                 "--published-at" => published_at = Some(required_argument(&mut arguments, &flag)?),
                 "--channel" => channel = required_argument(&mut arguments, &flag)?,
+                "--rollout-cohort" => {
+                    rollout_cohort = required_argument(&mut arguments, &flag)?;
+                }
+                "--rollout-percentage" => {
+                    let raw = required_argument(&mut arguments, &flag)?;
+                    rollout_percentage = raw
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|value| *value <= 100)
+                        .ok_or_else(|| {
+                            "release rollout percentage must be an integer from 0 through 100"
+                                .to_string()
+                        })?;
+                }
                 "--output" => {
                     output_root = PathBuf::from(required_argument(&mut arguments, &flag)?);
                 }
@@ -102,38 +151,78 @@ impl PublisherConfig {
                 "--iscc" => {
                     iscc = OsString::from(required_argument(&mut arguments, &flag)?);
                 }
+                "--authenticode-tool" => {
+                    authenticode_tool = OsString::from(required_argument(&mut arguments, &flag)?);
+                }
+                "--authenticode-certificate-sha1" => {
+                    authenticode_certificate_sha1 = Some(required_argument(&mut arguments, &flag)?);
+                }
+                "--authenticode-timestamp-url" => {
+                    authenticode_timestamp_url = Some(required_argument(&mut arguments, &flag)?);
+                }
                 _ => return Err(usage()),
             }
         }
         let config = Self {
             signing_key_file: signing_key_file.ok_or_else(usage)?,
+            expected_verifying_key,
+            skip_build,
             release_identity: release_identity.ok_or_else(usage)?,
             generation: generation.ok_or_else(usage)?,
+            release_version: release_version.ok_or_else(usage)?,
             minimum_version: minimum_version.ok_or_else(usage)?,
             base_url: normalize_base_url(&base_url.ok_or_else(usage)?)?,
             published_at: published_at.ok_or_else(usage)?,
             channel,
+            rollout_cohort,
+            rollout_percentage,
             output_root,
             r2_bucket,
             wrangler,
             iscc,
+            authenticode_tool,
+            authenticode_certificate_sha1,
+            authenticode_timestamp_url,
         };
         if !valid_release_identity(&config.release_identity)
             || !valid_identifier(&config.channel, 32)
+            || !valid_identifier(&config.rollout_cohort, 64)
             || !valid_published_at(&config.published_at)
+            || semver::Version::parse(&config.release_version).is_err()
             || semver::Version::parse(&config.minimum_version).is_err()
         {
             return Err(
-                "release identity, minimum version, channel, or publish time is invalid"
+                "release identity, release version, minimum version, channel, or publish time is invalid"
                     .to_string(),
             );
+        }
+        if cfg!(target_os = "windows") {
+            let certificate = config
+                .authenticode_certificate_sha1
+                .as_deref()
+                .ok_or_else(|| {
+                    "Windows publishing requires an Authenticode certificate SHA-1 thumbprint"
+                        .to_string()
+                })?;
+            let timestamp_url = config
+                .authenticode_timestamp_url
+                .as_deref()
+                .ok_or_else(|| {
+                    "Windows publishing requires an RFC 3161 timestamp URL".to_string()
+                })?;
+            if !valid_certificate_sha1(certificate) || !valid_timestamp_url(timestamp_url) {
+                return Err(
+                    "Windows Authenticode certificate thumbprint or timestamp URL is invalid"
+                        .to_string(),
+                );
+            }
         }
         Ok(config)
     }
 }
 
 fn usage() -> String {
-    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> --release-identity <git-head> --generation <n> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>]".to_string()
+    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> [--expected-verifying-key <base64url-public-key>] [--skip-build] --release-identity <git-head> --generation <n> --release-version <candidate-semver> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--rollout-cohort all] [--rollout-percentage 100] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>] [--authenticode-tool <signtool>] --authenticode-certificate-sha1 <40-hex-thumbprint> --authenticode-timestamp-url <RFC3161-url>".to_string()
 }
 
 fn required_argument(
@@ -149,6 +238,16 @@ fn required_argument(
 
 fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     let config = PublisherConfig::parse(arguments)?;
+    verify_production_publication_context(config.r2_bucket.as_deref(), |key| {
+        std::env::var_os(key)
+    })?;
+    if config.r2_bucket.is_some() && (!config.skip_build || config.expected_verifying_key.is_none())
+    {
+        return Err(
+            "production publication requires a separately qualified prebuilt release and an explicit expected verifying key"
+                .to_string(),
+        );
+    }
     let repository =
         std::env::current_dir().map_err(|_| "repository directory is unavailable".to_string())?;
     if !repository.join("Cargo.toml").is_file() {
@@ -157,12 +256,57 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     verify_repository_identity(&repository, &config.release_identity)?;
     let signing_key = read_signing_key(&config.signing_key_file)?;
     let verifying_key = signing_key.verifying_key();
-    build_release_binaries(&repository, &config, &verifying_key)?;
+    if config
+        .expected_verifying_key
+        .as_ref()
+        .is_some_and(|expected| expected != &verifying_key)
+    {
+        return Err(
+            "release signing key does not match the qualified public verifying key".to_string(),
+        );
+    }
+    if !config.skip_build {
+        build_release_binaries(&repository, &config, &verifying_key)?;
+    }
     let binaries = release_binary_paths(&repository);
     let published = package_release(&repository, &config, &signing_key, &binaries)?;
     print_release_summary(&published);
     if let Some(bucket) = config.r2_bucket.as_deref() {
-        upload_release(&config, bucket, &published, &verifying_key)?;
+        upload_release(&config, bucket, &published, &signing_key, &verifying_key)?;
+    }
+    Ok(())
+}
+
+fn parse_verifying_key(encoded: &str) -> Result<VerifyingKey, String> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| "release verifying key is not valid base64url".to_string())?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "release verifying key must contain exactly 32 bytes".to_string())?;
+    VerifyingKey::from_bytes(&bytes).map_err(|_| "release verifying key is invalid".to_string())
+}
+
+fn verify_production_publication_context(
+    r2_bucket: Option<&str>,
+    environment: impl Fn(&str) -> Option<OsString>,
+) -> Result<(), String> {
+    if r2_bucket.is_none() {
+        return Ok(());
+    }
+    for (name, expected) in [
+        ("GITHUB_ACTIONS", "true"),
+        ("GITHUB_WORKFLOW", "Production release"),
+        ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+        ("GITHUB_REF", "refs/heads/main"),
+        ("AXIUSFLOW_RELEASE_ENVIRONMENT", "production-release"),
+    ] {
+        if environment(name).as_deref() != Some(std::ffi::OsStr::new(expected)) {
+            return Err(
+                "R2 publication is restricted to the protected Production release GitHub Actions workflow"
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -177,6 +321,20 @@ fn normalize_base_url(value: &str) -> Result<String, String> {
         return Err("release base URL is invalid".to_string());
     }
     Ok(value.to_string())
+}
+
+fn valid_certificate_sha1(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_timestamp_url(value: &str) -> bool {
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !rest.is_empty() && !rest.starts_with('/') && !value.contains([' ', '\n', '\r', '\t', '#'])
 }
 
 fn valid_identifier(value: &str, maximum: usize) -> bool {
@@ -364,6 +522,9 @@ fn configure_release_build(
         .env("AXIUSFLOW_RELEASE_IDENTITY", &config.release_identity)
         .env("AXIUSFLOW_INSTALL_GENERATION", generation)
         .stdin(Stdio::null());
+    if let Some(certificate) = config.authenticode_certificate_sha1.as_deref() {
+        command.env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", certificate);
+    }
 }
 
 fn run_child(mut command: Command, description: &str) -> Result<(), String> {
@@ -411,6 +572,36 @@ struct UploadObject {
     local_path: PathBuf,
     object_key: String,
     content_type: &'static str,
+    requires_authenticode: bool,
+    requires_provenance_signature: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseProvenanceArtifact {
+    name: String,
+    size: u64,
+    sha256_b64url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseProvenance {
+    schema_version: u32,
+    release_identity: String,
+    install_generation: u64,
+    channel: String,
+    platform: String,
+    architecture: String,
+    rollout: RolloutMetadata,
+    artifacts: Vec<ReleaseProvenanceArtifact>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedReleaseProvenance {
+    provenance: ReleaseProvenance,
+    signature_b64url: String,
 }
 
 #[derive(Debug)]
@@ -444,11 +635,21 @@ fn package_release(
     let setup_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
     let launcher_name = format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX);
     let desktop_name = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
+    let rollback_compatibility_name = ROLLBACK_COMPATIBILITY_FILENAME;
     let setup_path = release_directory.join(&setup_name);
     let launcher_path = release_directory.join(&launcher_name);
     let desktop_path = release_directory.join(&desktop_name);
+    let rollback_compatibility_path = release_directory.join(rollback_compatibility_name);
     copy_release_binary(&binaries.launcher, &launcher_path)?;
     copy_release_binary(&binaries.desktop, &desktop_path)?;
+    if cfg!(target_os = "windows") && !cfg!(test) {
+        sign_authenticode_file(config, &launcher_path)?;
+        sign_authenticode_file(config, &desktop_path)?;
+    }
+    write_json_new(
+        &rollback_compatibility_path,
+        &RollbackCompatibilityMetadata::current(),
+    )?;
 
     let mut files = vec![
         release_file(
@@ -457,6 +658,7 @@ fn package_release(
             &desktop_name,
             &format!("{release_public_root}/{desktop_name}"),
             &config.base_url,
+            true,
         )?,
         release_file(
             ReleaseFileRole::RuntimeAsset,
@@ -464,6 +666,15 @@ fn package_release(
             &launcher_name,
             &format!("{release_public_root}/{launcher_name}"),
             &config.base_url,
+            true,
+        )?,
+        release_file(
+            ReleaseFileRole::RuntimeAsset,
+            &rollback_compatibility_path,
+            rollback_compatibility_name,
+            &format!("{release_public_root}/{rollback_compatibility_name}"),
+            &config.base_url,
+            false,
         )?,
     ];
     files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -477,8 +688,8 @@ fn package_release(
         architecture: architecture.to_string(),
         files,
         rollout: RolloutMetadata {
-            cohort: "all".to_string(),
-            percentage: 100,
+            cohort: config.rollout_cohort.clone(),
+            percentage: config.rollout_percentage,
         },
     };
     let signed = sign_release_manifest(manifest, signing_key)
@@ -499,8 +710,10 @@ fn package_release(
                 &launcher_path,
                 &manifest_path,
                 &desktop_path,
+                &rollback_compatibility_path,
                 &setup_path,
             )?;
+            sign_authenticode_file(config, &setup_path)?;
         }
     } else {
         // The public native installer is currently a Windows product. Keep
@@ -518,6 +731,31 @@ fn package_release(
         size: setup_metadata.len(),
         sha256_b64url: file_sha256_base64url(&setup_path)?,
     };
+    let provenance_path = release_directory.join("provenance.json");
+    let provenance = sign_release_provenance(
+        ReleaseProvenance {
+            schema_version: RELEASE_PROVENANCE_SCHEMA_VERSION,
+            release_identity: config.release_identity.clone(),
+            install_generation: config.generation,
+            channel: config.channel.clone(),
+            platform: platform.to_string(),
+            architecture: architecture.to_string(),
+            rollout: RolloutMetadata {
+                cohort: config.rollout_cohort.clone(),
+                percentage: config.rollout_percentage,
+            },
+            artifacts: vec![
+                provenance_artifact(&setup_name, &setup_path)?,
+                provenance_artifact("manifest.json", &manifest_path)?,
+                provenance_artifact(&launcher_name, &launcher_path)?,
+                provenance_artifact(&desktop_name, &desktop_path)?,
+                provenance_artifact(rollback_compatibility_name, &rollback_compatibility_path)?,
+            ],
+        },
+        signing_key,
+    )?;
+    write_json_new(&provenance_path, &provenance)?;
+    verify_release_provenance_file(&provenance_path, &signing_key.verifying_key())?;
     let channel = ReleaseChannelPointer {
         schema_version: RELEASE_CHANNEL_SCHEMA_VERSION,
         channel: config.channel.clone(),
@@ -525,7 +763,7 @@ fn package_release(
         architecture: architecture.to_string(),
         release_identity: config.release_identity.clone(),
         install_generation: config.generation,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: config.release_version.clone(),
         published_at: config.published_at.clone(),
         manifest_url,
         signed_release: signed,
@@ -545,21 +783,43 @@ fn package_release(
             local_path: setup_path,
             object_key: format!("{release_object_root}/{setup_name}"),
             content_type: executable_content_type,
+            requires_authenticode: cfg!(target_os = "windows"),
+            requires_provenance_signature: false,
         },
         UploadObject {
             local_path: launcher_path,
             object_key: format!("{release_object_root}/{launcher_name}"),
             content_type: executable_content_type,
+            requires_authenticode: cfg!(target_os = "windows"),
+            requires_provenance_signature: false,
         },
         UploadObject {
             local_path: desktop_path,
             object_key: format!("{release_object_root}/{desktop_name}"),
             content_type: executable_content_type,
+            requires_authenticode: cfg!(target_os = "windows"),
+            requires_provenance_signature: false,
         },
         UploadObject {
             local_path: manifest_path.clone(),
             object_key: format!("{release_object_root}/manifest.json"),
             content_type: "application/json",
+            requires_authenticode: false,
+            requires_provenance_signature: false,
+        },
+        UploadObject {
+            local_path: rollback_compatibility_path,
+            object_key: format!("{release_object_root}/{rollback_compatibility_name}"),
+            content_type: "application/json",
+            requires_authenticode: false,
+            requires_provenance_signature: false,
+        },
+        UploadObject {
+            local_path: provenance_path,
+            object_key: format!("{release_object_root}/provenance.json"),
+            content_type: "application/json",
+            requires_authenticode: false,
+            requires_provenance_signature: true,
         },
     ];
     Ok(PublishedRelease {
@@ -571,6 +831,8 @@ fn package_release(
             local_path: channel_path,
             object_key: channel_object_key,
             content_type: "application/json",
+            requires_authenticode: false,
+            requires_provenance_signature: false,
         },
     })
 }
@@ -592,12 +854,177 @@ fn copy_release_binary(source: &Path, destination: &Path) -> Result<(), String> 
     Ok(())
 }
 
+fn provenance_artifact(name: &str, path: &Path) -> Result<ReleaseProvenanceArtifact, String> {
+    let size = fs::metadata(path)
+        .map_err(|_| "release provenance artifact metadata is unavailable".to_string())?
+        .len();
+    if size == 0 {
+        return Err("release provenance artifact is empty".to_string());
+    }
+    Ok(ReleaseProvenanceArtifact {
+        name: name.to_string(),
+        size,
+        sha256_b64url: file_sha256_base64url(path)?,
+    })
+}
+
+fn sign_release_provenance(
+    provenance: ReleaseProvenance,
+    key: &SigningKey,
+) -> Result<SignedReleaseProvenance, String> {
+    validate_release_provenance(&provenance)?;
+    let canonical = serde_json::to_vec(&provenance)
+        .map_err(|_| "release provenance could not be serialized".to_string())?;
+    let mut message =
+        Vec::with_capacity(RELEASE_PROVENANCE_SIGNATURE_DOMAIN.len() + canonical.len());
+    message.extend_from_slice(RELEASE_PROVENANCE_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&canonical);
+    Ok(SignedReleaseProvenance {
+        provenance,
+        signature_b64url: URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
+    })
+}
+
+fn verify_release_provenance_file(path: &Path, key: &VerifyingKey) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|_| "signed release provenance metadata is unavailable".to_string())?;
+    if metadata.len() == 0 || metadata.len() > MAXIMUM_CHANNEL_BYTES {
+        return Err("signed release provenance size is invalid".to_string());
+    }
+    let signed: SignedReleaseProvenance = serde_json::from_slice(
+        &fs::read(path).map_err(|_| "signed release provenance could not be read".to_string())?,
+    )
+    .map_err(|_| "signed release provenance is malformed".to_string())?;
+    validate_release_provenance(&signed.provenance)?;
+    let canonical = serde_json::to_vec(&signed.provenance)
+        .map_err(|_| "release provenance could not be serialized".to_string())?;
+    let mut message =
+        Vec::with_capacity(RELEASE_PROVENANCE_SIGNATURE_DOMAIN.len() + canonical.len());
+    message.extend_from_slice(RELEASE_PROVENANCE_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&canonical);
+    let signature = URL_SAFE_NO_PAD
+        .decode(&signed.signature_b64url)
+        .map_err(|_| "release provenance signature is invalid".to_string())?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| "release provenance signature is invalid".to_string())?;
+    key.verify(&message, &signature)
+        .map_err(|_| "release provenance signature verification failed".to_string())
+}
+
+fn validate_release_provenance(provenance: &ReleaseProvenance) -> Result<(), String> {
+    if provenance.schema_version != RELEASE_PROVENANCE_SCHEMA_VERSION
+        || !valid_release_identity(&provenance.release_identity)
+        || provenance.install_generation == 0
+        || !valid_identifier(&provenance.channel, 32)
+        || !valid_identifier(&provenance.platform, 32)
+        || !valid_identifier(&provenance.architecture, 32)
+        || !valid_identifier(&provenance.rollout.cohort, 64)
+        || provenance.rollout.percentage > 100
+        || provenance.artifacts.len() != 5
+    {
+        return Err("release provenance shape is invalid".to_string());
+    }
+    let expected_names = BTreeSet::from([
+        format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX),
+        "manifest.json".to_string(),
+        format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX),
+        format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX),
+        ROLLBACK_COMPATIBILITY_FILENAME.to_string(),
+    ]);
+    let mut actual_names = BTreeSet::new();
+    for artifact in &provenance.artifacts {
+        let digest = URL_SAFE_NO_PAD
+            .decode(&artifact.sha256_b64url)
+            .map_err(|_| "release provenance artifact hash is invalid".to_string())?;
+        if !valid_identifier(&artifact.name, 128)
+            || artifact.size == 0
+            || digest.len() != 32
+            || !actual_names.insert(artifact.name.clone())
+        {
+            return Err("release provenance artifact is invalid".to_string());
+        }
+    }
+    if actual_names != expected_names {
+        return Err("release provenance artifact inventory is incomplete".to_string());
+    }
+    Ok(())
+}
+
+fn authenticode_settings(config: &PublisherConfig) -> Result<(&str, &str), String> {
+    let certificate = config
+        .authenticode_certificate_sha1
+        .as_deref()
+        .ok_or_else(|| "Authenticode certificate thumbprint is unavailable".to_string())?;
+    let timestamp_url = config
+        .authenticode_timestamp_url
+        .as_deref()
+        .ok_or_else(|| "Authenticode timestamp URL is unavailable".to_string())?;
+    if !valid_certificate_sha1(certificate) || !valid_timestamp_url(timestamp_url) {
+        return Err("Authenticode signing configuration is invalid".to_string());
+    }
+    Ok((certificate, timestamp_url))
+}
+
+fn sign_authenticode_file(config: &PublisherConfig, path: &Path) -> Result<(), String> {
+    let (certificate, timestamp_url) = authenticode_settings(config)?;
+    let mut command = Command::new(&config.authenticode_tool);
+    command
+        .args([
+            "sign",
+            "/sha1",
+            certificate,
+            "/fd",
+            "SHA256",
+            "/tr",
+            timestamp_url,
+            "/td",
+            "SHA256",
+            "/v",
+        ])
+        .arg(path)
+        .stdin(Stdio::null());
+    run_child(command, "Authenticode signing")?;
+    verify_authenticode_file(config, path)
+}
+
+fn verify_authenticode_file(config: &PublisherConfig, path: &Path) -> Result<(), String> {
+    let (certificate, _) = authenticode_settings(config)?;
+    let mut signtool = Command::new(&config.authenticode_tool);
+    signtool
+        .args(["verify", "/pa", "/all", "/v"])
+        .arg(path)
+        .stdin(Stdio::null());
+    run_child(signtool, "Authenticode verification")?;
+
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            VERIFY_AUTHENTICODE_METADATA,
+        ])
+        .env("AXIUSFLOW_AUTHENTICODE_PATH", path)
+        .env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", certificate)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|_| "Authenticode metadata verification could not be started".to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(
+            "Authenticode signature must be valid, use the intended publisher certificate, and carry an RFC 3161 timestamp"
+                .to_string(),
+        )
+    }
+}
+
 fn compile_windows_installer(
     repository: &Path,
     config: &PublisherConfig,
     launcher_path: &Path,
     manifest_path: &Path,
     desktop_path: &Path,
+    rollback_compatibility_path: &Path,
     setup_path: &Path,
 ) -> Result<(), String> {
     let script = repository.join("tools/windows/axiusflow_setup.iss");
@@ -608,6 +1035,7 @@ fn compile_windows_installer(
         launcher_path,
         manifest_path,
         desktop_path,
+        rollback_compatibility_path,
     ] {
         let metadata = fs::symlink_metadata(input)
             .map_err(|_| "Windows installer input is unavailable".to_string())?;
@@ -623,10 +1051,14 @@ fn compile_windows_installer(
         .ok_or_else(|| "Windows installer output path is invalid".to_string())?;
     let status = Command::new(&config.iscc)
         .arg("/Qp")
-        .arg(format!("/DAppVersion={}", env!("CARGO_PKG_VERSION")))
+        .arg(format!("/DAppVersion={}", config.release_version))
         .arg(format!("/DLauncherPath={}", launcher_path.display()))
         .arg(format!("/DManifestPath={}", manifest_path.display()))
         .arg(format!("/DDesktopPath={}", desktop_path.display()))
+        .arg(format!(
+            "/DRollbackCompatibilityPath={}",
+            rollback_compatibility_path.display()
+        ))
         .arg(format!("/DIconPath={}", icon.display()))
         .arg(format!("/DOutputDir={}", output_dir.display()))
         .arg(&script)
@@ -651,6 +1083,7 @@ fn release_file(
     name: &str,
     object_key: &str,
     base_url: &str,
+    executable: bool,
 ) -> Result<ReleaseFile, String> {
     let metadata = fs::metadata(path)
         .map_err(|_| "packaged release binary metadata is unavailable".to_string())?;
@@ -660,7 +1093,7 @@ fn release_file(
         url: format!("{base_url}/{object_key}"),
         size: metadata.len(),
         sha256: file_sha256_base64url(path)?,
-        executable: true,
+        executable,
     })
 }
 
@@ -730,10 +1163,12 @@ fn print_release_summary(release: &PublishedRelease) {
     println!("channel_object={}", release.channel_object.object_key);
 }
 
+#[allow(clippy::too_many_lines)]
 fn upload_release(
     config: &PublisherConfig,
     bucket: &str,
     release: &PublishedRelease,
+    signing_key: &SigningKey,
     verifying_key: &VerifyingKey,
 ) -> Result<(), String> {
     if !valid_identifier(bucket, 128) {
@@ -742,8 +1177,25 @@ fn upload_release(
     let verify_root = config.output_root.join(".r2-verify");
     fs::create_dir_all(&verify_root)
         .map_err(|_| "R2 verification directory could not be created".to_string())?;
-    verify_remote_channel_progression(config, bucket, release, verifying_key, &verify_root)?;
-    for object in &release.immutable_objects {
+    let predecessor =
+        verify_remote_channel_progression(config, bucket, release, verifying_key, &verify_root)?;
+    let block_plan_object = if let Some(predecessor) = predecessor.as_ref() {
+        build_optional_block_plan_object(
+            config,
+            bucket,
+            release,
+            predecessor,
+            signing_key,
+            &verify_root,
+        )?
+    } else {
+        None
+    };
+    for object in release
+        .immutable_objects
+        .iter()
+        .chain(block_plan_object.iter())
+    {
         ensure_wrangler_size(object)?;
         match wrangler_get(config, bucket, &object.object_key, &verify_root)? {
             RemoteObject::Missing => {}
@@ -756,7 +1208,11 @@ fn upload_release(
             }
         }
     }
-    for object in &release.immutable_objects {
+    for object in release
+        .immutable_objects
+        .iter()
+        .chain(block_plan_object.iter())
+    {
         wrangler_put(
             config,
             bucket,
@@ -771,11 +1227,26 @@ fn upload_release(
                 object.object_key
             ));
         };
-        verify_uploaded_object(object, &downloaded)?;
+        verify_uploaded_object(config, object, &downloaded, verifying_key)?;
+        if object
+            .object_key
+            .ends_with(&format!("/{BLOCK_PLAN_FILENAME}"))
+        {
+            let predecessor = predecessor
+                .as_ref()
+                .ok_or_else(|| "release block plan has no authenticated predecessor".to_string())?;
+            verify_block_plan_readback(
+                &downloaded,
+                predecessor,
+                &release.manifest_path,
+                verifying_key,
+            )?;
+        }
         fs::remove_file(downloaded)
             .map_err(|_| "R2 verification artifact could not be removed".to_string())?;
         verify_public_object(config, object)?;
     }
+    verify_candidate_release_for_publication(release, verifying_key)?;
     ensure_wrangler_size(&release.channel_object)?;
     // Publish the mutable pointer last so clients can never discover a
     // release before every referenced immutable object is present.
@@ -794,9 +1265,15 @@ fn upload_release(
     else {
         return Err("published stable channel could not be read back from R2".to_string());
     };
-    verify_uploaded_object(&release.channel_object, &downloaded_channel)?;
+    verify_uploaded_object(
+        config,
+        &release.channel_object,
+        &downloaded_channel,
+        verifying_key,
+    )?;
     fs::remove_file(downloaded_channel)
         .map_err(|_| "stable channel verification artifact could not be removed".to_string())?;
+    verify_public_object(config, &release.channel_object)?;
     let _ = fs::remove_dir(verify_root);
     Ok(())
 }
@@ -807,7 +1284,7 @@ fn verify_remote_channel_progression(
     release: &PublishedRelease,
     verifying_key: &VerifyingKey,
     verify_root: &Path,
-) -> Result<(), String> {
+) -> Result<Option<ReleaseChannelPointer>, String> {
     let remote = wrangler_get(
         config,
         bucket,
@@ -815,7 +1292,7 @@ fn verify_remote_channel_progression(
         verify_root,
     )?;
     let RemoteObject::Downloaded(path) = remote else {
-        return Ok(());
+        return Ok(None);
     };
     let result = (|| {
         let metadata = fs::metadata(&path)
@@ -828,26 +1305,404 @@ fn verify_remote_channel_progression(
                 .map_err(|_| "existing stable channel could not be read".to_string())?,
         )
         .map_err(|_| "existing stable channel is malformed".to_string())?;
-        verify_release_manifest_signature(&channel.signed_release, verifying_key)
-            .map_err(|_| "existing stable channel signature cannot be verified".to_string())?;
-        if channel.channel != config.channel
-            || channel.platform != std::env::consts::OS
-            || channel.architecture != std::env::consts::ARCH
-            || channel.install_generation != channel.signed_release.manifest.install_generation
-            || channel.release_identity != channel.signed_release.manifest.release_identity
-        {
-            return Err("existing stable channel identity is inconsistent".to_string());
-        }
+        validate_predecessor_channel(config, &channel, verifying_key)?;
         if channel.install_generation >= config.generation {
             return Err(format!(
-                "stable channel generation {} is not older than candidate generation {}",
+                "stable channel generation {} is not older than candidate generation {}; rollout hold or promotion must use a newer generation",
                 channel.install_generation, config.generation
             ));
         }
-        Ok(())
+        Ok(Some(channel))
     })();
     let _ = fs::remove_file(path);
     result
+}
+
+fn validate_predecessor_channel(
+    config: &PublisherConfig,
+    channel: &ReleaseChannelPointer,
+    verifying_key: &VerifyingKey,
+) -> Result<(), String> {
+    // A predecessor is an authenticated block source and monotonic channel
+    // witness, not a candidate for current installation. Older signed release
+    // shapes can therefore remain valid predecessors even after current local
+    // policy has retired those shapes.
+    verify_release_manifest_signature(&channel.signed_release, verifying_key)
+        .map_err(|_| "existing stable channel signed manifest is invalid".to_string())?;
+    let manifest = &channel.signed_release.manifest;
+    validate_predecessor_manifest_shape(manifest)?;
+    if channel.schema_version != RELEASE_CHANNEL_SCHEMA_VERSION
+        || channel.channel != config.channel
+        || channel.channel != manifest.channel
+        || channel.platform != std::env::consts::OS
+        || channel.platform != manifest.platform
+        || channel.architecture != std::env::consts::ARCH
+        || channel.architecture != manifest.architecture
+        || channel.install_generation != manifest.install_generation
+        || channel.release_identity != manifest.release_identity
+        || !valid_published_at(&channel.published_at)
+        || channel.version.is_empty()
+        || channel.version.len() > 64
+    {
+        return Err("existing stable channel identity is inconsistent".to_string());
+    }
+    let expected_manifest_url = format!(
+        "{}/{}/{}/{}-{}/manifest.json",
+        config.base_url,
+        manifest.platform,
+        manifest.architecture,
+        manifest.install_generation,
+        manifest.release_identity
+    );
+    if channel.manifest_url != expected_manifest_url {
+        return Err("existing stable channel manifest URL is inconsistent".to_string());
+    }
+    Ok(())
+}
+
+fn validate_predecessor_manifest_shape(manifest: &ReleaseManifest) -> Result<(), String> {
+    if manifest.schema_version == 0
+        || manifest.install_generation == 0
+        || !valid_release_identity(&manifest.release_identity)
+        || !valid_identifier(&manifest.channel, 32)
+        || !valid_identifier(&manifest.platform, 32)
+        || !valid_identifier(&manifest.architecture, 32)
+        || !valid_identifier(&manifest.rollout.cohort, 64)
+        || manifest.rollout.percentage > 100
+        || manifest.files.is_empty()
+        || manifest.files.len() > 256
+    {
+        return Err("existing stable channel signed manifest shape is invalid".to_string());
+    }
+    let mut paths = BTreeSet::new();
+    for file in &manifest.files {
+        let path = Path::new(&file.path);
+        let digest = URL_SAFE_NO_PAD
+            .decode(&file.sha256)
+            .map_err(|_| "existing stable channel file hash is invalid".to_string())?;
+        if file.size == 0
+            || digest.len() != 32
+            || !file.url.starts_with("https://")
+            || !path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            || !paths.insert(file.path.as_str())
+        {
+            return Err("existing stable channel signed manifest shape is invalid".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn verify_block_plan_readback(
+    path: &Path,
+    predecessor: &ReleaseChannelPointer,
+    target_manifest_path: &Path,
+    verifying_key: &VerifyingKey,
+) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|_| "release block plan read-back failed".to_string())?;
+    let target: SignedReleaseManifest = serde_json::from_slice(
+        &fs::read(target_manifest_path)
+            .map_err(|_| "candidate signed manifest could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate signed manifest is malformed".to_string())?;
+    decode_and_verify_block_plan(
+        &bytes,
+        &predecessor.signed_release.manifest,
+        &target.manifest,
+        verifying_key,
+    )
+    .map(|_| ())
+    .map_err(|error| format!("release block plan read-back verification failed: {error}"))
+}
+
+fn verify_candidate_release_for_publication(
+    release: &PublishedRelease,
+    verifying_key: &VerifyingKey,
+) -> Result<(), String> {
+    let signed: SignedReleaseManifest = serde_json::from_slice(
+        &fs::read(&release.manifest_path)
+            .map_err(|_| "candidate signed manifest could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate signed manifest is malformed".to_string())?;
+    verify_release_manifest(&signed, verifying_key, &ReleasePolicy::native(0))
+        .map_err(|_| "candidate signed manifest failed final verification".to_string())?;
+    for file in &signed.manifest.files {
+        verify_release_file(&release.release_directory.join(&file.path), file)
+            .map_err(|_| "candidate release artifact failed final verification".to_string())?;
+    }
+    let provenance = release
+        .immutable_objects
+        .iter()
+        .find(|object| object.requires_provenance_signature)
+        .ok_or_else(|| "candidate signed provenance is missing".to_string())?;
+    verify_release_provenance_file(&provenance.local_path, verifying_key)
+}
+
+fn build_optional_block_plan_object(
+    config: &PublisherConfig,
+    bucket: &str,
+    release: &PublishedRelease,
+    predecessor: &ReleaseChannelPointer,
+    signing_key: &SigningKey,
+    verify_root: &Path,
+) -> Result<Option<UploadObject>, String> {
+    let target_signed: SignedReleaseManifest = serde_json::from_slice(
+        &fs::read(&release.manifest_path)
+            .map_err(|_| "candidate signed manifest could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate signed manifest is malformed".to_string())?;
+    let source = &predecessor.signed_release.manifest;
+    let target = &target_signed.manifest;
+    let mut plans = collect_block_file_plans(config, bucket, release, source, target, verify_root)?;
+    if plans.is_empty() {
+        return Ok(None);
+    }
+    plans.sort_by(|left, right| left.path.cmp(&right.path));
+    let signed = sign_block_plan(
+        BlockPlan {
+            schema_version: BLOCK_PLAN_SCHEMA_VERSION,
+            source_release_identity: source.release_identity.clone(),
+            source_install_generation: source.install_generation,
+            target_release_identity: target.release_identity.clone(),
+            target_install_generation: target.install_generation,
+            files: plans,
+        },
+        source,
+        target,
+        signing_key,
+    )
+    .map_err(|error| format!("release block plan signing failed: {error}"))?;
+    let encoded = serde_json::to_vec(&signed)
+        .map_err(|_| "release block plan could not be serialized".to_string())?;
+    decode_and_verify_block_plan(&encoded, source, target, &signing_key.verifying_key())
+        .map_err(|error| format!("release block plan verification failed: {error}"))?;
+    let path = release.release_directory.join(BLOCK_PLAN_FILENAME);
+    write_bytes_new(&path, &encoded)?;
+    Ok(Some(UploadObject {
+        local_path: path,
+        object_key: format!(
+            "releases/{}/{}/{}-{}/{}",
+            target.platform,
+            target.architecture,
+            target.install_generation,
+            target.release_identity,
+            BLOCK_PLAN_FILENAME
+        ),
+        content_type: "application/json",
+        requires_authenticode: false,
+        requires_provenance_signature: false,
+    }))
+}
+
+fn collect_block_file_plans(
+    config: &PublisherConfig,
+    bucket: &str,
+    release: &PublishedRelease,
+    source: &ReleaseManifest,
+    target: &ReleaseManifest,
+    verify_root: &Path,
+) -> Result<Vec<BlockFilePlan>, String> {
+    let mut plans = Vec::new();
+    let mut total_blocks = 0_usize;
+    let mut total_downloads = 0_usize;
+    for target_file in &target.files {
+        let Some(plan) = fetch_predecessor_block_file_plan(
+            config,
+            bucket,
+            release,
+            source,
+            target_file,
+            verify_root,
+        )?
+        else {
+            continue;
+        };
+        let block_count = plan.blocks.len();
+        let download_count = plan
+            .blocks
+            .iter()
+            .filter(|block| block.source_offset.is_none())
+            .count();
+        if total_blocks.saturating_add(block_count) > MAXIMUM_BLOCK_PLAN_BLOCKS
+            || total_downloads.saturating_add(download_count) > MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS
+        {
+            continue;
+        }
+        total_blocks += block_count;
+        total_downloads += download_count;
+        plans.push(plan);
+    }
+    Ok(plans)
+}
+
+fn fetch_predecessor_block_file_plan(
+    config: &PublisherConfig,
+    bucket: &str,
+    release: &PublishedRelease,
+    source: &ReleaseManifest,
+    target_file: &ReleaseFile,
+    verify_root: &Path,
+) -> Result<Option<BlockFilePlan>, String> {
+    let Some(source_file) = source
+        .files
+        .iter()
+        .find(|file| file.path == target_file.path)
+    else {
+        return Ok(None);
+    };
+    let expected_source_url = format!(
+        "{}/{}/{}/{}-{}/{}",
+        config.base_url,
+        source.platform,
+        source.architecture,
+        source.install_generation,
+        source.release_identity,
+        target_file.path
+    );
+    if source_file.url != expected_source_url {
+        return Ok(None);
+    }
+    let source_object_key = format!(
+        "releases/{}/{}/{}-{}/{}",
+        source.platform,
+        source.architecture,
+        source.install_generation,
+        source.release_identity,
+        target_file.path
+    );
+    let Ok(remote) = wrangler_get(config, bucket, &source_object_key, verify_root) else {
+        return Ok(None);
+    };
+    let RemoteObject::Downloaded(source_path) = remote else {
+        return Ok(None);
+    };
+    let target_path = release.release_directory.join(&target_file.path);
+    let candidate = (|| {
+        if verify_release_file(&source_path, source_file).is_err() {
+            return Ok(None);
+        }
+        verify_release_file(&target_path, target_file)
+            .map_err(|_| "candidate release artifact verification failed".to_string())?;
+        build_block_file_plan(&source_path, source_file, &target_path, target_file)
+    })();
+    let _ = fs::remove_file(source_path);
+    candidate
+}
+
+fn build_block_file_plan(
+    source_path: &Path,
+    source: &ReleaseFile,
+    target_path: &Path,
+    target: &ReleaseFile,
+) -> Result<Option<BlockFilePlan>, String> {
+    let source_blocks = source.size.div_ceil(BLOCK_PLAN_BLOCK_BYTES);
+    let target_blocks = target.size.div_ceil(BLOCK_PLAN_BLOCK_BYTES);
+    let maximum_blocks = u64::try_from(MAXIMUM_BLOCK_PLAN_BLOCKS)
+        .map_err(|_| "release block count bound is invalid".to_string())?;
+    if source_blocks == 0
+        || target_blocks == 0
+        || source_blocks > maximum_blocks
+        || target_blocks > maximum_blocks
+    {
+        return Ok(None);
+    }
+
+    let mut source_file = File::open(source_path)
+        .map_err(|_| "predecessor release artifact could not be opened".to_string())?;
+    let block_bytes = usize::try_from(BLOCK_PLAN_BLOCK_BYTES)
+        .map_err(|_| "release block size does not fit this platform".to_string())?;
+    let mut buffer = vec![0_u8; block_bytes].into_boxed_slice();
+    let mut source_index = BTreeMap::<(u32, [u8; 32]), u64>::new();
+    let mut source_offset = 0_u64;
+    while source_offset < source.size {
+        let expected =
+            usize::try_from((source.size - source_offset).min(BLOCK_PLAN_BLOCK_BYTES))
+                .map_err(|_| "release source block size does not fit this platform".to_string())?;
+        let read = read_exact_block(&mut source_file, &mut buffer[..expected])?;
+        if read != expected {
+            return Err("predecessor release artifact ended unexpectedly".to_string());
+        }
+        let read_u32 = u32::try_from(read)
+            .map_err(|_| "release source block length overflowed".to_string())?;
+        let read_u64 = u64::try_from(read)
+            .map_err(|_| "release source block length overflowed".to_string())?;
+        let digest: [u8; 32] = Sha256::digest(&buffer[..read]).into();
+        source_index
+            .entry((read_u32, digest))
+            .or_insert(source_offset);
+        source_offset = source_offset
+            .checked_add(read_u64)
+            .ok_or_else(|| "release source block offset overflowed".to_string())?;
+    }
+
+    let mut target_file = File::open(target_path)
+        .map_err(|_| "candidate release artifact could not be opened".to_string())?;
+    let mut target_offset = 0_u64;
+    let target_capacity = usize::try_from(target_blocks)
+        .map_err(|_| "release target block count does not fit this platform".to_string())?;
+    let mut blocks = Vec::with_capacity(target_capacity);
+    let mut reused = false;
+    while target_offset < target.size {
+        let expected =
+            usize::try_from((target.size - target_offset).min(BLOCK_PLAN_BLOCK_BYTES))
+                .map_err(|_| "release target block size does not fit this platform".to_string())?;
+        let read = read_exact_block(&mut target_file, &mut buffer[..expected])?;
+        if read != expected {
+            return Err("candidate release artifact ended unexpectedly".to_string());
+        }
+        let read_u32 = u32::try_from(read)
+            .map_err(|_| "release target block length overflowed".to_string())?;
+        let read_u64 = u64::try_from(read)
+            .map_err(|_| "release target block length overflowed".to_string())?;
+        let digest: [u8; 32] = Sha256::digest(&buffer[..read]).into();
+        let source_offset = source_index.get(&(read_u32, digest)).copied();
+        reused |= source_offset.is_some();
+        blocks.push(BlockDescriptor {
+            length: read_u32,
+            sha256: URL_SAFE_NO_PAD.encode(digest),
+            source_offset,
+        });
+        target_offset = target_offset
+            .checked_add(read_u64)
+            .ok_or_else(|| "release target block offset overflowed".to_string())?;
+    }
+    if !reused {
+        return Ok(None);
+    }
+    Ok(Some(BlockFilePlan {
+        path: target.path.clone(),
+        source_size: source.size,
+        source_sha256: source.sha256.clone(),
+        target_size: target.size,
+        target_sha256: target.sha256.clone(),
+        blocks,
+    }))
+}
+
+fn read_exact_block(file: &mut File, buffer: &mut [u8]) -> Result<usize, String> {
+    let mut total = 0_usize;
+    while total < buffer.len() {
+        let count = file
+            .read(&mut buffer[total..])
+            .map_err(|_| "release artifact block could not be read".to_string())?;
+        if count == 0 {
+            break;
+        }
+        total += count;
+    }
+    Ok(total)
+}
+
+fn write_bytes_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "immutable release metadata already exists".to_string())?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "release metadata could not be committed".to_string())
 }
 
 fn ensure_wrangler_size(object: &UploadObject) -> Result<(), String> {
@@ -907,7 +1762,12 @@ fn wrangler_get(
     verify_root: &Path,
 ) -> Result<RemoteObject, String> {
     let suffix = URL_SAFE_NO_PAD.encode(Sha256::digest(object_key.as_bytes()));
-    let destination = verify_root.join(format!("{suffix}.object"));
+    let extension = Path::new(object_key)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| valid_identifier(value, 16))
+        .unwrap_or("object");
+    let destination = verify_root.join(format!("{suffix}.{extension}"));
     let _ = fs::remove_file(&destination);
     let target = format!("{bucket}/{object_key}");
     let output = Command::new(&config.wrangler)
@@ -934,7 +1794,12 @@ fn wrangler_get(
     Err(format!("Wrangler R2 read failed for {object_key}"))
 }
 
-fn verify_uploaded_object(object: &UploadObject, downloaded: &Path) -> Result<(), String> {
+fn verify_uploaded_object(
+    config: &PublisherConfig,
+    object: &UploadObject,
+    downloaded: &Path,
+    verifying_key: &VerifyingKey,
+) -> Result<(), String> {
     let local_size = fs::metadata(&object.local_path)
         .map_err(|_| "local release object metadata is unavailable".to_string())?
         .len();
@@ -949,14 +1814,23 @@ fn verify_uploaded_object(object: &UploadObject, downloaded: &Path) -> Result<()
             object.object_key
         ));
     }
+    if object.requires_authenticode && cfg!(target_os = "windows") {
+        verify_authenticode_file(config, downloaded)?;
+    }
+    if object.requires_provenance_signature {
+        verify_release_provenance_file(downloaded, verifying_key)?;
+    }
     Ok(())
 }
 
 fn verify_public_object(config: &PublisherConfig, object: &UploadObject) -> Result<(), String> {
-    let public_key = object
-        .object_key
-        .strip_prefix("releases/")
-        .ok_or_else(|| "immutable R2 object is outside the public release namespace".to_string())?;
+    let public_key = if let Some(key) = object.object_key.strip_prefix("releases/") {
+        key
+    } else if object.object_key.starts_with("channels/") {
+        object.object_key.as_str()
+    } else {
+        return Err("R2 object is outside the public release namespace".to_string());
+    };
     let url = format!("{}/{public_key}", config.base_url);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(true)
@@ -1030,7 +1904,309 @@ mod tests {
         }
     }
 
+    fn publisher_config_fixture(root: &Path, generation: u64) -> PublisherConfig {
+        PublisherConfig {
+            signing_key_file: root.join("unused"),
+            expected_verifying_key: None,
+            skip_build: false,
+            release_identity: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            generation,
+            release_version: "0.2.2".to_string(),
+            minimum_version: "0.2.0".to_string(),
+            base_url: "https://auth.axiusflow.test/releases".to_string(),
+            published_at: "2026-09-07T00:00:00Z".to_string(),
+            channel: "stable".to_string(),
+            rollout_cohort: "stable".to_string(),
+            rollout_percentage: 25,
+            output_root: root.join("out"),
+            r2_bucket: None,
+            wrangler: OsString::from("wrangler"),
+            iscc: OsString::from("ISCC.exe"),
+            authenticode_tool: OsString::from("signtool.exe"),
+            authenticode_certificate_sha1: Some(
+                "0123456789abcdef0123456789abcdef01234567".to_string(),
+            ),
+            authenticode_timestamp_url: Some("https://timestamp.example.test".to_string()),
+        }
+    }
+
+    fn release_file_fixture(path: &str, bytes: &[u8]) -> ReleaseFile {
+        ReleaseFile {
+            role: ReleaseFileRole::Desktop,
+            path: path.to_string(),
+            url: format!("https://releases.axiusflow.test/{path}"),
+            size: bytes.len() as u64,
+            sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
+            executable: true,
+        }
+    }
+
     #[test]
+    fn predecessor_channel_cross_binding_and_manifest_shape_fail_closed() {
+        let root = temporary_root("predecessor-validation");
+        let config = publisher_config_fixture(&root, 8);
+        let key = SigningKey::from_bytes(&[11; 32]);
+        let identity = "fedcba9876543210fedcba9876543210fedcba98";
+        let file = ReleaseFile {
+            url: format!(
+                "{}/{}/{}/7-{identity}/app.bin",
+                config.base_url,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            ..release_file_fixture("app.bin", b"source")
+        };
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
+            release_identity: identity.to_string(),
+            install_generation: 7,
+            channel: "stable".to_string(),
+            minimum_version: "0.2.0".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            files: vec![file],
+            rollout: RolloutMetadata {
+                cohort: "all".to_string(),
+                percentage: 100,
+            },
+        };
+        let signed_release = sign_release_manifest(manifest, &key).expect("source signs");
+        let mut channel = ReleaseChannelPointer {
+            schema_version: RELEASE_CHANNEL_SCHEMA_VERSION,
+            channel: "stable".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            release_identity: identity.to_string(),
+            install_generation: 7,
+            version: "0.2.0".to_string(),
+            published_at: "2026-09-07T00:00:00Z".to_string(),
+            manifest_url: format!(
+                "{}/{}/{}/7-{identity}/manifest.json",
+                config.base_url,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            signed_release,
+            installer: ReleaseInstallerMetadata {
+                filename: "Axiusflow-Setup.exe".to_string(),
+                url: "https://auth.axiusflow.test/releases/setup.exe".to_string(),
+                size: 1,
+                sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
+            },
+        };
+        validate_predecessor_channel(&config, &channel, &key.verifying_key())
+            .expect("valid predecessor accepted");
+
+        // A cryptographically authentic predecessor can use a retired release
+        // inventory shape. It is never installed by this publisher; it is only
+        // a bounded, cross-bound block-reuse source. Keep accepting such a
+        // predecessor after current candidate policy retires the old role.
+        let mut legacy = channel.clone();
+        let engine_path = "axiusflow_engine.exe";
+        legacy.signed_release.manifest.files.push(ReleaseFile {
+            role: ReleaseFileRole::Engine,
+            path: engine_path.to_string(),
+            url: format!(
+                "{}/{}/{}/7-{identity}/{engine_path}",
+                config.base_url,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            size: 6,
+            sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(b"engine")),
+            executable: true,
+        });
+        let canonical =
+            serde_json::to_vec(&legacy.signed_release.manifest).expect("legacy manifest JSON");
+        legacy.signed_release.signature = URL_SAFE_NO_PAD.encode(key.sign(&canonical).to_bytes());
+        validate_predecessor_channel(&config, &legacy, &key.verifying_key())
+            .expect("signed retired predecessor shape remains an authenticated block source");
+
+        channel.platform = "other".to_string();
+        assert!(validate_predecessor_channel(&config, &channel, &key.verifying_key()).is_err());
+        channel.platform = std::env::consts::OS.to_string();
+        channel.signed_release.manifest.rollout.percentage = 101;
+        let canonical =
+            serde_json::to_vec(&channel.signed_release.manifest).expect("manifest JSON");
+        channel.signed_release.signature = URL_SAFE_NO_PAD.encode(key.sign(&canonical).to_bytes());
+        assert!(validate_predecessor_channel(&config, &channel, &key.verifying_key()).is_err());
+        fs::remove_dir_all(root).expect("remove predecessor fixture");
+    }
+
+    #[test]
+    fn final_candidate_audit_rejects_post_package_artifact_mutation() {
+        let root = temporary_root("final-candidate-audit");
+        let binaries_root = root.join("binaries");
+        fs::create_dir_all(&binaries_root).expect("binaries root");
+        let suffix = std::env::consts::EXE_SUFFIX;
+        let binaries = ReleaseBinaries {
+            launcher: binaries_root.join(format!("launcher{suffix}")),
+            desktop: binaries_root.join(format!("desktop{suffix}")),
+        };
+        fs::write(&binaries.launcher, b"launcher").expect("launcher fixture");
+        fs::write(&binaries.desktop, b"desktop").expect("desktop fixture");
+        let config = publisher_config_fixture(&root, 41);
+        let key = SigningKey::from_bytes(&[12; 32]);
+        let published = package_release(&root, &config, &key, &binaries).expect("package release");
+        verify_candidate_release_for_publication(&published, &key.verifying_key())
+            .expect("fresh package audits");
+        let signed: SignedReleaseManifest =
+            serde_json::from_slice(&fs::read(&published.manifest_path).expect("manifest bytes"))
+                .expect("signed manifest");
+        fs::write(
+            published
+                .release_directory
+                .join(&signed.manifest.files[0].path),
+            b"tampered",
+        )
+        .expect("tamper packaged artifact");
+        assert!(
+            verify_candidate_release_for_publication(&published, &key.verifying_key()).is_err()
+        );
+        fs::remove_dir_all(root).expect("remove final-audit fixture");
+    }
+
+    #[test]
+    fn block_plan_readback_reverifies_signature_and_release_binding() {
+        let root = temporary_root("block-plan-readback");
+        let key = SigningKey::from_bytes(&[13; 32]);
+        let payload = b"shared block";
+        let make_manifest = |identity: &str, generation: u64| ReleaseManifest {
+            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
+            release_identity: identity.to_string(),
+            install_generation: generation,
+            channel: "stable".to_string(),
+            minimum_version: "0.2.0".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            files: vec![release_file_fixture("app.bin", payload)],
+            rollout: RolloutMetadata {
+                cohort: "all".to_string(),
+                percentage: 100,
+            },
+        };
+        let source = sign_release_manifest(
+            make_manifest("1111111111111111111111111111111111111111", 7),
+            &key,
+        )
+        .expect("source signs");
+        let target = sign_release_manifest(
+            make_manifest("2222222222222222222222222222222222222222", 8),
+            &key,
+        )
+        .expect("target signs");
+        let file = &target.manifest.files[0];
+        let signed_plan = sign_block_plan(
+            BlockPlan {
+                schema_version: BLOCK_PLAN_SCHEMA_VERSION,
+                source_release_identity: source.manifest.release_identity.clone(),
+                source_install_generation: 7,
+                target_release_identity: target.manifest.release_identity.clone(),
+                target_install_generation: 8,
+                files: vec![BlockFilePlan {
+                    path: file.path.clone(),
+                    source_size: source.manifest.files[0].size,
+                    source_sha256: source.manifest.files[0].sha256.clone(),
+                    target_size: file.size,
+                    target_sha256: file.sha256.clone(),
+                    blocks: vec![BlockDescriptor {
+                        length: u32::try_from(payload.len()).expect("payload fits u32"),
+                        sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(payload)),
+                        source_offset: Some(0),
+                    }],
+                }],
+            },
+            &source.manifest,
+            &target.manifest,
+            &key,
+        )
+        .expect("block plan signs");
+        let sidecar = root.join(BLOCK_PLAN_FILENAME);
+        let target_path = root.join("manifest.json");
+        fs::write(
+            &sidecar,
+            serde_json::to_vec(&signed_plan).expect("plan JSON"),
+        )
+        .expect("sidecar writes");
+        fs::write(
+            &target_path,
+            serde_json::to_vec(&target).expect("target JSON"),
+        )
+        .expect("target manifest writes");
+        let predecessor = ReleaseChannelPointer {
+            schema_version: RELEASE_CHANNEL_SCHEMA_VERSION,
+            channel: "stable".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            release_identity: source.manifest.release_identity.clone(),
+            install_generation: 7,
+            version: "0.2.0".to_string(),
+            published_at: "2026-09-07T00:00:00Z".to_string(),
+            manifest_url: "https://releases.axiusflow.test/manifest.json".to_string(),
+            signed_release: source,
+            installer: ReleaseInstallerMetadata {
+                filename: "setup.exe".to_string(),
+                url: "https://releases.axiusflow.test/setup.exe".to_string(),
+                size: 1,
+                sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
+            },
+        };
+        verify_block_plan_readback(&sidecar, &predecessor, &target_path, &key.verifying_key())
+            .expect("read-back verifies");
+        fs::write(&sidecar, b"{}").expect("tamper sidecar");
+        assert!(
+            verify_block_plan_readback(&sidecar, &predecessor, &target_path, &key.verifying_key())
+                .is_err()
+        );
+        fs::remove_dir_all(root).expect("remove readback fixture");
+    }
+
+    #[test]
+    fn block_plan_reuses_moved_aligned_blocks_and_marks_changed_blocks_for_range_fetch() {
+        let root = temporary_root("block-plan-selection");
+        let block = usize::try_from(BLOCK_PLAN_BLOCK_BYTES).expect("block size fits usize");
+        let source_bytes = [vec![1_u8; block], vec![2_u8; block]].concat();
+        let target_bytes = [vec![2_u8; block], vec![1_u8; block], vec![3_u8; block]].concat();
+        let source_path = root.join("source.bin");
+        let target_path = root.join("target.bin");
+        fs::write(&source_path, &source_bytes).expect("source fixture");
+        fs::write(&target_path, &target_bytes).expect("target fixture");
+        let source = release_file_fixture("app.bin", &source_bytes);
+        let target = release_file_fixture("app.bin", &target_bytes);
+
+        let plan = build_block_file_plan(&source_path, &source, &target_path, &target)
+            .expect("block selection succeeds")
+            .expect("reuse is beneficial");
+        assert_eq!(plan.blocks.len(), 3);
+        assert_eq!(plan.blocks[0].source_offset, Some(BLOCK_PLAN_BLOCK_BYTES));
+        assert_eq!(plan.blocks[1].source_offset, Some(0));
+        assert_eq!(plan.blocks[2].source_offset, None);
+        assert_eq!(plan.target_sha256, target.sha256);
+        fs::remove_dir_all(root).expect("remove block-plan fixture");
+    }
+
+    #[test]
+    fn block_plan_is_omitted_when_no_target_block_matches_the_predecessor() {
+        let root = temporary_root("block-plan-no-reuse");
+        let block = usize::try_from(BLOCK_PLAN_BLOCK_BYTES).expect("block size fits usize");
+        let source_bytes = vec![4_u8; block];
+        let target_bytes = vec![5_u8; block];
+        let source_path = root.join("source.bin");
+        let target_path = root.join("target.bin");
+        fs::write(&source_path, &source_bytes).expect("source fixture");
+        fs::write(&target_path, &target_bytes).expect("target fixture");
+        let source = release_file_fixture("app.bin", &source_bytes);
+        let target = release_file_fixture("app.bin", &target_bytes);
+        assert!(
+            build_block_file_plan(&source_path, &source, &target_path, &target)
+                .expect("block selection succeeds")
+                .is_none()
+        );
+        fs::remove_dir_all(root).expect("remove block-plan fixture");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn package_emits_signed_manifest_with_versioned_launcher_and_matching_channel() {
         let root = temporary_root("package");
         let binaries_root = root.join("binaries");
@@ -1044,16 +2220,26 @@ mod tests {
         fs::write(&binaries.desktop, b"desktop-fixture").expect("desktop fixture");
         let config = PublisherConfig {
             signing_key_file: root.join("unused"),
+            expected_verifying_key: None,
+            skip_build: false,
             release_identity: "0123456789abcdef0123456789abcdef01234567".to_string(),
             generation: 41,
+            release_version: "7.8.9".to_string(),
             minimum_version: "0.2.0".to_string(),
             base_url: "https://auth.axiusflow.test/releases".to_string(),
             published_at: "2026-09-07T00:00:00Z".to_string(),
             channel: "stable".to_string(),
+            rollout_cohort: "stable".to_string(),
+            rollout_percentage: 25,
             output_root: root.join("out"),
             r2_bucket: None,
             wrangler: OsString::from("wrangler"),
             iscc: OsString::from("ISCC.exe"),
+            authenticode_tool: OsString::from("signtool.exe"),
+            authenticode_certificate_sha1: Some(
+                "0123456789abcdef0123456789abcdef01234567".to_string(),
+            ),
+            authenticode_timestamp_url: Some("https://timestamp.example.test".to_string()),
         };
         let key = SigningKey::from_bytes(&[7; 32]);
         let published = package_release(&root, &config, &key, &binaries).expect("package release");
@@ -1062,13 +2248,15 @@ mod tests {
         )
         .expect("signed manifest");
         assert_eq!(signed.manifest.minimum_version, "0.2.0");
+        assert_eq!(signed.manifest.rollout.cohort, "stable");
+        assert_eq!(signed.manifest.rollout.percentage, 25);
         verify_release_manifest(
             &signed,
             &key.verifying_key(),
             &previous_compatible_launcher_policy(),
         )
         .expect("previous compatible launcher accepts the signed release");
-        assert_eq!(signed.manifest.files.len(), 2);
+        assert_eq!(signed.manifest.files.len(), 3);
         assert!(
             signed
                 .manifest
@@ -1079,6 +2267,11 @@ mod tests {
         assert!(signed.manifest.files.iter().any(|file| {
             file.role == ReleaseFileRole::RuntimeAsset
                 && file.path == format!("axiusflow_launcher{suffix}")
+        }));
+        assert!(signed.manifest.files.iter().any(|file| {
+            file.role == ReleaseFileRole::RuntimeAsset
+                && file.path == "rollback-compatibility.json"
+                && !file.executable
         }));
         let channel: ReleaseChannelPointer =
             serde_json::from_slice(&fs::read(&published.channel_path).expect("channel bytes"))
@@ -1097,7 +2290,7 @@ mod tests {
                 std::env::consts::ARCH
             )
         );
-        assert_eq!(channel.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(channel.version, "7.8.9");
         assert_eq!(channel.published_at, "2026-09-07T00:00:00Z");
         assert!(channel.installer.url.contains("/41-0123456789abcdef"));
         assert!(!channel.installer.url.contains("/releases/releases/"));
@@ -1120,6 +2313,54 @@ mod tests {
                 .object_key
                 .ends_with(&format!("axiusflow_launcher{suffix}"))
         }));
+        let provenance_object = published
+            .immutable_objects
+            .iter()
+            .find(|object| object.object_key.ends_with("/provenance.json"))
+            .expect("signed provenance object");
+        assert!(provenance_object.requires_provenance_signature);
+        verify_release_provenance_file(&provenance_object.local_path, &key.verifying_key())
+            .expect("signed provenance verifies");
+        let provenance: SignedReleaseProvenance = serde_json::from_slice(
+            &fs::read(&provenance_object.local_path).expect("provenance bytes"),
+        )
+        .expect("signed provenance JSON");
+        assert_eq!(
+            provenance.provenance.release_identity,
+            config.release_identity
+        );
+        assert_eq!(provenance.provenance.install_generation, 41);
+        assert_eq!(provenance.provenance.rollout.cohort, "stable");
+        assert_eq!(provenance.provenance.rollout.percentage, 25);
+        assert_eq!(provenance.provenance.artifacts.len(), 5);
+        for name in [
+            format!("Axiusflow-Setup{suffix}"),
+            "manifest.json".to_string(),
+            format!("axiusflow_launcher{suffix}"),
+            format!("axiusflow_desktop{suffix}"),
+            "rollback-compatibility.json".to_string(),
+        ] {
+            assert!(
+                provenance
+                    .provenance
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.name == name)
+            );
+        }
+        for artifact in &provenance.provenance.artifacts {
+            let path = published.release_directory.join(&artifact.name);
+            assert_eq!(
+                artifact.size,
+                fs::metadata(&path)
+                    .expect("provenance artifact metadata")
+                    .len()
+            );
+            assert_eq!(
+                artifact.sha256_b64url,
+                file_sha256_base64url(&path).expect("provenance artifact hash")
+            );
+        }
         let wire: serde_json::Value =
             serde_json::from_slice(&fs::read(&published.channel_path).expect("channel wire bytes"))
                 .expect("channel wire JSON");
@@ -1146,6 +2387,176 @@ mod tests {
         assert!(valid_published_at("2024-02-29T23:59:59.123Z"));
         assert!(!valid_published_at("2026-02-30T00:00:00Z"));
         assert!(!valid_published_at("2026-09-07T25:00:00Z"));
+        assert!(valid_certificate_sha1(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!valid_certificate_sha1("01234567"));
+        assert!(valid_timestamp_url("https://timestamp.example.test"));
+        assert!(valid_timestamp_url("http://timestamp.example.test/rfc3161"));
+        assert!(!valid_timestamp_url("file:///timestamp"));
+        assert!(!valid_timestamp_url(
+            "https://timestamp.example.test/#fragment"
+        ));
+    }
+
+    #[test]
+    fn production_publication_requires_protected_ci_context() {
+        assert!(verify_production_publication_context(None, |_| None).is_ok());
+        assert!(
+            verify_production_publication_context(Some("axiusflow-releases"), |_| None).is_err()
+        );
+        let expected = [
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_WORKFLOW", "Production release"),
+            ("GITHUB_EVENT_NAME", "workflow_dispatch"),
+            ("GITHUB_REF", "refs/heads/main"),
+            ("AXIUSFLOW_RELEASE_ENVIRONMENT", "production-release"),
+        ];
+        assert!(
+            verify_production_publication_context(Some("axiusflow-releases"), |name| {
+                expected
+                    .iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, value)| OsString::from(value))
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn publisher_rollout_percentage_accepts_hold_and_rejects_out_of_range() {
+        let arguments = |percentage: &str| {
+            vec![
+                OsString::from("--signing-key-file"),
+                OsString::from("unused-key"),
+                OsString::from("--release-identity"),
+                OsString::from("0123456789abcdef0123456789abcdef01234567"),
+                OsString::from("--generation"),
+                OsString::from("42"),
+                OsString::from("--release-version"),
+                OsString::from("0.2.2"),
+                OsString::from("--minimum-version"),
+                OsString::from("0.2.0"),
+                OsString::from("--base-url"),
+                OsString::from("https://auth.axiusflow.test/releases"),
+                OsString::from("--published-at"),
+                OsString::from("2026-09-07T00:00:00Z"),
+                OsString::from("--rollout-cohort"),
+                OsString::from("stable"),
+                OsString::from("--rollout-percentage"),
+                OsString::from(percentage),
+                OsString::from("--authenticode-certificate-sha1"),
+                OsString::from("0123456789abcdef0123456789abcdef01234567"),
+                OsString::from("--authenticode-timestamp-url"),
+                OsString::from("https://timestamp.example.test"),
+            ]
+        };
+        let held = PublisherConfig::parse(arguments("0").into_iter()).expect("0 percent hold");
+        assert_eq!(held.rollout_cohort, "stable");
+        assert_eq!(held.rollout_percentage, 0);
+        assert!(PublisherConfig::parse(arguments("100").into_iter()).is_ok());
+        assert!(PublisherConfig::parse(arguments("101").into_iter()).is_err());
+    }
+
+    #[test]
+    fn provenance_signature_is_domain_separated_and_rejects_tampering() {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let provenance = ReleaseProvenance {
+            schema_version: RELEASE_PROVENANCE_SCHEMA_VERSION,
+            release_identity: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            install_generation: 42,
+            channel: "stable".to_string(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            rollout: RolloutMetadata {
+                cohort: "stable".to_string(),
+                percentage: 50,
+            },
+            artifacts: vec![
+                ReleaseProvenanceArtifact {
+                    name: format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX),
+                    size: 1,
+                    sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
+                },
+                ReleaseProvenanceArtifact {
+                    name: "manifest.json".to_string(),
+                    size: 2,
+                    sha256_b64url: URL_SAFE_NO_PAD.encode([2_u8; 32]),
+                },
+                ReleaseProvenanceArtifact {
+                    name: format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX),
+                    size: 3,
+                    sha256_b64url: URL_SAFE_NO_PAD.encode([3_u8; 32]),
+                },
+                ReleaseProvenanceArtifact {
+                    name: format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX),
+                    size: 4,
+                    sha256_b64url: URL_SAFE_NO_PAD.encode([4_u8; 32]),
+                },
+                ReleaseProvenanceArtifact {
+                    name: "rollback-compatibility.json".to_string(),
+                    size: 5,
+                    sha256_b64url: URL_SAFE_NO_PAD.encode([5_u8; 32]),
+                },
+            ],
+        };
+        let signed = sign_release_provenance(provenance.clone(), &key).expect("signed provenance");
+        let canonical = serde_json::to_vec(&provenance).expect("canonical provenance");
+        let signature = URL_SAFE_NO_PAD
+            .decode(&signed.signature_b64url)
+            .expect("signature bytes");
+        let signature = Signature::from_slice(&signature).expect("signature");
+        assert!(key.verifying_key().verify(&canonical, &signature).is_err());
+
+        let root = temporary_root("provenance-tamper");
+        let path = root.join("provenance.json");
+        write_json_new(&path, &signed).expect("write signed provenance");
+        verify_release_provenance_file(&path, &key.verifying_key()).expect("valid provenance");
+        let mut tampered = signed;
+        tampered.provenance.install_generation += 1;
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&tampered).expect("tampered JSON"),
+        )
+        .expect("write tamper");
+        assert!(verify_release_provenance_file(&path, &key.verifying_key()).is_err());
+        fs::remove_dir_all(root).expect("remove provenance fixture");
+    }
+
+    #[test]
+    fn windows_authenticode_contract_is_rfc3161_sha256_and_verifies_timestamp_metadata() {
+        let source = include_str!("axiusflow_release_publisher.rs");
+        for required in [
+            "\"/sha1\"",
+            "\"/fd\"",
+            "\"SHA256\"",
+            "\"/tr\"",
+            "\"/td\"",
+            "Get-AuthenticodeSignature",
+            "TimeStamperCertificate",
+            "SignerCertificate.Thumbprint",
+            "verify_public_object(config, &release.channel_object)?",
+        ] {
+            assert!(source.contains(required), "publisher lost {required}");
+        }
+        let launcher_sign = source
+            .find("sign_authenticode_file(config, &launcher_path)?;")
+            .expect("launcher signing hook");
+        let desktop_sign = source
+            .find("sign_authenticode_file(config, &desktop_path)?;")
+            .expect("desktop signing hook");
+        let manifest_inventory = source
+            .find("let mut files = vec![")
+            .expect("manifest inventory");
+        let setup_sign = source
+            .find("sign_authenticode_file(config, &setup_path)?;")
+            .expect("setup signing hook");
+        let setup_hash = source
+            .find("let setup_metadata = fs::metadata(&setup_path)")
+            .expect("setup metadata/hash boundary");
+        assert!(launcher_sign < manifest_inventory);
+        assert!(desktop_sign < manifest_inventory);
+        assert!(setup_sign < setup_hash);
     }
 
     #[test]
@@ -1163,6 +2574,8 @@ mod tests {
             "RegisterExtraCloseApplicationsResource",
             "--remove-all-local-data",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
+            "RollbackCompatibilityPath",
+            "DestName: \"rollback-compatibility.json\"",
         ] {
             assert!(
                 script.contains(required),

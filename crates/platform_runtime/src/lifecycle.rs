@@ -14,6 +14,12 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
+#[cfg(target_os = "windows")]
+use std::{
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
@@ -23,12 +29,21 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const RELEASE_CHANNEL_SCHEMA_VERSION: u32 = 1;
+pub const ROLLBACK_COMPATIBILITY_SCHEMA_VERSION: u32 = 1;
+pub const ROLLBACK_COMPATIBILITY_FILENAME: &str = "rollback-compatibility.json";
+/// Bump only when persisted local state is no longer backward-readable by the
+/// immediately preceding release. Additive protobuf fields, preserved field
+/// numbers/types/meaning, and permanently retired tags stay in the same epoch.
+pub const CURRENT_STATE_COMPATIBILITY_EPOCH: u32 = 1;
 const INVENTORY_SCHEMA_VERSION: u32 = 1;
 const MAXIMUM_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAXIMUM_ROLLBACK_COMPATIBILITY_BYTES: u64 = 1024;
 const MAXIMUM_RELEASE_FILES: usize = 256;
 const MAXIMUM_OWNED_ROOTS: usize = 64;
 const MAXIMUM_VAULT_KEYS: usize = 64;
 const MAXIMUM_RELEASE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+#[cfg(target_os = "windows")]
+const AUTHENTICODE_AUDIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Role of one immutable release file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -144,6 +159,31 @@ pub struct ActiveRelease {
     pub directory_name: String,
 }
 
+/// Signed-inventory asset that fences automatic rollback across incompatible
+/// persisted-state migrations without changing the release manifest schema.
+///
+/// The current workspace file is protobuf: releases that only add fields while
+/// preserving existing field numbers, wire types, meaning, and retired tags use
+/// the same epoch. Any forward-only/destructive migration must increment the
+/// epoch, making automatic rollback fail closed before an older binary sees the
+/// new state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackCompatibilityMetadata {
+    pub schema_version: u32,
+    pub state_compatibility_epoch: u32,
+}
+
+impl RollbackCompatibilityMetadata {
+    #[must_use]
+    pub const fn current() -> Self {
+        Self {
+            schema_version: ROLLBACK_COMPATIBILITY_SCHEMA_VERSION,
+            state_compatibility_epoch: CURRENT_STATE_COMPATIBILITY_EPOCH,
+        }
+    }
+}
+
 /// One exact native credential-vault namespace and non-secret key.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,7 +241,8 @@ pub trait LifecycleHooks {
     fn audit_external_absence(&self, inventory: &InstallationInventory) -> Result<(), String>;
 }
 
-/// Successful update state. Success always means superseded files are absent.
+/// Successful update state. Success keeps at most one verified predecessor as
+/// the retained known-good release and removes any older retained generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateOutcome {
     pub active: ActiveRelease,
@@ -422,16 +463,18 @@ enum UpdateState {
     Activated,
     HealthChecked,
     Cleanup,
+    RollingBack,
 }
 
 impl UpdateState {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Preparing,
         Self::Staged,
         Self::ProcessesStopped,
         Self::Activated,
         Self::HealthChecked,
         Self::Cleanup,
+        Self::RollingBack,
     ];
 }
 
@@ -443,6 +486,7 @@ fn update_journal_name(state: UpdateState) -> &'static str {
         UpdateState::Activated => "update-3-activated.json",
         UpdateState::HealthChecked => "update-4-health-checked.json",
         UpdateState::Cleanup => "update-5-cleanup.json",
+        UpdateState::RollingBack => "update-6-rolling-back.json",
     }
 }
 
@@ -452,6 +496,42 @@ struct UpdateJournal {
     state: UpdateState,
     candidate: ActiveRelease,
     previous: Option<ActiveRelease>,
+    #[serde(default)]
+    previous_retained: Option<ActiveRelease>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+enum RetainedRollbackState {
+    Preparing,
+    ProcessesStopped,
+    Activated,
+    Cleanup,
+}
+
+impl RetainedRollbackState {
+    const ALL: [Self; 4] = [
+        Self::Preparing,
+        Self::ProcessesStopped,
+        Self::Activated,
+        Self::Cleanup,
+    ];
+}
+
+fn retained_rollback_journal_name(state: RetainedRollbackState) -> &'static str {
+    match state {
+        RetainedRollbackState::Preparing => "rollback-0-preparing.json",
+        RetainedRollbackState::ProcessesStopped => "rollback-1-processes-stopped.json",
+        RetainedRollbackState::Activated => "rollback-2-activated.json",
+        RetainedRollbackState::Cleanup => "rollback-3-cleanup.json",
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedRollbackJournal {
+    state: RetainedRollbackState,
+    failed: ActiveRelease,
+    target: ActiveRelease,
 }
 
 /// Filesystem transaction owner used by the packaging launcher/updater.
@@ -504,6 +584,13 @@ impl ReleaseInstaller {
         let mut active = None;
         for entry in entries {
             let entry = entry.map_err(|_| LifecycleError::JournalCorrupt)?;
+            let file_name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| LifecycleError::JournalCorrupt)?;
+            if file_name.starts_with('.') && file_name.ends_with(".json.next") {
+                continue;
+            }
             let metadata = entry
                 .file_type()
                 .map_err(|_| LifecycleError::JournalCorrupt)?;
@@ -511,7 +598,7 @@ impl ReleaseInstaller {
                 return Err(LifecycleError::JournalCorrupt);
             }
             let candidate: ActiveRelease = read_json(&entry.path())?;
-            if !valid_active_release(&candidate) {
+            if !valid_active_release(&candidate) || file_name != pointer_name(&candidate) {
                 return Err(LifecycleError::JournalCorrupt);
             }
             if active.as_ref().is_none_or(|current: &ActiveRelease| {
@@ -523,6 +610,99 @@ impl ReleaseInstaller {
         Ok(active)
     }
 
+    /// Resolves and verifies the single locally retained known-good release.
+    ///
+    /// The retained release is not selected by remote channel data. It must be
+    /// older than the current active release and still pass its signed manifest
+    /// and exact inventory verification before a launcher may consider it for
+    /// a later rollback decision.
+    ///
+    /// # Errors
+    /// Returns an error when the retained record, signature, inventory, or its
+    /// relationship to the active release is invalid.
+    pub fn retained_known_good_release(&self) -> Result<Option<ActiveRelease>, LifecycleError> {
+        let Some(retained) = self.read_retained_known_good()? else {
+            return Ok(None);
+        };
+        let active = self
+            .active_release()?
+            .ok_or(LifecycleError::JournalCorrupt)?;
+        if retained.install_generation >= active.install_generation || retained == active {
+            return Err(LifecycleError::JournalCorrupt);
+        }
+        let mut policy = self.policy.clone();
+        policy.minimum_install_generation = 0;
+        self.audit_release(&retained, &policy)?;
+        Ok(Some(retained))
+    }
+
+    /// Atomically re-selects the locally retained, verified known-good release.
+    ///
+    /// The rollback target cannot be supplied by channel data or the caller: it
+    /// is resolved only from the bounded local known-good record written by a
+    /// previously successful update. Both its signed manifest and exact file
+    /// inventory are reverified before any active pointer changes. The failed
+    /// newer release is removed after the older release becomes active.
+    ///
+    /// # Errors
+    /// Returns an error if no verified retained release exists, another
+    /// lifecycle transaction is pending, the active process cannot stop, or
+    /// the journaled pointer/cleanup transaction cannot complete safely.
+    pub fn rollback_to_retained_known_good<H: LifecycleHooks>(
+        &self,
+        hooks: &H,
+    ) -> Result<ActiveRelease, LifecycleError> {
+        let _lock = LifecycleLock::acquire(&self.lifecycle_root)?;
+        if self.lifecycle_root.join("uninstall.json").exists() {
+            return Err(LifecycleError::UninstallPendingCleanup);
+        }
+        if self.read_update_journal()?.is_some() || self.read_retained_rollback_journal()?.is_some()
+        {
+            return Err(LifecycleError::UpdatePendingCleanup);
+        }
+        let failed = self
+            .audit_active_release()?
+            .ok_or(LifecycleError::RollbackFailed)?;
+        let target = self
+            .retained_known_good_release()?
+            .ok_or(LifecycleError::RollbackFailed)?;
+        self.verify_retained_rollback_compatibility(&failed, &target)?;
+        let journal = RetainedRollbackJournal {
+            state: RetainedRollbackState::Preparing,
+            failed,
+            target: target.clone(),
+        };
+        self.write_retained_rollback_journal(&journal)?;
+        self.resume_retained_rollback(journal, hooks)?;
+        Ok(target)
+    }
+
+    /// Returns the authenticated signed manifest for the currently owned active
+    /// or retained known-good release after re-running its exact local audit.
+    ///
+    /// This does not accept arbitrary version directories: the supplied release
+    /// must be one of the lifecycle owner's bounded current records.
+    ///
+    /// # Errors
+    /// Returns a lifecycle verification error if the release is not currently
+    /// owned, or if its signature, identity, platform policy, or exact local
+    /// inventory no longer verifies.
+    pub fn verified_release_manifest(
+        &self,
+        release: &ActiveRelease,
+    ) -> Result<SignedReleaseManifest, LifecycleError> {
+        let active = self.audit_active_release()?;
+        if active.as_ref() == Some(release) {
+            return self.read_verified_release_manifest(release, &self.policy);
+        }
+        if self.retained_known_good_release()?.as_ref() == Some(release) {
+            let mut policy = self.policy.clone();
+            policy.minimum_install_generation = 0;
+            return self.read_verified_release_manifest(release, &policy);
+        }
+        Err(LifecycleError::VerificationFailed)
+    }
+
     /// Verifies the active pointer, signed manifest, complete file inventory,
     /// platform policy, and executable permissions before normal launch.
     ///
@@ -530,20 +710,17 @@ impl ReleaseInstaller {
     /// Rejects any missing, extra, modified, symlinked, or incompatible artifact.
     pub fn audit_active_release(&self) -> Result<Option<ActiveRelease>, LifecycleError> {
         let Some(active) = self.active_release()? else {
+            if self.read_retained_known_good()?.is_some() {
+                return Err(LifecycleError::JournalCorrupt);
+            }
             return Ok(None);
         };
-        let signed: SignedReleaseManifest = read_json(&self.manifest_path(&active))?;
-        verify_release_manifest(&signed, &self.verifying_key, &self.policy)?;
-        if signed.manifest.release_identity != active.release_identity
-            || signed.manifest.install_generation != active.install_generation
-        {
-            return Err(LifecycleError::VerificationFailed);
-        }
-        let root = self.version_path(&active)?;
-        verify_candidate_inventory(&root, &signed.manifest.files)?;
+        self.audit_release(&active, &self.policy)?;
+        let retained = self.retained_known_good_release()?;
+        let expected_release_count = usize::from(retained.is_some()).saturating_add(1);
         if count_entries(&self.lifecycle_root.join("active"))? != 1
-            || count_entries(&self.lifecycle_root.join("manifests"))? != 1
-            || count_entries(&self.install_root.join("versions"))? != 1
+            || count_entries(&self.lifecycle_root.join("manifests"))? != expected_release_count
+            || count_entries(&self.install_root.join("versions"))? != expected_release_count
         {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
@@ -574,6 +751,7 @@ impl ReleaseInstaller {
     ) -> Result<UpdateOutcome, LifecycleError> {
         let _lock = LifecycleLock::acquire(&self.lifecycle_root)?;
         let previous = self.audit_active_release()?;
+        let previous_retained = self.retained_known_good_release()?;
         let mut policy = self.policy.clone();
         if let Some(active) = &previous {
             policy.minimum_install_generation = policy
@@ -598,6 +776,7 @@ impl ReleaseInstaller {
             state: UpdateState::Preparing,
             candidate: candidate.clone(),
             previous: previous.clone(),
+            previous_retained: previous_retained.clone(),
         };
         self.write_update_journal(&journal)?;
         if let Err(error) = Self::stage(signed, bundle_root, &candidate_root) {
@@ -613,16 +792,23 @@ impl ReleaseInstaller {
         journal.state = UpdateState::ProcessesStopped;
         self.write_update_journal(&journal)?;
         self.commit_manifest(signed, &candidate)?;
-        let pointer = self.commit_pointer(&candidate)?;
+        if let Err(error) = self.audit_release(&candidate, &policy) {
+            if self.remove_manifest(&candidate).is_err()
+                || remove_owned_path(&candidate_root).is_err()
+                || self.remove_release_record_temporaries(&candidate).is_err()
+                || self.remove_update_journal().is_err()
+            {
+                return Err(LifecycleError::UpdatePendingCleanup);
+            }
+            return Err(error);
+        }
+        self.commit_pointer(&candidate)?;
         journal.state = UpdateState::Activated;
         self.write_update_journal(&journal)?;
         if hooks.health_check(&candidate).is_err() {
-            if fs::remove_file(&pointer).is_err()
-                || self.remove_manifest(&candidate).is_err()
-                || remove_owned_path(&candidate_root).is_err()
-            {
-                return Err(LifecycleError::RollbackFailed);
-            }
+            journal.state = UpdateState::RollingBack;
+            self.write_update_journal(&journal)?;
+            self.restore_previous_after_candidate_failure(&journal)?;
             self.remove_update_journal()?;
             return Err(LifecycleError::HealthCheckFailed);
         }
@@ -630,20 +816,12 @@ impl ReleaseInstaller {
         self.write_update_journal(&journal)?;
         journal.state = UpdateState::Cleanup;
         self.write_update_journal(&journal)?;
-        if let Some(old) = &previous {
-            let old_root = self.version_path(old)?;
-            if remove_owned_path(&old_root).is_err()
-                || self.remove_pointer(old).is_err()
-                || self.remove_manifest(old).is_err()
-            {
-                return Err(LifecycleError::UpdatePendingCleanup);
-            }
-        }
-        self.remove_update_journal()?;
+        self.finish_successful_update(&journal)?;
         self.audit_single_active(&candidate)?;
+        self.remove_update_journal()?;
         Ok(UpdateOutcome {
             active: candidate,
-            removed_release: previous,
+            removed_release: previous_retained,
         })
     }
 
@@ -656,7 +834,15 @@ impl ReleaseInstaller {
         if self.lifecycle_root.join("uninstall.json").exists() {
             return Err(LifecycleError::UninstallPendingCleanup);
         }
-        let Some(journal) = self.read_update_journal()? else {
+        let update_journal = self.read_update_journal()?;
+        let rollback_journal = self.read_retained_rollback_journal()?;
+        if update_journal.is_some() && rollback_journal.is_some() {
+            return Err(LifecycleError::JournalCorrupt);
+        }
+        if let Some(journal) = rollback_journal {
+            return self.resume_retained_rollback(journal, hooks);
+        }
+        let Some(journal) = update_journal else {
             return Ok(());
         };
         let candidate_root = self.version_path(&journal.candidate)?;
@@ -666,21 +852,41 @@ impl ReleaseInstaller {
                     .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
                 self.remove_pointer(&journal.candidate)?;
                 self.remove_manifest(&journal.candidate)?;
+                self.remove_release_record_temporaries(&journal.candidate)?;
             }
-            UpdateState::Activated | UpdateState::HealthChecked | UpdateState::Cleanup => {
+            UpdateState::Activated => {
                 if hooks.health_check(&journal.candidate).is_err() {
-                    self.remove_pointer(&journal.candidate)
-                        .map_err(|_| LifecycleError::RollbackFailed)?;
-                    self.remove_manifest(&journal.candidate)
-                        .map_err(|_| LifecycleError::RollbackFailed)?;
-                    remove_owned_path(&candidate_root)
-                        .map_err(|_| LifecycleError::RollbackFailed)?;
-                } else if let Some(previous) = &journal.previous {
-                    remove_owned_path(&self.version_path(previous)?)
-                        .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
-                    self.remove_pointer(previous)?;
-                    self.remove_manifest(previous)?;
+                    let mut journal = journal;
+                    journal.state = UpdateState::RollingBack;
+                    self.write_update_journal(&journal)?;
+                    self.restore_previous_after_candidate_failure(&journal)?;
+                } else {
+                    let mut journal = journal;
+                    journal.state = UpdateState::HealthChecked;
+                    self.write_update_journal(&journal)?;
+                    journal.state = UpdateState::Cleanup;
+                    self.write_update_journal(&journal)?;
+                    self.finish_successful_update(&journal)?;
+                    self.audit_single_active(&journal.candidate)?;
+                    self.remove_release_record_temporaries(&journal.candidate)?;
                 }
+            }
+            UpdateState::HealthChecked => {
+                let mut journal = journal;
+                journal.state = UpdateState::Cleanup;
+                self.write_update_journal(&journal)?;
+                self.finish_successful_update(&journal)?;
+                self.audit_single_active(&journal.candidate)?;
+                self.remove_release_record_temporaries(&journal.candidate)?;
+            }
+            UpdateState::Cleanup => {
+                self.finish_successful_update(&journal)?;
+                self.audit_single_active(&journal.candidate)?;
+                self.remove_release_record_temporaries(&journal.candidate)?;
+            }
+            UpdateState::RollingBack => {
+                self.restore_previous_after_candidate_failure(&journal)?;
+                self.remove_release_record_temporaries(&journal.candidate)?;
             }
         }
         self.remove_update_journal()
@@ -792,6 +998,340 @@ impl ReleaseInstaller {
         )
     }
 
+    fn audit_release(
+        &self,
+        release: &ActiveRelease,
+        policy: &ReleasePolicy,
+    ) -> Result<(), LifecycleError> {
+        self.read_verified_release_manifest(release, policy)
+            .map(|_| ())
+    }
+
+    fn read_verified_release_manifest(
+        &self,
+        release: &ActiveRelease,
+        policy: &ReleasePolicy,
+    ) -> Result<SignedReleaseManifest, LifecycleError> {
+        let signed: SignedReleaseManifest = read_json(&self.manifest_path(release))?;
+        verify_release_manifest(&signed, &self.verifying_key, policy)?;
+        if signed.manifest.release_identity != release.release_identity
+            || signed.manifest.install_generation != release.install_generation
+        {
+            return Err(LifecycleError::VerificationFailed);
+        }
+        let root = self.version_path(release)?;
+        verify_candidate_inventory(&root, &signed.manifest.files)?;
+        Ok(signed)
+    }
+
+    fn rollback_compatibility_metadata(
+        &self,
+        release: &ActiveRelease,
+    ) -> Result<RollbackCompatibilityMetadata, LifecycleError> {
+        let mut policy = self.policy.clone();
+        policy.minimum_install_generation = 0;
+        let signed = self.read_verified_release_manifest(release, &policy)?;
+        let Some(expected) = signed.manifest.files.iter().find(|file| {
+            file.role == ReleaseFileRole::RuntimeAsset
+                && file.path == ROLLBACK_COMPATIBILITY_FILENAME
+        }) else {
+            return Err(LifecycleError::RollbackFailed);
+        };
+        let path = self
+            .version_path(release)?
+            .join(ROLLBACK_COMPATIBILITY_FILENAME);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| LifecycleError::RollbackFailed)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() == 0
+            || metadata.len() > MAXIMUM_ROLLBACK_COMPATIBILITY_BYTES
+            || metadata.len() != expected.size
+        {
+            return Err(LifecycleError::RollbackFailed);
+        }
+        let bytes = fs::read(&path).map_err(|_| LifecycleError::RollbackFailed)?;
+        if URL_SAFE_NO_PAD.encode(Sha256::digest(&bytes)) != expected.sha256 {
+            return Err(LifecycleError::RollbackFailed);
+        }
+        let compatibility: RollbackCompatibilityMetadata =
+            serde_json::from_slice(&bytes).map_err(|_| LifecycleError::RollbackFailed)?;
+        if compatibility.schema_version != ROLLBACK_COMPATIBILITY_SCHEMA_VERSION
+            || compatibility.state_compatibility_epoch == 0
+        {
+            return Err(LifecycleError::RollbackFailed);
+        }
+        Ok(compatibility)
+    }
+
+    fn verify_retained_rollback_compatibility(
+        &self,
+        failed: &ActiveRelease,
+        target: &ActiveRelease,
+    ) -> Result<(), LifecycleError> {
+        let failed = self.rollback_compatibility_metadata(failed)?;
+        let target = self.rollback_compatibility_metadata(target)?;
+        if failed.state_compatibility_epoch != target.state_compatibility_epoch {
+            return Err(LifecycleError::RollbackFailed);
+        }
+        Ok(())
+    }
+
+    fn remove_release_record_temporaries(
+        &self,
+        release: &ActiveRelease,
+    ) -> Result<(), LifecycleError> {
+        let name = pointer_name(release);
+        for directory in [
+            self.lifecycle_root.join("active"),
+            self.lifecycle_root.join("manifests"),
+        ] {
+            remove_file_if_present(&directory.join(format!(".{name}.next")))
+                .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        }
+        Ok(())
+    }
+
+    fn retained_known_good_path(&self) -> PathBuf {
+        self.lifecycle_root.join("known-good.json")
+    }
+
+    fn read_retained_known_good(&self) -> Result<Option<ActiveRelease>, LifecycleError> {
+        let path = self.retained_known_good_path();
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                let release: ActiveRelease = read_json(&path)?;
+                if !valid_active_release(&release) {
+                    return Err(LifecycleError::JournalCorrupt);
+                }
+                Ok(Some(release))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Ok(_) | Err(_) => Err(LifecycleError::JournalCorrupt),
+        }
+    }
+
+    fn commit_retained_known_good(&self, release: &ActiveRelease) -> Result<(), LifecycleError> {
+        if !valid_active_release(release) {
+            return Err(LifecycleError::JournalCorrupt);
+        }
+        write_json_atomic(&self.lifecycle_root, "known-good.json", release)
+    }
+
+    fn remove_retained_known_good(&self) -> Result<(), LifecycleError> {
+        remove_file_if_present(&self.retained_known_good_path())
+            .map_err(|_| LifecycleError::UpdatePendingCleanup)
+    }
+
+    fn finish_successful_update(&self, journal: &UpdateJournal) -> Result<(), LifecycleError> {
+        if let Some(previous) = &journal.previous {
+            self.commit_retained_known_good(previous)?;
+            self.remove_pointer(previous)?;
+        } else {
+            self.remove_retained_known_good()?;
+        }
+        if let Some(old_retained) = &journal.previous_retained
+            && journal.previous.as_ref() != Some(old_retained)
+        {
+            remove_owned_path(&self.version_path(old_retained)?)
+                .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+            self.remove_manifest(old_retained)?;
+        }
+        Ok(())
+    }
+
+    fn restore_previous_after_candidate_failure(
+        &self,
+        journal: &UpdateJournal,
+    ) -> Result<(), LifecycleError> {
+        let mut rollback_policy = self.policy.clone();
+        rollback_policy.minimum_install_generation = 0;
+        if let Some(previous) = &journal.previous {
+            // Candidate code has already executed by the time a health check
+            // can fail. Never select an older binary after that point unless
+            // both signed releases declare the same persisted-state epoch.
+            self.verify_retained_rollback_compatibility(&journal.candidate, previous)?;
+            self.audit_release(previous, &rollback_policy)?;
+            self.commit_pointer(previous)
+                .map_err(|_| LifecycleError::RollbackFailed)?;
+        }
+
+        let retained_to_restore =
+            journal.previous_retained.as_ref().and_then(|retained| {
+                if journal.previous.as_ref().is_some_and(|previous| {
+                    retained.install_generation >= previous.install_generation
+                }) {
+                    return None;
+                }
+                self.audit_release(retained, &rollback_policy)
+                    .ok()
+                    .map(|()| retained)
+            });
+
+        self.remove_pointer(&journal.candidate)
+            .map_err(|_| LifecycleError::RollbackFailed)?;
+        self.remove_manifest(&journal.candidate)
+            .map_err(|_| LifecycleError::RollbackFailed)?;
+        remove_owned_path(&self.version_path(&journal.candidate)?)
+            .map_err(|_| LifecycleError::RollbackFailed)?;
+
+        if let Some(retained) = retained_to_restore {
+            self.commit_retained_known_good(retained)
+                .map_err(|_| LifecycleError::RollbackFailed)?;
+        } else {
+            self.remove_retained_known_good()
+                .map_err(|_| LifecycleError::RollbackFailed)?;
+            if let Some(retained) = &journal.previous_retained {
+                remove_owned_path(&self.version_path(retained)?)
+                    .map_err(|_| LifecycleError::RollbackFailed)?;
+                self.remove_manifest(retained)
+                    .map_err(|_| LifecycleError::RollbackFailed)?;
+            }
+        }
+
+        if let Some(previous) = &journal.previous {
+            self.audit_single_active(previous)?;
+        } else if self.active_release()?.is_some() {
+            return Err(LifecycleError::RollbackFailed);
+        }
+        Ok(())
+    }
+
+    fn write_retained_rollback_journal(
+        &self,
+        journal: &RetainedRollbackJournal,
+    ) -> Result<(), LifecycleError> {
+        let name = retained_rollback_journal_name(journal.state);
+        write_json_atomic(&self.lifecycle_root, name, journal)?;
+        for state in RetainedRollbackState::ALL {
+            if state != journal.state {
+                remove_file_if_present(
+                    &self
+                        .lifecycle_root
+                        .join(retained_rollback_journal_name(state)),
+                )
+                .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_retained_rollback_journal(
+        &self,
+    ) -> Result<Option<RetainedRollbackJournal>, LifecycleError> {
+        for state in RetainedRollbackState::ALL.into_iter().rev() {
+            let path = self
+                .lifecycle_root
+                .join(retained_rollback_journal_name(state));
+            if path.exists() {
+                let journal: RetainedRollbackJournal = read_json(&path)?;
+                if journal.state != state
+                    || !valid_active_release(&journal.failed)
+                    || !valid_active_release(&journal.target)
+                    || journal.target.install_generation >= journal.failed.install_generation
+                {
+                    return Err(LifecycleError::JournalCorrupt);
+                }
+                return Ok(Some(journal));
+            }
+        }
+        Ok(None)
+    }
+
+    fn remove_retained_rollback_journal(&self) -> Result<(), LifecycleError> {
+        for state in RetainedRollbackState::ALL {
+            remove_file_if_present(
+                &self
+                    .lifecycle_root
+                    .join(retained_rollback_journal_name(state)),
+            )
+            .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn retained_rollback_journal_exists(&self) -> bool {
+        RetainedRollbackState::ALL.into_iter().any(|state| {
+            self.lifecycle_root
+                .join(retained_rollback_journal_name(state))
+                .exists()
+        })
+    }
+
+    fn resume_retained_rollback<H: LifecycleHooks>(
+        &self,
+        mut journal: RetainedRollbackJournal,
+        hooks: &H,
+    ) -> Result<(), LifecycleError> {
+        let retained_marker = self.read_retained_known_good()?;
+        match journal.state {
+            RetainedRollbackState::Preparing
+            | RetainedRollbackState::ProcessesStopped
+            | RetainedRollbackState::Activated
+                if retained_marker.as_ref() != Some(&journal.target) =>
+            {
+                return Err(LifecycleError::JournalCorrupt);
+            }
+            RetainedRollbackState::Cleanup
+                if retained_marker
+                    .as_ref()
+                    .is_some_and(|retained| retained != &journal.target) =>
+            {
+                return Err(LifecycleError::JournalCorrupt);
+            }
+            _ => {}
+        }
+        let mut rollback_policy = self.policy.clone();
+        rollback_policy.minimum_install_generation = 0;
+        self.audit_release(&journal.target, &rollback_policy)?;
+        if journal.state != RetainedRollbackState::Cleanup {
+            self.audit_release(&journal.failed, &rollback_policy)?;
+            self.verify_retained_rollback_compatibility(&journal.failed, &journal.target)?;
+        }
+
+        if journal.state == RetainedRollbackState::Preparing {
+            hooks
+                .prepare_activation(Some(&journal.failed))
+                .map_err(|_| LifecycleError::ShutdownFailed)?;
+            journal.state = RetainedRollbackState::ProcessesStopped;
+            self.write_retained_rollback_journal(&journal)?;
+        }
+        if journal.state == RetainedRollbackState::ProcessesStopped {
+            let selected = self.active_release()?;
+            if selected.as_ref() != Some(&journal.failed)
+                && selected.as_ref() != Some(&journal.target)
+            {
+                return Err(LifecycleError::JournalCorrupt);
+            }
+            self.commit_pointer(&journal.target)?;
+            self.remove_pointer(&journal.failed)
+                .map_err(|_| LifecycleError::RollbackFailed)?;
+            journal.state = RetainedRollbackState::Activated;
+            self.write_retained_rollback_journal(&journal)?;
+        }
+        if journal.state == RetainedRollbackState::Activated {
+            if self.active_release()?.as_ref() != Some(&journal.target) {
+                return Err(LifecycleError::JournalCorrupt);
+            }
+            journal.state = RetainedRollbackState::Cleanup;
+            self.write_retained_rollback_journal(&journal)?;
+        }
+        if journal.state == RetainedRollbackState::Cleanup {
+            if self.active_release()?.as_ref() != Some(&journal.target) {
+                return Err(LifecycleError::JournalCorrupt);
+            }
+            self.remove_retained_known_good()?;
+            remove_owned_path(&self.version_path(&journal.failed)?)
+                .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+            self.remove_manifest(&journal.failed)?;
+            self.audit_single_active(&journal.target)?;
+            self.remove_release_record_temporaries(&journal.failed)?;
+            self.remove_release_record_temporaries(&journal.target)?;
+            self.remove_retained_rollback_journal()?;
+        }
+        Ok(())
+    }
+
     fn remove_pointer(&self, release: &ActiveRelease) -> Result<(), LifecycleError> {
         remove_file_if_present(
             &self
@@ -864,11 +1404,15 @@ impl ReleaseInstaller {
         if count_entries(&active_root)? != 1 {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
-        if count_entries(&self.lifecycle_root.join("manifests"))? != 1 {
+        let retained = self.retained_known_good_release()?;
+        let expected_release_count = usize::from(retained.is_some()).saturating_add(1);
+        if count_entries(&self.lifecycle_root.join("manifests"))? != expected_release_count {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
         let versions = self.install_root.join("versions");
-        if count_entries(&versions)? != 1 || !self.version_path(expected)?.is_dir() {
+        if count_entries(&versions)? != expected_release_count
+            || !self.version_path(expected)?.is_dir()
+        {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
         self.audit_active_release().map(|_| ())
@@ -1174,6 +1718,17 @@ pub fn verify_release_file(path: &Path, expected: &ReleaseFile) -> Result<(), Li
 }
 
 fn verify_candidate_inventory(root: &Path, expected: &[ReleaseFile]) -> Result<(), LifecycleError> {
+    verify_candidate_inventory_with(root, expected, verify_installed_executable_authenticode)
+}
+
+fn verify_candidate_inventory_with<F>(
+    root: &Path,
+    expected: &[ReleaseFile],
+    mut verify_native_executable: F,
+) -> Result<(), LifecycleError>
+where
+    F: FnMut(&Path, &ReleaseFile) -> Result<(), LifecycleError>,
+{
     let mut actual = BTreeSet::new();
     collect_relative_files(root, root, &mut actual)?;
     let declared = expected
@@ -1190,8 +1745,164 @@ fn verify_candidate_inventory(root: &Path, expected: &[ReleaseFile]) -> Result<(
         verify_executable(&path, file.executable)?;
         #[cfg(not(unix))]
         verify_executable(&path, file.executable);
+        verify_native_executable(&path, file)?;
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn verify_installed_executable_authenticode(
+    _path: &Path,
+    _expected: &ReleaseFile,
+) -> Result<(), LifecycleError> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn verify_installed_executable_authenticode(
+    path: &Path,
+    expected: &ReleaseFile,
+) -> Result<(), LifecycleError> {
+    verify_installed_executable_authenticode_with(
+        path,
+        expected,
+        embedded_authenticode_thumbprint()?,
+        run_windows_authenticode_check,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn verify_installed_executable_authenticode_with<F>(
+    path: &Path,
+    expected: &ReleaseFile,
+    expected_thumbprint: Option<&str>,
+    verify: F,
+) -> Result<(), LifecycleError>
+where
+    F: FnOnce(&Path, &Path, &Path, &str) -> Result<(), LifecycleError>,
+{
+    if !expected.executable
+        || !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return Ok(());
+    }
+    let Some(thumbprint) = expected_thumbprint else {
+        // Development/test builds may intentionally omit production signing.
+        // Once packaging embeds the expected signer, every installed .exe
+        // inventory audit below fails closed on any trust/signature mismatch.
+        return Ok(());
+    };
+    verify_windows_authenticode_with(path, thumbprint, verify)
+}
+
+#[cfg(target_os = "windows")]
+fn embedded_authenticode_thumbprint() -> Result<Option<&'static str>, LifecycleError> {
+    let Some(thumbprint) = option_env!("AXIUSFLOW_AUTHENTICODE_CERT_SHA1") else {
+        return Ok(None);
+    };
+    if !valid_authenticode_thumbprint(thumbprint) {
+        return Err(LifecycleError::VerificationFailed);
+    }
+    Ok(Some(thumbprint))
+}
+
+/// Verifies one Windows executable against the production publisher signer and
+/// timestamp embedded by release packaging.
+///
+/// This is used for the stable launcher copy, which may legitimately remain
+/// newer than the active version directory after a retained-known-good rollback.
+///
+/// # Errors
+/// Fails closed when the production signer is not embedded or Windows trust,
+/// signer-thumbprint, or timestamp verification fails.
+#[cfg(target_os = "windows")]
+pub fn verify_windows_publisher_signature(path: &Path) -> Result<(), LifecycleError> {
+    let thumbprint =
+        embedded_authenticode_thumbprint()?.ok_or(LifecycleError::VerificationFailed)?;
+    verify_windows_authenticode_with(path, thumbprint, run_windows_authenticode_check)
+}
+
+#[cfg(target_os = "windows")]
+fn valid_authenticode_thumbprint(thumbprint: &str) -> bool {
+    thumbprint.len() == 40 && thumbprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(target_os = "windows")]
+fn system32_powershell() -> Result<(PathBuf, PathBuf), LifecycleError> {
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or(LifecycleError::VerificationFailed)?;
+    let powershell = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let security_module = system_root.join(
+        "System32/WindowsPowerShell/v1.0/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1",
+    );
+    for path in [&powershell, &security_module] {
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| LifecycleError::VerificationFailed)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(LifecycleError::VerificationFailed);
+        }
+    }
+    Ok((powershell, security_module))
+}
+
+#[cfg(target_os = "windows")]
+fn verify_windows_authenticode_with<F>(
+    path: &Path,
+    expected_thumbprint: &str,
+    verify: F,
+) -> Result<(), LifecycleError>
+where
+    F: FnOnce(&Path, &Path, &Path, &str) -> Result<(), LifecycleError>,
+{
+    if !valid_authenticode_thumbprint(expected_thumbprint) {
+        return Err(LifecycleError::VerificationFailed);
+    }
+    let (powershell, security_module) = system32_powershell()?;
+    verify(&powershell, &security_module, path, expected_thumbprint)
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_authenticode_check(
+    powershell: &Path,
+    security_module: &Path,
+    path: &Path,
+    expected_thumbprint: &str,
+) -> Result<(), LifecycleError> {
+    const SCRIPT: &str = "$ErrorActionPreference='Stop'; Import-Module -Name $env:AXIUSFLOW_AUTHENTICODE_SECURITY_MODULE -Force -ErrorAction Stop; $s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:AXIUSFLOW_AUTHENTICODE_PATH -ErrorAction Stop; if ($s.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ine $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -or $null -eq $s.TimeStamperCertificate) { exit 1 }; exit 0";
+    let mut child = Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            SCRIPT,
+        ])
+        .env("AXIUSFLOW_AUTHENTICODE_SECURITY_MODULE", security_module)
+        .env("AXIUSFLOW_AUTHENTICODE_PATH", path)
+        .env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", expected_thumbprint)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| LifecycleError::VerificationFailed)?;
+    let deadline = Instant::now() + AUTHENTICODE_AUDIT_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) | Err(_) => return Err(LifecycleError::VerificationFailed),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LifecycleError::VerificationFailed);
+            }
+        }
+    }
 }
 
 fn collect_relative_files(
@@ -1507,31 +2218,47 @@ mod tests {
             .map_or(0, |duration| duration.as_nanos())
     }
 
-    fn release(root: &Path, generation: u64) -> (SignedReleaseManifest, SigningKey, PathBuf) {
+    fn release_with_rollback_bytes(
+        root: &Path,
+        generation: u64,
+        rollback_compatibility: Option<Vec<u8>>,
+    ) -> (SignedReleaseManifest, SigningKey, PathBuf) {
         let bundle = root.join(format!("bundle-{generation}"));
         fs::create_dir_all(&bundle).expect("bundle");
         let desktop = format!("desktop-{generation}").into_bytes();
         let launcher = format!("launcher-{generation}").into_bytes();
         fs::write(bundle.join("axiusflow_desktop"), &desktop).expect("desktop");
         fs::write(bundle.join("axiusflow_launcher"), &launcher).expect("launcher");
-        let files = [
+        if let Some(bytes) = &rollback_compatibility {
+            fs::write(bundle.join(ROLLBACK_COMPATIBILITY_FILENAME), bytes)
+                .expect("rollback compatibility");
+        }
+        let mut files = vec![
             (ReleaseFileRole::Desktop, "axiusflow_desktop", desktop),
             (
                 ReleaseFileRole::RuntimeAsset,
                 "axiusflow_launcher",
                 launcher,
             ),
-        ]
-        .into_iter()
-        .map(|(role, path, bytes)| ReleaseFile {
-            role,
-            path: path.to_string(),
-            url: format!("https://releases.axiusflow.test/{generation}/{path}"),
-            size: bytes.len() as u64,
-            sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
-            executable: true,
-        })
-        .collect();
+        ];
+        if let Some(bytes) = rollback_compatibility {
+            files.push((
+                ReleaseFileRole::RuntimeAsset,
+                ROLLBACK_COMPATIBILITY_FILENAME,
+                bytes,
+            ));
+        }
+        let files = files
+            .into_iter()
+            .map(|(role, path, bytes)| ReleaseFile {
+                role,
+                path: path.to_string(),
+                url: format!("https://releases.axiusflow.test/{generation}/{path}"),
+                size: bytes.len() as u64,
+                sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
+                executable: true,
+            })
+            .collect();
         let manifest = ReleaseManifest {
             schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
             release_identity: format!("release-{generation}"),
@@ -1549,6 +2276,92 @@ mod tests {
         let key = SigningKey::from_bytes(&[u8::try_from(generation).unwrap_or(0); 32]);
         let signed = sign_release_manifest(manifest, &key).expect("sign manifest");
         (signed, key, bundle)
+    }
+
+    fn release(root: &Path, generation: u64) -> (SignedReleaseManifest, SigningKey, PathBuf) {
+        release_with_rollback_bytes(
+            root,
+            generation,
+            Some(
+                serde_json::to_vec(&RollbackCompatibilityMetadata::current())
+                    .expect("rollback compatibility encodes"),
+            ),
+        )
+    }
+
+    fn release_with_compatibility_epoch(
+        root: &Path,
+        generation: u64,
+        epoch: u32,
+    ) -> (SignedReleaseManifest, SigningKey, PathBuf) {
+        release_with_rollback_bytes(
+            root,
+            generation,
+            Some(
+                serde_json::to_vec(&RollbackCompatibilityMetadata {
+                    schema_version: ROLLBACK_COMPATIBILITY_SCHEMA_VERSION,
+                    state_compatibility_epoch: epoch,
+                })
+                .expect("rollback compatibility encodes"),
+            ),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_exe_inventory_authenticode_gate_uses_absolute_system32_trust_check() {
+        let root = temporary_root("authenticode-inventory");
+        let executable = root.join("fixture.exe");
+        let bytes = b"signed-fixture-shape";
+        fs::write(&executable, bytes).expect("fixture executable");
+        let expected = ReleaseFile {
+            role: ReleaseFileRole::Desktop,
+            path: "fixture.exe".to_string(),
+            url: "https://releases.axiusflow.test/fixture.exe".to_string(),
+            size: bytes.len() as u64,
+            sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
+            executable: true,
+        };
+        let calls = std::cell::Cell::new(0_u32);
+        verify_candidate_inventory_with(&root, std::slice::from_ref(&expected), |path, file| {
+            verify_installed_executable_authenticode_with(
+                path,
+                file,
+                Some("0123456789ABCDEF0123456789ABCDEF01234567"),
+                |powershell, security_module, checked, thumbprint| {
+                    calls.set(calls.get() + 1);
+                    assert!(powershell.is_absolute());
+                    assert!(security_module.is_absolute());
+                    assert!(powershell.to_string_lossy().contains("System32"));
+                    assert!(security_module.to_string_lossy().contains("System32"));
+                    assert_eq!(checked, executable);
+                    assert_eq!(thumbprint, "0123456789ABCDEF0123456789ABCDEF01234567");
+                    Ok(())
+                },
+            )
+        })
+        .expect("inventory accepts trusted signer seam");
+        assert_eq!(calls.get(), 1);
+
+        assert_eq!(
+            verify_installed_executable_authenticode_with(
+                &executable,
+                &expected,
+                Some("0123456789ABCDEF0123456789ABCDEF01234567"),
+                |_, _, _, _| Err(LifecycleError::VerificationFailed),
+            ),
+            Err(LifecycleError::VerificationFailed)
+        );
+        assert_eq!(
+            verify_installed_executable_authenticode_with(
+                &executable,
+                &expected,
+                Some("not-a-thumbprint"),
+                |_, _, _, _| Ok(()),
+            ),
+            Err(LifecycleError::VerificationFailed)
+        );
+        let _ = remove_owned_path(&root);
     }
 
     #[test]
@@ -1657,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_upgrade_leaves_one_matching_release_and_no_staging() {
+    fn successful_upgrade_retains_one_verified_known_good_release() {
         let root = temporary_root("upgrade");
         let (first, key, first_bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
@@ -1675,13 +2488,74 @@ mod tests {
             .install(&second, &second_bundle, &Hooks::default())
             .expect("upgrade");
         assert_eq!(outcome.active.install_generation, 2);
-        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert_eq!(outcome.removed_release, None);
+        assert_eq!(
+            installer
+                .retained_known_good_release()
+                .expect("retained release")
+                .expect("known-good release")
+                .install_generation,
+            1
+        );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(2));
         assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }
 
     #[test]
-    fn successive_upgrades_leave_one_matching_release_and_no_staging() {
+    fn verified_release_manifest_accepts_only_owned_audited_releases() {
+        let root = temporary_root("verified-manifest");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        let active = installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install")
+            .active;
+        let retained = installer
+            .retained_known_good_release()
+            .expect("retained read")
+            .expect("retained release");
+
+        assert_eq!(
+            installer
+                .verified_release_manifest(&active)
+                .expect("active manifest")
+                .manifest
+                .install_generation,
+            2
+        );
+        assert_eq!(
+            installer
+                .verified_release_manifest(&retained)
+                .expect("retained manifest")
+                .manifest
+                .install_generation,
+            1
+        );
+        let unknown = ActiveRelease {
+            release_identity: "release-9".to_string(),
+            install_generation: 9,
+            directory_name: "00000000000000000009-release-9".to_string(),
+        };
+        assert_eq!(
+            installer.verified_release_manifest(&unknown),
+            Err(LifecycleError::VerificationFailed)
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn successive_upgrades_rotate_the_retained_release_and_stay_bounded() {
         let root = temporary_root("successive-upgrades");
         let (first, key, first_bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
@@ -1693,6 +2567,7 @@ mod tests {
         installer
             .install(&first, &first_bundle, &Hooks::default())
             .expect("first install");
+        let mut removed = Vec::new();
         for generation in [2_u64, 3] {
             let (next, _, next_bundle) = release(&root, generation);
             let next = sign_release_manifest(next.manifest, &key).expect("same release key");
@@ -1700,6 +2575,11 @@ mod tests {
                 .install(&next, &next_bundle, &Hooks::default())
                 .expect("upgrade");
             assert_eq!(outcome.active.install_generation, generation);
+            removed.push(
+                outcome
+                    .removed_release
+                    .map(|release| release.install_generation),
+            );
         }
         assert_eq!(
             installer
@@ -1709,8 +2589,63 @@ mod tests {
                 .install_generation,
             3
         );
-        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert_eq!(removed, vec![None, Some(1)]);
+        assert_eq!(
+            installer
+                .retained_known_good_release()
+                .expect("retained release")
+                .expect("known-good release")
+                .install_generation,
+            2
+        );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(2));
+        assert!(
+            !root
+                .join("install/versions/00000000000000000001-release-1")
+                .exists()
+        );
         assert!(!installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn retained_known_good_inventory_is_reverified_before_use() {
+        let root = temporary_root("retained-audit");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+        installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("upgrade");
+        let retained = installer
+            .retained_known_good_release()
+            .expect("retained release")
+            .expect("known-good release");
+        fs::write(
+            installer
+                .release_directory(&retained)
+                .expect("retained directory")
+                .join("axiusflow_desktop"),
+            b"tampered retained desktop",
+        )
+        .expect("mutate retained desktop");
+        assert_eq!(
+            installer.retained_known_good_release(),
+            Err(LifecycleError::VerificationFailed)
+        );
+        assert_eq!(
+            installer.audit_active_release(),
+            Err(LifecycleError::VerificationFailed)
+        );
         let _ = remove_owned_path(&root);
     }
 
@@ -1763,6 +2698,99 @@ mod tests {
     }
 
     #[test]
+    fn active_release_ignores_uncommitted_next_pointer() {
+        let root = temporary_root("ignore-next-pointer");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let active = installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install")
+            .active;
+        let uncommitted = ActiveRelease {
+            release_identity: "release-2".to_string(),
+            install_generation: 2,
+            directory_name: "00000000000000000002-release-2".to_string(),
+        };
+        let temporary = installer
+            .lifecycle_root
+            .join("active")
+            .join(format!(".{}.next", pointer_name(&uncommitted)));
+        fs::write(
+            &temporary,
+            serde_json::to_vec(&uncommitted).expect("pointer encodes"),
+        )
+        .expect("temporary pointer writes");
+
+        assert_eq!(
+            installer.active_release().expect("active read"),
+            Some(active)
+        );
+        assert_eq!(
+            installer.audit_active_release(),
+            Err(LifecycleError::UpdatePendingCleanup)
+        );
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn preactivation_recovery_removes_pointer_and_manifest_temporary_files() {
+        let root = temporary_root("preactivation-next-cleanup");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let previous = installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install")
+            .active;
+        let candidate = ActiveRelease {
+            release_identity: "release-2".to_string(),
+            install_generation: 2,
+            directory_name: "00000000000000000002-release-2".to_string(),
+        };
+        let name = pointer_name(&candidate);
+        let pointer_temporary = installer
+            .lifecycle_root
+            .join("active")
+            .join(format!(".{name}.next"));
+        let manifest_temporary = installer
+            .lifecycle_root
+            .join("manifests")
+            .join(format!(".{name}.next"));
+        fs::write(&pointer_temporary, b"partial-pointer").expect("temporary pointer");
+        fs::write(&manifest_temporary, b"partial-manifest").expect("temporary manifest");
+        installer
+            .write_update_journal(&UpdateJournal {
+                state: UpdateState::ProcessesStopped,
+                candidate,
+                previous: Some(previous.clone()),
+                previous_retained: None,
+            })
+            .expect("preactivation journal");
+
+        installer.recover(&Hooks::default()).expect("recover");
+        assert!(!pointer_temporary.exists());
+        assert!(!manifest_temporary.exists());
+        assert_eq!(
+            installer
+                .audit_active_release()
+                .expect("active audit")
+                .expect("previous active"),
+            previous
+        );
+        assert!(!installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
     fn failed_health_check_restores_the_previous_pointer() {
         let root = temporary_root("rollback");
         let (first, key, first_bundle) = release(&root, 1);
@@ -1799,6 +2827,464 @@ mod tests {
         assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
         assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn failed_health_check_never_rolls_back_across_state_compatibility_epochs() {
+        let root = temporary_root("health-rollback-compatibility");
+        let (first, key, first_bundle) = release_with_compatibility_epoch(&root, 1, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release_with_compatibility_epoch(&root, 2, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        assert_eq!(
+            installer.install(
+                &second,
+                &second_bundle,
+                &Hooks {
+                    fail_health: true,
+                    ..Hooks::default()
+                }
+            ),
+            Err(LifecycleError::RollbackFailed)
+        );
+        assert_eq!(
+            installer
+                .active_release()
+                .expect("active")
+                .expect("candidate remains selected")
+                .install_generation,
+            2
+        );
+        assert!(installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn recovery_restores_previous_after_partial_known_good_rotation_then_health_failure() {
+        let root = temporary_root("rollback-after-partial-cleanup");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let previous = installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install")
+            .active;
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        let candidate = ActiveRelease {
+            release_identity: second.manifest.release_identity.clone(),
+            install_generation: second.manifest.install_generation,
+            directory_name: format!(
+                "{:020}-{}",
+                second.manifest.install_generation, second.manifest.release_identity
+            ),
+        };
+        let candidate_root = installer.version_path(&candidate).expect("candidate path");
+        ReleaseInstaller::stage(&second, &second_bundle, &candidate_root).expect("stage candidate");
+        installer
+            .commit_manifest(&second, &candidate)
+            .expect("commit candidate manifest");
+        installer
+            .commit_pointer(&candidate)
+            .expect("commit candidate pointer");
+        let journal = UpdateJournal {
+            state: UpdateState::Activated,
+            candidate: candidate.clone(),
+            previous: Some(previous.clone()),
+            previous_retained: None,
+        };
+        installer
+            .write_update_journal(&journal)
+            .expect("write activated journal");
+
+        // Reproduce the crash window: the previous release has already become
+        // the known-good record and lost its active pointer, while the update
+        // journal still requires recovery.
+        installer
+            .commit_retained_known_good(&previous)
+            .expect("rotate known-good pointer");
+        installer
+            .remove_pointer(&previous)
+            .expect("remove previous active pointer");
+        assert_eq!(
+            installer
+                .active_release()
+                .expect("active release")
+                .expect("candidate active"),
+            candidate
+        );
+
+        installer
+            .recover(&Hooks {
+                fail_health: true,
+                ..Hooks::default()
+            })
+            .expect("failed candidate recovers previous");
+        assert_eq!(
+            installer
+                .audit_active_release()
+                .expect("active audit")
+                .expect("previous restored"),
+            previous
+        );
+        assert_eq!(
+            installer
+                .retained_known_good_release()
+                .expect("retained state"),
+            None
+        );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert_eq!(
+            count_entries(&installer.lifecycle_root.join("manifests")),
+            Ok(1)
+        );
+        assert!(!installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn rolling_back_update_state_never_reconsiders_candidate_health() {
+        let root = temporary_root("rollback-decision-is-durable");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let previous = installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install")
+            .active;
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        let candidate = ActiveRelease {
+            release_identity: second.manifest.release_identity.clone(),
+            install_generation: second.manifest.install_generation,
+            directory_name: format!(
+                "{:020}-{}",
+                second.manifest.install_generation, second.manifest.release_identity
+            ),
+        };
+        let candidate_root = installer.version_path(&candidate).expect("candidate path");
+        ReleaseInstaller::stage(&second, &second_bundle, &candidate_root).expect("stage candidate");
+        installer
+            .commit_manifest(&second, &candidate)
+            .expect("commit candidate manifest");
+        installer
+            .commit_pointer(&candidate)
+            .expect("commit candidate pointer");
+        installer
+            .write_update_journal(&UpdateJournal {
+                state: UpdateState::RollingBack,
+                candidate: candidate.clone(),
+                previous: Some(previous.clone()),
+                previous_retained: None,
+            })
+            .expect("persist rollback decision");
+
+        // Default hooks would report the candidate healthy. Recovery must not
+        // re-run that decision after RollingBack has been durably recorded.
+        installer
+            .recover(&Hooks::default())
+            .expect("resume decided rollback");
+        assert_eq!(
+            installer
+                .audit_active_release()
+                .expect("active audit")
+                .expect("previous active"),
+            previous
+        );
+        assert!(!candidate_root.exists());
+        assert!(!installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn retained_known_good_rollback_selects_only_the_verified_local_predecessor() {
+        let root = temporary_root("retained-rollback");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install");
+
+        let restored = installer
+            .rollback_to_retained_known_good(&Hooks::default())
+            .expect("rollback to retained release");
+        assert_eq!(restored.install_generation, 1);
+        assert_eq!(
+            installer
+                .audit_active_release()
+                .expect("active audit")
+                .expect("active release"),
+            restored
+        );
+        assert_eq!(
+            installer
+                .retained_known_good_release()
+                .expect("retained state"),
+            None
+        );
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert_eq!(
+            count_entries(&installer.lifecycle_root.join("manifests")),
+            Ok(1)
+        );
+        assert!(!installer.retained_rollback_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn retained_rollback_rejects_mismatched_signed_state_compatibility_epochs() {
+        let root = temporary_root("rollback-compatibility-epoch");
+        let (first, key, first_bundle) = release_with_compatibility_epoch(&root, 1, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release_with_compatibility_epoch(&root, 2, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+        let active = installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install")
+            .active;
+
+        assert_eq!(
+            installer.rollback_to_retained_known_good(&Hooks::default()),
+            Err(LifecycleError::RollbackFailed)
+        );
+        assert_eq!(
+            installer.active_release().expect("active read"),
+            Some(active)
+        );
+        assert!(!installer.retained_rollback_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn retained_rollback_rejects_missing_signed_state_compatibility_asset() {
+        let root = temporary_root("rollback-compatibility-missing");
+        let (first, key, first_bundle) = release_with_rollback_bytes(&root, 1, None);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+        let active = installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install")
+            .active;
+
+        assert_eq!(
+            installer.rollback_to_retained_known_good(&Hooks::default()),
+            Err(LifecycleError::RollbackFailed)
+        );
+        assert_eq!(
+            installer.active_release().expect("active read"),
+            Some(active)
+        );
+        assert!(!installer.retained_rollback_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn retained_rollback_rejects_malformed_signed_state_compatibility_asset() {
+        let root = temporary_root("rollback-compatibility-malformed");
+        let (first, key, first_bundle) =
+            release_with_rollback_bytes(&root, 1, Some(b"not-json".to_vec()));
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install");
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+        let active = installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install")
+            .active;
+
+        assert_eq!(
+            installer.rollback_to_retained_known_good(&Hooks::default()),
+            Err(LifecycleError::RollbackFailed)
+        );
+        assert_eq!(
+            installer.active_release().expect("active read"),
+            Some(active)
+        );
+        assert!(!installer.retained_rollback_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn health_checked_and_cleanup_recovery_never_rechecks_candidate_health() {
+        for state in [UpdateState::HealthChecked, UpdateState::Cleanup] {
+            let root = temporary_root(&format!("durable-health-{state:?}"));
+            let (first, key, first_bundle) = release(&root, 1);
+            let installer = ReleaseInstaller::new(
+                root.join("install"),
+                key.verifying_key(),
+                ReleasePolicy::native(0),
+            )
+            .expect("installer");
+            let previous = installer
+                .install(&first, &first_bundle, &Hooks::default())
+                .expect("first install")
+                .active;
+            let (second, _, second_bundle) = release(&root, 2);
+            let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+            let candidate = ActiveRelease {
+                release_identity: second.manifest.release_identity.clone(),
+                install_generation: second.manifest.install_generation,
+                directory_name: format!(
+                    "{:020}-{}",
+                    second.manifest.install_generation, second.manifest.release_identity
+                ),
+            };
+            let candidate_root = installer.version_path(&candidate).expect("candidate path");
+            ReleaseInstaller::stage(&second, &second_bundle, &candidate_root)
+                .expect("stage candidate");
+            installer
+                .commit_manifest(&second, &candidate)
+                .expect("candidate manifest");
+            installer
+                .commit_pointer(&candidate)
+                .expect("candidate pointer");
+            installer
+                .write_update_journal(&UpdateJournal {
+                    state,
+                    candidate: candidate.clone(),
+                    previous: Some(previous.clone()),
+                    previous_retained: None,
+                })
+                .expect("durable success journal");
+
+            installer
+                .recover(&Hooks {
+                    fail_health: true,
+                    ..Hooks::default()
+                })
+                .expect("durable success resumes without health recheck");
+            assert_eq!(
+                installer
+                    .audit_active_release()
+                    .expect("active audit")
+                    .expect("candidate remains active"),
+                candidate
+            );
+            assert_eq!(
+                installer
+                    .retained_known_good_release()
+                    .expect("retained read")
+                    .expect("previous retained"),
+                previous
+            );
+            assert!(!installer.update_journal_exists());
+            let _ = remove_owned_path(&root);
+        }
+    }
+
+    #[test]
+    fn interrupted_retained_rollback_recovers_at_every_transaction_boundary() {
+        for state in RetainedRollbackState::ALL {
+            let root = temporary_root(&format!("retained-rollback-recover-{state:?}"));
+            let (first, key, first_bundle) = release(&root, 1);
+            let installer = ReleaseInstaller::new(
+                root.join("install"),
+                key.verifying_key(),
+                ReleasePolicy::native(0),
+            )
+            .expect("installer");
+            installer
+                .install(&first, &first_bundle, &Hooks::default())
+                .expect("first install");
+            let (second, _, second_bundle) = release(&root, 2);
+            let second = sign_release_manifest(second.manifest, &key).expect("same key");
+            let failed = installer
+                .install(&second, &second_bundle, &Hooks::default())
+                .expect("second install")
+                .active;
+            let target = installer
+                .retained_known_good_release()
+                .expect("retained release")
+                .expect("rollback target");
+            if matches!(
+                state,
+                RetainedRollbackState::Activated | RetainedRollbackState::Cleanup
+            ) {
+                installer
+                    .commit_pointer(&target)
+                    .expect("commit rollback target");
+                installer
+                    .remove_pointer(&failed)
+                    .expect("remove failed pointer");
+            }
+            installer
+                .write_retained_rollback_journal(&RetainedRollbackJournal {
+                    state,
+                    failed,
+                    target: target.clone(),
+                })
+                .expect("write rollback journal");
+
+            installer
+                .recover(&Hooks::default())
+                .expect("recover retained rollback");
+            assert_eq!(
+                installer
+                    .audit_active_release()
+                    .expect("active audit")
+                    .expect("rollback target active"),
+                target
+            );
+            assert_eq!(
+                installer
+                    .retained_known_good_release()
+                    .expect("retained state"),
+                None
+            );
+            assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+            assert!(!installer.retained_rollback_journal_exists());
+            let _ = remove_owned_path(&root);
+        }
     }
 
     #[test]
@@ -1856,6 +3342,7 @@ mod tests {
                     state,
                     candidate: candidate.clone(),
                     previous: Some(previous.clone()),
+                    previous_retained: None,
                 })
                 .expect("write interrupted journal");
             installer.recover(&Hooks::default()).expect("recover");
@@ -1873,6 +3360,17 @@ mod tests {
                 &previous
             };
             assert_eq!(&active, expected);
+            let retained = installer
+                .retained_known_good_release()
+                .expect("retained release");
+            if matches!(
+                state,
+                UpdateState::Activated | UpdateState::HealthChecked | UpdateState::Cleanup
+            ) {
+                assert_eq!(retained.as_ref(), Some(&previous));
+            } else {
+                assert_eq!(retained, None);
+            }
             let _ = remove_owned_path(&root);
         }
     }
@@ -1896,11 +3394,13 @@ mod tests {
             state: UpdateState::Staged,
             candidate: candidate.clone(),
             previous: None,
+            previous_retained: None,
         };
         let activated = UpdateJournal {
             state: UpdateState::Activated,
             candidate,
             previous: None,
+            previous_retained: None,
         };
 
         installer
@@ -1951,6 +3451,7 @@ mod tests {
                 directory_name: "00000000000000000002-candidate".to_string(),
             },
             previous: None,
+            previous_retained: None,
         };
         installer
             .write_update_journal(&journal)
@@ -1996,12 +3497,17 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        let previous = installer
+        let first_active = installer
             .install(&first, &first_bundle, &Hooks::default())
             .expect("first install")
             .active;
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        installer
+            .install(&second, &second_bundle, &Hooks::default())
+            .expect("second install");
         let old_desktop = installer
-            .release_directory(&previous)
+            .release_directory(&first_active)
             .expect("old release directory")
             .join("axiusflow_desktop");
         // FILE_SHARE_READ lets the pre-install audit read the old release
@@ -2011,10 +3517,10 @@ mod tests {
             .share_mode(1)
             .open(&old_desktop)
             .expect("hold old desktop without delete sharing");
-        let (second, _, second_bundle) = release(&root, 2);
-        let second = sign_release_manifest(second.manifest, &key).expect("same key");
+        let (third, _, third_bundle) = release(&root, 3);
+        let third = sign_release_manifest(third.manifest, &key).expect("same key");
         assert_eq!(
-            installer.install(&second, &second_bundle, &Hooks::default()),
+            installer.install(&third, &third_bundle, &Hooks::default()),
             Err(LifecycleError::UpdatePendingCleanup)
         );
         assert_eq!(
@@ -2023,21 +3529,37 @@ mod tests {
                 .expect("active state")
                 .expect("candidate pointer"),
             ActiveRelease {
-                release_identity: second.manifest.release_identity.clone(),
-                install_generation: second.manifest.install_generation,
+                release_identity: third.manifest.release_identity.clone(),
+                install_generation: third.manifest.install_generation,
                 directory_name: format!(
                     "{:020}-{}",
-                    second.manifest.install_generation, second.manifest.release_identity
+                    third.manifest.install_generation, third.manifest.release_identity
                 ),
             }
         );
+        assert_eq!(
+            installer
+                .read_retained_known_good()
+                .expect("known-good pointer")
+                .expect("known-good release")
+                .install_generation,
+            2
+        );
         assert!(installer.update_journal_exists());
-        assert_eq!(count_entries(&root.join("install/versions")), Ok(2));
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(3));
         drop(lock);
         installer
             .recover(&Hooks::default())
             .expect("resume cleanup");
-        assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
+        assert_eq!(count_entries(&root.join("install/versions")), Ok(2));
+        assert_eq!(
+            installer
+                .retained_known_good_release()
+                .expect("retained release")
+                .expect("known-good release")
+                .install_generation,
+            2
+        );
         assert!(!installer.update_journal_exists());
         let _ = remove_owned_path(&root);
     }

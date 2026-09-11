@@ -1375,7 +1375,8 @@ fn run_desktop_readiness_command(
     if arguments.next().is_some() {
         return Err(usage.to_string());
     }
-    let workspace = local_state::load_workspace();
+    let workspace = local_state::load_workspace_for_readiness()
+        .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
     let market = axiusflow_market_runtime::MarketService::start()?;
     let status = market.status()?;
     if status.providers.is_empty() {

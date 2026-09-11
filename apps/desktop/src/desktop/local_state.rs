@@ -36,6 +36,24 @@ pub(super) fn load_workspace() -> WorkspaceState {
     })
 }
 
+/// Loads persisted workspace state for the release activation readiness gate.
+///
+/// Unlike normal interactive startup this path is fallible and deliberately
+/// does not migrate or rewrite legacy persistence. A candidate must prove it
+/// can read the user's current state before it can pass activation health.
+pub(super) fn load_workspace_for_readiness() -> Result<WorkspaceState, String> {
+    let path = workspace_path()?;
+    if path.is_file() {
+        return load_workspace_from_path(&path);
+    }
+    let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
+    if legacy.is_file() {
+        load_legacy_workspace_from_path(&legacy)
+    } else {
+        Ok(default_workspace())
+    }
+}
+
 fn load_workspace_result() -> Result<WorkspaceState, String> {
     let path = workspace_path()?;
     if path.is_file() {

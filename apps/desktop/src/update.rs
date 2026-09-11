@@ -20,6 +20,7 @@ use std::{
 use serde::Deserialize;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const PREPARE_TIMEOUT: Duration = Duration::from_mins(30);
 const MAXIMUM_CHECK_OUTPUT_BYTES: usize = 16 * 1024;
 const RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const RESTART_CHILD_STABILITY_WINDOW: Duration = Duration::from_millis(150);
@@ -34,7 +35,8 @@ pub enum UpdateState {
     Idle,
     Checking,
     Current,
-    Available { latest_version: String },
+    Downloading { latest_version: String },
+    ReadyToRestart { latest_version: String },
     Error(String),
     PreparingRestart,
 }
@@ -57,6 +59,7 @@ enum UpdateResult {
         system_version: String,
         result: Result<LauncherUpdateCheck, String>,
     },
+    Prepared(Result<LauncherUpdateCheck, String>),
     RestartPrepared(Result<PreparedRestart, String>),
 }
 
@@ -69,6 +72,15 @@ struct LauncherUpdateCheck {
     current_version: String,
     latest_version: String,
     update_available: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct LauncherIdentityReport {
+    schema_version: u32,
+    release_identity: String,
+    install_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -93,7 +105,7 @@ impl DesktopUpdater {
             .name("axiusflow-update-client".to_string())
             .spawn(move || run_update_worker(&request_rx, &result_tx))
             .map_err(|_| "update client could not start".to_string())?;
-        Ok(Self {
+        let mut updater = Self {
             requests: request_tx,
             results: result_rx,
             presentation: UpdatePresentation {
@@ -102,7 +114,9 @@ impl DesktopUpdater {
             },
             request_pending: false,
             prepared_restart: None,
-        })
+        };
+        updater.request_check()?;
+        Ok(updater)
     }
 
     #[must_use]
@@ -129,8 +143,8 @@ impl DesktopUpdater {
         if self.request_pending {
             return Err("an update request is already pending".to_string());
         }
-        if !matches!(self.presentation.state, UpdateState::Available { .. }) {
-            return Err("no verified Axiusflow update is available".to_string());
+        if !matches!(self.presentation.state, UpdateState::ReadyToRestart { .. }) {
+            return Err("no prepared Axiusflow update is ready to restart".to_string());
         }
         self.requests
             .try_send(UpdateRequest::Restart)
@@ -160,7 +174,6 @@ impl DesktopUpdater {
                 return UpdatePoll::default();
             }
         };
-        self.request_pending = false;
         match result {
             UpdateResult::Checked {
                 system_version,
@@ -168,7 +181,30 @@ impl DesktopUpdater {
             } => {
                 self.presentation.system_version = system_version;
                 self.presentation.state = match result {
-                    Ok(report) if report.update_available => UpdateState::Available {
+                    Ok(report) if report.update_available => {
+                        self.request_pending = true;
+                        UpdateState::Downloading {
+                            latest_version: report.latest_version,
+                        }
+                    }
+                    Ok(_) => {
+                        self.request_pending = false;
+                        UpdateState::Current
+                    }
+                    Err(error) => {
+                        self.request_pending = false;
+                        UpdateState::Error(error)
+                    }
+                };
+                UpdatePoll {
+                    changed: true,
+                    restart_prepared: false,
+                }
+            }
+            UpdateResult::Prepared(result) => {
+                self.request_pending = false;
+                self.presentation.state = match result {
+                    Ok(report) if report.update_available => UpdateState::ReadyToRestart {
                         latest_version: report.latest_version,
                     },
                     Ok(_) => UpdateState::Current,
@@ -180,6 +216,7 @@ impl DesktopUpdater {
                 }
             }
             UpdateResult::RestartPrepared(Ok(mut prepared)) => {
+                self.request_pending = false;
                 if let Err(error) = prepared.require_running() {
                     self.presentation.state = UpdateState::Error(error);
                     return UpdatePoll {
@@ -194,6 +231,7 @@ impl DesktopUpdater {
                 }
             }
             UpdateResult::RestartPrepared(Err(error)) => {
+                self.request_pending = false;
                 self.presentation.state = UpdateState::Error(error);
                 UpdatePoll {
                     changed: true,
@@ -222,15 +260,35 @@ impl DesktopUpdater {
 
 fn run_update_worker(requests: &Receiver<UpdateRequest>, results: &SyncSender<UpdateResult>) {
     while let Ok(request) = requests.recv() {
-        let result = match request {
-            UpdateRequest::Check => UpdateResult::Checked {
-                system_version: system_version(),
-                result: run_launcher_check(),
-            },
-            UpdateRequest::Restart => UpdateResult::RestartPrepared(spawn_update_restart()),
-        };
-        if results.send(result).is_err() {
-            return;
+        match request {
+            UpdateRequest::Check => {
+                let result = run_launcher_check();
+                let prepare = result.as_ref().is_ok_and(|report| report.update_available);
+                if results
+                    .send(UpdateResult::Checked {
+                        system_version: system_version(),
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                if prepare
+                    && results
+                        .send(UpdateResult::Prepared(run_launcher_prepare()))
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            UpdateRequest::Restart => {
+                if results
+                    .send(UpdateResult::RestartPrepared(spawn_update_restart()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
     }
 }
@@ -272,10 +330,91 @@ fn stable_launcher() -> Result<PathBuf, String> {
             "axiusflow_launcher{}",
             std::env::consts::EXE_SUFFIX
         ));
-    if !launcher_files_match(&launcher, &signed_launcher)? {
+    if !launcher_is_trusted(&launcher, &signed_launcher)? {
         return Err("installed Axiusflow launcher is not the active signed launcher".to_string());
     }
     Ok(launcher)
+}
+
+fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result<bool, String> {
+    let active = axiusflow_platform_runtime::current_release_identity();
+    launcher_is_trusted_with(launcher, active_signed_launcher, |path| {
+        #[cfg(target_os = "windows")]
+        {
+            if axiusflow_platform_runtime::verify_windows_publisher_signature(path).is_err() {
+                return false;
+            }
+            launcher_identity(path).is_ok_and(|launcher| {
+                launcher.schema_version == 1
+                    && launcher.install_generation > active.install_generation
+                    && launcher.install_generation > 0
+                    && !launcher.release_identity.is_empty()
+                    && launcher.release_identity.len() <= 128
+                    && launcher
+                        .release_identity
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = path;
+            false
+        }
+    })
+}
+
+fn launcher_is_trusted_with<F>(
+    launcher: &Path,
+    active_signed_launcher: &Path,
+    verify_publisher: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(&Path) -> bool,
+{
+    if launcher_files_match(launcher, active_signed_launcher)? {
+        return Ok(true);
+    }
+    Ok(verify_publisher(launcher))
+}
+
+#[cfg(target_os = "windows")]
+fn launcher_identity(launcher: &Path) -> Result<LauncherIdentityReport, String> {
+    let mut child = launcher_command(launcher)
+        .arg("--launcher-identity")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "installed Axiusflow launcher identity could not be queried".to_string())?;
+    let deadline = Instant::now() + CHECK_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("installed Axiusflow launcher identity query timed out".to_string());
+            }
+            Err(_) => return Err("installed Axiusflow launcher identity query failed".to_string()),
+        }
+    };
+    if !status.success() {
+        return Err("installed Axiusflow launcher identity query was rejected".to_string());
+    }
+    let mut output = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        stdout
+            .take(1025)
+            .read_to_end(&mut output)
+            .map_err(|_| "installed Axiusflow launcher identity could not be read".to_string())?;
+    }
+    if output.len() > 1024 {
+        return Err("installed Axiusflow launcher identity exceeded its size bound".to_string());
+    }
+    serde_json::from_slice(&output)
+        .map_err(|_| "installed Axiusflow launcher identity was invalid".to_string())
 }
 
 fn launcher_files_match(left: &Path, right: &Path) -> Result<bool, String> {
@@ -327,15 +466,41 @@ fn launcher_command(launcher: &std::path::Path) -> Command {
 }
 
 fn run_launcher_check() -> Result<LauncherUpdateCheck, String> {
+    run_launcher_report(
+        "--check-update",
+        CHECK_TIMEOUT,
+        "update check could not start",
+        "update check timed out",
+        "updates could not be checked right now",
+    )
+}
+
+fn run_launcher_prepare() -> Result<LauncherUpdateCheck, String> {
+    run_launcher_report(
+        "--prepare-update",
+        PREPARE_TIMEOUT,
+        "update download could not start",
+        "update download timed out",
+        "update could not be downloaded right now",
+    )
+}
+
+fn run_launcher_report(
+    argument: &str,
+    timeout: Duration,
+    start_error: &str,
+    timeout_error: &str,
+    status_error: &str,
+) -> Result<LauncherUpdateCheck, String> {
     let launcher = stable_launcher()?;
     let mut child = launcher_command(&launcher)
-        .arg("--check-update")
+        .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| "update check could not start".to_string())?;
-    let deadline = Instant::now() + CHECK_TIMEOUT;
+        .map_err(|_| start_error.to_string())?;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -343,13 +508,13 @@ fn run_launcher_check() -> Result<LauncherUpdateCheck, String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("update check timed out".to_string());
+                return Err(timeout_error.to_string());
             }
-            Err(_) => return Err("update check failed".to_string()),
+            Err(_) => return Err("update launcher process failed".to_string()),
         }
     };
     if !status.success() {
-        return Err("updates could not be checked right now".to_string());
+        return Err(status_error.to_string());
     }
     let mut output = Vec::new();
     if let Some(stdout) = child.stdout.take() {
@@ -371,7 +536,8 @@ fn validate_launcher_report(report: LauncherUpdateCheck) -> Result<LauncherUpdat
     if report.schema_version != 2
         || report.current_generation != current
         || report.latest_generation < report.current_generation
-        || report.current_version != env!("CARGO_PKG_VERSION")
+        || report.current_version.is_empty()
+        || report.current_version.len() > 64
         || report.latest_version.is_empty()
         || report.latest_version.len() > 64
         || report.update_available != (report.latest_generation > report.current_generation)
@@ -560,13 +726,17 @@ mod tests {
     use std::{
         fs,
         process::{Child, Command, Stdio},
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        LauncherUpdateCheck, PreparedRestart, RestartSlot, claim_restart_slot,
-        launcher_files_match, release_restart_slot, validate_launcher_report,
+        DesktopUpdater, LauncherUpdateCheck, PreparedRestart, RestartSlot, UpdatePresentation,
+        UpdateRequest, UpdateResult, UpdateState, claim_restart_slot, launcher_files_match,
+        launcher_is_trusted_with, release_restart_slot, validate_launcher_report,
         validate_restart_acknowledgement, wait_for_restart_ready,
     };
 
@@ -614,6 +784,105 @@ mod tests {
         path
     }
 
+    fn update_report(update_available: bool) -> LauncherUpdateCheck {
+        let current = axiusflow_platform_runtime::current_release_identity().install_generation;
+        LauncherUpdateCheck {
+            schema_version: 2,
+            current_generation: current,
+            latest_generation: if update_available {
+                current.saturating_add(1)
+            } else {
+                current
+            },
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: if update_available {
+                "0.3.0".to_string()
+            } else {
+                env!("CARGO_PKG_VERSION").to_string()
+            },
+            update_available,
+        }
+    }
+
+    #[test]
+    fn checked_update_downloads_before_restart_becomes_available() {
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let mut updater = DesktopUpdater {
+            requests: request_tx,
+            results: result_rx,
+            presentation: UpdatePresentation {
+                system_version: "Detecting system…".to_string(),
+                state: UpdateState::Checking,
+            },
+            request_pending: true,
+            prepared_restart: None,
+        };
+        let report = update_report(true);
+
+        result_tx
+            .send(UpdateResult::Checked {
+                system_version: "Windows".to_string(),
+                result: Ok(report.clone()),
+            })
+            .expect("checked result queues");
+        assert!(updater.poll().changed);
+        assert_eq!(
+            updater.presentation.state,
+            UpdateState::Downloading {
+                latest_version: report.latest_version.clone()
+            }
+        );
+        assert!(updater.request_pending);
+        assert!(updater.request_restart().is_err());
+
+        result_tx
+            .send(UpdateResult::Prepared(Ok(report.clone())))
+            .expect("prepared result queues");
+        assert!(updater.poll().changed);
+        assert_eq!(
+            updater.presentation.state,
+            UpdateState::ReadyToRestart {
+                latest_version: report.latest_version
+            }
+        );
+        assert!(!updater.request_pending);
+        updater
+            .request_restart()
+            .expect("prepared update can request restart");
+        assert!(matches!(
+            request_rx.try_recv().expect("restart request queues"),
+            UpdateRequest::Restart
+        ));
+        assert_eq!(updater.presentation.state, UpdateState::PreparingRestart);
+    }
+
+    #[test]
+    fn prepared_refresh_can_resolve_to_current_without_restart() {
+        let (request_tx, _request_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let mut updater = DesktopUpdater {
+            requests: request_tx,
+            results: result_rx,
+            presentation: UpdatePresentation {
+                system_version: "Windows".to_string(),
+                state: UpdateState::Downloading {
+                    latest_version: "0.3.0".to_string(),
+                },
+            },
+            request_pending: true,
+            prepared_restart: None,
+        };
+        result_tx
+            .send(UpdateResult::Prepared(Ok(update_report(false))))
+            .expect("prepared current result queues");
+
+        assert!(updater.poll().changed);
+        assert_eq!(updater.presentation.state, UpdateState::Current);
+        assert!(!updater.request_pending);
+        assert!(updater.request_restart().is_err());
+    }
+
     #[test]
     fn launcher_report_requires_generation_consistency() {
         let current = axiusflow_platform_runtime::current_release_identity().install_generation;
@@ -626,6 +895,14 @@ mod tests {
             update_available: true,
         };
         assert!(validate_launcher_report(valid.clone()).is_ok());
+        assert!(
+            validate_launcher_report(LauncherUpdateCheck {
+                current_version: "9.9.9".to_string(),
+                ..valid.clone()
+            })
+            .is_ok(),
+            "a publisher-trusted newer stable launcher must remain usable after rollback across an app semver bump"
+        );
         assert!(
             validate_launcher_report(LauncherUpdateCheck {
                 update_available: false,
@@ -727,6 +1004,24 @@ mod tests {
         assert!(launcher_files_match(&stable, &active).expect("matching launchers compare"));
         fs::write(&stable, b"changed-launcher").expect("stable fixture mutates");
         assert!(!launcher_files_match(&stable, &active).expect("mismatch compares"));
+        fs::remove_dir_all(base).expect("temporary base removes");
+    }
+
+    #[test]
+    fn rollback_accepts_a_newer_publisher_signed_stable_launcher() {
+        let base = temporary_base("launcher-rollback-trust");
+        let stable = base.join("stable.exe");
+        let rolled_back = base.join("rolled-back.exe");
+        fs::write(&stable, b"newer-stable-launcher").expect("stable fixture writes");
+        fs::write(&rolled_back, b"older-versioned-launcher").expect("active fixture writes");
+        assert!(
+            launcher_is_trusted_with(&stable, &rolled_back, |_| true)
+                .expect("publisher trust fallback evaluates")
+        );
+        assert!(
+            !launcher_is_trusted_with(&stable, &rolled_back, |_| false)
+                .expect("publisher trust rejection evaluates")
+        );
         fs::remove_dir_all(base).expect("temporary base removes");
     }
 }

@@ -1206,6 +1206,7 @@ mod tests {
         let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
         for contract in [
             "--check-update",
+            "--prepare-update",
             "--update-and-restart",
             "--desktop-readiness",
             "DesktopReadinessReport",
@@ -1216,6 +1217,33 @@ mod tests {
                 "stable launcher lost {contract}"
             );
         }
+        assert!(
+            launcher.contains("bootstrap_requires_remote_install(active_release.as_ref())"),
+            "healthy installed startup must decide locally before remote update work"
+        );
+        let restart_start = launcher
+            .find("fn update_and_restart(")
+            .expect("update restart function");
+        let restart_end = launcher[restart_start..]
+            .find("\nstruct PreparedUpdate")
+            .map(|offset| restart_start + offset)
+            .expect("prepared update boundary");
+        let restart = &launcher[restart_start..restart_end];
+        let channel_recheck = restart
+            .find("checked_release_channel")
+            .expect("prepared restart channel recheck");
+        let restart_ack = restart
+            .find("announce_update_restart_ready")
+            .expect("prepared restart acknowledgement");
+        assert!(
+            restart.contains("preflight_update_restart")
+                && restart.contains("prepared.signed_release")
+                && !restart.contains("install_remote_update")
+                && !restart.contains("spawn_active_launcher_promotion")
+                && channel_recheck < restart_ack
+                && !restart[restart_ack..].contains("checked_release_channel"),
+            "restart handoff must activate only an already prepared local release"
+        );
         assert!(!launcher.contains("--launch-engine"));
         assert!(!launcher.contains("BackgroundService"));
         assert!(
@@ -1229,13 +1257,127 @@ mod tests {
             publisher.contains("--minimum-version")
                 && publisher.contains("config.minimum_version.clone()")
                 && release_script.contains("MinimumLauncherVersion")
-                && release_script.contains("--minimum-version $MinimumLauncherVersion"),
+                && release_script.contains("\"--minimum-version\", $MinimumLauncherVersion"),
             "release compatibility floor must be explicit and independent of the new app version"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn protected_release_and_non_blocking_update_contracts_remain_owned() {
+        let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
+        let release_script = manifest("tools/publish_release.ps1");
+        for contract in [
+            "AuthenticodeCertificateSha1",
+            "AuthenticodeTimestampUrl",
+            "WranglerPath",
+            "RolloutCohort",
+            "RolloutPercentage",
+            "PackageOnly",
+            "GITHUB_ACTIONS",
+            "AXIUSFLOW_RELEASE_ENVIRONMENT",
+            "git rev-parse origin/main",
+            "\"--authenticode-certificate-sha1\", $AuthenticodeCertificateSha1",
+            "\"--authenticode-timestamp-url\", $AuthenticodeTimestampUrl",
+            "--rollout-cohort",
+            "--rollout-percentage",
+        ] {
+            assert!(
+                release_script.contains(contract),
+                "release qualification script lost {contract}"
+            );
+        }
+        for contract in [
+            "--authenticode-certificate-sha1",
+            "--authenticode-timestamp-url",
+            "--skip-build",
+            "--expected-verifying-key",
+            "sign_authenticode_file(config, &launcher_path)",
+            "sign_authenticode_file(config, &desktop_path)",
+            "sign_authenticode_file(config, &setup_path)",
+            "TimeStamperCertificate",
+            "verify_authenticode_file(config, downloaded)",
+            "verify_public_object(config, &release.channel_object)",
+            "AXIUSFLOW_RELEASE_PROVENANCE_V1\\0",
+            "provenance.json",
+            "requires_provenance_signature",
+            "verify_production_publication_context",
+            "AXIUSFLOW_AUTHENTICODE_CERT_SHA1",
+            "rollback-compatibility.json",
+        ] {
+            assert!(
+                publisher.contains(contract),
+                "release publisher lost {contract}"
+            );
+        }
+        let release_workflow = manifest(".github/workflows/release.yml");
+        for contract in [
+            "workflow_dispatch:",
+            "qualify-windows:",
+            "release-build",
+            "needs: qualify-windows",
+            "environment: production-release",
+            "cancel-in-progress: false",
+            "persist-credentials: false",
+            "ref: ${{ github.sha }}",
+            "refs/heads/main",
+            "git checkout -B main $env:GITHUB_SHA",
+            "git rev-parse origin/main",
+            "release-signing",
+            "health_gate_approved:",
+            "rollout_cohort:",
+            "rollout_percentage:",
+            "AXIUSFLOW_RELEASE_ENVIRONMENT: production-release",
+            "RELEASE_VERIFYING_KEY_B64URL",
+            "qualified-release-binaries-",
+            "qualified-metadata",
+            "Get-FileHash",
+            "needs.qualify-windows.outputs.release_verifying_key",
+            "needs.qualify-windows.outputs.authenticode_certificate_sha1",
+            "RELEASE_PUBLISHER_PATH",
+            "RELEASE_PUBLISHER_SHA256",
+            "needs.qualify-windows.outputs.release_version",
+            "-SkipQualification",
+            "-SkipBuild",
+            "-PublisherPath",
+            "-PublisherSha256",
+            "Remove job-scoped release secrets",
+        ] {
+            assert!(
+                release_workflow.contains(contract),
+                "protected release workflow lost {contract}"
+            );
+        }
+        let qualifier_start = release_workflow
+            .find("qualify-windows:")
+            .expect("release qualification job");
+        let signer_start = release_workflow
+            .find("release-windows:")
+            .expect("protected signing job");
+        let qualifier = &release_workflow[qualifier_start..signer_start];
+        assert!(
+            !qualifier.contains("axiusflow_release_publisher.exe")
+                && !qualifier.contains("publisher_sha256"),
+            "unprivileged qualification must not supply executable publisher authority to the signing job"
+        );
+        let release_script = manifest("tools/publish_release.ps1");
+        let prebuild_start = release_script
+            .find("if ($PrebuildOnly)")
+            .expect("prebuild-only path");
+        let prebuild_end = release_script[prebuild_start..]
+            .find("$publishedAt")
+            .map(|offset| prebuild_start + offset)
+            .expect("prebuild path boundary");
+        assert!(
+            !release_script[prebuild_start..prebuild_end]
+                .contains("--bin axiusflow_release_publisher"),
+            "unprivileged prebuild must not manufacture the trusted release publisher"
         );
 
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(
             desktop.contains("run_desktop_readiness_command")
+                && desktop.contains("load_workspace_for_readiness")
                 && desktop.contains("schedule_versioned_launcher_promotion()")
         );
         let readiness = desktop.find("--desktop-readiness").expect("readiness gate");
@@ -1250,8 +1392,71 @@ mod tests {
         let update = manifest("apps/desktop/src/update.rs");
         assert!(
             update.contains("--check-update")
+                && update.contains("--prepare-update")
                 && update.contains("--update-and-restart")
+                && update.contains("UpdateState::Downloading")
+                && update.contains("UpdateState::ReadyToRestart")
+                && update.contains("updater.request_check()?")
                 && !update.contains("ReleaseInstaller")
+        );
+        assert!(
+            !update.contains("report.current_version != env!(\"CARGO_PKG_VERSION\")"),
+            "rolled-back desktops must not reject a newer trusted launcher solely for package semver"
+        );
+        let about = manifest("apps/desktop/src/components/about_dialog.rs");
+        assert!(
+            about.contains("Restart to update") && !about.contains("Update now"),
+            "About must expose explicit restart only after background preparation"
+        );
+        let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
+        let about_open_start = workspace_tabs
+            .find("pub(super) fn open_about_dialog")
+            .expect("About open function");
+        let about_open_end = workspace_tabs[about_open_start..]
+            .find("pub(super) fn close_about_dialog")
+            .map(|offset| about_open_start + offset)
+            .expect("About close function");
+        assert!(
+            !workspace_tabs[about_open_start..about_open_end].contains("request_check"),
+            "opening About must not be the update discovery trigger"
+        );
+    }
+
+    #[test]
+    fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
+        let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
+        for contract in [
+            "rollout_eligible",
+            "current_update_check_report",
+            "QUARANTINED_RELEASE_FILE",
+            "failed release could not be quarantined",
+            "EARLY_DESKTOP_STARTUP_WINDOW",
+            "rollback_to_retained_known_good",
+            "prepared_matches_current_offer",
+            "&current.channel.signed_release == prepared",
+            "retained.is_some()",
+            "launcher_generation < active.install_generation",
+            "spawn_desktop_release(installer, &retained, true)",
+            "command.arg(\"--workspace-tabs\")",
+        ] {
+            assert!(launcher.contains(contract), "launcher lost {contract}");
+        }
+        let channel_validation = launcher
+            .find("fn checked_release_channel(")
+            .expect("checked channel function");
+        let channel_tail = &launcher[channel_validation..];
+        let signature = channel_tail
+            .find("verify_release_manifest(")
+            .expect("channel signature validation");
+        let downgrade = channel_tail
+            .find("release channel generation regressed below the active release")
+            .expect("channel downgrade rejection");
+        let rollout = channel_tail
+            .find("release_offer_eligible(")
+            .expect("channel rollout policy");
+        assert!(
+            signature < downgrade && downgrade < rollout,
+            "rollout eligibility must be applied only after signature and downgrade validation"
         );
     }
     #[test]
@@ -1274,6 +1479,8 @@ mod tests {
             "DestName: \"axiusflow_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
             "ValueName: \"Axiusflow Engine\"; Flags: deletevalue",
+            "RollbackCompatibilityPath",
+            "DestName: \"rollback-compatibility.json\"",
         ] {
             assert!(
                 setup.contains(contract),

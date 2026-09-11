@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone, Copy)]
 enum AboutAction {
-    Update,
+    Restart,
     Retry,
 }
 
@@ -18,20 +18,30 @@ fn about_update_view(
 ) -> AboutUpdateView {
     let colors = theme.colors;
     let (status, status_color, action) = match update.map(|value| &value.state) {
-        Some(UpdateState::Idle | UpdateState::Checking) => {
+        Some(UpdateState::Idle) => (
+            "Updates are checked automatically.".to_string(),
+            colors.text_muted,
+            None,
+        ),
+        Some(UpdateState::Checking) => {
             ("Checking for updates…".to_string(), colors.text_muted, None)
         }
         Some(UpdateState::Current) => {
             ("Axiusflow is up to date.".to_string(), colors.bullish, None)
         }
-        Some(UpdateState::Available { latest_version }) => (
-            format!("Axiusflow {latest_version} is available."),
+        Some(UpdateState::Downloading { latest_version }) => (
+            format!("Downloading Axiusflow {latest_version}…"),
+            colors.text_muted,
+            None,
+        ),
+        Some(UpdateState::ReadyToRestart { latest_version }) => (
+            format!("Axiusflow {latest_version} is ready. Restart to update."),
             colors.bullish,
-            Some(AboutAction::Update),
+            Some(AboutAction::Restart),
         ),
         Some(UpdateState::Error(error)) => (error.clone(), colors.danger, Some(AboutAction::Retry)),
         Some(UpdateState::PreparingRestart) => (
-            "Preparing update and restart…".to_string(),
+            "Preparing restart to install update…".to_string(),
             colors.text_muted,
             None,
         ),
@@ -138,7 +148,7 @@ fn about_update_row(
     let action_button = view.action.map(|action| {
         let action_terminal = terminal.clone();
         let label = match action {
-            AboutAction::Update => "Update now",
+            AboutAction::Restart => "Restart to update",
             AboutAction::Retry => "Retry",
         };
         Button::new("about_update_action")
@@ -148,7 +158,7 @@ fn about_update_row(
             .label(label)
             .on_click(move |_, _, cx| {
                 action_terminal.update(cx, |terminal, terminal_cx| match action {
-                    AboutAction::Update => terminal.update_now(terminal_cx),
+                    AboutAction::Restart => terminal.restart_to_update(terminal_cx),
                     AboutAction::Retry => terminal.retry_update_check(terminal_cx),
                 });
             })
