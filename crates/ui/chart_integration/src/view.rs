@@ -12,6 +12,10 @@ use axiusflow_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
+use axiusflow_design_system::{
+    AxiusflowTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
+    platform_typography,
+};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
     KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -30,6 +34,7 @@ use nucleuscharts_render_gpui::{GpuiChartRenderer, NucleusViewport, PreparedNucl
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,6 +48,51 @@ const PANE_SEPARATOR_HIT: f64 = 4.0;
 const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
 const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
+
+fn platform_theme(theme: ChartTheme) -> AxiusflowTheme {
+    match theme {
+        ChartTheme::Light => AxiusflowTheme::light(),
+        ChartTheme::Dark => AxiusflowTheme::dark(),
+    }
+}
+
+fn opaque_css(color: ThemeColor, surface: ThemeColor) -> String {
+    format!("#{:06x}", color.over(surface).rgb_u32())
+}
+
+fn gpui_theme_color(color: ThemeColor) -> Rgba {
+    Rgba {
+        r: color.red(),
+        g: color.green(),
+        b: color.blue(),
+        a: color.alpha(),
+    }
+}
+
+fn apply_platform_text_contract(engine: &mut ChartEngine, theme: ChartTheme) {
+    let platform = platform_theme(theme);
+    let colors = platform.colors;
+    let text_primary = opaque_css(colors.text_primary, colors.surface);
+    let text_secondary = opaque_css(colors.text_secondary, colors.surface);
+    let options = serde_json::json!({
+        "layout": {
+            "fontFamily": platform_font_stack(),
+            "textColor": text_primary,
+            "mutedTextColor": text_secondary,
+        },
+        "watermark": {
+            "fontFamily": platform_font_stack(),
+        },
+        "leftPriceScale": { "textColor": text_primary },
+        "rightPriceScale": { "textColor": text_primary },
+    })
+    .to_string();
+    engine
+        .options
+        .apply_str(&options)
+        .expect("the platform text options derived from platform.css are valid");
+}
+
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
@@ -722,6 +772,13 @@ fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], 
         .unwrap_or_default()
 }
 
+fn platform_tabular_numerals() -> gpui::FontFeatures {
+    gpui::FontFeatures(Arc::new(vec![(
+        platform_typography().tabular_numerals_feature().to_owned(),
+        1,
+    )]))
+}
+
 /// One legend readout for a single-output series, or nothing when the series has no value at the
 /// crosshair.
 fn legend_series_values(
@@ -833,16 +890,13 @@ impl NucleusChartView {
     ///
     /// # Panics
     ///
-    /// Panics when the hard-coded default font options stop parsing, which can
-    /// only happen if the default chart font JSON itself becomes invalid.
+    /// Panics when the platform font options derived from `platform.css` stop
+    /// parsing.
     #[must_use]
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        engine
-            .options
-            .apply_str(r#"{"layout":{"fontFamily":"DM Sans, sans-serif"}}"#)
-            .expect("the default chart font options are valid");
+        apply_platform_text_contract(&mut engine, theme);
         let volume_series = install_volume_series(&mut engine);
         Self {
             engine,
@@ -923,16 +977,13 @@ impl NucleusChartView {
     ///
     /// # Panics
     ///
-    /// Panics when the hard-coded default font options stop parsing, which can
-    /// only happen if the default chart font JSON itself becomes invalid.
+    /// Panics when the platform font options derived from `platform.css` stop
+    /// parsing.
     #[must_use]
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        engine
-            .options
-            .apply_str(r#"{"layout":{"fontFamily":"DM Sans, sans-serif"}}"#)
-            .expect("the default chart font options are valid");
+        apply_platform_text_contract(&mut engine, theme);
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
@@ -1299,15 +1350,12 @@ impl NucleusChartView {
     ///
     /// # Panics
     ///
-    /// Panics when the hard-coded default font options stop parsing, which can
-    /// only happen if the default chart font JSON itself becomes invalid.
+    /// Panics when the platform font options derived from `platform.css` stop
+    /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
         self.theme = theme;
         self.engine.set_theme(theme);
-        self.engine
-            .options
-            .apply_str(r#"{"layout":{"fontFamily":"DM Sans, sans-serif"}}"#)
-            .expect("the default chart font options are valid");
+        apply_platform_text_contract(&mut self.engine, theme);
         self.invalidate_series_layout();
     }
 
@@ -2257,16 +2305,25 @@ impl NucleusChartView {
         }
 
         let layout = self.engine.options.get().layout.clone();
+        let typography = platform_typography();
         let font_size = layout.font_size.to_f32().unwrap_or(12.0);
         let measure = |text: &str, bold: bool| {
-            let weight = if bold { 600 } else { 400 };
+            let weight = if bold {
+                typography.weight(TypographyRole::Emphasis)
+            } else {
+                typography.weight(TypographyRole::Normal)
+            };
             f64::from(
                 measure_text(window, text, &layout.font_family, font_size, weight, false).width,
             )
         };
         let countdown_font_size = self.engine.countdown_font_size().to_f32().unwrap_or(10.0);
         let countdown_measure = |text: &str, bold: bool| {
-            let weight = if bold { 600 } else { 400 };
+            let weight = if bold {
+                typography.weight(TypographyRole::Emphasis)
+            } else {
+                typography.weight(TypographyRole::Normal)
+            };
             f64::from(
                 measure_text(
                     window,
@@ -2358,23 +2415,14 @@ impl Default for NucleusChartView {
 }
 
 fn legend_palette(theme: ChartTheme) -> LegendPalette {
-    match theme {
-        ChartTheme::Light => LegendPalette {
-            text: rgba(0x1414_14ff),
-            muted: rgba(0x6666_66ff),
-            bullish: rgba(0x0899_81ff),
-            bearish: rgba(0xf236_45ff),
-            hover: rgba(0x0000_000a),
-            danger: rgba(0xc43c_35ff),
-        },
-        ChartTheme::Dark => LegendPalette {
-            text: rgba(0xf0f0_f0ff),
-            muted: rgba(0x9999_99ff),
-            bullish: rgba(0x0899_81ff),
-            bearish: rgba(0xf236_45ff),
-            hover: rgba(0xffff_ff0d),
-            danger: rgba(0xef53_50ff),
-        },
+    let colors = platform_theme(theme).colors;
+    LegendPalette {
+        text: gpui_theme_color(colors.text_primary),
+        muted: gpui_theme_color(colors.text_secondary),
+        bullish: gpui_theme_color(colors.bullish),
+        bearish: gpui_theme_color(colors.bearish),
+        hover: gpui_theme_color(colors.hover_bg),
+        danger: gpui_theme_color(colors.danger),
     }
 }
 
@@ -2494,6 +2542,7 @@ fn chart_legend_row(
             .h(px(LEGEND_ROW_HEIGHT))
             .flex()
             .items_center()
+            .font_features(platform_tabular_numerals())
             .text_color(color)
             .child(value.text)
             .into_any_element()
@@ -2524,7 +2573,9 @@ fn chart_legend_row(
                 .h(px(LEGEND_ROW_HEIGHT))
                 .flex()
                 .items_center()
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(gpui::FontWeight(f32::from(
+                    platform_typography().weight(TypographyRole::Normal),
+                )))
                 .child(row.title.clone()),
         )
         .children(values)
@@ -2637,6 +2688,10 @@ impl Render for NucleusChartView {
             .id(("nucleus_chart_surface", cx.entity_id()))
             .relative()
             .size_full()
+            .font_family(platform_font_family())
+            .font_weight(gpui::FontWeight(f32::from(
+                platform_typography().weight(TypographyRole::Normal),
+            )))
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
             .key_context("NucleusChart")

@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use axiusflow_design_system::{TypographyRole, platform_font_family};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
@@ -9,6 +10,8 @@ use gpui::{
     point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
+
+use super::platform_font_weight;
 
 /// Events emitted by Axiusflow's single-line text input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -672,6 +675,8 @@ impl RenderOnce for Input {
             .min_w(px(0.0))
             .flex()
             .items_center()
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
             .when(self.has_presentation(Self::GROW), gpui::Styled::flex_1)
             .when(self.has_presentation(Self::APPEARANCE), gpui::Styled::px_2)
             .when_some(self.fill, gpui::Styled::bg)
@@ -753,7 +758,9 @@ impl Element for InputTextElement {
         let input = self.input.read(cx);
         let style = window.text_style();
         let (display_text, color) = if input.buffer.text.is_empty() {
-            (input.placeholder.clone(), style.color.opacity(0.48))
+            // platform.css defines placeholders as --text-secondary, which is
+            // the primary text color at 74% alpha in both light and dark modes.
+            (input.placeholder.clone(), style.color.opacity(0.74))
         } else {
             (SharedString::from(input.buffer.text.clone()), style.color)
         };

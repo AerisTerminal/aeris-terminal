@@ -34,14 +34,34 @@ fn legend_text(row: &LegendRow) -> String {
 }
 
 fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
-    let (surface, foreground, border, crosshair, label_background) = match theme {
-        ChartTheme::Light => ("#ffffff", "#141414", "#f1f1f1", "#141414", "#141414"),
-        ChartTheme::Dark => ("#141414", "#f0f0f0", "#262626", "#262626", "#262626"),
+    let (surface, foreground, secondary, border, crosshair, label_background) = match theme {
+        ChartTheme::Light => (
+            "#ffffff", "#141414", "#515151", "#f1f1f1", "#141414", "#141414",
+        ),
+        ChartTheme::Dark => (
+            "#141414", "#f0f0f0", "#b7b7b7", "#262626", "#262626", "#262626",
+        ),
     };
     let options = chart.engine.options.get();
     assert_eq!(options.layout.background.color, surface);
     assert_eq!(options.layout.text_color, foreground);
-    assert_eq!(options.layout.font_family, "DM Sans, sans-serif");
+    assert_eq!(options.layout.muted_text_color, secondary);
+    assert_eq!(
+        options.left_price_scale.text_color.as_deref(),
+        Some(foreground)
+    );
+    assert_eq!(
+        options.right_price_scale.text_color.as_deref(),
+        Some(foreground)
+    );
+    assert_eq!(
+        options.layout.font_family,
+        axiusflow_design_system::platform_font_stack()
+    );
+    assert_eq!(
+        options.watermark.font_family,
+        axiusflow_design_system::platform_font_stack()
+    );
     assert_eq!(options.grid.vert_lines.color, border);
     assert_eq!(options.crosshair.vert_line.color, crosshair);
     assert_eq!(
@@ -482,6 +502,21 @@ fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
     assert!(series.wick_down_color.is_none());
     assert!(series.border_up_color.is_none());
     assert!(series.border_down_color.is_none());
+}
+
+#[test]
+fn chart_legend_text_colors_project_the_platform_css_tokens() {
+    for (theme, platform) in [
+        (ChartTheme::Light, AxiusflowTheme::light()),
+        (ChartTheme::Dark, AxiusflowTheme::dark()),
+    ] {
+        let palette = legend_palette(theme);
+        let colors = platform.colors;
+        assert_eq!(palette.text, gpui_theme_color(colors.text_primary));
+        assert_eq!(palette.muted, gpui_theme_color(colors.text_secondary));
+        assert_eq!(palette.hover, gpui_theme_color(colors.hover_bg));
+        assert_eq!(palette.danger, gpui_theme_color(colors.danger));
+    }
 }
 
 #[test]

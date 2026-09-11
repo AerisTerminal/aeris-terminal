@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use axiusflow_design_system::{AxiusflowTheme, RadiusToken};
-use gpui::{App, Context, Entity, FontWeight, Render, Role, Window, div, prelude::*, px};
+use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
+use gpui::{App, Context, Entity, Render, Role, Window, div, prelude::*, px};
 
+use crate::desktop::native_ui::platform_font_weight;
 use crate::desktop::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
 
 pub(super) struct OnboardingApp {
@@ -166,6 +167,7 @@ fn onboarding_button(
     };
     div()
         .id(id)
+        .relative()
         .w_full()
         .h(px(40.0))
         .flex()
@@ -181,11 +183,17 @@ fn onboarding_button(
         .bg(gpui_color(fill))
         .text_color(gpui_color(foreground))
         .text_sm()
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(platform_font_weight(TypographyRole::Normal))
         .when(!pending, |button| {
             button
                 .cursor_pointer()
                 .hover(move |button| button.bg(gpui_color(colors.active_bg.over(fill))))
+                .active(move |button| {
+                    button
+                        .top(px(1.0))
+                        .bg(gpui_color(colors.active_bg.over(fill)))
+                        .opacity(0.94)
+                })
                 .on_click(|_, _, cx| OnboardingApp::begin_sign_in(cx))
         })
         .when(pending, gpui::Styled::cursor_not_allowed)
@@ -202,20 +210,6 @@ impl Render for OnboardingApp {
             .is_some_and(|account| account.verification_pending())
         {
             return session_verification_surface(window, &self.theme).into_any_element();
-        }
-        if self.loading
-            || axiusflow_desktop::account::DesktopAccount::shared()
-                .is_some_and(|account| account.authenticated())
-        {
-            return div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui_color(self.theme.colors.surface))
-                .text_color(gpui_color(self.theme.colors.text_primary))
-                .child("Signed in. Loading your workspace…")
-                .into_any_element();
         }
         if let Some(error) = &self.launch_error {
             return div()
@@ -240,6 +234,20 @@ impl Render for OnboardingApp {
                 )
                 .into_any_element();
         }
+        if self.loading
+            || axiusflow_desktop::account::DesktopAccount::shared()
+                .is_some_and(|account| account.authenticated())
+        {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_color(self.theme.colors.surface))
+                .text_color(gpui_color(self.theme.colors.text_primary))
+                .child("Signed in. Loading your workspace…")
+                .into_any_element();
+        }
         onboarding_surface(window, &self.theme, None).into_any_element()
     }
 }
@@ -254,7 +262,8 @@ fn session_verification_surface(window: &Window, theme: &AxiusflowTheme) -> gpui
         .justify_center()
         .bg(gpui_color(colors.surface))
         .text_color(gpui_color(colors.text_primary))
-        .font_family("DM Sans")
+        .font_family(platform_font_family())
+        .font_weight(platform_font_weight(TypographyRole::Normal))
         .child(onboarding_title_bar(window, theme))
         .child(
             div()
@@ -273,7 +282,7 @@ fn session_verification_surface(window: &Window, theme: &AxiusflowTheme) -> gpui
                     div()
                         .mt_6()
                         .text_lg()
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
                         .child("Verifying your session…"),
                 )
                 .child(
@@ -377,7 +386,8 @@ pub(super) fn onboarding_surface(
             .justify_center()
             .bg(gpui_color(colors.surface))
             .text_color(gpui_color(colors.text_primary))
-            .font_family("DM Sans")
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
             .child(onboarding_title_bar(window, theme))
             .child(
                 div()
@@ -397,7 +407,7 @@ pub(super) fn onboarding_surface(
                         div()
                             .mt_8()
                             .text_3xl()
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(platform_font_weight(TypographyRole::Strong))
                             .child("AXIUSFLOW"),
                     )
                     .child(

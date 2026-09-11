@@ -450,9 +450,18 @@ fn price_alert_existing_rows(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
                         .text_sm()
                         .text_color(gpui_color(colors.text_primary))
-                        .child(format!("{condition} · {alert_price}")),
+                        .child(format!("{condition} ·"))
+                        .child(
+                            div()
+                                .font_family(axiusflow_design_system::platform_font_family())
+                                .font_features(platform_tabular_numerals())
+                                .child(alert_price),
+                        ),
                 )
                 .child(
                     Button::new(("delete_price_alert", index))
@@ -493,14 +502,23 @@ fn price_alert_dialog_header(
                 .child(
                     div()
                         .text_base()
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
                         .child("Create price alert"),
                 )
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
                         .text_xs()
                         .text_color(gpui_color(colors.text_muted))
-                        .child(format!("{symbol} at {price}")),
+                        .child(format!("{symbol} at"))
+                        .child(
+                            div()
+                                .font_family(axiusflow_design_system::platform_font_family())
+                                .font_features(platform_tabular_numerals())
+                                .child(price.to_string()),
+                        ),
                 ),
         )
         .child(

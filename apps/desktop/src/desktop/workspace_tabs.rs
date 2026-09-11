@@ -357,6 +357,20 @@ impl TerminalApp {
         cx.notify();
     }
 
+    pub(super) fn reset_chart_settings(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {
+        let Some(surface) = self.chart_settings_surface(menu) else {
+            return;
+        };
+        let appearance = ChartAppearanceSettings::default();
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_appearance(&appearance, surface_cx);
+            // Nucleus's canonical default mode is Normal, represented by 0.
+            surface.set_chart_crosshair_mode(0, surface_cx);
+        });
+        self.chart_settings_color_picker = None;
+        cx.notify();
+    }
+
     /// Opens the account dropdown under the avatar click point, or closes it
     /// when already open. The stored anchor keeps the panel glued to the
     /// avatar's rendered position instead of a fixed screen corner.

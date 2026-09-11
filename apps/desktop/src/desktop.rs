@@ -70,7 +70,9 @@ use axiusflow_contracts::{
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
     workspace_study_setting_state,
 };
-use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
+use axiusflow_design_system::{
+    AxiusflowTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
+};
 use axiusflow_desktop::market_worker::{
     ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
@@ -133,8 +135,10 @@ use native_ui::{
     icon::Icon,
     input::{Input, InputEvent, InputState},
     loader::Loader,
-    menu::{MenuRow, compact_menu_panel, menu_separator},
+    menu::{MenuRow, compact_menu_panel, flat_compact_menu_panel, menu_separator},
+    platform_font_weight, platform_tabular_numerals,
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
+    tab::Tab,
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
@@ -290,9 +294,9 @@ const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
 const QUICK_TIMEFRAME_POPUP_TOP: f32 = 64.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
-const CHART_SETTINGS_PANEL_WIDTH: f32 = 700.0;
-const CHART_SETTINGS_PANEL_HEIGHT: f32 = 540.0;
-const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 164.0;
+const CHART_SETTINGS_PANEL_WIDTH: f32 = 840.0;
+const CHART_SETTINGS_PANEL_HEIGHT: f32 = 620.0;
+const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 184.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
 const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
@@ -2395,10 +2399,13 @@ fn run_onboarding() {
             install_platform_http_client(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
-                .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                    "../../../crates/ui/design_system/assets/fonts/DMSans-Regular.ttf"
-                ))])
-                .expect("the bundled DM Sans fonts are valid");
+                .add_fonts(
+                    PLATFORM_FONT_BYTES
+                        .iter()
+                        .map(|font| Cow::Borrowed(*font))
+                        .collect(),
+                )
+                .expect("the bundled platform font is valid");
             let options = desktop_window_options(0, cx);
             cx.open_window(options, |window, cx| {
                 let screen = cx.new(|_| onboarding::OnboardingApp::new());
@@ -2429,10 +2436,13 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             install_platform_http_client(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
-                .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                    "../../../crates/ui/design_system/assets/fonts/DMSans-Regular.ttf"
-                ))])
-                .expect("the bundled DM Sans fonts are valid");
+                .add_fonts(
+                    PLATFORM_FONT_BYTES
+                        .iter()
+                        .map(|font| Cow::Borrowed(*font))
+                        .collect(),
+                )
+                .expect("the bundled platform font is valid");
             mount_desktop(configured, lifecycle, None, cx);
         });
 }

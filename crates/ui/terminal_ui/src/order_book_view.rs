@@ -2,7 +2,9 @@
 use crate::OrderBookRow;
 use crate::order_book::{compact_quantity_text, grouped_fixed_point_text};
 use crate::{OrderBookColumnLevel, OrderBookFrame};
-use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
+use axiusflow_design_system::{
+    AxiusflowTheme, ThemeColor, TypographyRole, platform_font_family, platform_typography,
+};
 use axiusflow_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
 use gpui::{
     AnyElement, Context, Div, Hsla, IntoElement, Render, ScrollStrategy, Task,
@@ -41,6 +43,17 @@ const BOOK_WIDTH: f32 = 0.30;
 const TRADE_WIDTH: f32 = 0.10;
 const PRICE_WIDTH: f32 = 0.20;
 const ORDERS_WIDTH: f32 = 0.10;
+
+fn platform_font_weight(role: TypographyRole) -> gpui::FontWeight {
+    gpui::FontWeight(f32::from(platform_typography().weight(role)))
+}
+
+fn platform_tabular_numerals() -> gpui::FontFeatures {
+    gpui::FontFeatures(Arc::new(vec![(
+        platform_typography().tabular_numerals_feature().to_owned(),
+        1,
+    )]))
+}
 
 /// Columns available in the read-only order-book ladder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,6 +378,8 @@ impl Render for ReadOnlyOrderBookView {
             .size_full()
             .overflow_hidden()
             .bg(gpui_color(colors.surface))
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_color(gpui_color(colors.text_primary))
             .child(
                 div()
@@ -1295,6 +1310,9 @@ fn render_level_row(
         .overflow_hidden()
         .border_b_1()
         .border_color(gpui_color(colors.border))
+        .font_family(platform_font_family())
+        .font_weight(platform_font_weight(TypographyRole::Normal))
+        .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
         .children(
             OrderBookColumn::ALL
@@ -1334,6 +1352,9 @@ fn render_empty_price_tick(
         .overflow_hidden()
         .border_b_1()
         .border_color(gpui_color(colors.border))
+        .font_family(platform_font_family())
+        .font_weight(platform_font_weight(TypographyRole::Normal))
+        .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
         .children(
             OrderBookColumn::ALL
@@ -1611,6 +1632,9 @@ fn spread_row(
             .border_b_1()
             .border_color(gpui_color(theme.colors.border))
             .bg(gpui_color(theme.colors.surface_secondary))
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
+            .font_features(platform_tabular_numerals())
             .text_size(px(TEXT_SIZE))
             .text_color(gpui_color(theme.colors.text_secondary))
             .child(format!("{}  —  {}", bid.price_text, ask.price_text)),

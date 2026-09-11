@@ -1,8 +1,16 @@
 @font-face {
-  font-family: "DM Sans";
-  src: url("./assets/fonts/DMSans-Regular.ttf") format("truetype");
+  font-family: "HK Grotesk";
+  src: url("./assets/fonts/HKGrotesk-Medium.ttf") format("truetype");
   font-style: normal;
-  font-weight: 400;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HK Grotesk";
+  src: url("./assets/fonts/HKGrotesk-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
   font-display: swap;
 }
 
@@ -10,7 +18,11 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --font-sans: "DM Sans", sans-serif;
+  --font-sans: "HK Grotesk", sans-serif;
+  --font-weight-normal: 500;
+  --font-weight-emphasis: 700;
+  --font-weight-strong: 700;
+  --font-feature-tabular-numerals: "tnum";
 
   /* Surfaces */
   --surface: #ffffff;
@@ -108,7 +120,21 @@ body {
   font-family: var(--font-sans);
   font-synthesis: none;
   font-variant-ligatures: common-ligatures;
-  font-weight: 400;
+  font-weight: var(--font-weight-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+.platform-text-emphasis {
+  font-weight: var(--font-weight-emphasis);
+}
+
+.platform-text-strong {
+  font-weight: var(--font-weight-strong);
+}
+
+.platform-numeric-changing {
+  font-feature-settings: var(--font-feature-tabular-numerals) 1;
+  font-variant-numeric: tabular-nums;
 }
 
 button,
@@ -137,7 +163,13 @@ button,
 .button-outline,
 .button-ghost {
   border-radius: var(--radius-default);
-  transition: background-color 150ms ease, color 150ms ease;
+  transition: transform 100ms ease-out, background-color 150ms ease, color 150ms ease;
+}
+
+.button-primary:active:not(:disabled):not([aria-disabled="true"]),
+.button-outline:active:not(:disabled):not([aria-disabled="true"]),
+.button-ghost:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: scale(0.96);
 }
 
 .button-primary {

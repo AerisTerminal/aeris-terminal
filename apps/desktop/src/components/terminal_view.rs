@@ -169,7 +169,8 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::close_window))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
-            .font_family("DM Sans")
+            .font_family(axiusflow_design_system::platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
             .children(title_bar)
             .child(header)
             .child(
@@ -400,7 +401,6 @@ fn workspace_tab(
     let index = state.index;
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
-    let colors = theme.colors;
     let tab_id = workspace.id;
     let selected = index == state.active;
     let select_terminal = terminal.clone();
@@ -410,9 +410,8 @@ fn workspace_tab(
     let drag = WorkspaceTabDrag { tab_id };
     let tab_focus = workspace.focus.clone();
     let mouse_focus = workspace.focus.clone();
-    div()
-        .id(("workspace_tab", tab_id))
-        .occlude()
+    Tab::new(("workspace_tab", tab_id), &theme)
+        .selected(selected)
         .w(px(WORKSPACE_TAB_WIDTH))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .flex_none()
@@ -421,43 +420,14 @@ fn workspace_tab(
         .gap_1()
         .pl_3()
         .pr_1()
-        .rounded(px(f32::from(
-            chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
-        )))
-        .border_1()
-        .border_color(gpui_color(if selected {
-            colors.border
-        } else {
-            colors.surface_secondary
-        }))
-        .bg(gpui_color(if selected {
-            colors.active_bg.over(colors.surface_secondary)
-        } else {
-            colors.surface_secondary
-        }))
         .text_sm()
-        .text_color(gpui_color(if selected {
-            colors.text_primary
-        } else {
-            colors.text_secondary
-        }))
         .track_focus(&tab_focus)
-        .role(Role::Tab)
         .aria_label(label.clone())
-        .aria_selected(selected)
         .aria_position_in_set(index + 1)
         .aria_size_of_set(state.workspace_count)
-        .cursor_pointer()
         .when_some(state.drag_translation, |tab, translation| {
             tab.relative().left(px(translation)).shadow_md()
         })
-        .when(!selected, |tab| {
-            tab.hover(move |tab| {
-                tab.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                    .text_color(gpui_color(colors.text_primary))
-            })
-        })
-        .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2())
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             mouse_focus.focus(window, cx);
             select_terminal.update(cx, |terminal, cx| {

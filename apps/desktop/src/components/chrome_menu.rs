@@ -51,6 +51,8 @@ pub(super) fn chrome_menu_surface(
         .max_h_full()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
+        .font_family(axiusflow_design_system::platform_font_family())
+        .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_secondary))
 }
 
@@ -68,7 +70,7 @@ pub(super) fn chrome_menu_group_heading(
         .pt(px(2.0))
         .pb(px(4.0))
         .text_size(px(10.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
+        .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_muted))
         .child(label.to_ascii_uppercase())
 }
@@ -89,7 +91,7 @@ pub(super) fn chrome_menu_empty(
         .child(
             div()
                 .text_size(px(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(platform_font_weight(TypographyRole::Strong))
                 .text_color(gpui_color(colors.text_primary))
                 .child(title),
         )

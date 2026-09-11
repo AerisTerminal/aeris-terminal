@@ -711,22 +711,27 @@ impl Render for ConnectionStatusTooltip {
                 .border_1()
                 .border_color(gpui_color(colors.border))
                 .bg(gpui_color(colors.surface))
+                .font_family(axiusflow_design_system::platform_font_family())
+                .font_weight(platform_font_weight(TypographyRole::Normal))
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(connection_tooltip_row(
                     "Provider",
                     self.provider.clone(),
+                    false,
                     &self.theme,
                 ))
                 .child(connection_tooltip_row(
                     "Status",
                     self.status.clone(),
+                    false,
                     &self.theme,
                 ))
                 .child(connection_tooltip_row(
                     "Latency",
                     self.latency.clone(),
+                    true,
                     &self.theme,
                 )),
         )
@@ -736,6 +741,7 @@ impl Render for ConnectionStatusTooltip {
 fn connection_tooltip_row(
     label: &'static str,
     value: SharedString,
+    numeric: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     div()
@@ -749,12 +755,19 @@ fn connection_tooltip_row(
                 .text_color(gpui_color(theme.colors.text_muted))
                 .child(label),
         )
-        .child(
+        .child(if numeric {
+            div()
+                .font_family(axiusflow_design_system::platform_font_family())
+                .font_features(platform_tabular_numerals())
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child(value)
+        } else {
             div()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_primary))
-                .child(value),
-        )
+                .child(value)
+        })
 }
 
 #[derive(Clone, Copy)]

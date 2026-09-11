@@ -4,6 +4,134 @@
 //! checked CSS manifest uses generated custom-property names, while painting
 //! code consumes typed values without string lookup.
 
+use std::sync::OnceLock;
+
+/// Canonical portable stylesheet shared with the native presentation layer.
+pub const PLATFORM_CSS: &str = include_str!("../platform.css");
+
+/// Bundled platform faces referenced by `platform.css`.
+pub static PLATFORM_FONT_BYTES: [&[u8]; 2] = [
+    include_bytes!("../assets/fonts/HKGrotesk-Medium.ttf"),
+    include_bytes!("../assets/fonts/HKGrotesk-Bold.ttf"),
+];
+
+static PLATFORM_TYPOGRAPHY: OnceLock<PlatformTypography> = OnceLock::new();
+
+fn css_custom_property_value(declaration: &'static str) -> &'static str {
+    let Some(start) = PLATFORM_CSS.find(declaration) else {
+        panic!("platform.css must declare {declaration}");
+    };
+    let value = &PLATFORM_CSS[start + declaration.len()..];
+    let Some((value, _)) = value.split_once(';') else {
+        panic!("platform.css {declaration} declaration must end with a semicolon");
+    };
+    value.trim()
+}
+
+fn primary_font_family(stack: &'static str, declaration: &'static str) -> &'static str {
+    let Some(quoted) = stack.strip_prefix('"') else {
+        panic!("platform.css {declaration} must begin with a quoted family");
+    };
+    let Some((family, _)) = quoted.split_once('"') else {
+        panic!("platform.css {declaration} must contain a closing quote");
+    };
+    family
+}
+
+fn css_weight(declaration: &'static str) -> u16 {
+    css_custom_property_value(declaration)
+        .parse()
+        .unwrap_or_else(|_| panic!("platform.css {declaration} must be an integer font weight"))
+}
+
+fn quoted_css_value(declaration: &'static str) -> &'static str {
+    let value = css_custom_property_value(declaration);
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("platform.css {declaration} must be a quoted string"))
+}
+
+/// Semantic roles in the canonical platform typography hierarchy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypographyRole {
+    Normal,
+    Emphasis,
+    Strong,
+}
+
+/// Typed native projection of the typography values owned by `platform.css`.
+///
+/// GPUI does not consume CSS, so native views ask this projection for the same
+/// family, semantic weights, and OpenType feature tag instead of duplicating
+/// those decisions in presentation code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformTypography {
+    stack: &'static str,
+    family: &'static str,
+    normal_weight: u16,
+    emphasis_weight: u16,
+    strong_weight: u16,
+    tabular_numerals_feature: &'static str,
+}
+
+impl PlatformTypography {
+    #[must_use]
+    pub const fn stack(self) -> &'static str {
+        self.stack
+    }
+
+    #[must_use]
+    pub const fn family(self) -> &'static str {
+        self.family
+    }
+
+    #[must_use]
+    pub const fn weight(self, role: TypographyRole) -> u16 {
+        match role {
+            TypographyRole::Normal => self.normal_weight,
+            TypographyRole::Emphasis => self.emphasis_weight,
+            TypographyRole::Strong => self.strong_weight,
+        }
+    }
+
+    #[must_use]
+    pub const fn tabular_numerals_feature(self) -> &'static str {
+        self.tabular_numerals_feature
+    }
+}
+
+/// Returns the canonical typography contract projected from `platform.css`.
+#[must_use]
+pub fn platform_typography() -> PlatformTypography {
+    *PLATFORM_TYPOGRAPHY.get_or_init(|| {
+        let stack = css_custom_property_value("--font-sans:");
+        PlatformTypography {
+            stack,
+            family: primary_font_family(stack, "--font-sans"),
+            normal_weight: css_weight("--font-weight-normal:"),
+            emphasis_weight: css_weight("--font-weight-emphasis:"),
+            strong_weight: css_weight("--font-weight-strong:"),
+            tabular_numerals_feature: quoted_css_value("--font-feature-tabular-numerals:"),
+        }
+    })
+}
+
+/// Returns the `--font-sans` value from `platform.css`.
+///
+/// Native GPUI does not interpret CSS directly, so native consumers resolve
+/// the same canonical declaration here instead of duplicating a font name.
+#[must_use]
+pub fn platform_font_stack() -> &'static str {
+    platform_typography().stack()
+}
+
+/// Returns the primary family from the canonical `--font-sans` CSS value.
+#[must_use]
+pub fn platform_font_family() -> &'static str {
+    platform_typography().family()
+}
+
 /// The application-wide color mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThemeMode {
@@ -499,7 +627,10 @@ impl RadiusToken {
 
 #[cfg(test)]
 mod tests {
-    use super::{AxiusflowTheme, ColorToken, RadiusToken, ThemeColor};
+    use super::{
+        AxiusflowTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+        platform_font_stack, platform_typography,
+    };
 
     fn token_source<'a>(tokens: &'a [ColorToken], identifier: &str) -> &'a str {
         tokens
@@ -669,17 +800,35 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"DM Sans\", sans-serif;",
-            "DMSans-Regular.ttf",
-            "font-weight: 400;",
+            "--font-sans: \"HK Grotesk\", sans-serif;",
+            "--font-weight-normal: 500;",
+            "--font-weight-emphasis: 700;",
+            "--font-weight-strong: 700;",
+            "--font-feature-tabular-numerals: \"tnum\";",
+            "HKGrotesk-Medium.ttf",
+            "HKGrotesk-Bold.ttf",
+            "font-weight: 700;",
+            "font-variant-numeric: tabular-nums;",
+            "-webkit-font-smoothing: antialiased;",
             "font-synthesis: none;",
+            "transition: transform 100ms ease-out, background-color 150ms ease, color 150ms ease;",
+            "transform: scale(0.96);",
             "outline: 2px solid var(--ring);",
             "outline-offset: 2px;",
-            "transition: background-color 150ms ease, color 150ms ease;",
             "cursor: not-allowed;",
             "@media (prefers-reduced-motion: reduce)",
         ] {
             assert!(css.contains(required), "CSS is missing `{required}`");
         }
+        assert!(!css.contains("HKGrotesk-SemiBold.ttf"));
+        assert!(!css.contains("font-weight: 600;"));
+        assert_eq!(platform_font_family(), "HK Grotesk");
+        assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
+
+        let typography = platform_typography();
+        assert_eq!(typography.weight(TypographyRole::Normal), 500);
+        assert_eq!(typography.weight(TypographyRole::Emphasis), 700);
+        assert_eq!(typography.weight(TypographyRole::Strong), 700);
+        assert_eq!(typography.tabular_numerals_feature(), "tnum");
     }
 }

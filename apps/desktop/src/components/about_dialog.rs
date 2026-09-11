@@ -82,7 +82,7 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
                         .child(
                             div()
                                 .text_base()
-                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .font_weight(platform_font_weight(TypographyRole::Strong))
                                 .text_color(gpui_color(colors.text_primary))
                                 .child("About Axiusflow"),
                         )

@@ -1,13 +1,13 @@
 use std::{rc::Rc, sync::Arc};
 
-use axiusflow_design_system::{AxiusflowTheme, ThemeColor};
+use axiusflow_design_system::{AxiusflowTheme, ThemeColor, TypographyRole, platform_font_family};
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
     Interactivity, IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
     StyleRefinement, Styled, Window, div, prelude::*, px,
 };
 
-use super::{icon::Icon, loader::Loader, tooltip::TooltipSpec};
+use super::{icon::Icon, loader::Loader, platform_font_weight, tooltip::TooltipSpec};
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -19,6 +19,38 @@ fn control_geometry(content_size: Option<Pixels>) -> (Pixels, Pixels) {
     content_size.map_or((DEFAULT_CONTROL_SIZE, DEFAULT_ICON_SIZE), |control_size| {
         (control_size, control_size * CUSTOM_ICON_SCALE)
     })
+}
+
+fn control_label_weight() -> gpui::FontWeight {
+    platform_font_weight(TypographyRole::Normal)
+}
+
+fn with_pointer_states(
+    control: Stateful<Div>,
+    policy: ControlPolicy,
+    caller_hover_style: Option<StyleRefinement>,
+    hover_color: Option<Hsla>,
+    active_color: Option<Hsla>,
+) -> Stateful<Div> {
+    let has_caller_hover_style = caller_hover_style.is_some();
+    control
+        .when_some(
+            caller_hover_style.filter(|_| policy.accepts_input()),
+            |this, caller_hover_style| {
+                this.hover(move |mut style| {
+                    style.refine(&caller_hover_style);
+                    style
+                })
+            },
+        )
+        .when_some(
+            hover_color.filter(|_| policy.accepts_input() && !has_caller_hover_style),
+            |this, color| this.hover(move |style| style.bg(color)),
+        )
+        .when_some(
+            active_color.filter(|_| policy.accepts_input()),
+            |this, color| this.active(move |style| style.top(px(1.0)).bg(color).opacity(0.94)),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -313,11 +345,10 @@ impl RenderOnce for Control {
         let tooltip = self.tooltip;
         let activation = self.activation;
         let caller_hover_style = self.hover_style;
-        let has_caller_hover_style = caller_hover_style.is_some();
         let base = self.base;
         let caller_style = self.style;
 
-        let mut control = base
+        let control = base
             .occlude()
             .role(Role::Button)
             .when_some(aria_label, StatefulInteractiveElement::aria_label)
@@ -325,59 +356,55 @@ impl RenderOnce for Control {
             .track_focus(&focus_handle)
             .flex()
             .flex_shrink_0()
+            .relative()
             .items_center()
             .justify_center()
             .gap_1()
             .rounded(px(4.0))
+            .font_family(platform_font_family())
+            .when(has_text, |this| this.font_weight(control_label_weight()))
             .when(has_text, |this| this.px(padding))
             .when(!has_text, |this| this.size(control_size))
             .when(policy.accepts_input(), gpui::Styled::cursor_pointer)
-            .when(!policy.accepts_input(), gpui::Styled::cursor_default)
-            .when_some(
-                caller_hover_style.filter(|_| policy.accepts_input()),
-                |this, caller_hover_style| {
-                    this.hover(move |mut style| {
-                        style.refine(&caller_hover_style);
-                        style
-                    })
-                },
-            )
-            .when_some(
-                hover_color.filter(|_| policy.accepts_input() && !has_caller_hover_style),
-                |this, color| this.hover(move |style| style.bg(color)),
-            )
-            .when_some(
-                selected_color.filter(|_| self.flags.contains(ControlFlags::SELECTED)),
-                gpui::Styled::bg,
-            )
-            .when(self.flags.contains(ControlFlags::LOADING), |this| {
-                this.opacity(0.8)
-            })
-            .when(self.flags.contains(ControlFlags::DISABLED), |this| {
-                this.opacity(0.55)
-                    .when_some(disabled_color, gpui::Styled::text_color)
-            })
-            .focus_visible(move |style| style.border_2().border_color(focus_color))
-            .when_some(
-                activation.filter(|_| policy.accepts_input()),
-                |this, handler| this.on_click(move |event, window, cx| handler(event, window, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .children(leading)
-                    .children(self.leading)
-                    .children(self.label)
-                    .children(self.children)
-                    .children(self.caret.map(|caret| {
-                        caret
-                            .with_size((icon_size * 0.75).max(px(10.0)))
-                            .into_any_element()
-                    })),
-            );
+            .when(!policy.accepts_input(), gpui::Styled::cursor_default);
+        let mut control = with_pointer_states(
+            control,
+            policy,
+            caller_hover_style,
+            hover_color,
+            selected_color,
+        )
+        .when_some(
+            selected_color.filter(|_| self.flags.contains(ControlFlags::SELECTED)),
+            gpui::Styled::bg,
+        )
+        .when(self.flags.contains(ControlFlags::LOADING), |this| {
+            this.opacity(0.8)
+        })
+        .when(self.flags.contains(ControlFlags::DISABLED), |this| {
+            this.when_some(disabled_color, gpui::Styled::text_color)
+        })
+        .focus_visible(move |style| style.border_2().border_color(focus_color))
+        .when_some(
+            activation.filter(|_| policy.accepts_input()),
+            |this, handler| this.on_click(move |event, window, cx| handler(event, window, cx)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .children(leading)
+                .children(self.leading)
+                .children(self.label)
+                .children(self.children)
+                .children(self.caret.map(|caret| {
+                    caret
+                        .with_size((icon_size * 0.75).max(px(10.0)))
+                        .into_any_element()
+                })),
+        );
         control.style().refine(&caller_style);
 
         if let Some(tooltip) = tooltip {
@@ -399,9 +426,14 @@ fn theme_color(color: ThemeColor) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{InteractiveElement, Styled, px};
+    use gpui::{FontWeight, InteractiveElement, Styled, px};
 
-    use super::{Control, ControlPolicy, control_geometry};
+    use super::{Control, ControlPolicy, control_geometry, control_label_weight};
+
+    #[test]
+    fn ordinary_control_labels_keep_the_platform_normal_weight() {
+        assert_eq!(control_label_weight(), FontWeight(500.0));
+    }
 
     #[test]
     fn custom_control_size_preserves_glyph_inset() {

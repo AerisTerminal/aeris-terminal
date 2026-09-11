@@ -57,6 +57,11 @@ pub(super) fn chrome_overlay_layer(
                     interval_popup: compact_panel,
                     dual_container,
                     primary_surface: quick_timeframe,
+                    elevation: if anchored_menu {
+                        ChromeOverlayElevation::Flat
+                    } else {
+                        ChromeOverlayElevation::Elevated
+                    },
                 },
                 closing,
                 generation,
@@ -183,11 +188,18 @@ pub(super) fn chrome_overlay_content(
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum ChromeOverlayElevation {
+    Flat,
+    Elevated,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     dual_container: bool,
     primary_surface: bool,
+    elevation: ChromeOverlayElevation,
 }
 
 pub(super) fn chrome_overlay_panel(
@@ -222,6 +234,10 @@ pub(super) fn chrome_overlay_panel(
                     colors.surface
                 }))
         })
+        .when(
+            !style.dual_container && style.elevation == ChromeOverlayElevation::Elevated,
+            gpui::Styled::shadow_md,
+        )
         .when(style.interval_popup && !style.dual_container, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
@@ -528,7 +544,7 @@ pub(super) fn quick_timeframe_overlay_content(
                 .w_full()
                 .text_center()
                 .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(platform_font_weight(TypographyRole::Strong))
                 .child("Time frame"),
         )
         .child(
@@ -536,7 +552,7 @@ pub(super) fn quick_timeframe_overlay_content(
                 .w_full()
                 .h(px(58.0))
                 .text_size(px(18.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(platform_font_weight(TypographyRole::Normal))
                 .child(
                     Input::new(input)
                         .appearance(true)

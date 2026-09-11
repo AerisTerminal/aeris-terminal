@@ -623,6 +623,7 @@ name = "axiusflow_chart_integration"
 version = "0.2.3"
 dependencies = [
  "axiusflow_application",
+ "axiusflow_design_system",
  "axiusflow_terminal_ui",
  "gpui",
  "nucleuscharts_engine",
