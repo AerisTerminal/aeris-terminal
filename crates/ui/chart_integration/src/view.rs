@@ -2630,9 +2630,8 @@ fn legend_control(
         LegendControl::Visibility(false) => ("Show", LEGEND_VIEW_OFF_ICON, palette.muted),
         LegendControl::Remove => ("Remove", LEGEND_REMOVE_ICON, palette.danger),
     };
-    let id = item.key() * 2 + u64::from(remove);
     div()
-        .id(("chart_legend_control", id))
+        .id(legend_control_element_id(item, control))
         .size(px(20.0))
         .flex_none()
         .flex()
@@ -2662,6 +2661,14 @@ fn legend_control(
             cx.stop_propagation();
         })
         .child(svg().path(path).size(px(14.0)).text_color(color))
+}
+
+fn legend_control_element_id(item: LegendItem, control: LegendControl) -> (&'static str, u64) {
+    let namespace = match control {
+        LegendControl::Visibility(_) => "chart_legend_visibility_control",
+        LegendControl::Remove => "chart_legend_remove_control",
+    };
+    (namespace, item.key())
 }
 
 impl Render for NucleusChartView {

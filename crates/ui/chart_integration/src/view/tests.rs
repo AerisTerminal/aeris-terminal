@@ -1663,6 +1663,23 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
 }
 
 #[test]
+fn study_legend_control_ids_do_not_overflow_or_alias_control_kinds() {
+    let study = LegendItem::Study {
+        study_id: u64::MAX,
+        series_id: u32::MAX,
+    };
+    let visibility = legend_control_element_id(study, LegendControl::Visibility(true));
+    let remove = legend_control_element_id(study, LegendControl::Remove);
+
+    assert_eq!(visibility.1, (1_u64 << 63) | u64::from(u32::MAX));
+    assert_ne!(visibility, remove);
+    assert_ne!(
+        visibility,
+        legend_control_element_id(LegendItem::Asset, LegendControl::Visibility(true))
+    );
+}
+
+#[test]
 fn multi_output_study_legend_visibility_toggles_the_whole_study() {
     let mut chart = NucleusChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000];
