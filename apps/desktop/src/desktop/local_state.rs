@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 
 use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    SeriesCadence, SeriesKey, WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind,
-    WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyMarketStream, WorkspaceTabState, workspace_study_setting_state,
+    SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
+    workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -13,6 +14,7 @@ const WORKSPACE_FILE: &str = "workspace-state.pb";
 const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
 const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
 const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
+const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct LegacyWorkspaceEnvelope {
@@ -264,8 +266,45 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
             .price_alerts
             .truncate(axiusflow_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
         chart.studies = sanitize_studies(std::mem::take(&mut chart.studies));
+        if chart
+            .appearance
+            .as_ref()
+            .is_some_and(|appearance| !valid_chart_appearance(appearance))
+        {
+            chart.appearance = None;
+        }
     }
     workspace
+}
+
+fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
+    let color_is_valid = |value: &str| {
+        !value.is_empty()
+            && value.len() <= MAXIMUM_CHART_COLOR_BYTES
+            && !value.chars().any(char::is_control)
+    };
+    [
+        appearance.grid_color.as_str(),
+        appearance.crosshair_color.as_str(),
+        appearance.up_color.as_str(),
+        appearance.down_color.as_str(),
+        appearance.wick_up_color.as_str(),
+        appearance.wick_down_color.as_str(),
+        appearance.border_up_color.as_str(),
+        appearance.border_down_color.as_str(),
+        appearance.line_color.as_str(),
+        appearance.area_top_color.as_str(),
+        appearance.area_bottom_color.as_str(),
+        appearance.baseline_top_color.as_str(),
+        appearance.baseline_bottom_color.as_str(),
+    ]
+    .into_iter()
+    .all(color_is_valid)
+        && appearance.grid_style <= 4
+        && (1..=4).contains(&appearance.crosshair_width)
+        && appearance.crosshair_style <= 4
+        && (1..=4).contains(&appearance.line_width)
+        && appearance.line_style <= 4
 }
 
 fn sanitize_studies(studies: Vec<WorkspaceChartStudyState>) -> Vec<WorkspaceChartStudyState> {
@@ -508,6 +547,31 @@ mod tests {
                 persisted_sma_study(1, 50, false),
                 persisted_bollinger_study(2, true),
             ],
+            appearance: Some(WorkspaceChartAppearanceState {
+                grid_visible: false,
+                grid_color: "#334155".to_string(),
+                grid_style: 2,
+                crosshair_color: "#94a3b8".to_string(),
+                crosshair_width: 2,
+                crosshair_style: 1,
+                up_color: "#10b981".to_string(),
+                down_color: "#ef4444".to_string(),
+                wick_up_color: "#34d399".to_string(),
+                wick_down_color: "#f87171".to_string(),
+                border_up_color: "#059669".to_string(),
+                border_down_color: "#dc2626".to_string(),
+                wick_visible: true,
+                border_visible: false,
+                open_visible: true,
+                thin_bars: false,
+                line_color: "#3b82f6".to_string(),
+                line_width: 3,
+                line_style: 0,
+                area_top_color: "#2563eb".to_string(),
+                area_bottom_color: "#172554".to_string(),
+                baseline_top_color: "#22c55e".to_string(),
+                baseline_bottom_color: "#ef4444".to_string(),
+            }),
         }
     }
 
@@ -657,6 +721,46 @@ mod tests {
         assert_eq!(studies.len(), 2);
         assert_eq!(studies[0].local_id, 1);
         assert_eq!(studies[1].local_id, 2);
+    }
+
+    #[test]
+    fn sanitizer_drops_invalid_chart_appearance_without_dropping_the_chart() {
+        let mut workspace = default_workspace();
+        let chart = workspace.workspace_tabs[0].panes[0]
+            .chart
+            .get_or_insert_with(WorkspaceChartState::default);
+        chart.appearance = Some(WorkspaceChartAppearanceState {
+            grid_visible: true,
+            grid_color: "#334155".to_string(),
+            grid_style: 9,
+            crosshair_color: "#94a3b8".to_string(),
+            crosshair_width: 2,
+            crosshair_style: 1,
+            up_color: "#10b981".to_string(),
+            down_color: "#ef4444".to_string(),
+            wick_up_color: "#10b981".to_string(),
+            wick_down_color: "#ef4444".to_string(),
+            border_up_color: "#10b981".to_string(),
+            border_down_color: "#ef4444".to_string(),
+            wick_visible: true,
+            border_visible: true,
+            open_visible: true,
+            thin_bars: true,
+            line_color: "#3b82f6".to_string(),
+            line_width: 2,
+            line_style: 0,
+            area_top_color: "#2563eb".to_string(),
+            area_bottom_color: "#172554".to_string(),
+            baseline_top_color: "#22c55e".to_string(),
+            baseline_bottom_color: "#ef4444".to_string(),
+        });
+
+        let sanitized = sanitize_workspace(workspace);
+        let chart = sanitized.workspace_tabs[0].panes[0]
+            .chart
+            .as_ref()
+            .expect("chart remains available");
+        assert!(chart.appearance.is_none());
     }
     #[test]
     fn legacy_framed_workspace_remains_readable_without_a_transport_runtime() {

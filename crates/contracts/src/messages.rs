@@ -249,6 +249,66 @@ pub struct WorkspaceChartState {
     /// Host-owned native study graph in stable creation/dependency order.
     #[prost(message, repeated, tag = "8")]
     pub studies: Vec<WorkspaceChartStudyState>,
+    /// Host-owned durable chart appearance. Nucleus remains the renderer/state
+    /// executor; this stores only product-authored presentation preferences.
+    #[prost(message, optional, tag = "9")]
+    pub appearance: Option<WorkspaceChartAppearanceState>,
+}
+
+/// Durable chart presentation preferences that are independent of market data.
+///
+/// Colors are stored as bounded CSS strings understood by Nucleus. Numeric line
+/// widths/styles use integers because current product controls expose discrete
+/// professional chart choices rather than arbitrary floating-point values.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+#[allow(clippy::struct_excessive_bools)] // Protobuf mirrors independent persisted UI toggles.
+pub struct WorkspaceChartAppearanceState {
+    #[prost(bool, tag = "1")]
+    pub grid_visible: bool,
+    #[prost(string, tag = "2")]
+    pub grid_color: String,
+    #[prost(uint32, tag = "3")]
+    pub grid_style: u32,
+    #[prost(string, tag = "4")]
+    pub crosshair_color: String,
+    #[prost(uint32, tag = "5")]
+    pub crosshair_width: u32,
+    #[prost(uint32, tag = "6")]
+    pub crosshair_style: u32,
+    #[prost(string, tag = "7")]
+    pub up_color: String,
+    #[prost(string, tag = "8")]
+    pub down_color: String,
+    #[prost(string, tag = "9")]
+    pub wick_up_color: String,
+    #[prost(string, tag = "10")]
+    pub wick_down_color: String,
+    #[prost(string, tag = "11")]
+    pub border_up_color: String,
+    #[prost(string, tag = "12")]
+    pub border_down_color: String,
+    #[prost(bool, tag = "13")]
+    pub wick_visible: bool,
+    #[prost(bool, tag = "14")]
+    pub border_visible: bool,
+    #[prost(bool, tag = "15")]
+    pub open_visible: bool,
+    #[prost(bool, tag = "16")]
+    pub thin_bars: bool,
+    #[prost(string, tag = "17")]
+    pub line_color: String,
+    #[prost(uint32, tag = "18")]
+    pub line_width: u32,
+    #[prost(uint32, tag = "19")]
+    pub line_style: u32,
+    #[prost(string, tag = "20")]
+    pub area_top_color: String,
+    #[prost(string, tag = "21")]
+    pub area_bottom_color: String,
+    #[prost(string, tag = "22")]
+    pub baseline_top_color: String,
+    #[prost(string, tag = "23")]
+    pub baseline_bottom_color: String,
 }
 
 /// Durable host-owned state for one native Study Runtime instance.

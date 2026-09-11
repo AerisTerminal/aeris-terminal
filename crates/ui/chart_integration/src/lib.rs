@@ -20,9 +20,9 @@ pub use nucleuscharts_engine::{
     AlertSnapshot as ChartAlertSnapshot,
 };
 pub use view::{
-    ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator, ChartIndicatorError,
-    ChartIndicatorState, ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget,
-    ChartStudyPlotKind, ChartStudyScaleTarget, ChartType, DrawingsLockSummary, NucleusChartView,
-    PriceAxisMenuAction, PriceAxisMenuState,
+    ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingTool,
+    ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyOutputDescriptor,
+    ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyScaleTarget,
+    ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

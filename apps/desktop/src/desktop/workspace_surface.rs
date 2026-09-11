@@ -45,6 +45,71 @@ fn restored_market_selection(
     }
 }
 
+fn persisted_chart_appearance(
+    appearance: &ChartAppearanceSettings,
+) -> WorkspaceChartAppearanceState {
+    WorkspaceChartAppearanceState {
+        grid_visible: appearance.grid_visible,
+        grid_color: appearance.grid_color.clone(),
+        grid_style: u32::from(appearance.grid_style),
+        crosshair_color: appearance.crosshair_color.clone(),
+        crosshair_width: u32::from(appearance.crosshair_width),
+        crosshair_style: u32::from(appearance.crosshair_style),
+        up_color: appearance.up_color.clone(),
+        down_color: appearance.down_color.clone(),
+        wick_up_color: appearance.wick_up_color.clone(),
+        wick_down_color: appearance.wick_down_color.clone(),
+        border_up_color: appearance.border_up_color.clone(),
+        border_down_color: appearance.border_down_color.clone(),
+        wick_visible: appearance.wick_visible,
+        border_visible: appearance.border_visible,
+        open_visible: appearance.open_visible,
+        thin_bars: appearance.thin_bars,
+        line_color: appearance.line_color.clone(),
+        line_width: u32::from(appearance.line_width),
+        line_style: u32::from(appearance.line_style),
+        area_top_color: appearance.area_top_color.clone(),
+        area_bottom_color: appearance.area_bottom_color.clone(),
+        baseline_top_color: appearance.baseline_top_color.clone(),
+        baseline_bottom_color: appearance.baseline_bottom_color.clone(),
+    }
+}
+
+fn restored_chart_appearance(
+    appearance: &WorkspaceChartAppearanceState,
+) -> Option<ChartAppearanceSettings> {
+    let grid_style = u8::try_from(appearance.grid_style).ok()?.min(4);
+    let crosshair_width = u8::try_from(appearance.crosshair_width).ok()?.clamp(1, 4);
+    let crosshair_style = u8::try_from(appearance.crosshair_style).ok()?.min(4);
+    let line_width = u8::try_from(appearance.line_width).ok()?.clamp(1, 4);
+    let line_style = u8::try_from(appearance.line_style).ok()?.min(4);
+    Some(ChartAppearanceSettings {
+        grid_visible: appearance.grid_visible,
+        grid_color: appearance.grid_color.clone(),
+        grid_style,
+        crosshair_color: appearance.crosshair_color.clone(),
+        crosshair_width,
+        crosshair_style,
+        up_color: appearance.up_color.clone(),
+        down_color: appearance.down_color.clone(),
+        wick_up_color: appearance.wick_up_color.clone(),
+        wick_down_color: appearance.wick_down_color.clone(),
+        border_up_color: appearance.border_up_color.clone(),
+        border_down_color: appearance.border_down_color.clone(),
+        wick_visible: appearance.wick_visible,
+        border_visible: appearance.border_visible,
+        open_visible: appearance.open_visible,
+        thin_bars: appearance.thin_bars,
+        line_color: appearance.line_color.clone(),
+        line_width,
+        line_style,
+        area_top_color: appearance.area_top_color.clone(),
+        area_bottom_color: appearance.area_bottom_color.clone(),
+        baseline_top_color: appearance.baseline_top_color.clone(),
+        baseline_bottom_color: appearance.baseline_bottom_color.clone(),
+    })
+}
+
 const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
     match plot {
         StudyPlotKind::Line => ChartStudyPlotKind::Line,
@@ -496,6 +561,7 @@ impl WorkspaceSurface {
             crosshair_mode: u32::from(chart.crosshair_mode()),
             price_alerts: self.price_alerts.clone(),
             studies,
+            appearance: Some(persisted_chart_appearance(&chart.appearance_settings())),
         })
     }
 
@@ -531,9 +597,16 @@ impl WorkspaceSurface {
         let crosshair_mode = u8::try_from(state.crosshair_mode)
             .ok()
             .filter(|mode| *mode <= 3);
+        let appearance = state
+            .appearance
+            .as_ref()
+            .and_then(restored_chart_appearance);
         chart.update(cx, |chart, _| {
             if let Some(chart_type) = chart_type {
                 chart.set_chart_type(chart_type);
+            }
+            if let Some(appearance) = &appearance {
+                let _ = chart.set_appearance_settings(appearance);
             }
             if let Err(error) = chart.restore_indicator_states(&indicators) {
                 eprintln!("Axiusflow persisted indicators could not be restored: {error}");
@@ -2483,6 +2556,54 @@ impl WorkspaceSurface {
             .map_or(self.chart_chrome.chart_type, |chart| {
                 chart.read(cx).chart_type()
             })
+    }
+
+    pub(super) fn chart_appearance(&self, cx: &App) -> Option<ChartAppearanceSettings> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).appearance_settings())
+    }
+
+    pub(super) fn chart_crosshair_mode(&self, cx: &App) -> Option<u8> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).crosshair_mode())
+    }
+
+    pub(super) fn set_chart_appearance(
+        &mut self,
+        appearance: &ChartAppearanceSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_appearance_settings(appearance);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        }) {
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_chart_crosshair_mode(&mut self, mode: u8, cx: &mut Context<Self>) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_crosshair_mode(mode);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        }) {
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
     }
 
     pub(super) fn set_chart_type(&mut self, chart_type: ChartType, cx: &mut Context<Self>) {

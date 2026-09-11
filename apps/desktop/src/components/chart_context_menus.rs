@@ -631,12 +631,22 @@ pub(super) fn price_axis_menu_item(
 pub(super) fn chart_settings_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
+    section: ChartSettingsSection,
+    snapshot: &ChartSettingsSnapshot,
+    color_picker: Option<ChartColorSetting>,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
-    let origin = clamp_overlay_origin(menu.position, viewport, CHART_SETTINGS_MENU_WIDTH, 1.0, 0.0);
+    let origin = clamp_chart_settings_origin(menu.position, viewport);
     let dismiss = terminal.clone();
+    let content = match section {
+        ChartSettingsSection::Series => {
+            chart_series_settings(terminal, menu, snapshot, color_picker, theme)
+        }
+        ChartSettingsSection::Canvas => {
+            chart_canvas_settings(terminal, menu, snapshot, color_picker, theme)
+        }
+    };
     div()
         .id("chart_settings_menu_scrim")
         .absolute()
@@ -651,23 +661,1042 @@ pub(super) fn chart_settings_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(
-            compact_menu_panel(
-                "chart_settings_menu",
-                origin,
-                px(CHART_SETTINGS_MENU_WIDTH),
-                theme,
-            )
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .text_color(gpui_color(colors.text_muted))
-                    .child("Axiusflow runs market data only while the app is open."),
-            ),
-        )
+        .child(chart_settings_panel(
+            terminal, origin, section, snapshot, content, theme,
+        ))
         .into_any_element()
+}
+
+fn chart_settings_panel(
+    terminal: &Entity<TerminalApp>,
+    origin: gpui::Point<Pixels>,
+    section: ChartSettingsSection,
+    snapshot: &ChartSettingsSnapshot,
+    content: AnyElement,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    div()
+        .id("chart_settings_menu")
+        .absolute()
+        .left(origin.x)
+        .top(origin.y)
+        .w(px(CHART_SETTINGS_PANEL_WIDTH))
+        .h(px(CHART_SETTINGS_PANEL_HEIGHT))
+        .flex()
+        .flex_col()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
+        .shadow_lg()
+        .occlude()
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .child(chart_settings_header(terminal, section, snapshot, theme))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(chart_settings_sidebar(terminal, section, theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .id("chart_settings_content_scroll")
+                        .overflow_y_scroll()
+                        .px_5()
+                        .py_4()
+                        .child(content),
+                ),
+        )
+}
+
+fn chart_settings_header(
+    terminal: &Entity<TerminalApp>,
+    section: ChartSettingsSection,
+    snapshot: &ChartSettingsSnapshot,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let terminal = terminal.clone();
+    div()
+        .h(px(56.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(gpui_color(colors.text_primary))
+                        .child("Chart settings"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child(format!(
+                            "{} · {}",
+                            snapshot.chart_type.label(),
+                            section.label()
+                        )),
+                ),
+        )
+        .child(
+            div()
+                .id("chart_settings_close")
+                .size(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .cursor_pointer()
+                .text_color(gpui_color(colors.icon))
+                .hover(|item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .on_click(move |_, _, cx| {
+                    terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.close_chart_settings_menu(terminal_cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .child("×"),
+        )
+}
+
+fn clamp_chart_settings_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let width = px(CHART_SETTINGS_PANEL_WIDTH);
+    let height = px(CHART_SETTINGS_PANEL_HEIGHT);
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    point(
+        origin
+            .x
+            .max(margin)
+            .min((viewport.width - width - margin).max(margin)),
+        origin
+            .y
+            .max(margin)
+            .min((viewport.height - height - margin).max(margin)),
+    )
+}
+
+fn chart_settings_sidebar(
+    terminal: &Entity<TerminalApp>,
+    selected: ChartSettingsSection,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let mut sidebar = div()
+        .w(px(CHART_SETTINGS_SIDEBAR_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .border_r_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary));
+    for section in ChartSettingsSection::ALL {
+        let active = selected == section;
+        let terminal = terminal.clone();
+        sidebar = sidebar.child(
+            div()
+                .id(("chart_settings_section", section as usize))
+                .w_full()
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .cursor_pointer()
+                .when(active, |item| {
+                    item.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
+                })
+                .when(!active, |item| {
+                    item.hover(|hovered| {
+                        hovered.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                    })
+                })
+                .on_click(move |_, _, cx| {
+                    terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.set_chart_settings_section(section, terminal_cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(if active {
+                            gpui::FontWeight::SEMIBOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        })
+                        .text_color(gpui_color(if active {
+                            colors.text_primary
+                        } else {
+                            colors.text_secondary
+                        }))
+                        .child(section.label()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child(section.description()),
+                ),
+        );
+    }
+    sidebar
+}
+
+fn chart_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    snapshot: &ChartSettingsSnapshot,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    let body = match snapshot.chart_type {
+        ChartType::Candles => {
+            candle_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
+        }
+        ChartType::Bars => {
+            bar_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
+        }
+        ChartType::Line | ChartType::BrushableArea => line_series_settings(
+            terminal,
+            menu,
+            &snapshot.appearance,
+            color_picker,
+            snapshot.chart_type == ChartType::BrushableArea,
+            theme,
+        ),
+        ChartType::Area => {
+            area_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
+        }
+        ChartType::Baseline => {
+            baseline_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
+        }
+    };
+    settings_content_header(
+        snapshot.chart_type.label(),
+        "Appearance controls adapt to the active price-series type.",
+        theme,
+    )
+    .child(body)
+    .into_any_element()
+}
+
+fn candle_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    div()
+        .child(settings_group_heading(
+            "Body",
+            "Directional candle colors",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Up,
+            &appearance.up_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Down,
+            &appearance.down_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_group_heading(
+            "Wicks",
+            "Independent wick colors and visibility",
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Show wicks",
+            appearance.wick_visible,
+            ChartSettingsAction::ToggleWicks,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::WickUp,
+            &appearance.wick_up_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::WickDown,
+            &appearance.wick_down_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_group_heading(
+            "Borders",
+            "Candle outline styling",
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Show borders",
+            appearance.border_visible,
+            ChartSettingsAction::ToggleBorders,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::BorderUp,
+            &appearance.border_up_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::BorderDown,
+            &appearance.border_down_color,
+            color_picker,
+            theme,
+        ))
+        .into_any_element()
+}
+
+fn bar_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    div()
+        .child(settings_group_heading(
+            "OHLC bars",
+            "Directional colors and bar geometry",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Up,
+            &appearance.up_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Down,
+            &appearance.down_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Show open tick",
+            appearance.open_visible,
+            ChartSettingsAction::ToggleOpen,
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Thin bars",
+            appearance.thin_bars,
+            ChartSettingsAction::ToggleThinBars,
+            theme,
+        ))
+        .into_any_element()
+}
+
+fn line_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<ChartColorSetting>,
+    brushable: bool,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    div()
+        .child(settings_group_heading(
+            "Line",
+            "Stroke color, width and pattern",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Line,
+            &appearance.line_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_line_controls(terminal, menu, appearance, theme))
+        .when(brushable, |content| {
+            content.child(
+                div()
+                    .mt_3()
+                    .text_xs()
+                    .text_color(gpui_color(theme.colors.text_muted))
+                    .child("Brush selections retain their own transient range styling."),
+            )
+        })
+        .into_any_element()
+}
+
+fn area_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    div()
+        .child(settings_group_heading(
+            "Line",
+            "Area boundary stroke",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Line,
+            &appearance.line_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_line_controls(terminal, menu, appearance, theme))
+        .child(settings_group_heading(
+            "Fill",
+            "Top and bottom gradient colors",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::AreaTop,
+            &appearance.area_top_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::AreaBottom,
+            &appearance.area_bottom_color,
+            color_picker,
+            theme,
+        ))
+        .into_any_element()
+}
+
+fn baseline_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    div()
+        .child(settings_group_heading(
+            "Baseline",
+            "Independent colors above and below the base",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::BaselineTop,
+            &appearance.baseline_top_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::BaselineBottom,
+            &appearance.baseline_bottom_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_group_heading(
+            "Stroke",
+            "Shared line width and pattern",
+            theme,
+        ))
+        .child(settings_line_controls(terminal, menu, appearance, theme))
+        .into_any_element()
+}
+
+fn chart_canvas_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    snapshot: &ChartSettingsSnapshot,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    settings_content_header(
+        "Canvas",
+        "Customize chart guides without changing market data or scale state.",
+        theme,
+    )
+    .child(canvas_grid_settings(
+        terminal,
+        menu,
+        &snapshot.appearance,
+        color_picker,
+        theme,
+    ))
+    .child(canvas_crosshair_settings(
+        terminal,
+        menu,
+        snapshot,
+        color_picker,
+        theme,
+    ))
+    .into_any_element()
+}
+
+fn canvas_grid_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    div()
+        .child(settings_group_heading("Grid", "Pane grid lines", theme))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Show grid lines",
+            appearance.grid_visible,
+            ChartSettingsAction::ToggleGrid,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Grid,
+            &appearance.grid_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Grid style",
+            &[
+                (
+                    "Solid",
+                    appearance.grid_style == 0,
+                    ChartSettingsAction::GridStyle(0),
+                ),
+                (
+                    "Dotted",
+                    appearance.grid_style == 1,
+                    ChartSettingsAction::GridStyle(1),
+                ),
+                (
+                    "Dashed",
+                    appearance.grid_style == 2,
+                    ChartSettingsAction::GridStyle(2),
+                ),
+            ],
+            theme,
+        ))
+}
+
+fn canvas_crosshair_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    snapshot: &ChartSettingsSnapshot,
+    color_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let appearance = &snapshot.appearance;
+    div()
+        .child(settings_group_heading(
+            "Crosshair",
+            "Pointer guides and snapping",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Crosshair,
+            &appearance.crosshair_color,
+            color_picker,
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Mode",
+            &[
+                (
+                    "Normal",
+                    snapshot.crosshair_mode == 0,
+                    ChartSettingsAction::CrosshairMode(0),
+                ),
+                (
+                    "Magnet",
+                    snapshot.crosshair_mode == 1,
+                    ChartSettingsAction::CrosshairMode(1),
+                ),
+                (
+                    "Hidden",
+                    snapshot.crosshair_mode == 2,
+                    ChartSettingsAction::CrosshairMode(2),
+                ),
+                (
+                    "OHLC",
+                    snapshot.crosshair_mode == 3,
+                    ChartSettingsAction::CrosshairMode(3),
+                ),
+            ],
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Width",
+            &[
+                (
+                    "1",
+                    appearance.crosshair_width == 1,
+                    ChartSettingsAction::CrosshairWidth(1),
+                ),
+                (
+                    "2",
+                    appearance.crosshair_width == 2,
+                    ChartSettingsAction::CrosshairWidth(2),
+                ),
+                (
+                    "3",
+                    appearance.crosshair_width == 3,
+                    ChartSettingsAction::CrosshairWidth(3),
+                ),
+            ],
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Style",
+            &[
+                (
+                    "Solid",
+                    appearance.crosshair_style == 0,
+                    ChartSettingsAction::CrosshairStyle(0),
+                ),
+                (
+                    "Dotted",
+                    appearance.crosshair_style == 1,
+                    ChartSettingsAction::CrosshairStyle(1),
+                ),
+                (
+                    "Dashed",
+                    appearance.crosshair_style == 2,
+                    ChartSettingsAction::CrosshairStyle(2),
+                ),
+            ],
+            theme,
+        ))
+}
+
+fn settings_content_header(
+    title: &'static str,
+    description: &'static str,
+    theme: &AxiusflowTheme,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_base()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child(title),
+        )
+        .child(
+            div()
+                .mb_2()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_muted))
+                .child(description),
+        )
+}
+
+fn settings_group_heading(
+    title: &'static str,
+    description: &'static str,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    div()
+        .mt_3()
+        .mb_1()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_muted))
+                .child(description),
+        )
+}
+
+fn settings_toggle_row(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    label: &'static str,
+    enabled: bool,
+    action: ChartSettingsAction,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let terminal = terminal.clone();
+    let menu = menu.clone();
+    div()
+        .h(px(38.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .child(
+            div()
+                .text_sm()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(label),
+        )
+        .child(
+            div()
+                .id(label)
+                .w(px(34.0))
+                .h(px(19.0))
+                .p(px(2.0))
+                .flex()
+                .items_center()
+                .when(enabled, |track| {
+                    track.justify_end().bg(gpui_color(colors.primary))
+                })
+                .when(!enabled, |track| {
+                    track.justify_start().bg(gpui_color(colors.input_border))
+                })
+                .rounded_full()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.apply_chart_settings_action(&menu, action, terminal_cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .size(px(15.0))
+                        .rounded_full()
+                        .bg(gpui_color(colors.primary_foreground)),
+                ),
+        )
+}
+
+fn settings_color_row(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    setting: ChartColorSetting,
+    value: &str,
+    open_picker: Option<ChartColorSetting>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let terminal_for_toggle = terminal.clone();
+    let color = chart_css_color(value, colors.text_secondary);
+    let open = open_picker == Some(setting);
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .child(
+            div()
+                .h(px(38.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(gpui_color(colors.text_secondary))
+                        .child(setting.label()),
+                )
+                .child(
+                    div()
+                        .id(("chart_color_picker", setting as usize))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            terminal_for_toggle.update(cx, |terminal, terminal_cx| {
+                                terminal.toggle_chart_color_picker(setting, terminal_cx);
+                            });
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            div()
+                                .size(px(22.0))
+                                .rounded(px(5.0))
+                                .border_1()
+                                .border_color(gpui_color(colors.input_border))
+                                .bg(color),
+                        )
+                        .child(
+                            div()
+                                .w(px(62.0))
+                                .text_xs()
+                                .text_color(gpui_color(colors.text_muted))
+                                .child(value.to_ascii_uppercase()),
+                        ),
+                ),
+        )
+        .when(open, |row| {
+            row.child(settings_color_palette(
+                terminal, menu, setting, value, theme,
+            ))
+        })
+}
+
+fn settings_color_palette(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    setting: ChartColorSetting,
+    current: &str,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    const COLORS: [&str; 18] = [
+        "#089981", "#F7525F", "#2962FF", "#2196F3", "#00BCD4", "#26A69A", "#AB47BC", "#FF9800",
+        "#FDD835", "#FFFFFF", "#CBD5E1", "#94A3B8", "#64748B", "#475569", "#334155", "#1E293B",
+        "#172554", "#101722",
+    ];
+    let colors = theme.colors;
+    let mut palette = div()
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .px_2()
+        .pt_1()
+        .pb_3();
+    for (index, value) in COLORS.into_iter().enumerate() {
+        let terminal = terminal.clone();
+        let menu = menu.clone();
+        let selected = current.eq_ignore_ascii_case(value);
+        palette = palette.child(
+            div()
+                .id(("chart_palette_color", index))
+                .size(px(24.0))
+                .p(px(if selected { 2.0 } else { 1.0 }))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(gpui_color(if selected {
+                    colors.primary
+                } else {
+                    colors.input_border
+                }))
+                .cursor_pointer()
+                .hover(|item| item.border_color(gpui_color(colors.ring)))
+                .on_click(move |_, _, cx| {
+                    terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.apply_chart_color(&menu, setting, value, terminal_cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .size_full()
+                        .rounded(px(4.0))
+                        .bg(chart_css_color(value, colors.text_secondary)),
+                ),
+        );
+    }
+    palette
+}
+
+fn settings_line_controls(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Width",
+            &[
+                (
+                    "1",
+                    appearance.line_width == 1,
+                    ChartSettingsAction::LineWidth(1),
+                ),
+                (
+                    "2",
+                    appearance.line_width == 2,
+                    ChartSettingsAction::LineWidth(2),
+                ),
+                (
+                    "3",
+                    appearance.line_width == 3,
+                    ChartSettingsAction::LineWidth(3),
+                ),
+                (
+                    "4",
+                    appearance.line_width == 4,
+                    ChartSettingsAction::LineWidth(4),
+                ),
+            ],
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Style",
+            &[
+                (
+                    "Solid",
+                    appearance.line_style == 0,
+                    ChartSettingsAction::LineStyle(0),
+                ),
+                (
+                    "Dotted",
+                    appearance.line_style == 1,
+                    ChartSettingsAction::LineStyle(1),
+                ),
+                (
+                    "Dashed",
+                    appearance.line_style == 2,
+                    ChartSettingsAction::LineStyle(2),
+                ),
+            ],
+            theme,
+        ))
+}
+
+fn settings_choice_row(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    label: &'static str,
+    choices: &[(&'static str, bool, ChartSettingsAction)],
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let mut controls = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .p(px(2.0))
+        .rounded(px(6.0))
+        .bg(gpui_color(colors.input_fill));
+    for (index, (choice, selected, action)) in choices.iter().copied().enumerate() {
+        let terminal = terminal.clone();
+        let menu = menu.clone();
+        controls = controls.child(
+            div()
+                .id((label, index))
+                .px_2()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .text_xs()
+                .text_color(gpui_color(if selected {
+                    colors.text_primary
+                } else {
+                    colors.text_muted
+                }))
+                .when(selected, |item| {
+                    item.bg(gpui_color(colors.active_bg.over(colors.input_fill)))
+                })
+                .hover(|item| item.bg(gpui_color(colors.hover_bg.over(colors.input_fill))))
+                .on_click(move |_, _, cx| {
+                    terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.apply_chart_settings_action(&menu, action, terminal_cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .child(choice),
+        );
+    }
+    div()
+        .min_h(px(42.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .border_b_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .child(
+            div()
+                .text_sm()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(label),
+        )
+        .child(controls)
+}
+
+fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
+    value
+        .strip_prefix('#')
+        .filter(|hex| hex.len() == 6)
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .map_or_else(|| gpui_color(fallback), |hex| gpui::rgb(hex).into())
 }
 /// Circular account avatar for the header toolbar. Signed-out sessions keep
 /// the asset-free muted person glyph; signed-in sessions render verified

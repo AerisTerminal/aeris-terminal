@@ -53,20 +53,22 @@ use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
     ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
-    ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartIndicator,
-    ChartIndicatorState, ChartSplitDirection, ChartStudyOutputDescriptor, ChartStudyPaneTarget,
-    ChartStudyPlotKind, ChartStudyScaleTarget, ChartType, ChartWorkspaceLayout, NucleusChartTheme,
-    NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
+    ChartDrawingTool, ChartIndicator, ChartIndicatorState, ChartSplitDirection,
+    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyScaleTarget,
+    ChartType, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView, NucleusWorkspace,
+    PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesKey, WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
-    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, workspace_study_setting_state,
+    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartState,
+    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    workspace_study_setting_state,
 };
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode};
 use axiusflow_desktop::market_worker::{
@@ -288,6 +290,9 @@ const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
 const QUICK_TIMEFRAME_POPUP_TOP: f32 = 64.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
+const CHART_SETTINGS_PANEL_WIDTH: f32 = 640.0;
+const CHART_SETTINGS_PANEL_HEIGHT: f32 = 500.0;
+const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 164.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
 const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
@@ -1850,6 +1855,90 @@ struct ChartContextMenu {
     copy_price: Option<SharedString>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ChartSettingsSection {
+    #[default]
+    Series,
+    Canvas,
+}
+
+impl ChartSettingsSection {
+    const ALL: [Self; 2] = [Self::Series, Self::Canvas];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Series => "Series",
+            Self::Canvas => "Canvas",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Series => "Price series",
+            Self::Canvas => "Grid & crosshair",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum ChartColorSetting {
+    Up,
+    Down,
+    WickUp,
+    WickDown,
+    BorderUp,
+    BorderDown,
+    Line,
+    AreaTop,
+    AreaBottom,
+    BaselineTop,
+    BaselineBottom,
+    Grid,
+    Crosshair,
+}
+
+impl ChartColorSetting {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Up => "Up candles",
+            Self::Down => "Down candles",
+            Self::WickUp => "Up wicks",
+            Self::WickDown => "Down wicks",
+            Self::BorderUp => "Up borders",
+            Self::BorderDown => "Down borders",
+            Self::Line => "Line",
+            Self::AreaTop => "Area top",
+            Self::AreaBottom => "Area bottom",
+            Self::BaselineTop => "Above baseline",
+            Self::BaselineBottom => "Below baseline",
+            Self::Grid => "Grid",
+            Self::Crosshair => "Crosshair",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChartSettingsAction {
+    ToggleGrid,
+    GridStyle(u8),
+    CrosshairMode(u8),
+    CrosshairWidth(u8),
+    CrosshairStyle(u8),
+    ToggleWicks,
+    ToggleBorders,
+    ToggleOpen,
+    ToggleThinBars,
+    LineWidth(u8),
+    LineStyle(u8),
+}
+
+#[derive(Clone, Debug)]
+struct ChartSettingsSnapshot {
+    chart_type: ChartType,
+    appearance: ChartAppearanceSettings,
+    crosshair_mode: u8,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceShellKind {
     Window,
@@ -1878,6 +1967,8 @@ struct TerminalApp {
     workspace_drag: Option<WorkspaceDragState>,
     chart_context_menu: Option<ChartContextMenu>,
     chart_settings_menu: Option<ChartContextMenu>,
+    chart_settings_section: ChartSettingsSection,
+    chart_settings_color_picker: Option<ChartColorSetting>,
     account_menu_open: bool,
     account_menu_anchor: Option<gpui::Point<Pixels>>,
     profile_refresh_on_activation: bool,

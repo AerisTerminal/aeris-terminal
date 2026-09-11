@@ -1218,6 +1218,43 @@ fn asset_legend_shows_ohlc_only_on_candles_and_bars() {
 }
 
 #[test]
+fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
+    let mut chart = interactive_chart();
+    let revision = chart.user_state_revision();
+    let appearance = ChartAppearanceSettings {
+        grid_visible: false,
+        grid_color: "#334155".to_string(),
+        grid_style: 1,
+        crosshair_color: "#94A3B8".to_string(),
+        crosshair_width: 3,
+        crosshair_style: 0,
+        up_color: "#10B981".to_string(),
+        down_color: "#EF4444".to_string(),
+        wick_up_color: "#34D399".to_string(),
+        wick_down_color: "#F87171".to_string(),
+        border_up_color: "#059669".to_string(),
+        border_down_color: "#DC2626".to_string(),
+        wick_visible: false,
+        border_visible: false,
+        open_visible: false,
+        thin_bars: false,
+        line_color: "#3B82F6".to_string(),
+        line_width: 4,
+        line_style: 2,
+        area_top_color: "#2563EB".to_string(),
+        area_bottom_color: "#172554".to_string(),
+        baseline_top_color: "#22C55E".to_string(),
+        baseline_bottom_color: "#F43F5E".to_string(),
+    };
+
+    assert!(chart.set_appearance_settings(&appearance));
+    assert_eq!(chart.appearance_settings(), appearance);
+    assert_eq!(chart.user_state_revision(), revision + 1);
+    assert!(!chart.set_appearance_settings(&appearance));
+    assert_eq!(chart.user_state_revision(), revision + 1);
+}
+
+#[test]
 fn legend_values_follow_volume_direction_and_indicator_series_colors() {
     let mut chart = interactive_chart();
     chart

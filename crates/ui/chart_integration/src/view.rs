@@ -300,6 +300,67 @@ pub enum ChartType {
     BrushableArea,
 }
 
+/// Durable product-owned presentation preferences for the primary market series
+/// and chart canvas. The values are intentionally renderer-neutral primitives;
+/// Nucleus remains the owner that interprets and paints them.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Independent product styling toggles, not state-machine flags.
+pub struct ChartAppearanceSettings {
+    pub grid_visible: bool,
+    pub grid_color: String,
+    pub grid_style: u8,
+    pub crosshair_color: String,
+    pub crosshair_width: u8,
+    pub crosshair_style: u8,
+    pub up_color: String,
+    pub down_color: String,
+    pub wick_up_color: String,
+    pub wick_down_color: String,
+    pub border_up_color: String,
+    pub border_down_color: String,
+    pub wick_visible: bool,
+    pub border_visible: bool,
+    pub open_visible: bool,
+    pub thin_bars: bool,
+    pub line_color: String,
+    pub line_width: u8,
+    pub line_style: u8,
+    pub area_top_color: String,
+    pub area_bottom_color: String,
+    pub baseline_top_color: String,
+    pub baseline_bottom_color: String,
+}
+
+impl Default for ChartAppearanceSettings {
+    fn default() -> Self {
+        Self {
+            grid_visible: true,
+            grid_color: "#363c4e".to_string(),
+            grid_style: 2,
+            crosshair_color: "#758696".to_string(),
+            crosshair_width: 1,
+            crosshair_style: 2,
+            up_color: "#089981".to_string(),
+            down_color: "#f7525f".to_string(),
+            wick_up_color: "#089981".to_string(),
+            wick_down_color: "#f7525f".to_string(),
+            border_up_color: "#089981".to_string(),
+            border_down_color: "#f7525f".to_string(),
+            wick_visible: true,
+            border_visible: true,
+            open_visible: true,
+            thin_bars: true,
+            line_color: "#2196f3".to_string(),
+            line_width: 2,
+            line_style: 0,
+            area_top_color: "#089981".to_string(),
+            area_bottom_color: "#101722".to_string(),
+            baseline_top_color: "#089981".to_string(),
+            baseline_bottom_color: "#f7525f".to_string(),
+        }
+    }
+}
+
 impl ChartType {
     const fn shows_ohlc_legend(self) -> bool {
         matches!(self, Self::Candles | Self::Bars)
@@ -357,6 +418,18 @@ impl ChartType {
             Self::Area | Self::BrushableArea => nucleuscharts_engine::SeriesKind::Area,
             Self::Baseline => nucleuscharts_engine::SeriesKind::Baseline,
         }
+    }
+}
+
+fn bounded_style_width(width: f64) -> u8 {
+    if width < 1.5 {
+        1
+    } else if width < 2.5 {
+        2
+    } else if width < 3.5 {
+        3
+    } else {
+        4
     }
 }
 
@@ -1673,6 +1746,145 @@ impl NucleusChartView {
     #[must_use]
     pub const fn chart_type(&self) -> ChartType {
         self.chart_type
+    }
+
+    /// Returns the current durable chart appearance without exposing Nucleus
+    /// series/options internals to the desktop shell.
+    #[must_use]
+    pub fn appearance_settings(&self) -> ChartAppearanceSettings {
+        let mut appearance = ChartAppearanceSettings::default();
+        let options = self.engine.options.get();
+        appearance.grid_visible =
+            options.grid.vert_lines.visible && options.grid.horz_lines.visible;
+        appearance
+            .grid_color
+            .clone_from(&options.grid.vert_lines.color);
+        appearance.grid_style = options.grid.vert_lines.style.min(4);
+        appearance
+            .crosshair_color
+            .clone_from(&options.crosshair.vert_line.color);
+        appearance.crosshair_width = bounded_style_width(options.crosshair.vert_line.width);
+        appearance.crosshair_style = options.crosshair.vert_line.style.min(4);
+
+        let Some(series_json) = self.engine.series_options_json(0) else {
+            return appearance;
+        };
+        let Ok(serde_json::Value::Object(series)) =
+            serde_json::from_str::<serde_json::Value>(&series_json)
+        else {
+            return appearance;
+        };
+        let color = |key: &str, fallback: &str| {
+            series
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(fallback)
+                .to_string()
+        };
+        appearance.up_color = color("up_color", &appearance.up_color);
+        appearance.down_color = color("down_color", &appearance.down_color);
+        appearance.wick_up_color = color("wick_up_color", &appearance.up_color);
+        appearance.wick_down_color = color("wick_down_color", &appearance.down_color);
+        appearance.border_up_color = color("border_up_color", &appearance.up_color);
+        appearance.border_down_color = color("border_down_color", &appearance.down_color);
+        appearance.line_color = color("color", &appearance.line_color);
+        appearance.area_top_color = color("area_top_color", &appearance.area_top_color);
+        appearance.area_bottom_color = color("area_bottom_color", &appearance.area_bottom_color);
+        appearance.baseline_top_color = color("top_line_color", &appearance.baseline_top_color);
+        appearance.baseline_bottom_color =
+            color("bottom_line_color", &appearance.baseline_bottom_color);
+        appearance.wick_visible = series
+            .get("wick_visible")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        appearance.border_visible = series
+            .get("border_visible")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        appearance.open_visible = series
+            .get("open_visible")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        appearance.thin_bars = series
+            .get("thin_bars")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        appearance.line_width = series
+            .get("line_width")
+            .and_then(serde_json::Value::as_f64)
+            .map_or(appearance.line_width, bounded_style_width);
+        appearance.line_style = series
+            .get("line_style")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .map_or(appearance.line_style, |value| value.min(4));
+        appearance
+    }
+
+    /// Applies host-authored series/canvas presentation in place. Market data,
+    /// viewport state and provider ownership are untouched.
+    pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
+        let current = self.appearance_settings();
+        if current == *appearance {
+            return false;
+        }
+        let chart_patch = serde_json::json!({
+            "grid": {
+                "vertLines": {
+                    "visible": appearance.grid_visible,
+                    "color": appearance.grid_color,
+                    "style": appearance.grid_style.min(4),
+                },
+                "horzLines": {
+                    "visible": appearance.grid_visible,
+                    "color": appearance.grid_color,
+                    "style": appearance.grid_style.min(4),
+                }
+            },
+            "crosshair": {
+                "vertLine": {
+                    "color": appearance.crosshair_color,
+                    "width": appearance.crosshair_width.clamp(1, 4),
+                    "style": appearance.crosshair_style.min(4),
+                },
+                "horzLine": {
+                    "color": appearance.crosshair_color,
+                    "width": appearance.crosshair_width.clamp(1, 4),
+                    "style": appearance.crosshair_style.min(4),
+                }
+            }
+        })
+        .to_string();
+        if self.engine.apply_options(&chart_patch).is_err() {
+            return false;
+        }
+        let series_patch = serde_json::json!({
+            "up_color": appearance.up_color,
+            "down_color": appearance.down_color,
+            "wick_up_color": appearance.wick_up_color,
+            "wick_down_color": appearance.wick_down_color,
+            "border_up_color": appearance.border_up_color,
+            "border_down_color": appearance.border_down_color,
+            "wick_visible": appearance.wick_visible,
+            "border_visible": appearance.border_visible,
+            "open_visible": appearance.open_visible,
+            "thin_bars": appearance.thin_bars,
+            "color": appearance.line_color,
+            "line_width": appearance.line_width.clamp(1, 4),
+            "line_style": appearance.line_style.min(4),
+            "area_top_color": appearance.area_top_color,
+            "area_bottom_color": appearance.area_bottom_color,
+            "top_line_color": appearance.baseline_top_color,
+            "bottom_line_color": appearance.baseline_bottom_color,
+        })
+        .to_string();
+        if !self.engine.series_apply_options_json(0, &series_patch) {
+            return false;
+        }
+        self.invalidate_series_frame();
+        self.mark_user_state_changed();
+        true
     }
 
     /// Applies a built-in Nucleus price-series kind without changing market data.

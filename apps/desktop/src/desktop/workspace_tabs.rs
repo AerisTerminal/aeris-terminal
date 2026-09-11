@@ -77,6 +77,8 @@ impl TerminalApp {
             workspace_drag: None,
             chart_context_menu: None,
             chart_settings_menu: None,
+            chart_settings_section: ChartSettingsSection::Series,
+            chart_settings_color_picker: None,
             account_menu_open: false,
             account_menu_anchor: None,
             profile_refresh_on_activation: false,
@@ -212,6 +214,7 @@ impl TerminalApp {
     ) {
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         self.chart_settings_menu = None;
+        self.chart_settings_color_picker = None;
         self.chart_context_menu = Some(menu);
         cx.notify();
     }
@@ -224,8 +227,134 @@ impl TerminalApp {
 
     pub(super) fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
         if self.chart_settings_menu.take().is_some() {
+            self.chart_settings_color_picker = None;
             cx.notify();
         }
+    }
+
+    fn chart_settings_surface(&self, menu: &ChartContextMenu) -> Option<Entity<WorkspaceSurface>> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
+            .map(|pane| pane.surface.clone())
+    }
+
+    fn chart_settings_snapshot(
+        &self,
+        menu: &ChartContextMenu,
+        cx: &App,
+    ) -> Option<ChartSettingsSnapshot> {
+        let surface = self.chart_settings_surface(menu)?;
+        let surface = surface.read(cx);
+        Some(ChartSettingsSnapshot {
+            chart_type: surface.chart_type(cx),
+            appearance: surface.chart_appearance(cx)?,
+            crosshair_mode: surface.chart_crosshair_mode(cx)?,
+        })
+    }
+
+    pub(super) fn set_chart_settings_section(
+        &mut self,
+        section: ChartSettingsSection,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_settings_section != section {
+            self.chart_settings_section = section;
+            self.chart_settings_color_picker = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_chart_color_picker(
+        &mut self,
+        color: ChartColorSetting,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_settings_color_picker =
+            (self.chart_settings_color_picker != Some(color)).then_some(color);
+        cx.notify();
+    }
+
+    pub(super) fn apply_chart_color(
+        &mut self,
+        menu: &ChartContextMenu,
+        setting: ChartColorSetting,
+        color: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.chart_settings_surface(menu) else {
+            return;
+        };
+        let Some(mut appearance) = surface.read(cx).chart_appearance(cx) else {
+            return;
+        };
+        match setting {
+            ChartColorSetting::Up => appearance.up_color = color.to_string(),
+            ChartColorSetting::Down => appearance.down_color = color.to_string(),
+            ChartColorSetting::WickUp => appearance.wick_up_color = color.to_string(),
+            ChartColorSetting::WickDown => appearance.wick_down_color = color.to_string(),
+            ChartColorSetting::BorderUp => appearance.border_up_color = color.to_string(),
+            ChartColorSetting::BorderDown => appearance.border_down_color = color.to_string(),
+            ChartColorSetting::Line => appearance.line_color = color.to_string(),
+            ChartColorSetting::AreaTop => appearance.area_top_color = color.to_string(),
+            ChartColorSetting::AreaBottom => appearance.area_bottom_color = color.to_string(),
+            ChartColorSetting::BaselineTop => appearance.baseline_top_color = color.to_string(),
+            ChartColorSetting::BaselineBottom => {
+                appearance.baseline_bottom_color = color.to_string();
+            }
+            ChartColorSetting::Grid => appearance.grid_color = color.to_string(),
+            ChartColorSetting::Crosshair => appearance.crosshair_color = color.to_string(),
+        }
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_appearance(&appearance, surface_cx);
+        });
+        self.chart_settings_color_picker = None;
+        cx.notify();
+    }
+
+    pub(super) fn apply_chart_settings_action(
+        &mut self,
+        menu: &ChartContextMenu,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(surface) = self.chart_settings_surface(menu) else {
+            return;
+        };
+        if let ChartSettingsAction::CrosshairMode(mode) = action {
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_chart_crosshair_mode(mode, surface_cx);
+            });
+            cx.notify();
+            return;
+        }
+        let Some(mut appearance) = surface.read(cx).chart_appearance(cx) else {
+            return;
+        };
+        match action {
+            ChartSettingsAction::ToggleGrid => appearance.grid_visible = !appearance.grid_visible,
+            ChartSettingsAction::GridStyle(style) => appearance.grid_style = style.min(4),
+            ChartSettingsAction::CrosshairMode(_) => unreachable!(),
+            ChartSettingsAction::CrosshairWidth(width) => {
+                appearance.crosshair_width = width.clamp(1, 4);
+            }
+            ChartSettingsAction::CrosshairStyle(style) => {
+                appearance.crosshair_style = style.min(4);
+            }
+            ChartSettingsAction::ToggleWicks => appearance.wick_visible = !appearance.wick_visible,
+            ChartSettingsAction::ToggleBorders => {
+                appearance.border_visible = !appearance.border_visible;
+            }
+            ChartSettingsAction::ToggleOpen => appearance.open_visible = !appearance.open_visible,
+            ChartSettingsAction::ToggleThinBars => appearance.thin_bars = !appearance.thin_bars,
+            ChartSettingsAction::LineWidth(width) => appearance.line_width = width.clamp(1, 4),
+            ChartSettingsAction::LineStyle(style) => appearance.line_style = style.min(4),
+        }
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_appearance(&appearance, surface_cx);
+        });
+        cx.notify();
     }
 
     /// Opens the account dropdown under the avatar click point, or closes it
@@ -346,6 +475,8 @@ impl TerminalApp {
                 self.close_active_pane(&ClosePane, window, cx);
             }
             ChartContextAction::Settings => {
+                self.chart_settings_section = ChartSettingsSection::Series;
+                self.chart_settings_color_picker = None;
                 self.chart_settings_menu = Some(menu);
             }
         }
@@ -1419,10 +1550,19 @@ impl TerminalApp {
                 &self.theme,
             )
         });
-        let settings_menu = self
-            .chart_settings_menu
-            .clone()
-            .map(|menu| chart_settings_menu_layer(terminal, &menu, viewport, &self.theme));
+        let settings_menu = self.chart_settings_menu.clone().and_then(|menu| {
+            self.chart_settings_snapshot(&menu, cx).map(|snapshot| {
+                chart_settings_menu_layer(
+                    terminal,
+                    &menu,
+                    self.chart_settings_section,
+                    &snapshot,
+                    self.chart_settings_color_picker,
+                    viewport,
+                    &self.theme,
+                )
+            })
+        });
         (context_menu, settings_menu)
     }
 }
