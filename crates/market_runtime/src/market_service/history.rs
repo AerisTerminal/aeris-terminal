@@ -958,7 +958,7 @@ impl Coordinator<'_> {
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
-        match self.studies.execute_ready_for_market(&self.engine, series) {
+        match self.execute_studies_ready_for_market(series) {
             Ok(executed) => self.publish_study_outputs(&executed),
             Err(error) => {
                 eprintln!("Axiusflow study execution after history install failed: {error}");

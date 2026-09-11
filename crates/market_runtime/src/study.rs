@@ -6,13 +6,16 @@
 //! `market_service`. The runtime produces deterministic recalculation plans and shared upstream
 //! stream requirements without creating provider work itself.
 
-use axiusflow_market_data::{BarSeriesKey, MarketBar};
+use axiusflow_market_data::{
+    AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, TopOfBookQuote,
+};
 use axiusflow_market_engine::{
-    ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, SeriesSnapshot, StreamRequirements,
+    ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesSnapshot,
+    StreamRequirements,
 };
 use std::{
     any::Any,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     num::{NonZeroU64, NonZeroUsize},
@@ -95,6 +98,283 @@ pub enum StudyBarField {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StudyMarketSeries {
     snapshot: Arc<SeriesSnapshot>,
+}
+
+/// One retained provider-neutral aggressor trade exposed to native studies.
+///
+/// This is the same bounded live sample retained by `market_runtime` for the
+/// canonical instrument state; the Study Runtime does not keep a second trade
+/// buffer. Prices and quantities remain fixed-point and use the scales reported
+/// by [`StudyTradeWindow`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StudyTradeSample {
+    pub observed_unix_nanos: i64,
+    pub price: i64,
+    pub quantity: i64,
+    pub aggressor: AggressorSide,
+}
+
+/// Borrowed bounded window over the runtime's retained recent trades.
+#[derive(Clone, Copy)]
+pub struct StudyTradeWindow<'a> {
+    trades: &'a VecDeque<StudyTradeSample>,
+    session_generation: u64,
+    source_watermark: u64,
+    price_scale: u8,
+    quantity_scale: u8,
+}
+
+impl<'a> StudyTradeWindow<'a> {
+    pub(crate) const fn new(
+        trades: &'a VecDeque<StudyTradeSample>,
+        session_generation: u64,
+        source_watermark: u64,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Self {
+        Self {
+            trades,
+            session_generation,
+            source_watermark,
+            price_scale,
+            quantity_scale,
+        }
+    }
+
+    /// Returns the number of retained live trade samples.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.trades.len()
+    }
+
+    /// Returns whether the runtime currently retains no live trade samples.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.trades.is_empty()
+    }
+
+    /// Returns the provider session generation owning the retained trade window.
+    #[must_use]
+    pub const fn session_generation(self) -> u64 {
+        self.session_generation
+    }
+
+    /// Returns the latest accepted trade source sequence.
+    #[must_use]
+    pub const fn source_watermark(self) -> u64 {
+        self.source_watermark
+    }
+
+    /// Returns the fixed-point decimal scale for trade prices.
+    #[must_use]
+    pub const fn price_scale(self) -> u8 {
+        self.price_scale
+    }
+
+    /// Returns the fixed-point decimal scale for trade quantities.
+    #[must_use]
+    pub const fn quantity_scale(self) -> u8 {
+        self.quantity_scale
+    }
+
+    /// Returns one retained trade sample without copying the retained window.
+    #[must_use]
+    pub fn get(self, index: usize) -> Option<StudyTradeSample> {
+        self.trades.get(index).copied()
+    }
+
+    /// Iterates retained trade samples from oldest to newest without allocating.
+    #[must_use]
+    pub fn iter(self) -> impl ExactSizeIterator<Item = StudyTradeSample> + 'a {
+        self.trades.iter().copied()
+    }
+}
+
+/// Borrowed current top-of-book quote for one canonical instrument.
+#[derive(Clone, Copy)]
+pub struct StudyQuoteView<'a> {
+    quote: &'a TopOfBookQuote,
+    price_scale: u8,
+    quantity_scale: u8,
+}
+
+impl<'a> StudyQuoteView<'a> {
+    pub(crate) const fn new(
+        quote: &'a TopOfBookQuote,
+        price_scale: u8,
+        quantity_scale: u8,
+    ) -> Self {
+        Self {
+            quote,
+            price_scale,
+            quantity_scale,
+        }
+    }
+
+    /// Returns the current bid, if the provider has not explicitly cleared it.
+    #[must_use]
+    pub const fn bid(self) -> Option<DepthLevel> {
+        self.quote.bid
+    }
+
+    /// Returns the current ask, if the provider has not explicitly cleared it.
+    #[must_use]
+    pub const fn ask(self) -> Option<DepthLevel> {
+        self.quote.ask
+    }
+
+    /// Returns the latest accepted quote source sequence.
+    #[must_use]
+    pub const fn source_sequence(self) -> u64 {
+        self.quote.metadata.source_sequence
+    }
+
+    /// Returns the provider session generation owning this quote.
+    #[must_use]
+    pub const fn session_generation(self) -> u64 {
+        self.quote.metadata.session_generation
+    }
+
+    /// Returns the best available event-time timestamp for this quote.
+    #[must_use]
+    pub fn observed_unix_nanos(self) -> i64 {
+        self.quote
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .or(self.quote.metadata.timestamps.provider_unix_nanos)
+            .unwrap_or(self.quote.metadata.timestamps.received_unix_nanos)
+    }
+
+    /// Returns the fixed-point decimal scale for quote prices.
+    #[must_use]
+    pub const fn price_scale(self) -> u8 {
+        self.price_scale
+    }
+
+    /// Returns the fixed-point decimal scale for quote quantities.
+    #[must_use]
+    pub const fn quantity_scale(self) -> u8 {
+        self.quantity_scale
+    }
+}
+
+/// Borrowed canonical depth image for one instrument.
+///
+/// Level iteration reads the existing `OrderBook` maps directly. No depth
+/// vector is cloned merely to execute a study.
+#[derive(Clone, Copy)]
+pub struct StudyDepthView<'a> {
+    book: &'a OrderBook,
+    price_scale: u8,
+    quantity_scale: u8,
+}
+
+impl<'a> StudyDepthView<'a> {
+    pub(crate) const fn new(book: &'a OrderBook, price_scale: u8, quantity_scale: u8) -> Self {
+        Self {
+            book,
+            price_scale,
+            quantity_scale,
+        }
+    }
+
+    /// Returns current canonical book readiness/recovery state.
+    #[must_use]
+    pub const fn state(self) -> OrderBookState {
+        self.book.state()
+    }
+
+    /// Returns the current canonical book revision.
+    #[must_use]
+    pub const fn revision(self) -> u64 {
+        self.book.revision()
+    }
+
+    /// Returns the latest accepted depth source sequence.
+    #[must_use]
+    pub const fn source_watermark(self) -> u64 {
+        self.book.source_watermark()
+    }
+
+    /// Returns the provider session generation owning this depth image.
+    #[must_use]
+    pub fn session_generation(self) -> Option<u64> {
+        self.book.session_generation()
+    }
+
+    /// Returns canonical bid levels from best to worst without allocating.
+    #[must_use]
+    pub fn bids(self) -> impl ExactSizeIterator<Item = DepthLevel> + 'a {
+        self.book.bid_levels()
+    }
+
+    /// Returns canonical ask levels from best to worst without allocating.
+    #[must_use]
+    pub fn asks(self) -> impl ExactSizeIterator<Item = DepthLevel> + 'a {
+        self.book.ask_levels()
+    }
+
+    /// Returns the fixed-point decimal scale for depth prices.
+    #[must_use]
+    pub const fn price_scale(self) -> u8 {
+        self.price_scale
+    }
+
+    /// Returns the fixed-point decimal scale for depth quantities.
+    #[must_use]
+    pub const fn quantity_scale(self) -> u8 {
+        self.quantity_scale
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StudyNonBarChange<'a> {
+    pub provider_id: &'a str,
+    pub instrument_id: &'a str,
+    pub entitlement_id: &'a str,
+    pub stream: MarketStream,
+    pub observed_unix_nanos: i64,
+}
+
+/// Borrowed non-bar market state aligned with one declared market dependency.
+#[derive(Clone, Copy, Default)]
+pub struct StudyLiveMarketData<'a> {
+    quote: Option<StudyQuoteView<'a>>,
+    trades: Option<StudyTradeWindow<'a>>,
+    depth: Option<StudyDepthView<'a>>,
+}
+
+impl<'a> StudyLiveMarketData<'a> {
+    pub(crate) const fn new(
+        quote: Option<StudyQuoteView<'a>>,
+        trades: Option<StudyTradeWindow<'a>>,
+        depth: Option<StudyDepthView<'a>>,
+    ) -> Self {
+        Self {
+            quote,
+            trades,
+            depth,
+        }
+    }
+
+    /// Returns the current canonical top-of-book quote, when requested and available.
+    #[must_use]
+    pub const fn quote(self) -> Option<StudyQuoteView<'a>> {
+        self.quote
+    }
+
+    /// Returns the runtime's bounded recent-trade window, when requested.
+    #[must_use]
+    pub const fn trades(self) -> Option<StudyTradeWindow<'a>> {
+        self.trades
+    }
+
+    /// Returns the current canonical depth image, when requested.
+    #[must_use]
+    pub const fn depth(self) -> Option<StudyDepthView<'a>> {
+        self.depth
+    }
 }
 
 impl StudyMarketSeries {
@@ -571,6 +851,7 @@ impl StudyOutputBuffer {
 pub struct StudyExecutionContext<'a> {
     settings: &'a StudySettings,
     inputs: &'a [ResolvedStudyInput],
+    live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
     timestamps: &'a [i64],
     dirty: StudyDirtyRange,
     outputs: &'a mut [StudyOutputBuffer],
@@ -582,6 +863,7 @@ pub struct StudyExecutionContext<'a> {
 pub struct StudyExecutionInputs<'a> {
     settings: &'a StudySettings,
     inputs: &'a [ResolvedStudyInput],
+    live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
     timestamps: &'a [i64],
     dirty: StudyDirtyRange,
 }
@@ -613,6 +895,16 @@ impl<'a> StudyExecutionInputs<'a> {
             ResolvedStudyInput::Output(series) => StudyInputSeries::Output(series),
         })
     }
+
+    /// Returns borrowed quote/trade/depth state for one market dependency.
+    ///
+    /// Output dependencies and market dependencies that requested only bars
+    /// return `None`. The returned views borrow the coordinator's existing
+    /// canonical live state and never allocate a second depth/trade snapshot.
+    #[must_use]
+    pub fn live_market(self, index: usize) -> Option<StudyLiveMarketData<'a>> {
+        self.live_inputs.get(index).copied().flatten()
+    }
 }
 
 impl StudyExecutionContext<'_> {
@@ -643,6 +935,12 @@ impl StudyExecutionContext<'_> {
         })
     }
 
+    /// Returns borrowed quote/trade/depth state for one market dependency.
+    #[must_use]
+    pub fn live_market(&self, index: usize) -> Option<StudyLiveMarketData<'_>> {
+        self.live_inputs.get(index).copied().flatten()
+    }
+
     /// Returns one mutable numeric output buffer.
     #[must_use]
     pub fn output(&mut self, index: usize) -> Option<&mut StudyOutputBuffer> {
@@ -669,6 +967,7 @@ impl StudyExecutionContext<'_> {
             StudyExecutionInputs {
                 settings: self.settings,
                 inputs: self.inputs,
+                live_inputs: self.live_inputs,
                 timestamps: self.timestamps,
                 dirty: self.dirty,
             },
@@ -690,6 +989,7 @@ impl StudyExecutionContext<'_> {
             StudyExecutionInputs {
                 settings: self.settings,
                 inputs: self.inputs,
+                live_inputs: self.live_inputs,
                 timestamps: self.timestamps,
                 dirty: self.dirty,
             },
@@ -1198,6 +1498,7 @@ struct NativeStudyCalculation<'a> {
     program: NativeStudyProgram,
     output_count: usize,
     inputs: &'a [ResolvedStudyInput],
+    live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
     timestamps: &'a [i64],
     dirty: StudyDirtyRange,
 }
@@ -1671,26 +1972,54 @@ impl StudyRuntime {
     /// # Errors
     /// Returns an error for unknown/non-executable studies, output-memory bounds,
     /// output-generation exhaustion, or a calculation rejection.
+    #[cfg(test)]
     pub(crate) fn execute_ready(
         &mut self,
         engine: &MarketEngine,
         study_id: StudyInstanceId,
     ) -> Result<bool, StudyRuntimeError> {
-        self.execute_ready_range(engine, study_id, None)
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        self.execute_ready_with_live(engine, study_id, &mut no_live_market)
+    }
+
+    pub(crate) fn execute_ready_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        study_id: StudyInstanceId,
+        live_market: &mut F,
+    ) -> Result<bool, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
+        self.execute_ready_range_with_live(engine, study_id, None, live_market)
     }
 
     /// Re-executes one study and every downstream dependent whose inputs become
     /// ready, preserving dependency/registration order. This is the covering
     /// path used immediately after in-place study reinitialization.
+    #[cfg(test)]
     pub(crate) fn execute_ready_subtree(
         &mut self,
         engine: &MarketEngine,
         study_id: StudyInstanceId,
     ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError> {
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        self.execute_ready_subtree_with_live(engine, study_id, &mut no_live_market)
+    }
+
+    pub(crate) fn execute_ready_subtree_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        study_id: StudyInstanceId,
+        live_market: &mut F,
+    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
         let affected = self.dependent_subtree(study_id)?;
         let mut executed = Vec::new();
         for candidate in affected {
-            match self.execute_ready(engine, candidate) {
+            match self.execute_ready_with_live(engine, candidate, live_market) {
                 Ok(true) => executed.push(candidate),
                 Ok(false) | Err(StudyRuntimeError::StudyNotExecutable(_)) => {}
                 Err(error) => return Err(error),
@@ -1699,12 +2028,27 @@ impl StudyRuntime {
         Ok(executed)
     }
 
+    #[cfg(test)]
     fn execute_ready_range(
         &mut self,
         engine: &MarketEngine,
         study_id: StudyInstanceId,
         requested_dirty: Option<StudyDirtyRange>,
     ) -> Result<bool, StudyRuntimeError> {
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        self.execute_ready_range_with_live(engine, study_id, requested_dirty, &mut no_live_market)
+    }
+
+    fn execute_ready_range_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        study_id: StudyInstanceId,
+        requested_dirty: Option<StudyDirtyRange>,
+        live_market: &mut F,
+    ) -> Result<bool, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
         let (definition, settings, program, previous_state_bytes) = {
             let node = self
                 .studies
@@ -1719,6 +2063,9 @@ impl StudyRuntime {
             )
         };
         let Some(inputs) = self.resolve_inputs(engine, &definition) else {
+            return Ok(false);
+        };
+        let Some(live_inputs) = Self::resolve_live_inputs(&definition, live_market) else {
             return Ok(false);
         };
         let timestamps =
@@ -1772,6 +2119,7 @@ impl StudyRuntime {
                 program,
                 output_count,
                 inputs: &inputs,
+                live_inputs: &live_inputs,
                 timestamps: &timestamps,
                 dirty,
             },
@@ -1948,6 +2296,7 @@ impl StudyRuntime {
         let mut context = StudyExecutionContext {
             settings: calculation.settings,
             inputs: calculation.inputs,
+            live_inputs: calculation.live_inputs,
             timestamps: calculation.timestamps,
             dirty: calculation.dirty,
             outputs: &mut outputs,
@@ -2002,12 +2351,32 @@ impl StudyRuntime {
     /// canonical live-bar mutation. The changed event is mapped to each study's
     /// own primary timeline by exact exchange timestamp before invalidation is
     /// applied, so secondary MTF inputs never reuse another series' row index.
+    #[cfg(test)]
     pub(crate) fn execute_live_market_change(
         &mut self,
         engine: &MarketEngine,
         series: &BarSeriesKey,
         exchange_timestamp_unix_nanos: i64,
     ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError> {
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        self.execute_live_market_change_with_live(
+            engine,
+            series,
+            exchange_timestamp_unix_nanos,
+            &mut no_live_market,
+        )
+    }
+
+    pub(crate) fn execute_live_market_change_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        series: &BarSeriesKey,
+        exchange_timestamp_unix_nanos: i64,
+        live_market: &mut F,
+    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
         let direct = self
             .market_dependents
             .get(series)
@@ -2015,8 +2384,13 @@ impl StudyRuntime {
             .unwrap_or_default();
         let mut pending = BTreeMap::<StudyInstanceId, StudyDirtyRange>::new();
         for study_id in direct {
-            let Some(range) =
-                self.market_change_range(engine, study_id, series, exchange_timestamp_unix_nanos)?
+            let Some(range) = self.market_change_range(
+                engine,
+                study_id,
+                series,
+                MarketStream::Bars,
+                exchange_timestamp_unix_nanos,
+            )?
             else {
                 continue;
             };
@@ -2026,13 +2400,72 @@ impl StudyRuntime {
                 .or_insert(range);
         }
 
+        self.execute_pending_ranges_with_live(engine, pending, live_market)
+    }
+
+    pub(crate) fn execute_live_non_bar_change_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        change: StudyNonBarChange<'_>,
+        live_market: &mut F,
+    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
+        debug_assert!(!matches!(change.stream, MarketStream::Bars));
+        let matching_series = self
+            .market_dependents
+            .keys()
+            .filter(|series| {
+                series.provider_id == change.provider_id
+                    && series.instrument_id == change.instrument_id
+                    && series.entitlement_id == change.entitlement_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut pending = BTreeMap::<StudyInstanceId, StudyDirtyRange>::new();
+        for series in matching_series {
+            let direct = self
+                .market_dependents
+                .get(&series)
+                .cloned()
+                .unwrap_or_default();
+            for study_id in direct {
+                let Some(range) = self.market_change_range(
+                    engine,
+                    study_id,
+                    &series,
+                    change.stream,
+                    change.observed_unix_nanos,
+                )?
+                else {
+                    continue;
+                };
+                pending
+                    .entry(study_id)
+                    .and_modify(|current| *current = current.merge(range))
+                    .or_insert(range);
+            }
+        }
+        self.execute_pending_ranges_with_live(engine, pending, live_market)
+    }
+
+    fn execute_pending_ranges_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        mut pending: BTreeMap<StudyInstanceId, StudyDirtyRange>,
+        live_market: &mut F,
+    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
         let ordered = self.studies.keys().copied().collect::<Vec<_>>();
         let mut executed = Vec::new();
         for study_id in ordered {
             let Some(range) = pending.remove(&study_id) else {
                 continue;
             };
-            match self.execute_ready_range(engine, study_id, Some(range)) {
+            match self.execute_ready_range_with_live(engine, study_id, Some(range), live_market) {
                 Ok(true) => {
                     executed.push(study_id);
                     self.propagate_output_change(engine, study_id, range, &mut pending)?;
@@ -2049,7 +2482,8 @@ impl StudyRuntime {
         engine: &MarketEngine,
         study_id: StudyInstanceId,
         changed_series: &BarSeriesKey,
-        exchange_timestamp_unix_nanos: i64,
+        changed_stream: MarketStream,
+        observed_unix_nanos: i64,
     ) -> Result<Option<StudyDirtyRange>, StudyRuntimeError> {
         let node = self
             .studies
@@ -2060,21 +2494,32 @@ impl StudyRuntime {
             let StudyDependency::Market(input) = dependency else {
                 continue;
             };
-            if input.series != *changed_series {
+            if input.series != *changed_series || !input.streams.contains(changed_stream) {
                 continue;
             }
             let Some(length) = self.primary_timeline_len(engine, &node.definition) else {
                 continue;
             };
-            let Some(start) =
-                self.primary_lower_bound(engine, &node.definition, exchange_timestamp_unix_nanos)
-            else {
-                continue;
+            let start = if matches!(changed_stream, MarketStream::Bars) {
+                let Some(start) =
+                    self.primary_lower_bound(engine, &node.definition, observed_unix_nanos)
+                else {
+                    continue;
+                };
+                start
+            } else {
+                let Some(start) =
+                    self.primary_row_at_or_before(engine, &node.definition, observed_unix_nanos)
+                else {
+                    continue;
+                };
+                start
             };
             if start >= length {
                 continue;
             }
-            let candidate = if dependency_index == 0 {
+            let candidate = if matches!(changed_stream, MarketStream::Bars) && dependency_index == 0
+            {
                 StudyDirtyRange::bounded(start, start + 1)?
                     .invalidated_by(node.definition.invalidation)?
             } else {
@@ -2088,6 +2533,32 @@ impl StudyRuntime {
             }));
         }
         Ok(dirty)
+    }
+
+    fn primary_row_at_or_before(
+        &self,
+        engine: &MarketEngine,
+        definition: &StudyDefinition,
+        observed_unix_nanos: i64,
+    ) -> Option<usize> {
+        let timestamps: &[i64] = match definition.dependencies.first()? {
+            StudyDependency::Market(input) => {
+                let snapshot = engine.series_snapshot(&input.series)?;
+                if snapshot.bars.is_empty() {
+                    return None;
+                }
+                let upper = snapshot.bars.partition_point(|bar| {
+                    bar.exchange_timestamp_unix_nanos <= observed_unix_nanos
+                });
+                return Some(upper.saturating_sub(1));
+            }
+            StudyDependency::Output(output) => self.outputs.get(output)?.timestamps(),
+        };
+        if timestamps.is_empty() {
+            return None;
+        }
+        let upper = timestamps.partition_point(|timestamp| *timestamp <= observed_unix_nanos);
+        Some(upper.saturating_sub(1))
     }
 
     fn propagate_output_change(
@@ -2208,11 +2679,25 @@ impl StudyRuntime {
     /// This is currently the covering-recalculation path used for initial
     /// history hydration. Live incremental execution is intentionally kept
     /// separate until event-time dirty ranges are mapped across MTF inputs.
+    #[cfg(test)]
     pub(crate) fn execute_ready_for_market(
         &mut self,
         engine: &MarketEngine,
         series: &BarSeriesKey,
     ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError> {
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        self.execute_ready_for_market_with_live(engine, series, &mut no_live_market)
+    }
+
+    pub(crate) fn execute_ready_for_market_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        series: &BarSeriesKey,
+        live_market: &mut F,
+    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
         let mut affected = self
             .market_dependents
             .get(series)
@@ -2234,7 +2719,7 @@ impl StudyRuntime {
 
         let mut executed = Vec::new();
         for study_id in affected {
-            match self.execute_ready(engine, study_id) {
+            match self.execute_ready_with_live(engine, study_id, live_market) {
                 Ok(true) => executed.push(study_id),
                 Ok(false) | Err(StudyRuntimeError::StudyNotExecutable(_)) => {}
                 Err(error) => return Err(error),
@@ -2262,6 +2747,31 @@ impl StudyRuntime {
             }
         }
         Some(inputs)
+    }
+
+    fn resolve_live_inputs<'a, F>(
+        definition: &StudyDefinition,
+        live_market: &mut F,
+    ) -> Option<Vec<Option<StudyLiveMarketData<'a>>>>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
+        let mut live_inputs = Vec::with_capacity(definition.dependencies.len());
+        for dependency in &definition.dependencies {
+            let StudyDependency::Market(input) = dependency else {
+                live_inputs.push(None);
+                continue;
+            };
+            let needs_live = input.streams.contains(MarketStream::Trades)
+                || input.streams.contains(MarketStream::Quotes)
+                || input.streams.contains(MarketStream::Depth);
+            if needs_live {
+                live_inputs.push(Some(live_market(input)?));
+            } else {
+                live_inputs.push(None);
+            }
+        }
+        Some(live_inputs)
     }
 
     /// Reconciles all study market dependencies into `MarketEngine` data leases.
@@ -2639,7 +3149,7 @@ fn bounded_execution_detail(mut detail: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::BarPeriod;
+    use axiusflow_market_data::{BarPeriod, DepthSnapshot, EventMetadata, QualifiedTimestamp};
     use axiusflow_market_engine::{
         MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
     };
@@ -2740,6 +3250,22 @@ mod tests {
             low: close - 100,
             close,
             volume: 1_000,
+        }
+    }
+
+    fn event_metadata(source_sequence: u64, offset_seconds: i64) -> EventMetadata {
+        let observed_unix_nanos = (1_700_000_000 + offset_seconds) * 1_000_000_000;
+        EventMetadata {
+            provider_id: "provider".to_string(),
+            instrument_id: "ES".to_string(),
+            entitlement_id: "entitlement".to_string(),
+            source_sequence,
+            session_generation: 1,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: Some(observed_unix_nanos),
+                provider_unix_nanos: None,
+                received_unix_nanos: observed_unix_nanos + 1,
+            },
         }
     }
 
@@ -3034,6 +3560,116 @@ mod tests {
         Ok(())
     }
 
+    fn calculate_live_microstructure(
+        context: &mut StudyExecutionContext<'_>,
+    ) -> Result<(), String> {
+        let (inputs, outputs) = context.split();
+        let live = inputs
+            .live_market(0)
+            .ok_or_else(|| "live market state is unavailable".to_string())?;
+        let quote = live
+            .quote()
+            .ok_or_else(|| "quote is unavailable".to_string())?;
+        let trades = live
+            .trades()
+            .ok_or_else(|| "trades are unavailable".to_string())?;
+        let depth = live
+            .depth()
+            .ok_or_else(|| "depth is unavailable".to_string())?;
+        let bid = quote
+            .bid()
+            .ok_or_else(|| "quote bid is unavailable".to_string())?
+            .price;
+        let ask = quote
+            .ask()
+            .ok_or_else(|| "quote ask is unavailable".to_string())?
+            .price;
+        let trade_quantity = trades
+            .iter()
+            .last()
+            .ok_or_else(|| "retained trade is unavailable".to_string())?
+            .quantity;
+        let depth_bid = depth
+            .bids()
+            .next()
+            .ok_or_else(|| "depth bid is unavailable".to_string())?
+            .price;
+        let value = i32::try_from((ask - bid) + trade_quantity + depth_bid)
+            .map(f64::from)
+            .map_err(|_| "microstructure test value is out of range".to_string())?;
+        let output = outputs
+            .first_mut()
+            .ok_or_else(|| "microstructure output is unavailable".to_string())?;
+        let dirty = inputs.dirty_range();
+        let end = dirty
+            .end_exclusive
+            .unwrap_or(output.len())
+            .min(output.len());
+        for row in dirty.start..end {
+            output.set(row, Some(value))?;
+        }
+        Ok(())
+    }
+
+    struct LiveMicrostructureFixture {
+        book: OrderBook,
+        trades: VecDeque<StudyTradeSample>,
+        quote_one: TopOfBookQuote,
+        quote_two: TopOfBookQuote,
+    }
+
+    fn live_microstructure_fixture() -> LiveMicrostructureFixture {
+        let mut book = OrderBook::new(bound(8));
+        book.install_snapshot(&DepthSnapshot {
+            metadata: event_metadata(1, 90),
+            bids: vec![DepthLevel {
+                price: 95,
+                quantity: 4,
+                order_count: Some(1),
+            }],
+            asks: vec![DepthLevel {
+                price: 140,
+                quantity: 5,
+                order_count: Some(1),
+            }],
+        })
+        .expect("depth installs");
+        let trades = VecDeque::from([StudyTradeSample {
+            observed_unix_nanos: event_metadata(2, 90).timestamps.received_unix_nanos,
+            price: 105,
+            quantity: 3,
+            aggressor: AggressorSide::Buy,
+        }]);
+        let quote_one = TopOfBookQuote {
+            metadata: event_metadata(3, 90),
+            bid: Some(DepthLevel {
+                price: 100,
+                quantity: 2,
+                order_count: None,
+            }),
+            ask: Some(DepthLevel {
+                price: 110,
+                quantity: 2,
+                order_count: None,
+            }),
+        };
+        let quote_two = TopOfBookQuote {
+            metadata: event_metadata(4, 90),
+            ask: Some(DepthLevel {
+                price: 130,
+                quantity: 2,
+                order_count: None,
+            }),
+            ..quote_one.clone()
+        };
+        LiveMicrostructureFixture {
+            book,
+            trades,
+            quote_one,
+            quote_two,
+        }
+    }
+
     fn scaled_close_registration(source: BarSeriesKey, multiplier: i64) -> NativeStudyRegistration {
         let definition = StudyDefinition {
             identifier: "scaled_close".to_string(),
@@ -3290,6 +3926,90 @@ mod tests {
         assert_eq!(consumer_output.values(), &[Some(63_000.0), Some(66_000.0)]);
         assert_eq!(consumer_output.generation(), 2);
         assert_eq!(consumer_output.timestamps(), producer_output.timestamps());
+    }
+
+    #[test]
+    fn non_bar_live_change_recomputes_the_containing_tail_row_from_borrowed_market_state() {
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES");
+        engine
+            .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 0, bars())
+            .expect("canonical history installs");
+        let streams = StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth);
+        let definition = definition(
+            "live_microstructure",
+            vec![market(source.clone(), streams)],
+            1,
+            StudyInvalidationPolicy::FromFirstChanged,
+        );
+        let study = runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&definition.settings).expect("defaults"),
+                    definition,
+                    program: NativeStudyProgram::stateless(calculate_live_microstructure),
+                },
+            )
+            .expect("study registers");
+
+        let live = live_microstructure_fixture();
+
+        let first_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_one, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut first_lookup = |_input: &StudyMarketInput| Some(first_live);
+        assert!(
+            runtime
+                .execute_ready_with_live(&engine, study, &mut first_lookup)
+                .expect("initial execution")
+        );
+        assert_eq!(
+            runtime
+                .output_series(study.output(0))
+                .expect("initial output")
+                .values(),
+            &[Some(108.0), Some(108.0)]
+        );
+
+        let second_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_two, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut second_lookup = |_input: &StudyMarketInput| Some(second_live);
+        assert_eq!(
+            runtime
+                .execute_live_non_bar_change_with_live(
+                    &engine,
+                    StudyNonBarChange {
+                        provider_id: "provider",
+                        instrument_id: "ES",
+                        entitlement_id: "entitlement",
+                        stream: MarketStream::Quotes,
+                        observed_unix_nanos: event_metadata(4, 90)
+                            .timestamps
+                            .exchange_unix_nanos
+                            .expect("exchange timestamp"),
+                    },
+                    &mut second_lookup,
+                )
+                .expect("quote change recalculates"),
+            vec![study]
+        );
+        assert_eq!(
+            runtime
+                .output_series(study.output(0))
+                .expect("updated output")
+                .values(),
+            &[Some(108.0), Some(128.0)]
+        );
     }
 
     #[test]

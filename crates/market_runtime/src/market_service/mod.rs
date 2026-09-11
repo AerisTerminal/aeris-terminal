@@ -17,7 +17,7 @@ use crate::{
     study::{
         MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE, MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE,
         NativeStudyRegistration, StudyInstanceId, StudyMarketLeaseChangeKind, StudyOutputId,
-        StudyRuntime, StudyRuntimeConfig,
+        StudyRuntime, StudyRuntimeConfig, StudyTradeSample,
     },
 };
 use axiusflow_contracts::{
@@ -347,19 +347,11 @@ struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
-    recent_trades: VecDeque<RecentAggressorTrade>,
+    recent_trades: VecDeque<StudyTradeSample>,
     traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
     trade_session_generation: u64,
     last_trade_source_sequence: u64,
     retention_clock_unix_nanos: i64,
-}
-
-#[derive(Clone, Copy)]
-struct RecentAggressorTrade {
-    observed_unix_nanos: i64,
-    price: i64,
-    quantity: i64,
-    aggressor: AggressorSide,
 }
 
 mod realtime;

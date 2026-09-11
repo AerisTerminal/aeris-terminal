@@ -43,6 +43,43 @@ fn calculate_counter(context: &mut StudyExecutionContext<'_>) -> Result<(), Stri
     Ok(())
 }
 
+fn calculate_microstructure(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+    let (inputs, outputs) = context.split();
+    let live = inputs
+        .live_market(0)
+        .ok_or_else(|| "live market input is unavailable".to_string())?;
+    let quote = live
+        .quote()
+        .ok_or_else(|| "quote is not available yet".to_string())?;
+    let trades = live
+        .trades()
+        .ok_or_else(|| "trade window is unavailable".to_string())?;
+    let depth = live
+        .depth()
+        .ok_or_else(|| "depth is unavailable".to_string())?;
+    let best_bid = quote.bid().map(|level| level.price);
+    let best_ask = depth.asks().next().map(|level| level.price);
+    let _latest_trade = trades.get(trades.len().saturating_sub(1));
+    let output = outputs
+        .first_mut()
+        .ok_or_else(|| "microstructure output is unavailable".to_string())?;
+    let dirty = inputs.dirty_range();
+    let end = dirty
+        .end_exclusive
+        .unwrap_or(output.len())
+        .min(output.len());
+    for row in dirty.start..end {
+        let spread = best_bid
+            .zip(best_ask)
+            .map(|(bid, ask)| i32::try_from(ask - bid))
+            .transpose()
+            .map_err(|_| "spread is out of example range".to_string())?
+            .map(f64::from);
+        output.set(row, spread)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn a_stateful_native_study_can_be_defined_through_the_sdk_facade_only() {
     let definition = StudyDefinition {
@@ -87,4 +124,41 @@ fn indicator_on_indicator_dependency_is_expressible_through_the_sdk_facade_only(
         StudyDependency::Output(output)
             if output.study_id == upstream && output.output_index == 2
     ));
+}
+
+#[test]
+fn quote_trade_and_depth_inputs_are_expressible_through_the_sdk_facade_only() {
+    let streams = StreamRequirements::BARS
+        .with(axiusflow_study_sdk::MarketStream::Trades)
+        .with(axiusflow_study_sdk::MarketStream::Quotes)
+        .with(axiusflow_study_sdk::MarketStream::Depth);
+    let definition = StudyDefinition {
+        identifier: "example.microstructure".to_string(),
+        dependencies: vec![StudyDependency::Market(StudyMarketInput {
+            series: BarSeriesKey {
+                provider_id: "provider".to_string(),
+                instrument_id: "instrument".to_string(),
+                entitlement_id: "entitlement".to_string(),
+                period: BarPeriod::time(60).expect("minute period"),
+                definition_version: 1,
+            },
+            streams,
+        })],
+        settings: Vec::new(),
+        outputs: vec![StudyOutputSpec {
+            identifier: "spread".to_string(),
+            title: "Spread".to_string(),
+            plot: StudyPlotKind::Line,
+            pane: StudyPaneTarget::Price,
+            scale: StudyScaleTarget::Primary,
+        }],
+        invalidation: StudyInvalidationPolicy::FromFirstChanged,
+    };
+    let registration = NativeStudyRegistration {
+        settings: StudySettings::defaults(&definition.settings).expect("valid settings"),
+        definition,
+        program: NativeStudyProgram::stateless(calculate_microstructure),
+    };
+
+    assert_eq!(registration.definition.identifier, "example.microstructure");
 }

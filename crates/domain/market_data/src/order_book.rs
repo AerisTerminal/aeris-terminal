@@ -150,6 +150,36 @@ impl OrderBook {
         self.state
     }
 
+    /// Returns the current canonical book revision.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the latest accepted provider source watermark.
+    #[must_use]
+    pub const fn source_watermark(&self) -> u64 {
+        self.source_watermark
+    }
+
+    /// Returns the provider session generation currently owning this book.
+    #[must_use]
+    pub fn session_generation(&self) -> Option<u64> {
+        self.identity.as_ref().map(|identity| identity.3)
+    }
+
+    /// Iterates canonical bid levels from best to worst without allocating.
+    #[must_use]
+    pub fn bid_levels(&self) -> impl ExactSizeIterator<Item = DepthLevel> + '_ {
+        self.bids.values().rev().copied()
+    }
+
+    /// Iterates canonical ask levels from best to worst without allocating.
+    #[must_use]
+    pub fn ask_levels(&self) -> impl ExactSizeIterator<Item = DepthLevel> + '_ {
+        self.asks.values().copied()
+    }
+
     /// Installs a complete bounded snapshot, replacing all candidate state.
     ///
     /// # Errors

@@ -12,7 +12,10 @@ use super::{
     RithmicLiveHandoff, RithmicRealtimeDemand, StreamRequirements, StudyMarketLeaseChangeKind,
     StudyRuntime, StudyRuntimeConfig, authorize_consumer, thread,
 };
-use crate::{MarketRuntimeEvent, MarketStudyOutputSnapshot};
+use crate::{
+    MarketRuntimeEvent, MarketStudyOutputSnapshot,
+    study::{StudyLiveMarketData, StudyMarketInput, StudyNonBarChange, StudyRuntimeError},
+};
 
 pub(super) struct OwnedCoordinatorChannels {
     pub(super) commands: Receiver<Command>,
@@ -164,6 +167,15 @@ pub(super) fn drain_shutdown_provider_events(coordinator: &mut Coordinator<'_>) 
             break;
         }
     }
+}
+
+fn study_live_market_data<'a>(
+    order_books: &'a BTreeMap<(String, String), ProviderOrderBook>,
+    input: &StudyMarketInput,
+) -> Option<StudyLiveMarketData<'a>> {
+    order_books
+        .values()
+        .find_map(|book| book.study_live_market_data(input))
 }
 
 pub(super) struct Coordinator<'a> {
@@ -513,8 +525,7 @@ impl Coordinator<'_> {
             .register_native_for_consumer(consumer_id, registration)
             .map_err(|error| error.to_string())?;
         let prepared = self.reconcile_study_market_data().and_then(|()| {
-            self.studies
-                .execute_ready(&self.engine, study_id)
+            self.execute_study_ready(study_id)
                 .map_err(|error| error.to_string())
         });
         match prepared {
@@ -574,8 +585,7 @@ impl Coordinator<'_> {
             .map_err(|error| error.to_string())?;
 
         let prepared = self.reconcile_study_market_data().and_then(|()| {
-            self.studies
-                .execute_ready_subtree(&self.engine, study_id)
+            self.execute_study_ready_subtree(study_id)
                 .map_err(|error| error.to_string())
         });
         match prepared {
@@ -637,6 +647,81 @@ impl Coordinator<'_> {
         }
     }
 
+    fn execute_study_ready(
+        &mut self,
+        study_id: super::StudyInstanceId,
+    ) -> Result<bool, StudyRuntimeError> {
+        let engine = &self.engine;
+        let order_books = &self.order_books;
+        let studies = &mut self.studies;
+        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        studies.execute_ready_with_live(engine, study_id, &mut live_market)
+    }
+
+    fn execute_study_ready_subtree(
+        &mut self,
+        study_id: super::StudyInstanceId,
+    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+        let engine = &self.engine;
+        let order_books = &self.order_books;
+        let studies = &mut self.studies;
+        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        studies.execute_ready_subtree_with_live(engine, study_id, &mut live_market)
+    }
+
+    pub(super) fn execute_studies_ready_for_market(
+        &mut self,
+        series: &BarSeriesKey,
+    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+        let engine = &self.engine;
+        let order_books = &self.order_books;
+        let studies = &mut self.studies;
+        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        studies.execute_ready_for_market_with_live(engine, series, &mut live_market)
+    }
+
+    pub(super) fn execute_study_bar_change(
+        &mut self,
+        series: &BarSeriesKey,
+        exchange_timestamp_unix_nanos: i64,
+    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+        let engine = &self.engine;
+        let order_books = &self.order_books;
+        let studies = &mut self.studies;
+        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        studies.execute_live_market_change_with_live(
+            engine,
+            series,
+            exchange_timestamp_unix_nanos,
+            &mut live_market,
+        )
+    }
+
+    pub(super) fn execute_study_non_bar_change(
+        &mut self,
+        provider_id: &str,
+        instrument_id: &str,
+        entitlement_id: &str,
+        stream: MarketStream,
+        observed_unix_nanos: i64,
+    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+        let engine = &self.engine;
+        let order_books = &self.order_books;
+        let studies = &mut self.studies;
+        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        studies.execute_live_non_bar_change_with_live(
+            engine,
+            StudyNonBarChange {
+                provider_id,
+                instrument_id,
+                entitlement_id,
+                stream,
+                observed_unix_nanos,
+            },
+            &mut live_market,
+        )
+    }
+
     fn reconcile_study_market_data(&mut self) -> Result<(), String> {
         let changes = self
             .studies
@@ -680,7 +765,10 @@ impl Coordinator<'_> {
     pub(super) fn reconcile_order_books(&mut self) {
         let mut required_identities = BTreeSet::new();
         for (series, subscription) in self.engine.subscriptions() {
-            if subscription.streams.contains(MarketStream::Depth) {
+            if subscription.streams.contains(MarketStream::Depth)
+                || subscription.streams.contains(MarketStream::Trades)
+                || subscription.streams.contains(MarketStream::Quotes)
+            {
                 required_identities.insert((
                     series.provider_id.clone(),
                     series.instrument_id.clone(),

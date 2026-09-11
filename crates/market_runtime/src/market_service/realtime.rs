@@ -5,15 +5,18 @@ use super::{
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
     MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering,
-    ProviderGeneration, ProviderHealth, ProviderOrderBook, RecentAggressorTrade,
-    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence,
-    RithmicLiveHandoff, RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent,
-    SeriesLoadState, TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id,
+    ProviderGeneration, ProviderHealth, ProviderOrderBook, RithmicCalendarPeriod,
+    RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff,
+    RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState,
+    StudyTradeSample, TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id,
     merge_live_candle, series_state_payload, series_update_message,
 };
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
     HyperliquidDisplayDepthEvent,
+};
+use crate::study::{
+    StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyQuoteView, StudyTradeWindow,
 };
 use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
 
@@ -129,7 +132,7 @@ impl ProviderOrderBook {
         changed
     }
 
-    fn remove_recent_trade(&mut self, trade: RecentAggressorTrade) {
+    fn remove_recent_trade(&mut self, trade: StudyTradeSample) {
         let Some(volumes) = self.traded_volumes.get_mut(&trade.price) else {
             return;
         };
@@ -198,7 +201,7 @@ impl ProviderOrderBook {
             AggressorSide::Sell => volumes.sell = volumes.sell.saturating_add(trade.quantity),
             AggressorSide::Unknown => unreachable!(),
         }
-        self.recent_trades.push_back(RecentAggressorTrade {
+        self.recent_trades.push_back(StudyTradeSample {
             observed_unix_nanos,
             price: trade.price,
             quantity: trade.quantity,
@@ -229,6 +232,43 @@ impl ProviderOrderBook {
         }
         self.top_of_book = Some(quote.clone());
         true
+    }
+
+    pub(super) fn study_live_market_data<'a>(
+        &'a self,
+        input: &StudyMarketInput,
+    ) -> Option<StudyLiveMarketData<'a>> {
+        if self.instrument.provider != input.series.provider_id
+            || self.instrument.instrument_id != input.series.instrument_id
+            || self.instrument.entitlement_id != input.series.entitlement_id
+        {
+            return None;
+        }
+        let price_scale = u8::try_from(self.instrument.price_scale).ok()?;
+        let quantity_scale = u8::try_from(self.instrument.quantity_scale).ok()?;
+        let quote = input
+            .streams
+            .contains(MarketStream::Quotes)
+            .then(|| {
+                self.top_of_book
+                    .as_ref()
+                    .map(|quote| StudyQuoteView::new(quote, price_scale, quantity_scale))
+            })
+            .flatten();
+        let trades = input.streams.contains(MarketStream::Trades).then(|| {
+            StudyTradeWindow::new(
+                &self.recent_trades,
+                self.trade_session_generation,
+                self.last_trade_source_sequence,
+                price_scale,
+                quantity_scale,
+            )
+        });
+        let depth = input
+            .streams
+            .contains(MarketStream::Depth)
+            .then(|| StudyDepthView::new(&self.book, price_scale, quantity_scale));
+        Some(StudyLiveMarketData::new(quote, trades, depth))
     }
 }
 
@@ -772,6 +812,30 @@ impl HyperliquidLiveHandoff {
 }
 
 impl Coordinator<'_> {
+    fn publish_non_bar_study_change(
+        &mut self,
+        provider_id: &str,
+        instrument_id: &str,
+        entitlement_id: &str,
+        stream: MarketStream,
+        observed_unix_nanos: i64,
+    ) {
+        match self.execute_study_non_bar_change(
+            provider_id,
+            instrument_id,
+            entitlement_id,
+            stream,
+            observed_unix_nanos,
+        ) {
+            Ok(executed) => self.publish_study_outputs(&executed),
+            Err(error) => {
+                // Native study failure must not change acceptance/recovery of
+                // authoritative provider state.
+                eprintln!("Axiusflow live non-bar study execution failed: {error}");
+            }
+        }
+    }
+
     fn clear_hyperliquid_display_depth(&mut self) {
         let affected = self
             .hyperliquid_display_depth
@@ -875,11 +939,7 @@ impl Coordinator<'_> {
                     events.publish_series_update(series_update_message(&publication));
                 }
             }
-            match self.studies.execute_live_market_change(
-                &self.engine,
-                series,
-                exchange_timestamp_unix_nanos,
-            ) {
+            match self.execute_study_bar_change(series, exchange_timestamp_unix_nanos) {
                 Ok(executed) => self.publish_study_outputs(&executed),
                 Err(error) => {
                     // Study failure is isolated from canonical market publication.
@@ -1367,10 +1427,26 @@ impl Coordinator<'_> {
         }
         self.evaluate_price_alert_trade(trade);
         let instrument_id = trade.metadata.instrument_id.clone();
+        let entitlement_id = trade.metadata.entitlement_id.clone();
+        let observed_unix_nanos = trade
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .or(trade.metadata.timestamps.provider_unix_nanos)
+            .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
         let trade_changed = self
             .order_books
             .get_mut(&("hyperliquid".to_string(), instrument_id.clone()))
             .is_some_and(|order_book| order_book.accept_recent_trade(trade));
+        if trade_changed {
+            self.publish_non_bar_study_change(
+                "hyperliquid",
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Trades,
+                observed_unix_nanos,
+            );
+        }
         trade_changed.then_some(instrument_id)
     }
 
@@ -1570,12 +1646,26 @@ impl Coordinator<'_> {
         }
         self.evaluate_price_alert_trade(trade);
         let instrument_id = trade.metadata.instrument_id.clone();
+        let entitlement_id = trade.metadata.entitlement_id.clone();
+        let observed_unix_nanos = trade
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .or(trade.metadata.timestamps.provider_unix_nanos)
+            .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
         let trade_changed = self
             .order_books
             .get_mut(&("rithmic".to_string(), instrument_id.clone()))
             .is_some_and(|order_book| order_book.accept_recent_trade(trade));
         if trade_changed {
             self.broadcast_order_book("rithmic", &instrument_id);
+            self.publish_non_bar_study_change(
+                "rithmic",
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Trades,
+                observed_unix_nanos,
+            );
         }
         let failed = self
             .rithmic_live
@@ -1680,14 +1770,20 @@ impl Coordinator<'_> {
             return;
         }
         let instrument_id = snapshot.metadata.instrument_id.clone();
-        let observed_unix_nanos = snapshot.metadata.timestamps.received_unix_nanos;
-        let should_publish = self
+        let entitlement_id = snapshot.metadata.entitlement_id.clone();
+        let observed_unix_nanos = snapshot
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .or(snapshot.metadata.timestamps.provider_unix_nanos)
+            .unwrap_or(snapshot.metadata.timestamps.received_unix_nanos);
+        let (book_changed, trades_changed) = self
             .order_books
             .get_mut(&(provider.to_string(), instrument_id.clone()))
             .filter(|order_book| {
                 order_book.instrument.entitlement_id == snapshot.metadata.entitlement_id
             })
-            .is_some_and(|order_book| {
+            .map_or((false, false), |order_book| {
                 let trades_changed = order_book.prune_recent_trades(observed_unix_nanos);
                 let book_changed = matches!(
                     order_book.book.install_snapshot(snapshot),
@@ -1697,10 +1793,28 @@ impl Coordinator<'_> {
                     order_book.book.state(),
                     CanonicalOrderBookState::Recovering(_)
                 );
-                trades_changed || book_changed
+                (book_changed, trades_changed)
             });
-        if should_publish {
+        if book_changed || trades_changed {
             self.broadcast_order_book(provider, &instrument_id);
+        }
+        if book_changed {
+            self.publish_non_bar_study_change(
+                provider,
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Depth,
+                observed_unix_nanos,
+            );
+        }
+        if trades_changed {
+            self.publish_non_bar_study_change(
+                provider,
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Trades,
+                observed_unix_nanos,
+            );
         }
     }
 
@@ -1724,16 +1838,40 @@ impl Coordinator<'_> {
             return;
         }
         let instrument_id = quote.metadata.instrument_id.clone();
-        let observed_unix_nanos = quote.metadata.timestamps.received_unix_nanos;
-        let changed = self
+        let entitlement_id = quote.metadata.entitlement_id.clone();
+        let observed_unix_nanos = quote
+            .metadata
+            .timestamps
+            .exchange_unix_nanos
+            .or(quote.metadata.timestamps.provider_unix_nanos)
+            .unwrap_or(quote.metadata.timestamps.received_unix_nanos);
+        let (quote_changed, trades_changed) = self
             .order_books
             .get_mut(&(provider.to_string(), instrument_id.clone()))
-            .is_some_and(|order_book| {
+            .map_or((false, false), |order_book| {
                 let trades_changed = order_book.prune_recent_trades(observed_unix_nanos);
-                order_book.install_top_of_book(quote) || trades_changed
+                (order_book.install_top_of_book(quote), trades_changed)
             });
-        if changed {
+        if quote_changed || trades_changed {
             self.broadcast_order_book(provider, &instrument_id);
+        }
+        if quote_changed {
+            self.publish_non_bar_study_change(
+                provider,
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Quotes,
+                observed_unix_nanos,
+            );
+        }
+        if trades_changed {
+            self.publish_non_bar_study_change(
+                provider,
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Trades,
+                observed_unix_nanos,
+            );
         }
     }
 
@@ -1895,13 +2033,23 @@ impl Coordinator<'_> {
         ready
     }
 
-    /// Rebuilds the complete desired Hyperliquid subscription set from live
-    /// handoffs and depth demand. Candles follow chart series, trades follow
-    /// live instruments, and books follow Order Book demand; nothing else subscribes.
+    /// Rebuilds the complete desired Hyperliquid subscription set from the
+    /// authoritative engine stream union. Each provider feed follows only the
+    /// stream classes that require it; retaining canonical live state never
+    /// implies an unrelated upstream subscription.
     pub(super) fn hyperliquid_demand(&self) -> HyperliquidDemand {
         let mut candles = BTreeSet::new();
         let mut trades = BTreeSet::new();
+        let mut quotes = BTreeSet::new();
+        let mut books = BTreeSet::new();
         for (series, live) in &self.hyperliquid_live {
+            let Some(streams) = self
+                .engine
+                .subscription_status(series)
+                .map(|status| status.streams)
+            else {
+                continue;
+            };
             let Ok(instrument) = self.hyperliquid_instrument(series) else {
                 continue;
             };
@@ -1918,11 +2066,21 @@ impl Coordinator<'_> {
                 price_scale,
                 quantity_scale,
             };
-            candles.insert(HyperliquidCandleDemand {
-                instrument: mapping.clone(),
-                interval: live.interval.clone(),
-            });
-            trades.insert(mapping);
+            if streams.contains(MarketStream::Bars) {
+                candles.insert(HyperliquidCandleDemand {
+                    instrument: mapping.clone(),
+                    interval: live.interval.clone(),
+                });
+            }
+            if streams.contains(MarketStream::Trades) {
+                trades.insert(mapping.clone());
+            }
+            if streams.contains(MarketStream::Quotes) || streams.contains(MarketStream::Depth) {
+                quotes.insert(mapping.clone());
+            }
+            if streams.contains(MarketStream::Depth) {
+                books.insert(mapping);
+            }
         }
         for instrument in self.price_alerts.active_instruments("hyperliquid") {
             let (Ok(price_scale), Ok(quantity_scale)) = (
@@ -1939,28 +2097,10 @@ impl Coordinator<'_> {
                 quantity_scale,
             });
         }
-        let mut books = BTreeSet::new();
-        for ((provider, _), book) in &self.order_books {
-            if provider != "hyperliquid" {
-                continue;
-            }
-            let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(book.instrument.price_scale),
-                u8::try_from(book.instrument.quantity_scale),
-            ) else {
-                continue;
-            };
-            books.insert(HyperliquidInstrumentDemand {
-                wire_coin: book.instrument.provider_symbol.clone(),
-                instrument_id: book.instrument.instrument_id.clone(),
-                entitlement_id: book.instrument.entitlement_id.clone(),
-                price_scale,
-                quantity_scale,
-            });
-        }
         HyperliquidDemand {
             candles: candles.into_iter().collect(),
             trades: trades.into_iter().collect(),
+            quotes: quotes.into_iter().collect(),
             books: books.into_iter().collect(),
         }
     }
@@ -2029,8 +2169,10 @@ impl Coordinator<'_> {
         }
         let demand = self.hyperliquid_demand();
         let display_demand = self.hyperliquid_display_depth_demand();
-        let empty =
-            demand.candles.is_empty() && demand.trades.is_empty() && demand.books.is_empty();
+        let empty = demand.candles.is_empty()
+            && demand.trades.is_empty()
+            && demand.quotes.is_empty()
+            && demand.books.is_empty();
         if empty && !self.hyperliquid_engaged {
             self.hyperliquid_demand_dirty = false;
             return;

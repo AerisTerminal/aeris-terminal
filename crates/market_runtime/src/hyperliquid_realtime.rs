@@ -85,6 +85,8 @@ pub(crate) struct HyperliquidDemand {
     pub candles: Vec<HyperliquidCandleDemand>,
     /// Trade feeds, one per demanded instrument.
     pub trades: Vec<HyperliquidInstrumentDemand>,
+    /// BBO feeds, one per quote-demanded instrument.
+    pub quotes: Vec<HyperliquidInstrumentDemand>,
     /// Book feeds, one per depth-demanded instrument.
     pub books: Vec<HyperliquidInstrumentDemand>,
 }
@@ -852,18 +854,25 @@ fn reconcile_subscriptions(
         );
         instruments.insert(trade.wire_coin.clone(), trade.clone());
     }
-    for book in demand
-        .books
+    for quote in demand
+        .quotes
         .iter()
         .take(MAXIMUM_SUBSCRIPTION_FRAMES_PER_DEMAND)
     {
         insert_subscription(
             &mut desired,
             SubscriptionKey::Bbo {
-                coin: book.wire_coin.clone(),
+                coin: quote.wire_coin.clone(),
             },
-            axiusflow_hyperliquid_market_adapter::build_bbo_subscription(&book.wire_coin),
+            axiusflow_hyperliquid_market_adapter::build_bbo_subscription(&quote.wire_coin),
         );
+        instruments.insert(quote.wire_coin.clone(), quote.clone());
+    }
+    for book in demand
+        .books
+        .iter()
+        .take(MAXIMUM_SUBSCRIPTION_FRAMES_PER_DEMAND)
+    {
         insert_subscription(
             &mut desired,
             SubscriptionKey::Book {
