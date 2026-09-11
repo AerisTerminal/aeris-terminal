@@ -262,4 +262,3 @@ The runtime foundation and first built-ins are functional and verified. The imme
 2. Obtain the narrow Nucleus indexed optional-sample recursive EMA API.
 3. Use EMA as the proof that stateful recursive indicators stay incremental, transactional, gap-correct, and single-formula-source.
 4. Expand the built-in library and richer study types only after those foundations stay green.
-
