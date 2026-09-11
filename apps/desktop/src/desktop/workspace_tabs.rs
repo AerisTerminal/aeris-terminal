@@ -207,6 +207,30 @@ impl TerminalApp {
         }
     }
 
+    pub(super) fn absorb_study_settings_requests(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut requested = None;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                let study_id = pane.surface.update(cx, |surface, _| {
+                    surface.pending_study_settings_request.take()
+                });
+                if let Some(study_id) = study_id {
+                    requested = Some((workspace.id, pane.id, pane.surface.clone(), study_id));
+                }
+            }
+        }
+        if let Some((workspace_id, pane_id, surface, study_id)) = requested {
+            self.select_pane(workspace_id, pane_id, cx);
+            surface.update(cx, |surface, surface_cx| {
+                surface.open_study_settings_dialog(study_id, window, surface_cx);
+            });
+        }
+    }
+
     pub(super) fn open_chart_context_menu(
         &mut self,
         menu: ChartContextMenu,

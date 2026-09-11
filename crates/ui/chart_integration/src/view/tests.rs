@@ -1290,6 +1290,26 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
 }
 
 #[test]
+fn platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
+    let mut chart = interactive_chart();
+    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#262626");
+
+    chart.set_theme(ChartTheme::Light);
+    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#f1f1f1");
+
+    let mut custom = chart.appearance_settings();
+    custom.grid_color = "#334155".to_string();
+    assert!(chart.set_appearance_settings(&custom));
+    chart.set_theme(ChartTheme::Dark);
+    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#334155");
+
+    let mut persisted_light_default = chart.appearance_settings();
+    persisted_light_default.grid_color = "#f1f1f1".to_string();
+    assert!(chart.set_appearance_settings(&persisted_light_default));
+    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#262626");
+}
+
+#[test]
 fn legend_values_follow_volume_direction_and_indicator_series_colors() {
     let mut chart = interactive_chart();
     chart
@@ -1669,14 +1689,27 @@ fn study_legend_control_ids_do_not_overflow_or_alias_control_kinds() {
         series_id: u32::MAX,
     };
     let visibility = legend_control_element_id(study, LegendControl::Visibility(true));
+    let settings = legend_control_element_id(study, LegendControl::Settings);
     let remove = legend_control_element_id(study, LegendControl::Remove);
 
     assert_eq!(visibility.1, (1_u64 << 63) | u64::from(u32::MAX));
+    assert_ne!(visibility, settings);
+    assert_ne!(settings, remove);
     assert_ne!(visibility, remove);
     assert_ne!(
         visibility,
         legend_control_element_id(LegendItem::Asset, LegendControl::Visibility(true))
     );
+}
+
+#[test]
+fn study_settings_requests_are_bounded_to_one_latest_study_identity() {
+    let mut chart = NucleusChartView::empty();
+    assert_eq!(chart.take_study_settings_request(), None);
+    chart.pending_study_settings = Some(7);
+    chart.pending_study_settings = Some(9);
+    assert_eq!(chart.take_study_settings_request(), Some(9));
+    assert_eq!(chart.take_study_settings_request(), None);
 }
 
 #[test]

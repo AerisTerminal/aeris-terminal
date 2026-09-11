@@ -891,6 +891,7 @@ impl WorkspaceSurface {
             last_persisted_viewport: None,
             pending_chart_context_menu: None,
             pending_pane_activate: PaneActivationRequest::None,
+            pending_study_settings_request: None,
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
             retained_chart_presentation: RetainedChartPresentation::default(),

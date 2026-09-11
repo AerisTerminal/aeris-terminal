@@ -60,6 +60,17 @@ fn opaque_css(color: ThemeColor, surface: ThemeColor) -> String {
     format!("#{:06x}", color.over(surface).rgb_u32())
 }
 
+fn platform_grid_color(theme: ChartTheme) -> String {
+    let colors = platform_theme(theme).colors;
+    opaque_css(colors.border, colors.surface)
+}
+
+fn is_platform_grid_default(color: &str) -> bool {
+    color.eq_ignore_ascii_case("#363c4e")
+        || color.eq_ignore_ascii_case(&platform_grid_color(ChartTheme::Light))
+        || color.eq_ignore_ascii_case(&platform_grid_color(ChartTheme::Dark))
+}
+
 fn gpui_theme_color(color: ThemeColor) -> Rgba {
     Rgba {
         r: color.red(),
@@ -385,7 +396,7 @@ impl Default for ChartAppearanceSettings {
     fn default() -> Self {
         Self {
             grid_visible: true,
-            grid_color: "#363c4e".to_string(),
+            grid_color: platform_grid_color(ChartTheme::Dark),
             grid_style: 2,
             crosshair_color: "#758696".to_string(),
             crosshair_width: 1,
@@ -753,6 +764,7 @@ struct LegendPalette {
 
 const LEGEND_VIEW_ICON: &str = "axiusflow/icons/ui/view.svg";
 const LEGEND_VIEW_OFF_ICON: &str = "axiusflow/icons/ui/view-off.svg";
+const LEGEND_SETTINGS_ICON: &str = "axiusflow/icons/ui/settings-01.svg";
 const LEGEND_REMOVE_ICON: &str = "axiusflow/icons/ui/cancel-01.svg";
 const LEGEND_LOADING_ICON: &str = "axiusflow/icons/ui/loader.svg";
 /// One rotation of the legend's loading glyph.
@@ -851,6 +863,7 @@ pub struct NucleusChartView {
     cursor_style: CursorStyle,
     pending_context_menu: Option<ChartContextRequest>,
     pending_activate: ActivationRequest,
+    pending_study_settings: Option<u64>,
     instrument_price_precision: u8,
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
@@ -924,6 +937,7 @@ impl NucleusChartView {
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
+            pending_study_settings: None,
             instrument_price_precision: 2,
             instrument_price_scale: 2,
             price_precision_override: None,
@@ -1021,6 +1035,7 @@ impl NucleusChartView {
             cursor_style: CursorStyle::Crosshair,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
+            pending_study_settings: None,
             instrument_price_precision: replay_display_precision(replay),
             instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
@@ -1142,6 +1157,11 @@ impl NucleusChartView {
         let pending = self.pending_activate == ActivationRequest::Pending;
         self.pending_activate = ActivationRequest::None;
         pending
+    }
+
+    /// Takes a pending host request to edit one runtime-managed study.
+    pub fn take_study_settings_request(&mut self) -> Option<u64> {
+        self.pending_study_settings.take()
     }
 
     /// Reads Nucleus-owned Y-axis chrome for the hit-tested price scale.
@@ -1353,9 +1373,21 @@ impl NucleusChartView {
     /// Panics when the platform font options derived from `platform.css` stop
     /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
+        let current_grid_color = self.engine.options.get().grid.vert_lines.color.clone();
+        let grid_tracks_platform_theme = is_platform_grid_default(&current_grid_color);
         self.theme = theme;
         self.engine.set_theme(theme);
         apply_platform_text_contract(&mut self.engine, theme);
+        if !grid_tracks_platform_theme {
+            let patch = serde_json::json!({
+                "grid": {
+                    "vertLines": { "color": current_grid_color },
+                    "horzLines": { "color": current_grid_color },
+                }
+            })
+            .to_string();
+            let _ = self.engine.apply_options(&patch);
+        }
         self.invalidate_series_layout();
     }
 
@@ -1873,8 +1905,12 @@ impl NucleusChartView {
     /// Applies host-authored series/canvas presentation in place. Market data,
     /// viewport state and provider ownership are untouched.
     pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
+        let mut appearance = appearance.clone();
+        if is_platform_grid_default(&appearance.grid_color) {
+            appearance.grid_color = platform_grid_color(self.theme);
+        }
         let current = self.appearance_settings();
-        if current == *appearance {
+        if current == appearance {
             return false;
         }
         let chart_patch = serde_json::json!({
@@ -2514,6 +2550,13 @@ fn chart_legend_row(
         .items_center()
         .gap_1()
         .child(visibility);
+    if matches!(row.item, LegendItem::Study { .. }) {
+        controls = controls.child(
+            legend_control(chart, row.item, LegendControl::Settings, palette)
+                .invisible()
+                .group_hover(group.clone(), gpui::Styled::visible),
+        );
+    }
     if row.item != LegendItem::Asset {
         controls = controls.child(
             legend_control(chart, row.item, LegendControl::Remove, palette)
@@ -2614,6 +2657,7 @@ fn legend_loading_glyph(palette: LegendPalette) -> AnyElement {
 #[derive(Clone, Copy)]
 enum LegendControl {
     Visibility(bool),
+    Settings,
     Remove,
 }
 
@@ -2628,6 +2672,7 @@ fn legend_control(
     let (label, path, color) = match control {
         LegendControl::Visibility(true) => ("Hide", LEGEND_VIEW_ICON, palette.text),
         LegendControl::Visibility(false) => ("Show", LEGEND_VIEW_OFF_ICON, palette.muted),
+        LegendControl::Settings => ("Settings", LEGEND_SETTINGS_ICON, palette.text),
         LegendControl::Remove => ("Remove", LEGEND_REMOVE_ICON, palette.danger),
     };
     div()
@@ -2646,6 +2691,13 @@ fn legend_control(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
             action_chart.update(cx, |chart, chart_cx| {
+                if matches!(control, LegendControl::Settings) {
+                    if let LegendItem::Study { study_id, .. } = item {
+                        chart.pending_study_settings = Some(study_id);
+                        chart_cx.notify();
+                    }
+                    return;
+                }
                 let changed = if remove {
                     chart.remove_legend_indicator(item)
                 } else {
@@ -2666,6 +2718,7 @@ fn legend_control(
 fn legend_control_element_id(item: LegendItem, control: LegendControl) -> (&'static str, u64) {
     let namespace = match control {
         LegendControl::Visibility(_) => "chart_legend_visibility_control",
+        LegendControl::Settings => "chart_legend_settings_control",
         LegendControl::Remove => "chart_legend_remove_control",
     };
     (namespace, item.key())

@@ -590,6 +590,7 @@ struct WorkspaceSurface {
     last_persisted_viewport: Option<(i64, i64)>,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
+    pending_study_settings_request: Option<StudyInstanceId>,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
     retained_chart_presentation: RetainedChartPresentation,
@@ -926,10 +927,11 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                 app.chart_persistence_dirty = true;
                 cx.notify();
             }
-            let (activate, request) = chart.update(cx, |chart, _| {
+            let (activate, request, study_settings_request) = chart.update(cx, |chart, _| {
                 (
                     chart.take_activate_request(),
                     chart.take_context_menu_request(),
+                    chart.take_study_settings_request(),
                 )
             });
             let alert_request = chart
@@ -944,10 +946,14 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
             if let Some(request) = request {
                 app.pending_chart_context_menu = Some(request);
             }
+            let had_study_settings_request = study_settings_request.is_some();
+            if let Some(study_id) = study_settings_request.and_then(StudyInstanceId::try_from_u64) {
+                app.pending_study_settings_request = Some(study_id);
+            }
             if let Some(request) = alert_request {
                 app.open_price_alert_dialog(request);
             }
-            if activate || had_menu || had_alert_request {
+            if activate || had_menu || had_alert_request || had_study_settings_request {
                 cx.notify();
             }
             if chart.read(cx).has_market_data() {

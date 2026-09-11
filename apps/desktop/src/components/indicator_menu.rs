@@ -49,57 +49,6 @@ pub(super) struct IndicatorDialogState<'a> {
     pub(super) scroll: &'a ScrollHandle,
 }
 
-fn active_study_rows(
-    app: &Entity<WorkspaceSurface>,
-    theme: &AxiusflowTheme,
-    cx: &App,
-) -> Vec<AnyElement> {
-    let active = {
-        let surface = app.read(cx);
-        surface
-            .studies
-            .active
-            .iter()
-            .filter(|study| !surface.studies.removing.contains(&study.study_id))
-            .map(|study| {
-                (
-                    study.study_id,
-                    workspace_surface::study_display_name(&study.persisted.identifier),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    let colors = theme.colors;
-    active
-        .into_iter()
-        .enumerate()
-        .map(|(index, (study_id, label))| {
-            let settings_app = app.clone();
-            MenuRow::search_result(("active_study_row", index), label, theme)
-                .trailing(button_activation(
-                    Button::new(("study_settings", index))
-                        .icon(header_icon(HugeIcon::Settings01).with_size(px(14.0)))
-                        .theme(theme)
-                        .resting_fill(colors.surface)
-                        .w(px(24.0))
-                        .h(px(24.0))
-                        .compact()
-                        .border_1()
-                        .border_color(gpui_color(colors.border))
-                        .cursor_pointer()
-                        .tab_stop(false),
-                    true,
-                    move |window, cx| {
-                        settings_app.update(cx, |surface, surface_cx| {
-                            surface.open_study_settings_dialog(study_id, window, surface_cx);
-                        });
-                    },
-                ))
-                .into_any_element()
-        })
-        .collect()
-}
-
 fn available_indicator_rows(
     app: &Entity<WorkspaceSurface>,
     specs: &[&chart_chrome::IndicatorSpec],
@@ -162,13 +111,7 @@ pub(super) fn indicator_dialog_content(
         || format!("{} native", indicator_specs.len()),
         str::to_string,
     );
-    let active_rows = active_study_rows(app, theme, cx);
     let mut list = chrome_menu_scroll_body();
-    if !active_rows.is_empty() {
-        list = list
-            .child(chrome_menu_group_heading("On chart", &colors))
-            .children(active_rows);
-    }
     if indicator_specs.is_empty() {
         list = list.child(chrome_menu_empty(
             "No matching indicators",
