@@ -670,10 +670,9 @@ mod tests {
         let css = include_str!("../platform.css");
         for required in [
             "--font-sans: \"DM Sans\", sans-serif;",
-            "DMSans-Variable.ttf",
-            "font-weight: 100 1000;",
-            "font-synthesis: none;",
+            "DMSans-Regular.ttf",
             "font-weight: 400;",
+            "font-synthesis: none;",
             "outline: 2px solid var(--ring);",
             "outline-offset: 2px;",
             "transition: background-color 150ms ease, color 150ms ease;",

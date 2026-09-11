@@ -2396,7 +2396,7 @@ fn run_onboarding() {
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                    "../../../crates/ui/design_system/assets/fonts/DMSans-Variable.ttf"
+                    "../../../crates/ui/design_system/assets/fonts/DMSans-Regular.ttf"
                 ))])
                 .expect("the bundled DM Sans fonts are valid");
             let options = desktop_window_options(0, cx);
@@ -2430,7 +2430,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                    "../../../crates/ui/design_system/assets/fonts/DMSans-Variable.ttf"
+                    "../../../crates/ui/design_system/assets/fonts/DMSans-Regular.ttf"
                 ))])
                 .expect("the bundled DM Sans fonts are valid");
             mount_desktop(configured, lifecycle, None, cx);

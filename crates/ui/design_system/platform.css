@@ -1,8 +1,8 @@
 @font-face {
   font-family: "DM Sans";
-  src: url("./assets/fonts/DMSans-Variable.ttf") format("truetype");
+  src: url("./assets/fonts/DMSans-Regular.ttf") format("truetype");
   font-style: normal;
-  font-weight: 100 1000;
+  font-weight: 400;
   font-display: swap;
 }
 
