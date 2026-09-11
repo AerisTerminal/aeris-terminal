@@ -136,7 +136,7 @@ const fn chart_study_scale(scale: StudyScaleTarget) -> ChartStudyScaleTarget {
 const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
     matches!(
         indicator,
-        ChartIndicator::Sma | ChartIndicator::Wma | ChartIndicator::Bollinger
+        ChartIndicator::Sma | ChartIndicator::Ema | ChartIndicator::Wma | ChartIndicator::Bollinger
     )
 }
 
@@ -250,6 +250,166 @@ fn runtime_study_setting_value(
             StudySettingValue::Choice(value.clone())
         }
     })
+}
+
+fn persisted_study_setting_value(
+    value: &StudySettingValue,
+) -> workspace_study_setting_state::Value {
+    match value {
+        StudySettingValue::Boolean(value) => workspace_study_setting_state::Value::Boolean(*value),
+        StudySettingValue::Integer(value) => workspace_study_setting_state::Value::Integer(*value),
+        StudySettingValue::Decimal(value) => {
+            workspace_study_setting_state::Value::Decimal(WorkspaceStudyDecimalState {
+                mantissa: value.mantissa,
+                scale: u32::from(value.scale),
+            })
+        }
+        StudySettingValue::Text(value) => workspace_study_setting_state::Value::Text(value.clone()),
+        StudySettingValue::Choice(value) => {
+            workspace_study_setting_state::Value::Choice(value.clone())
+        }
+    }
+}
+
+pub(super) fn study_decimal_text(value: StudyDecimal) -> String {
+    let scale = usize::from(value.scale);
+    if scale == 0 {
+        return value.mantissa.to_string();
+    }
+    let negative = value.mantissa < 0;
+    let magnitude = i128::from(value.mantissa).abs();
+    let factor = 10_i128.pow(u32::from(value.scale));
+    let whole = magnitude / factor;
+    let fraction = magnitude % factor;
+    format!(
+        "{}{whole}.{fraction:0width$}",
+        if negative { "-" } else { "" },
+        width = scale
+    )
+}
+
+fn parse_study_decimal(text: &str) -> Result<StudyDecimal, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("decimal setting cannot be empty".to_string());
+    }
+    let (negative, unsigned) = text
+        .strip_prefix('-')
+        .map_or((false, text), |value| (true, value));
+    let unsigned = unsigned.strip_prefix('+').unwrap_or(unsigned);
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || (whole.is_empty() && fraction.is_empty())
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len()
+            > usize::from(axiusflow_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE)
+    {
+        return Err("decimal setting is invalid".to_string());
+    }
+    let whole = if whole.is_empty() { "0" } else { whole };
+    let scale = u8::try_from(fraction.len()).map_err(|_| "decimal scale is invalid".to_string())?;
+    let factor = 10_i128.pow(u32::from(scale));
+    let whole = whole
+        .parse::<i128>()
+        .map_err(|_| "decimal setting is out of range".to_string())?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<i128>()
+            .map_err(|_| "decimal setting is out of range".to_string())?
+    };
+    let magnitude = whole
+        .checked_mul(factor)
+        .and_then(|value| value.checked_add(fraction))
+        .ok_or_else(|| "decimal setting is out of range".to_string())?;
+    let signed = if negative { -magnitude } else { magnitude };
+    let mantissa =
+        i64::try_from(signed).map_err(|_| "decimal setting is out of range".to_string())?;
+    Ok(StudyDecimal { mantissa, scale })
+}
+
+fn study_setting_input_text(value: &StudySettingValue) -> Option<String> {
+    match value {
+        StudySettingValue::Integer(value) => Some(value.to_string()),
+        StudySettingValue::Decimal(value) => Some(study_decimal_text(*value)),
+        StudySettingValue::Text(value) => Some(value.clone()),
+        StudySettingValue::Boolean(_) | StudySettingValue::Choice(_) => None,
+    }
+}
+
+fn study_setting_value_from_dialog(
+    dialog: &StudySettingsDialogState,
+    spec: &StudySettingSpec,
+    cx: &App,
+) -> Result<StudySettingValue, String> {
+    match &spec.presentation.control {
+        StudySettingControl::Boolean | StudySettingControl::Choice { .. } => dialog
+            .draft_values
+            .get(&spec.identifier)
+            .cloned()
+            .ok_or_else(|| format!("{} has no value", spec.presentation.label)),
+        StudySettingControl::Integer { .. } => {
+            let input = dialog
+                .inputs
+                .get(&spec.identifier)
+                .ok_or_else(|| format!("{} editor is unavailable", spec.presentation.label))?;
+            input
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<i64>()
+                .map(StudySettingValue::Integer)
+                .map_err(|_| format!("{} must be a whole number", spec.presentation.label))
+        }
+        StudySettingControl::Decimal { .. } => {
+            let input = dialog
+                .inputs
+                .get(&spec.identifier)
+                .ok_or_else(|| format!("{} editor is unavailable", spec.presentation.label))?;
+            parse_study_decimal(input.read(cx).value().as_ref())
+                .map(StudySettingValue::Decimal)
+                .map_err(|error| format!("{}: {error}", spec.presentation.label))
+        }
+        StudySettingControl::Text => {
+            let input = dialog
+                .inputs
+                .get(&spec.identifier)
+                .ok_or_else(|| format!("{} editor is unavailable", spec.presentation.label))?;
+            Ok(StudySettingValue::Text(input.read(cx).value().to_string()))
+        }
+    }
+}
+
+pub(super) fn study_setting_condition_matches(
+    dialog: &StudySettingsDialogState,
+    condition: Option<&StudySettingCondition>,
+    cx: &App,
+) -> bool {
+    let Some(condition) = condition else {
+        return true;
+    };
+    let Some(spec) = dialog
+        .specs
+        .iter()
+        .find(|spec| spec.identifier == condition.setting_identifier)
+    else {
+        return false;
+    };
+    study_setting_value_from_dialog(dialog, spec, cx).is_ok_and(|value| value == condition.equals)
+}
+
+pub(super) fn study_display_name(identifier: &str) -> String {
+    match identifier {
+        axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER => "Simple Moving Average".to_string(),
+        axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER => "Exponential Moving Average".to_string(),
+        axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
+        axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
+        _ => identifier.to_string(),
+    }
 }
 
 fn runtime_study_streams(streams: &[i32]) -> Result<StreamRequirements, String> {
@@ -383,6 +543,17 @@ fn legacy_runtime_study(
                 )),
             }],
             vec![axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string()],
+        ),
+        ChartIndicator::Ema => (
+            axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_EMA_IMPLEMENTATION_REVISION,
+            vec![WorkspaceStudySettingState {
+                identifier: axiusflow_study_sdk::BUILTIN_EMA_PERIOD_SETTING.to_string(),
+                value: Some(workspace_study_setting_state::Value::Integer(
+                    axiusflow_study_sdk::BUILTIN_EMA_DEFAULT_PERIOD,
+                )),
+            }],
+            vec![axiusflow_study_sdk::BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Wma => (
             axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER,
@@ -693,6 +864,7 @@ impl WorkspaceSurface {
             timeframe_input,
             indicator_message: None,
             studies,
+            study_settings_dialog: None,
             chrome_overlay: None,
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
@@ -1769,6 +1941,11 @@ impl WorkspaceSurface {
             } => self.apply_study_registration_failed(request_sequence, message, cx),
             MarketWorkerMessage::StudyReinitializationFailed { study_id, message } => {
                 self.studies.reinitializing.remove(&study_id);
+                if let Some(dialog) = &mut self.study_settings_dialog
+                    && dialog.study_id == study_id
+                {
+                    dialog.message = Some(message.clone());
+                }
                 self.indicator_message = Some(message);
                 cx.notify();
             }
@@ -1886,7 +2063,13 @@ impl WorkspaceSurface {
             .try_reinitialize_study(study_id, registration)
         {
             Ok(()) => {
-                self.studies.reinitializing.insert(study_id, series);
+                self.studies.reinitializing.insert(
+                    study_id,
+                    PendingStudyReinitialization {
+                        series,
+                        replacement_persisted: None,
+                    },
+                );
                 Ok(())
             }
             Err(TrySendError::Full(_)) => {
@@ -1995,7 +2178,7 @@ impl WorkspaceSurface {
     }
 
     fn apply_study_reinitialized(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
-        let Some(series) = self.studies.reinitializing.get(&study_id).cloned() else {
+        let Some(pending) = self.studies.reinitializing.get(&study_id).cloned() else {
             return;
         };
         if let Some(state) = self
@@ -2004,7 +2187,18 @@ impl WorkspaceSurface {
             .iter_mut()
             .find(|state| state.study_id == study_id)
         {
-            state.resolved_chart_series = Some(series);
+            state.resolved_chart_series = Some(pending.series);
+            if let Some(replacement) = pending.replacement_persisted {
+                state.persisted = replacement;
+                self.chart_persistence_dirty = true;
+            }
+        }
+        if self
+            .study_settings_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.study_id == study_id)
+        {
+            self.study_settings_dialog = None;
         }
         self.indicator_message = None;
         cx.notify();
@@ -3017,6 +3211,246 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn open_study_settings_dialog(
+        &mut self,
+        study_id: StudyInstanceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.studies.removing.contains(&study_id)
+            || self.studies.reinitializing.contains_key(&study_id)
+        {
+            self.indicator_message = Some("Study settings are busy; try again".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(active) = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == study_id)
+            .cloned()
+        else {
+            self.indicator_message = Some("Study is no longer active".to_string());
+            cx.notify();
+            return;
+        };
+        let series = match self.current_runtime_series() {
+            Ok(series) => series,
+            Err(message) => {
+                self.indicator_message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let registration =
+            match runtime_study_registration(&active.persisted, &series, &self.studies.active) {
+                Ok(registration) => registration,
+                Err(message) => {
+                    self.indicator_message = Some(message);
+                    cx.notify();
+                    return;
+                }
+            };
+        let mut draft_values = BTreeMap::new();
+        let mut inputs = HashMap::new();
+        let mut subscriptions = Vec::new();
+        let surface = cx.entity();
+        for spec in &registration.definition.settings {
+            let Some(value) = registration.settings.get(&spec.identifier).cloned() else {
+                self.indicator_message = Some("Study settings are incomplete".to_string());
+                cx.notify();
+                return;
+            };
+            if let Some(text) = study_setting_input_text(&value) {
+                let input = cx.new(|input_cx| InputState::new(window, input_cx));
+                input.update(cx, |input, input_cx| {
+                    input.set_value(text, window, input_cx);
+                });
+                let notify_surface = surface.clone();
+                subscriptions.push(window.subscribe(
+                    &input,
+                    cx,
+                    move |_, event: &InputEvent, _, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            notify_surface.update(cx, |_, surface_cx| surface_cx.notify());
+                        }
+                    },
+                ));
+                inputs.insert(spec.identifier.clone(), input);
+            }
+            draft_values.insert(spec.identifier.clone(), value);
+        }
+        self.study_settings_dialog = Some(StudySettingsDialogState {
+            study_id,
+            title: study_display_name(&active.persisted.identifier),
+            specs: registration.definition.settings,
+            draft_values,
+            inputs,
+            _subscriptions: subscriptions,
+            message: None,
+        });
+        self.indicator_message = None;
+        self.chrome_overlay = None;
+        self.timeframe_menu_flyout = None;
+        self.chrome_selection = 0;
+        cx.notify();
+    }
+
+    pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.study_settings_dialog.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_study_setting_boolean(
+        &mut self,
+        identifier: &str,
+        value: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.study_settings_dialog {
+            dialog
+                .draft_values
+                .insert(identifier.to_string(), StudySettingValue::Boolean(value));
+            dialog.message = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn select_study_setting_choice(
+        &mut self,
+        identifier: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.study_settings_dialog {
+            dialog.draft_values.insert(
+                identifier.to_string(),
+                StudySettingValue::Choice(value.to_string()),
+            );
+            dialog.message = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn reset_study_settings_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = &mut self.study_settings_dialog else {
+            return;
+        };
+        for spec in &dialog.specs {
+            let value = spec.default.clone();
+            if let Some(text) = study_setting_input_text(&value)
+                && let Some(input) = dialog.inputs.get(&spec.identifier)
+            {
+                input.update(cx, |input, input_cx| {
+                    input.set_value(text, window, input_cx);
+                });
+            }
+            dialog.draft_values.insert(spec.identifier.clone(), value);
+        }
+        dialog.message = None;
+        cx.notify();
+    }
+
+    pub(super) fn save_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.study_settings_dialog.as_ref() else {
+            return;
+        };
+        let study_id = dialog.study_id;
+        if self.studies.reinitializing.contains_key(&study_id) {
+            return;
+        }
+        let mut values = Vec::with_capacity(dialog.specs.len());
+        for spec in &dialog.specs {
+            let value = match study_setting_value_from_dialog(dialog, spec, cx) {
+                Ok(value) => value,
+                Err(message) => {
+                    if let Some(dialog) = &mut self.study_settings_dialog {
+                        dialog.message = Some(message);
+                    }
+                    cx.notify();
+                    return;
+                }
+            };
+            values.push((spec.identifier.clone(), value));
+        }
+        let Some(active) = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == study_id)
+            .cloned()
+        else {
+            if let Some(dialog) = &mut self.study_settings_dialog {
+                dialog.message = Some("Study is no longer active".to_string());
+            }
+            cx.notify();
+            return;
+        };
+        let mut replacement = active.persisted;
+        replacement.settings = values
+            .iter()
+            .map(|(identifier, value)| WorkspaceStudySettingState {
+                identifier: identifier.clone(),
+                value: Some(persisted_study_setting_value(value)),
+            })
+            .collect();
+        let series = match self.current_runtime_series() {
+            Ok(series) => series,
+            Err(message) => {
+                if let Some(dialog) = &mut self.study_settings_dialog {
+                    dialog.message = Some(message);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let registration =
+            match runtime_study_registration(&replacement, &series, &self.studies.active) {
+                Ok(registration) => registration,
+                Err(message) => {
+                    if let Some(dialog) = &mut self.study_settings_dialog {
+                        dialog.message = Some(message);
+                    }
+                    cx.notify();
+                    return;
+                }
+            };
+        match self
+            .market_worker
+            .try_reinitialize_study(study_id, registration)
+        {
+            Ok(()) => {
+                self.studies.reinitializing.insert(
+                    study_id,
+                    PendingStudyReinitialization {
+                        series,
+                        replacement_persisted: Some(replacement),
+                    },
+                );
+                if let Some(dialog) = &mut self.study_settings_dialog {
+                    dialog.message = None;
+                }
+            }
+            Err(TrySendError::Full(_)) => {
+                if let Some(dialog) = &mut self.study_settings_dialog {
+                    dialog.message = Some("Study settings queue is busy; try again".to_string());
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                if let Some(dialog) = &mut self.study_settings_dialog {
+                    dialog.message = Some("Study runtime is unavailable".to_string());
+                }
+            }
+        }
+        cx.notify();
+    }
+
     pub(super) fn clear_indicators(&mut self, cx: &mut Context<Self>) {
         let mut runtime_removal_queued = false;
         let study_ids = self
@@ -3158,12 +3592,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn persisted_bounded_window_indicators_are_restored_by_the_runtime_owner_only() {
+    fn study_decimal_editor_round_trips_exact_fixed_point_values() {
+        for value in [
+            StudyDecimal {
+                mantissa: 25,
+                scale: 1,
+            },
+            StudyDecimal {
+                mantissa: -125,
+                scale: 2,
+            },
+            StudyDecimal {
+                mantissa: 42,
+                scale: 0,
+            },
+        ] {
+            let text = study_decimal_text(value);
+            assert_eq!(parse_study_decimal(&text).expect("decimal parses"), value);
+        }
+        assert!(parse_study_decimal("1.2.3").is_err());
+    }
+
+    #[test]
+    fn failed_study_setting_reinitialization_preserves_durable_configuration() {
+        let study_id = StudyInstanceId::try_from_u64(1).expect("study id");
+        let original = legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study");
+        let mut replacement = original.clone();
+        replacement.settings = vec![WorkspaceStudySettingState {
+            identifier: axiusflow_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
+            value: Some(workspace_study_setting_state::Value::Integer(42)),
+        }];
+        let series = BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+            entitlement_id: "test".to_string(),
+            period: axiusflow_market_data::BarPeriod::time(60).expect("minute series"),
+            definition_version: 1,
+        };
+        let mut studies = RuntimeStudiesState {
+            active: vec![RuntimeStudyState {
+                study_id,
+                persisted: original.clone(),
+                resolved_chart_series: Some(series.clone()),
+            }],
+            ..RuntimeStudiesState::default()
+        };
+        studies.reinitializing.insert(
+            study_id,
+            PendingStudyReinitialization {
+                series,
+                replacement_persisted: Some(replacement),
+            },
+        );
+
+        // Runtime failure retires only the pending candidate. The active
+        // durable configuration is not replaced until success is acknowledged.
+        studies.reinitializing.remove(&study_id);
+        assert_eq!(studies.active[0].persisted, original);
+    }
+
+    #[test]
+    fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only() {
         let state = WorkspaceChartState {
             indicators: vec![
                 WorkspaceChartIndicatorState {
                     kind: "sma".to_string(),
                     visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "ema".to_string(),
+                    visible: true,
                 },
                 WorkspaceChartIndicatorState {
                     kind: "wma".to_string(),
@@ -3181,7 +3679,7 @@ mod tests {
             ..WorkspaceChartState::default()
         };
         let restored = persisted_runtime_studies(Some(&state));
-        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.len(), 4);
         assert_eq!(
             restored[0].persisted.identifier,
             axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER
@@ -3189,16 +3687,21 @@ mod tests {
         assert!(!restored[0].persisted.visible);
         assert_eq!(
             restored[1].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER
+            axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER
         );
         assert!(restored[1].persisted.visible);
         assert_eq!(
             restored[2].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER
+        );
+        assert!(restored[2].persisted.visible);
+        assert_eq!(
+            restored[3].persisted.identifier,
             axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
         );
-        assert!(!restored[2].persisted.visible);
+        assert!(!restored[3].persisted.visible);
         assert_eq!(
-            restored[2].persisted.output_identifiers,
+            restored[3].persisted.output_identifiers,
             vec![
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
@@ -3233,8 +3736,9 @@ mod tests {
     }
 
     #[test]
-    fn bounded_window_picker_indicators_are_runtime_managed() {
+    fn migrated_picker_indicators_are_runtime_managed() {
         assert!(runtime_managed_indicator(ChartIndicator::Sma));
+        assert!(runtime_managed_indicator(ChartIndicator::Ema));
         assert!(runtime_managed_indicator(ChartIndicator::Wma));
         assert!(runtime_managed_indicator(ChartIndicator::Bollinger));
         assert!(!runtime_managed_indicator(ChartIndicator::Rsi));
@@ -3245,6 +3749,10 @@ mod tests {
         let persisted = persisted_legacy_indicator_states([
             ChartIndicatorState {
                 indicator: ChartIndicator::Sma,
+                visible: true,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Ema,
                 visible: true,
             },
             ChartIndicatorState {

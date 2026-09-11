@@ -229,6 +229,10 @@ pub(super) fn workspace_pane_element(
             theme,
         )
     });
+    let study_settings_dialog = surface
+        .study_settings_dialog
+        .as_ref()
+        .map(|dialog| study_settings_dialog_layer(&pane.surface, dialog, theme, cx));
     let workspace_id = workspace.id;
     let pane_focus = pane.focus.clone();
     let select_terminal = terminal.clone();
@@ -265,6 +269,7 @@ pub(super) fn workspace_pane_element(
         })
         .child(content)
         .children(price_alert_dialog)
+        .children(study_settings_dialog)
         .into_any_element()
 }
 

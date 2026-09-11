@@ -80,11 +80,11 @@ The foundation is substantially implemented. The remaining work is no longer "cr
 
 ## What is still left
 
-### 1. First-class study settings schema and desktop editor
+### Completed: first-class study settings schema and desktop editor
 
-The existing typed setting values are sufficient for persistence and calculation, but the declaration is still too small for a generic production UI. The SDK needs presentation metadata without exposing formula internals.
+The settings contract now carries presentation metadata without exposing formula internals, and the desktop owns one generic transactional editor over the same durable/runtime study identity.
 
-Required additions:
+Completed additions:
 
 - Human-readable label/title per setting.
 - Optional description/help text.
@@ -99,7 +99,9 @@ Required additions:
 
 ### 2. Recursive EMA without O(history) conversion
 
-EMA is intentionally not migrated yet because the pinned Nucleus incremental API currently requires contiguous `f64` input for rebuilds, while Axius canonical bars are fixed-point and study-output dependencies carry `Option<f64>` hard gaps.
+The recursive EMA implementation is complete across the local sibling Nucleus and Axiusflow trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Axiusflow wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
+
+The production dependency is pinned to Nucleus `feb6b0c45d448d978c1ef2a32502b2de87610722`, which contains the reviewed indexed optional-sample EMA state and copy-on-write sparse checkpoints used by Axiusflow.
 
 Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Axius.
 
@@ -204,18 +206,18 @@ Before third-party native studies are treated as a supported product surface:
 - [x] Per-instance transactional native state.
 - [x] Canonical bar inputs.
 - [x] Borrowed quote/trade/depth inputs.
-- [ ] Add setting labels, descriptions, groups, options, constraints, and conditional presentation metadata.
-- [ ] Add generic desktop study-settings editor and transactional durable/runtime reinitialization.
-- [ ] Add reset-to-default and validation/error UX.
+- [x] Add setting labels, descriptions, groups, options, constraints, and conditional presentation metadata.
+- [x] Add generic desktop study-settings editor and transactional durable/runtime reinitialization.
+- [x] Add reset-to-default and validation/error UX.
 
 ### Phase B — recursive indicator proof
 
-- [ ] Land/review the narrow indexed optional-sample EMA API in Nucleus.
-- [ ] Wrap Nucleus incremental EMA state in Axius-owned `NativeStudyState`.
-- [ ] Prove market-backed fixed-point EMA without O(history) conversion.
-- [ ] Prove output-backed EMA with `Option<f64>` hard gaps.
-- [ ] Add live append, same-tail revision, historical repair, rollback, and memory-bound tests.
-- [ ] Migrate built-in EMA through the same SDK registration surface.
+- [x] Land/review the narrow indexed optional-sample EMA API in Nucleus.
+- [x] Wrap Nucleus incremental EMA state in Axius-owned `NativeStudyState`.
+- [x] Prove market-backed fixed-point EMA without O(history) conversion.
+- [x] Prove output-backed EMA with `Option<f64>` hard gaps.
+- [x] Add live append, same-tail revision, historical repair, rollback, and memory-bound tests.
+- [x] Migrate built-in EMA through the same SDK registration surface.
 
 ### Phase C — production indicator library
 
@@ -256,9 +258,9 @@ Before third-party native studies are treated as a supported product surface:
 
 ## Current checkpoint
 
-The runtime foundation and first built-ins are functional and verified. The immediate next architecture milestones are:
+The runtime foundation, generic settings declaration/editor contract, and recursive EMA proof are implemented and verified across both repositories at the pinned Nucleus revision. Nucleus retains the formula/checkpoint ownership; Axiusflow retains durable/runtime orchestration and performs no O(history) conversion on live EMA updates.
 
-1. Finish the generic settings declaration/editor contract.
-2. Obtain the narrow Nucleus indexed optional-sample recursive EMA API.
-3. Use EMA as the proof that stateful recursive indicators stay incremental, transactional, gap-correct, and single-formula-source.
-4. Expand the built-in library and richer study types only after those foundations stay green.
+The immediate next architecture milestones are:
+
+1. Begin Phase C indicator prioritization from the now-green pinned recursive-indicator boundary.
+2. Keep new built-ins on the shared formula/runtime surface rather than introducing alternate calculation paths.

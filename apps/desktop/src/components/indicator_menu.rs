@@ -49,6 +49,106 @@ pub(super) struct IndicatorDialogState<'a> {
     pub(super) scroll: &'a ScrollHandle,
 }
 
+fn active_study_rows(
+    app: &Entity<WorkspaceSurface>,
+    theme: &AxiusflowTheme,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let active = {
+        let surface = app.read(cx);
+        surface
+            .studies
+            .active
+            .iter()
+            .filter(|study| !surface.studies.removing.contains(&study.study_id))
+            .map(|study| {
+                (
+                    study.study_id,
+                    workspace_surface::study_display_name(&study.persisted.identifier),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let colors = theme.colors;
+    active
+        .into_iter()
+        .enumerate()
+        .map(|(index, (study_id, label))| {
+            let settings_app = app.clone();
+            MenuRow::search_result(("active_study_row", index), label, theme)
+                .trailing(button_activation(
+                    Button::new(("study_settings", index))
+                        .icon(header_icon(HugeIcon::Settings01).with_size(px(14.0)))
+                        .theme(theme)
+                        .resting_fill(colors.surface)
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .compact()
+                        .border_1()
+                        .border_color(gpui_color(colors.border))
+                        .cursor_pointer()
+                        .tab_stop(false),
+                    true,
+                    move |window, cx| {
+                        settings_app.update(cx, |surface, surface_cx| {
+                            surface.open_study_settings_dialog(study_id, window, surface_cx);
+                        });
+                    },
+                ))
+                .into_any_element()
+        })
+        .collect()
+}
+
+fn available_indicator_rows(
+    app: &Entity<WorkspaceSurface>,
+    specs: &[&chart_chrome::IndicatorSpec],
+    keyboard_selection: usize,
+    theme: &AxiusflowTheme,
+) -> Vec<AnyElement> {
+    let colors = theme.colors;
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let row_app = app.clone();
+            let add_app = app.clone();
+            let indicator = native_indicator(spec.kind);
+            MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
+                .highlighted(keyboard_selection == index)
+                .on_click(move |_, window, cx| {
+                    if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                        row_app.update(cx, |app, app_cx| {
+                            app.close_chrome_overlay(window, app_cx);
+                        });
+                    }
+                })
+                .trailing(button_activation(
+                    Button::new(("add_indicator", index))
+                        .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
+                        .theme(theme)
+                        .resting_fill(colors.surface)
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .compact()
+                        .border_1()
+                        .border_color(gpui_color(colors.border))
+                        .cursor_pointer()
+                        .tab_stop(false),
+                    true,
+                    move |window, cx| {
+                        if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                            add_app.update(cx, |app, app_cx| {
+                                app.close_chrome_overlay(window, app_cx);
+                            });
+                        }
+                    },
+                ))
+                .into_any_element()
+        })
+        .collect()
+}
+
 pub(super) fn indicator_dialog_content(
     app: &Entity<WorkspaceSurface>,
     state: IndicatorDialogState<'_>,
@@ -58,62 +158,33 @@ pub(super) fn indicator_dialog_content(
     let colors = theme.colors;
     let indicator_specs =
         chart_chrome::filter_indicator_specs(state.input.read(cx).value().as_ref());
-    let result_count = indicator_specs.len();
-    let hint = state
-        .message
-        .map_or_else(|| format!("{result_count} native"), str::to_string);
-    let list = if indicator_specs.is_empty() {
-        chrome_menu_scroll_body().child(chrome_menu_empty(
+    let hint = state.message.map_or_else(
+        || format!("{} native", indicator_specs.len()),
+        str::to_string,
+    );
+    let active_rows = active_study_rows(app, theme, cx);
+    let mut list = chrome_menu_scroll_body();
+    if !active_rows.is_empty() {
+        list = list
+            .child(chrome_menu_group_heading("On chart", &colors))
+            .children(active_rows);
+    }
+    if indicator_specs.is_empty() {
+        list = list.child(chrome_menu_empty(
             "No matching indicators",
             "Try “average”, “bands”, or a kind like SMA.",
             &colors,
-        ))
+        ));
     } else {
-        chrome_menu_scroll_body()
+        list = list
             .child(chrome_menu_group_heading("Indicators", &colors))
-            .children(
-                indicator_specs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, spec)| {
-                        let row_app = app.clone();
-                        let add_app = app.clone();
-                        let indicator = native_indicator(spec.kind);
-                        MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
-                            .highlighted(state.keyboard_selection == index)
-                            .on_click(move |_, window, cx| {
-                                if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                                    row_app.update(cx, |app, app_cx| {
-                                        app.close_chrome_overlay(window, app_cx);
-                                    });
-                                }
-                            })
-                            .trailing(button_activation(
-                                Button::new(("add_indicator", index))
-                                    .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
-                                    .theme(theme)
-                                    .resting_fill(colors.surface)
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .compact()
-                                    .border_1()
-                                    .border_color(gpui_color(colors.border))
-                                    .cursor_pointer()
-                                    .tab_stop(false),
-                                true,
-                                move |window, cx| {
-                                    if add_app
-                                        .update(cx, |app, cx| app.add_indicator(indicator, cx))
-                                    {
-                                        add_app.update(cx, |app, app_cx| {
-                                            app.close_chrome_overlay(window, app_cx);
-                                        });
-                                    }
-                                },
-                            ))
-                    }),
-            )
-    };
+            .children(available_indicator_rows(
+                app,
+                &indicator_specs,
+                state.keyboard_selection,
+                theme,
+            ));
+    }
     chrome_menu_surface(&colors, state.extent)
         .child(chrome_menu_search_header(
             state.input,

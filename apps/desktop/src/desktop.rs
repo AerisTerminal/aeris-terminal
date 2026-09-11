@@ -35,6 +35,8 @@ mod price_alert_dialog;
 mod readiness_conformance;
 #[path = "rithmic_shell.rs"]
 mod rithmic_shell;
+#[path = "components/study_settings_dialog.rs"]
+mod study_settings_dialog;
 #[path = "components/symbol_menu.rs"]
 mod symbol_menu;
 #[path = "components/terminal_chrome.rs"]
@@ -82,7 +84,8 @@ use axiusflow_market_data::{BarSeriesKey, ChartAggregation, ChartInterval};
 use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
 use axiusflow_market_runtime::study::{
     NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
-    StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettingValue,
+    StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettingCondition, StudySettingControl,
+    StudySettingSpec, StudySettingValue,
 };
 use axiusflow_market_runtime::{
     MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,
@@ -149,7 +152,7 @@ use reqwest_client::ReqwestClient;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     pin::Pin,
     rc::Rc,
     sync::{
@@ -160,6 +163,7 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
     time::Duration,
 };
+use study_settings_dialog::study_settings_dialog_layer;
 use symbol_menu::{
     InstrumentSelectorAvailability, InstrumentSelectorMenu, InstrumentSelectorState,
     instrument_dialog_content, instrument_selector,
@@ -558,6 +562,7 @@ struct WorkspaceSurface {
     timeframe_input: Entity<InputState>,
     indicator_message: Option<String>,
     studies: RuntimeStudiesState,
+    study_settings_dialog: Option<StudySettingsDialogState>,
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
@@ -626,10 +631,26 @@ struct PendingRuntimeStudyState {
     blocked: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingStudyReinitialization {
+    series: BarSeriesKey,
+    replacement_persisted: Option<WorkspaceChartStudyState>,
+}
+
+struct StudySettingsDialogState {
+    study_id: StudyInstanceId,
+    title: String,
+    specs: Vec<StudySettingSpec>,
+    draft_values: BTreeMap<String, StudySettingValue>,
+    inputs: HashMap<String, Entity<InputState>>,
+    _subscriptions: Vec<gpui::Subscription>,
+    message: Option<String>,
+}
+
 struct RuntimeStudiesState {
     active: Vec<RuntimeStudyState>,
     pending: HashMap<u64, PendingRuntimeStudyState>,
-    reinitializing: HashMap<StudyInstanceId, BarSeriesKey>,
+    reinitializing: HashMap<StudyInstanceId, PendingStudyReinitialization>,
     removing: HashSet<StudyInstanceId>,
     deferred: Vec<PendingRuntimeStudyState>,
     next_local_id: u64,

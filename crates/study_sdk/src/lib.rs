@@ -16,7 +16,9 @@ pub use axiusflow_market_runtime::{
         StudyInputSeries, StudyInstanceId, StudyInvalidationPolicy, StudyLiveMarketData,
         StudyMarketInput, StudyMarketSeries, StudyOutputBuffer, StudyOutputId, StudyOutputSpec,
         StudyPaneTarget, StudyPlotKind, StudyQuoteView, StudyRuntimeError, StudyScaleTarget,
-        StudySettingSpec, StudySettingValue, StudySettings, StudyTradeSample, StudyTradeWindow,
+        StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
+        StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
+        StudyTradeSample, StudyTradeWindow,
     },
 };
 use num_traits::ToPrimitive;
@@ -32,6 +34,16 @@ pub const BUILTIN_SMA_PERIOD_SETTING: &str = "period";
 pub const BUILTIN_SMA_DEFAULT_PERIOD: i64 = 20;
 /// Stable output identifier exposed by the built-in SMA.
 pub const BUILTIN_SMA_OUTPUT_IDENTIFIER: &str = "sma";
+/// Stable implementation revision for the built-in Exponential Moving Average.
+pub const BUILTIN_EMA_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in Exponential Moving Average.
+pub const BUILTIN_EMA_IDENTIFIER: &str = "builtin.ema";
+/// Stable durable setting identifier for the built-in EMA period.
+pub const BUILTIN_EMA_PERIOD_SETTING: &str = "period";
+/// Default built-in EMA period used by legacy workspace migration and product UI.
+pub const BUILTIN_EMA_DEFAULT_PERIOD: i64 = 20;
+/// Stable output identifier exposed by the built-in EMA.
+pub const BUILTIN_EMA_OUTPUT_IDENTIFIER: &str = "ema";
 /// Stable implementation revision for the built-in Weighted Moving Average.
 pub const BUILTIN_WMA_IMPLEMENTATION_REVISION: u32 = 1;
 /// Stable implementation identifier for the built-in Weighted Moving Average.
@@ -142,6 +154,15 @@ pub fn restore_native_registration(
             }
             builtins::sma_registration(dependencies, settings)
         }
+        BUILTIN_EMA_IDENTIFIER => {
+            if implementation_revision != BUILTIN_EMA_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::ema_registration(dependencies, settings)
+        }
         BUILTIN_WMA_IDENTIFIER => {
             if implementation_revision != BUILTIN_WMA_IMPLEMENTATION_REVISION {
                 return Err(StudySdkError::UnsupportedImplementationRevision {
@@ -174,15 +195,56 @@ pub mod builtins {
         BUILTIN_BOLLINGER_DEVIATION_SETTING, BUILTIN_BOLLINGER_IDENTIFIER,
         BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER, BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER,
         BUILTIN_BOLLINGER_PERIOD_SETTING, BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER,
-        BUILTIN_SMA_DEFAULT_PERIOD, BUILTIN_SMA_IDENTIFIER, BUILTIN_SMA_OUTPUT_IDENTIFIER,
-        BUILTIN_SMA_PERIOD_SETTING, BUILTIN_WMA_DEFAULT_PERIOD, BUILTIN_WMA_IDENTIFIER,
-        BUILTIN_WMA_OUTPUT_IDENTIFIER, BUILTIN_WMA_PERIOD_SETTING, BarSeriesKey,
-        NativeStudyProgram, NativeStudyRegistration, NonZeroUsize, StreamRequirements,
-        StudyBarField, StudyDecimal, StudyDefinition, StudyDependency, StudyExecutionContext,
-        StudyInputSeries, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
-        StudyPaneTarget, StudyPlotKind, StudyRuntimeError, StudyScaleTarget, StudySdkError,
-        StudySettingSpec, StudySettingValue, StudySettings, ToPrimitive,
+        BUILTIN_EMA_DEFAULT_PERIOD, BUILTIN_EMA_IDENTIFIER, BUILTIN_EMA_OUTPUT_IDENTIFIER,
+        BUILTIN_EMA_PERIOD_SETTING, BUILTIN_SMA_DEFAULT_PERIOD, BUILTIN_SMA_IDENTIFIER,
+        BUILTIN_SMA_OUTPUT_IDENTIFIER, BUILTIN_SMA_PERIOD_SETTING, BUILTIN_WMA_DEFAULT_PERIOD,
+        BUILTIN_WMA_IDENTIFIER, BUILTIN_WMA_OUTPUT_IDENTIFIER, BUILTIN_WMA_PERIOD_SETTING,
+        BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, NativeStudyState, NonZeroUsize,
+        StreamRequirements, StudyBarField, StudyDecimal, StudyDefinition, StudyDependency,
+        StudyExecutionContext, StudyInputSeries, StudyInvalidationPolicy, StudyMarketInput,
+        StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyRuntimeError, StudyScaleTarget,
+        StudySdkError, StudySettingControl, StudySettingPresentation, StudySettingSpec,
+        StudySettingValue, StudySettings, ToPrimitive,
     };
+
+    fn period_setting_spec(identifier: &str, default: i64) -> StudySettingSpec {
+        StudySettingSpec::new(identifier, StudySettingValue::Integer(default)).with_presentation(
+            StudySettingPresentation {
+                label: "Period".to_string(),
+                description: Some("Number of input bars used by the calculation.".to_string()),
+                group: Some("Inputs".to_string()),
+                control: StudySettingControl::Integer {
+                    minimum: Some(1),
+                    maximum: None,
+                    step: Some(1),
+                },
+                visible_when: None,
+                enabled_when: None,
+            },
+        )
+    }
+
+    fn bollinger_deviation_setting_spec() -> StudySettingSpec {
+        StudySettingSpec::new(
+            BUILTIN_BOLLINGER_DEVIATION_SETTING,
+            StudySettingValue::Decimal(BUILTIN_BOLLINGER_DEFAULT_DEVIATION),
+        )
+        .with_presentation(StudySettingPresentation {
+            label: "Deviation".to_string(),
+            description: Some("Standard-deviation multiplier applied to the bands.".to_string()),
+            group: Some("Inputs".to_string()),
+            control: StudySettingControl::Decimal {
+                minimum: None,
+                maximum: None,
+                step: Some(StudyDecimal {
+                    mantissa: 1,
+                    scale: 1,
+                }),
+            },
+            visible_when: None,
+            enabled_when: None,
+        })
+    }
 
     /// Builds a Simple Moving Average registration over one canonical bar series.
     ///
@@ -213,6 +275,30 @@ pub mod builtins {
                 StudyRuntimeError::InvalidIdentifier
             }
         })
+    }
+
+    /// Builds an Exponential Moving Average registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when the requested period cannot be
+    /// represented by the durable integer setting contract.
+    pub fn ema(
+        series: BarSeriesKey,
+        period: NonZeroUsize,
+    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        let period_value =
+            i64::try_from(period.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)?;
+        ema_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::from([(
+                BUILTIN_EMA_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(period_value),
+            )]),
+        )
+        .map_err(sdk_error_to_runtime)
     }
 
     /// Builds a Weighted Moving Average registration over one canonical bar series.
@@ -296,10 +382,10 @@ pub mod builtins {
                 BUILTIN_SMA_IDENTIFIER.to_string(),
             ));
         }
-        let settings_spec = vec![StudySettingSpec {
-            identifier: BUILTIN_SMA_PERIOD_SETTING.to_string(),
-            default: StudySettingValue::Integer(BUILTIN_SMA_DEFAULT_PERIOD),
-        }];
+        let settings_spec = vec![period_setting_spec(
+            BUILTIN_SMA_PERIOD_SETTING,
+            BUILTIN_SMA_DEFAULT_PERIOD,
+        )];
         let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
         let period = match settings.get(BUILTIN_SMA_PERIOD_SETTING) {
             Some(StudySettingValue::Integer(value)) if *value > 0 => usize::try_from(*value)
@@ -332,10 +418,10 @@ pub mod builtins {
         overrides: BTreeMap<String, StudySettingValue>,
     ) -> Result<NativeStudyRegistration, StudySdkError> {
         validate_one_numeric_dependency(BUILTIN_WMA_IDENTIFIER, &dependencies)?;
-        let settings_spec = vec![StudySettingSpec {
-            identifier: BUILTIN_WMA_PERIOD_SETTING.to_string(),
-            default: StudySettingValue::Integer(BUILTIN_WMA_DEFAULT_PERIOD),
-        }];
+        let settings_spec = vec![period_setting_spec(
+            BUILTIN_WMA_PERIOD_SETTING,
+            BUILTIN_WMA_DEFAULT_PERIOD,
+        )];
         let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
         let period = wma_period(&settings)?;
         Ok(NativeStudyRegistration {
@@ -357,20 +443,47 @@ pub mod builtins {
         })
     }
 
+    pub(super) fn ema_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_numeric_dependency(BUILTIN_EMA_IDENTIFIER, &dependencies)?;
+        let settings_spec = vec![period_setting_spec(
+            BUILTIN_EMA_PERIOD_SETTING,
+            BUILTIN_EMA_DEFAULT_PERIOD,
+        )];
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        let period = positive_period(&settings, BUILTIN_EMA_PERIOD_SETTING)?;
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_EMA_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs: vec![StudyOutputSpec {
+                    identifier: BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string(),
+                    title: format!("EMA {}", period.get()),
+                    plot: StudyPlotKind::Line,
+                    pane: StudyPaneTarget::Price,
+                    scale: StudyScaleTarget::Primary,
+                }],
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_ema, create_ema_state),
+        })
+    }
+
     pub(super) fn bollinger_registration(
         dependencies: Vec<StudyDependency>,
         overrides: BTreeMap<String, StudySettingValue>,
     ) -> Result<NativeStudyRegistration, StudySdkError> {
         validate_one_numeric_dependency(BUILTIN_BOLLINGER_IDENTIFIER, &dependencies)?;
         let settings_spec = vec![
-            StudySettingSpec {
-                identifier: BUILTIN_BOLLINGER_PERIOD_SETTING.to_string(),
-                default: StudySettingValue::Integer(BUILTIN_BOLLINGER_DEFAULT_PERIOD),
-            },
-            StudySettingSpec {
-                identifier: BUILTIN_BOLLINGER_DEVIATION_SETTING.to_string(),
-                default: StudySettingValue::Decimal(BUILTIN_BOLLINGER_DEFAULT_DEVIATION),
-            },
+            period_setting_spec(
+                BUILTIN_BOLLINGER_PERIOD_SETTING,
+                BUILTIN_BOLLINGER_DEFAULT_PERIOD,
+            ),
+            bollinger_deviation_setting_spec(),
         ];
         let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
         let period = positive_period(&settings, BUILTIN_BOLLINGER_PERIOD_SETTING)?;
@@ -495,6 +608,87 @@ pub mod builtins {
             output.set(index, calculated.get(local).copied().flatten())?;
         }
         Ok(())
+    }
+
+    fn create_ema_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        let period = positive_period(settings, BUILTIN_EMA_PERIOD_SETTING)
+            .map_err(|_| "EMA period is unavailable".to_string())?;
+        Ok(NativeStudyState::new(
+            nucleuscharts_indicators::IncrementalEmaState::new(period),
+            ema_state_runtime_bytes,
+        ))
+    }
+
+    fn ema_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalEmaState) -> usize {
+        std::mem::size_of::<nucleuscharts_indicators::IncrementalEmaState>()
+            .saturating_add(state.runtime_bytes())
+    }
+
+    fn calculate_ema(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) =
+            context.split_with_state::<nucleuscharts_indicators::IncrementalEmaState>()
+        else {
+            return Err("EMA runtime state is unavailable".to_string());
+        };
+        let output = outputs
+            .get_mut(0)
+            .ok_or_else(|| "EMA output is unavailable".to_string())?;
+        let from = inputs.dirty_range().start.min(output.len());
+        if from >= output.len() {
+            return Ok(());
+        }
+        let input = inputs
+            .input(0)
+            .ok_or_else(|| "EMA requires one numeric study input".to_string())?;
+        match input {
+            StudyInputSeries::Market(series) => {
+                let close = series.field(StudyBarField::Close);
+                let divisor = 10_f64.powi(i32::from(close.scale()));
+                rebuild_ema_output(
+                    state,
+                    output.len(),
+                    from,
+                    |index| fixed_point_sample(close.value(index), divisor),
+                    |index, value| output.set(index, value),
+                )?;
+            }
+            StudyInputSeries::Output(series) => {
+                rebuild_ema_output(
+                    state,
+                    output.len(),
+                    from,
+                    |index| series.value(index).flatten(),
+                    |index, value| output.set(index, value),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_ema_output<S, W>(
+        state: &mut nucleuscharts_indicators::IncrementalEmaState,
+        len: usize,
+        from: usize,
+        sample_at: S,
+        mut write: W,
+    ) -> Result<(), String>
+    where
+        S: FnMut(usize) -> Option<f64>,
+        W: FnMut(usize, Option<f64>) -> Result<(), String>,
+    {
+        let mut write_error = None;
+        state.rebuild_from_indexed(len, from, sample_at, |index, value| {
+            if write_error.is_none() {
+                write_error = write(index, value).err();
+            }
+        });
+        write_error.map_or(Ok(()), Err)
+    }
+
+    fn fixed_point_sample(value: Option<i64>, divisor: f64) -> Option<f64> {
+        value
+            .and_then(|value| value.to_f64())
+            .map(|value| value / divisor)
     }
 
     fn calculate_wma(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
@@ -712,6 +906,137 @@ pub mod builtins {
             assert_eq!(bollinger[3].middle, None);
             assert_eq!(bollinger[4].middle, Some(4.5));
         }
+
+        #[test]
+        fn ema_adapter_visits_only_checkpoint_bounded_fixed_point_rows() {
+            let mut source = (0..5_000)
+                .map(|index| 10_000_i64 + i64::from(index))
+                .collect::<Vec<_>>();
+            let mut output = vec![None; source.len()];
+            let mut state = nucleuscharts_indicators::IncrementalEmaState::new(
+                NonZeroUsize::new(20).expect("period"),
+            );
+            let divisor = 100.0;
+            let mut visited = 0usize;
+
+            rebuild_ema_output(
+                &mut state,
+                source.len(),
+                0,
+                |index| {
+                    visited += 1;
+                    fixed_point_sample(source.get(index).copied(), divisor)
+                },
+                |index, value| {
+                    output[index] = value;
+                    Ok(())
+                },
+            )
+            .expect("full EMA rebuild");
+            assert_eq!(visited, source.len());
+            let dense = source
+                .iter()
+                .map(|value| value.to_f64().expect("test fixed-point converts") / 100.0)
+                .collect::<Vec<_>>();
+            assert_eq!(output, nucleuscharts_indicators::ema(&dense, 20));
+
+            let last = source.len() - 1;
+            source[last] += 250;
+            visited = 0;
+            rebuild_ema_output(
+                &mut state,
+                source.len(),
+                last,
+                |index| {
+                    visited += 1;
+                    fixed_point_sample(source.get(index).copied(), divisor)
+                },
+                |index, value| {
+                    output[index] = value;
+                    Ok(())
+                },
+            )
+            .expect("tail EMA revision");
+            assert_eq!(visited, 1);
+            assert_eq!(state.last_work_rows(), 1);
+
+            source.push(25_000);
+            output.push(None);
+            visited = 0;
+            let appended = source.len() - 1;
+            rebuild_ema_output(
+                &mut state,
+                source.len(),
+                appended,
+                |index| {
+                    visited += 1;
+                    fixed_point_sample(source.get(index).copied(), divisor)
+                },
+                |index, value| {
+                    output[index] = value;
+                    Ok(())
+                },
+            )
+            .expect("EMA append");
+            assert_eq!(visited, 1);
+            assert_eq!(state.last_work_rows(), 1);
+
+            let repaired = 2_500;
+            source[repaired] -= 375;
+            visited = 0;
+            rebuild_ema_output(
+                &mut state,
+                source.len(),
+                repaired,
+                |index| {
+                    visited += 1;
+                    fixed_point_sample(source.get(index).copied(), divisor)
+                },
+                |index, value| {
+                    output[index] = value;
+                    Ok(())
+                },
+            )
+            .expect("historical EMA repair");
+            assert_eq!(visited, state.last_work_rows());
+            assert!(visited >= source.len() - repaired);
+            assert!(visited < source.len() - repaired + 1_024);
+            assert!(state.runtime_bytes() < 4 * 1024);
+        }
+
+        #[test]
+        fn ema_adapter_preserves_output_backed_hard_gaps() {
+            let source = [
+                Some(1.0),
+                Some(2.0),
+                Some(3.0),
+                None,
+                Some(10.0),
+                Some(20.0),
+                Some(30.0),
+            ];
+            let mut output = vec![None; source.len()];
+            let mut state = nucleuscharts_indicators::IncrementalEmaState::new(
+                NonZeroUsize::new(3).expect("period"),
+            );
+
+            rebuild_ema_output(
+                &mut state,
+                source.len(),
+                0,
+                |index| source[index],
+                |index, value| {
+                    output[index] = value;
+                    Ok(())
+                },
+            )
+            .expect("output-backed EMA");
+
+            assert_eq!(
+                output,
+                vec![None, None, Some(2.0), None, None, None, Some(20.0)]
+            );
+        }
     }
 }
 
@@ -751,6 +1076,34 @@ mod tests {
     }
 
     #[test]
+    fn builtin_ema_uses_recursive_state_and_from_first_changed_invalidation() {
+        let registration = builtins::ema(
+            BarSeriesKey {
+                provider_id: "provider".to_string(),
+                instrument_id: "instrument".to_string(),
+                entitlement_id: "entitlement".to_string(),
+                period: BarPeriod::time(60).expect("minute period"),
+                definition_version: 1,
+            },
+            NonZeroUsize::new(20).expect("period"),
+        )
+        .expect("EMA registration");
+
+        assert_eq!(registration.definition.identifier, BUILTIN_EMA_IDENTIFIER);
+        assert_eq!(registration.definition.outputs.len(), 1);
+        assert_eq!(
+            registration.definition.outputs[0].identifier,
+            BUILTIN_EMA_OUTPUT_IDENTIFIER
+        );
+        assert_eq!(registration.definition.outputs[0].title, "EMA 20");
+        assert_eq!(
+            registration.definition.invalidation,
+            StudyInvalidationPolicy::FromFirstChanged
+        );
+        assert!(registration.program.state_factory.is_some());
+    }
+
+    #[test]
     fn durable_sma_restore_binds_versioned_code_and_typed_settings() {
         let source = BarSeriesKey {
             provider_id: "provider".to_string(),
@@ -782,6 +1135,64 @@ mod tests {
                 BUILTIN_SMA_IDENTIFIER,
                 2,
                 registration.definition.dependencies,
+                BTreeMap::new(),
+            ),
+            Err(StudySdkError::UnsupportedImplementationRevision { revision: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn durable_ema_restore_supports_market_and_output_dependencies() {
+        let source = BarSeriesKey {
+            provider_id: "provider".to_string(),
+            instrument_id: "instrument".to_string(),
+            entitlement_id: "entitlement".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        };
+        let market = restore_native_registration(
+            BUILTIN_EMA_IDENTIFIER,
+            BUILTIN_EMA_IMPLEMENTATION_REVISION,
+            vec![StudyDependency::Market(StudyMarketInput {
+                series: source,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::from([(
+                BUILTIN_EMA_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(34),
+            )]),
+        )
+        .expect("durable market EMA resolves");
+        assert_eq!(
+            market.settings.get(BUILTIN_EMA_PERIOD_SETTING),
+            Some(&StudySettingValue::Integer(34))
+        );
+        assert!(market.program.state_factory.is_some());
+
+        let upstream = StudyInstanceId::try_from_u64(7).expect("upstream study id");
+        let output = restore_native_registration(
+            BUILTIN_EMA_IDENTIFIER,
+            BUILTIN_EMA_IMPLEMENTATION_REVISION,
+            vec![StudyDependency::Output(upstream.output(0))],
+            BTreeMap::from([(
+                BUILTIN_EMA_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(5),
+            )]),
+        )
+        .expect("durable output-backed EMA resolves");
+        assert_eq!(
+            output.definition.dependencies,
+            vec![StudyDependency::Output(upstream.output(0))]
+        );
+        assert_eq!(
+            output.definition.invalidation,
+            StudyInvalidationPolicy::FromFirstChanged
+        );
+        assert!(matches!(
+            restore_native_registration(
+                BUILTIN_EMA_IDENTIFIER,
+                2,
+                output.definition.dependencies,
                 BTreeMap::new(),
             ),
             Err(StudySdkError::UnsupportedImplementationRevision { revision: 2, .. })
@@ -837,6 +1248,28 @@ mod tests {
                 .iter()
                 .all(|output| output.pane == StudyPaneTarget::Price)
         );
+        let wma_period = &wma.definition.settings[0];
+        assert_eq!(wma_period.presentation.label, "Period");
+        assert_eq!(wma_period.presentation.group.as_deref(), Some("Inputs"));
+        assert!(matches!(
+            wma_period.presentation.control,
+            StudySettingControl::Integer {
+                minimum: Some(1),
+                maximum: None,
+                step: Some(1),
+            }
+        ));
+        assert!(matches!(
+            bollinger.definition.settings[1].presentation.control,
+            StudySettingControl::Decimal {
+                minimum: None,
+                maximum: None,
+                step: Some(StudyDecimal {
+                    mantissa: 1,
+                    scale: 1,
+                }),
+            }
+        ));
     }
 
     #[test]
