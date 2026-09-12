@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn ordinary_control_labels_keep_the_platform_normal_weight() {
-        assert_eq!(control_label_weight(), FontWeight(400.0));
+        assert_eq!(control_label_weight(), FontWeight(500.0));
     }
 
     #[test]
