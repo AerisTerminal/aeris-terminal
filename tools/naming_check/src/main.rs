@@ -1626,6 +1626,16 @@ mod tests {
                 "every native OS lane must run {gate}"
             );
         }
+        for evidence_test in [
+            "./tools/test_evidence_verifiers.ps1",
+            "./tools/test_desktop_endurance_workflow.ps1",
+        ] {
+            assert_eq!(
+                workflow.matches(evidence_test).count(),
+                1,
+                "the Windows lane must keep the current evidence-schema regression {evidence_test}"
+            );
+        }
         for artifact in [
             "market-data-performance-linux",
             "market-data-performance-windows",

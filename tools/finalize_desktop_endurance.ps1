@@ -90,9 +90,12 @@ Assert-True ((Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash -ieq
 
 $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
 Assert-True ((Get-RequiredProperty $report "schema_version") -eq 2) "Desktop-endurance report schema is invalid."
+Assert-True ((Get-RequiredProperty $report "evidence_scope") -eq "synthetic_headless_desktop_continuous_endurance") "Desktop-endurance report has the wrong evidence scope."
 Assert-True ((Get-RequiredProperty $report "completion_state") -eq "completed") "Desktop-endurance report is incomplete."
 Assert-True ((Get-RequiredProperty $report "clean_stop") -is [bool] -and [bool](Get-RequiredProperty $report "clean_stop")) "Desktop-endurance report does not record a clean stop."
-Assert-True ((Get-RequiredProperty $report "readiness_qualified") -is [bool] -and [bool](Get-RequiredProperty $report "readiness_qualified")) "Desktop-endurance report is not qualified."
+Assert-True ((Get-RequiredProperty $report "synthetic_bounds_qualified") -is [bool] -and [bool](Get-RequiredProperty $report "synthetic_bounds_qualified")) "Desktop-endurance synthetic bounds are not qualified."
+$liveMarketGate = [string](Get-RequiredProperty $report "live_market_gate")
+Assert-True ($liveMarketGate -eq "not_run" -or $liveMarketGate -eq "passed" -or $liveMarketGate -eq "failed") "Desktop-endurance live market gate value is invalid."
 
 $launchMode = [string](Get-RequiredProperty $manifest "launch_mode")
 Assert-True ($launchMode -eq "foreground_supervisor" `

@@ -166,7 +166,7 @@ $actualReportHash = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Ha
 Assert-True ($actualReportHash -ieq $expectedReportHash) "Desktop endurance report SHA-256 does not match the final manifest."
 
 Assert-True ((Get-RequiredProperty $report "schema_version") -eq 2) "Desktop endurance report schema_version must be 2."
-Assert-True ((Get-RequiredProperty $report "evidence_scope") -eq "headless_desktop_continuous_endurance") "Desktop endurance report has the wrong evidence_scope."
+Assert-True ((Get-RequiredProperty $report "evidence_scope") -eq "synthetic_headless_desktop_continuous_endurance") "Desktop endurance report has the wrong evidence_scope."
 Assert-True ((Get-RequiredProperty $report "completion_state") -eq "completed") "Desktop endurance report is not completed."
 $reportRequestedDuration = Get-RequiredProperty $report "requested_duration_seconds"
 $reportRequiredDuration = Get-RequiredProperty $report "required_qualification_duration_seconds"
@@ -184,7 +184,9 @@ Assert-True ((Get-RequiredProperty $report "last_generation") -eq (Get-RequiredP
 Assert-True ((Get-RequiredProperty $report "stale_or_gapped_publications") -eq 0) "Report contains stale or gapped publications."
 Assert-JsonTrue (Get-RequiredProperty $report "working_set_within_bound") "Report working_set_within_bound"
 Assert-JsonTrue (Get-RequiredProperty $report "clean_stop") "Report clean_stop"
-Assert-JsonTrue (Get-RequiredProperty $report "readiness_qualified") "Report readiness_qualified"
+Assert-JsonTrue (Get-RequiredProperty $report "synthetic_bounds_qualified") "Report synthetic_bounds_qualified"
+$liveMarketGate = [string](Get-RequiredProperty $report "live_market_gate")
+Assert-True ($liveMarketGate -eq "not_run" -or $liveMarketGate -eq "passed" -or $liveMarketGate -eq "failed") "Report live_market_gate is invalid."
 
 $mailboxCapacityValue = Get-RequiredProperty $report "mailbox_capacity"
 $mailboxHighWaterValue = Get-RequiredProperty $report "mailbox_high_water_items"

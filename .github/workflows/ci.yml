@@ -126,6 +126,11 @@ jobs:
         run: cargo build --workspace --all-targets --all-features --locked
       - name: Test workspace
         run: cargo test --workspace --all-features --locked
+      - name: Test Windows evidence tooling
+        shell: pwsh
+        run: |
+          & ./tools/test_evidence_verifiers.ps1
+          & ./tools/test_desktop_endurance_workflow.ps1
       - name: Check local market-data performance
         run: cargo run -p axiusflow_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
       - name: Upload market-data baseline

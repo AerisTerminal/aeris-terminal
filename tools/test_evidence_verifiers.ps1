@@ -42,7 +42,7 @@ try {
     $startedUtc = [DateTimeOffset]::Parse("2030-01-01T00:00:00Z")
     $report = [ordered]@{
         schema_version = 2
-        evidence_scope = "headless_desktop_continuous_endurance"
+        evidence_scope = "synthetic_headless_desktop_continuous_endurance"
         completion_state = "completed"
         checkpoint_sequence = 481
         checkpoint_unix_milliseconds = $startedUtc.ToUnixTimeMilliseconds() + 28800001
@@ -61,7 +61,8 @@ try {
         maximum_working_set_growth_bytes = 67108864
         working_set_within_bound = $true
         clean_stop = $true
-        readiness_qualified = $true
+        synthetic_bounds_qualified = $true
+        live_market_gate = "not_run"
     }
     Write-Json $reportPath $report
     $enduranceManifestPath = Join-Path $testRoot "endurance-manifest.json"
@@ -188,13 +189,22 @@ try {
     $enduranceManifest.binary_sha256 = $binaryHash
     Write-Json $enduranceManifestPath $enduranceManifest
     $report.completion_state = "incomplete"
-    $report.readiness_qualified = $false
+    $report.synthetic_bounds_qualified = $false
     Write-Json $reportPath $report
     $enduranceManifest.report_sha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash
     Write-Json $enduranceManifestPath $enduranceManifest
     Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
     $report.completion_state = "completed"
-    $report.readiness_qualified = $true
+    $report.synthetic_bounds_qualified = $true
+    Write-Json $reportPath $report
+    $enduranceManifest.report_sha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash
+    Write-Json $enduranceManifestPath $enduranceManifest
+    $report.live_market_gate = "unknown"
+    Write-Json $reportPath $report
+    $enduranceManifest.report_sha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash
+    Write-Json $enduranceManifestPath $enduranceManifest
+    Invoke-ExpectedFailure $enduranceVerifier $enduranceManifestPath
+    $report.live_market_gate = "not_run"
     Write-Json $reportPath $report
 
     $profiles = @()
