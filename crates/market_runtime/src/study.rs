@@ -3942,6 +3942,64 @@ mod tests {
             .expect("test native state is committed")
     }
 
+    #[test]
+    #[ignore = "explicit release soak qualification for sustained trusted-native tail work"]
+    fn concurrent_native_study_tail_soak_keeps_state_output_and_demand_bounded() {
+        const STUDIES: usize = 16;
+        const TAIL_ITERATIONS: u32 = 20_000;
+
+        let mut runtime = StudyRuntime::new(config(32));
+        let mut engine = engine(2);
+        let source = series("ES");
+        engine
+            .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 3, bars())
+            .expect("canonical history installs");
+
+        let studies = (0..STUDIES)
+            .map(|_| {
+                runtime
+                    .register_native_for_consumer(
+                        ConsumerId(NonZeroU64::MIN),
+                        stateful_registration(source.clone(), 8),
+                    )
+                    .expect("trusted native study registers")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(runtime.market_requirements().len(), 1);
+
+        for study in &studies {
+            runtime
+                .execute_ready(&engine, *study)
+                .expect("initial covering execution succeeds");
+        }
+        let expected_points = STUDIES * bars().len();
+        let expected_state_bytes = STUDIES * 8;
+        assert_eq!(runtime.output_points, expected_points);
+        assert_eq!(runtime.state_bytes, expected_state_bytes);
+
+        let tail = StudyDirtyRange::bounded(1, 2).expect("one-row tail range");
+        for _ in 0..TAIL_ITERATIONS {
+            for study in &studies {
+                runtime
+                    .execute_ready_range(&engine, *study, Some(tail))
+                    .expect("bounded tail execution succeeds");
+            }
+        }
+
+        assert_eq!(runtime.output_points, expected_points);
+        assert_eq!(runtime.state_bytes, expected_state_bytes);
+        assert_eq!(runtime.market_requirements().len(), 1);
+        for study in studies {
+            let state = committed_test_state(&mut runtime, study);
+            assert_eq!(state.executions, TAIL_ITERATIONS + 1);
+            assert_eq!(state.accounted_bytes, 8);
+            let output = runtime
+                .output_series(study.output(0))
+                .expect("study output remains installed");
+            assert_eq!(output.len(), 2);
+        }
+    }
+
     fn calculate_secondary_asof(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let (inputs, outputs) = context.split();
         let Some(StudyInputSeries::Market(_primary)) = inputs.input(0) else {

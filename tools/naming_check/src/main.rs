@@ -408,6 +408,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn trusted_native_study_packaging_keeps_core_owners_and_dynamic_loading_out_of_the_sdk() {
+        assert_excludes(
+            "crates/study_sdk/Cargo.toml",
+            &[
+                "axiusflow_market_engine",
+                "axiusflow_account_runtime",
+                "axiusflow_chart_integration",
+                "axiusflow_rithmic_protocol_adapter",
+                "axiusflow_hyperliquid_market_adapter",
+                "nucleuscharts_engine",
+                "nucleuscharts_render",
+                "nucleuscharts_render_gpui",
+                "gpui",
+                "libloading",
+            ],
+        );
+        let packages = manifest("apps/desktop/src/study_packages.rs");
+        assert!(packages.contains("TRUSTED_NATIVE_STUDY_PACKAGES"));
+        for forbidden in ["LoadLibrary", "dlopen", "read_dir", "libloading"] {
+            assert!(
+                !packages.contains(forbidden),
+                "trusted native package boundary must remain static; found {forbidden}"
+            );
+        }
+    }
     #[test]
     fn desktop_presentation_layers_exclude_provider_and_storage_ownership() {
         for relative in [

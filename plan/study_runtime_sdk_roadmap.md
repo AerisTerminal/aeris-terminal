@@ -246,11 +246,20 @@ Before third-party native studies are treated as a supported product surface:
 
 ### Phase E — SDK productization
 
-- [ ] Define native study packaging/loading trust model.
-- [ ] Define SDK compatibility and implementation-revision migration policy.
-- [ ] Add author documentation and examples.
-- [ ] Add sustained performance/soak qualification.
-- [ ] Add end-to-end workspace restore/reconnect validation with a representative custom SDK study.
+- [x] Define native study packaging/loading trust model.
+  - Approved external native studies are statically linked into the signed product build and listed in one immutable bounded product allowlist; Axiusflow does not discover or load arbitrary native libraries at runtime.
+  - This is a source/dependency review trust boundary, not a sandbox: untrusted/user-installable native code would require a separate sandboxed architecture.
+- [x] Define SDK compatibility and implementation-revision migration policy.
+  - Source/API compatibility follows the Study SDK crate version; a separate SDK compatibility epoch fences incompatible durable host/package contracts.
+  - Persisted implementation revisions resolve explicitly. Packages may not silently rewrite persisted dependency graphs/settings; incompatible revisions remain durable and fail restore until a compatible signed build is present.
+- [x] Add author documentation and examples.
+  - The Study SDK README documents trust, versioning, revision, failure-isolation, bounded-resource, and approval rules.
+  - Compiling examples cover stateless, stateful, multi-output, multi-timeframe, and market-microstructure studies using only the SDK facade.
+- [x] Add sustained performance/soak qualification.
+  - An explicit release-only concurrent native-study tail soak drives 16 stateful studies through 20,000 revisions while asserting one shared market-demand key and constant output/state accounting.
+- [x] Add composed workspace restore/rebind and provider-reconnect qualification for representative native studies.
+  - Workspace-file round trips preserve unavailable external package state; product-registry restore and current-series rebind preserve durable identity/output contracts; a missing package cannot starve unrelated study restore.
+  - A newer provider session preserves a registered native study and its single shared engine lease without duplicate demand. These persistence, resolver, and runtime recovery tests deliberately cover their owning boundaries rather than pretending one desktop test owns provider recovery.
 
 ## Guardrails that must not regress
 
@@ -270,8 +279,10 @@ Before third-party native studies are treated as a supported product surface:
 
 The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
-The immediate next architecture milestones are:
+Phase E is now implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; the release soak keeps concurrent state/output/demand bounded; and composed workspace persistence/rebind plus provider-session recovery coverage verifies that runtime study/lease ownership is not duplicated.
 
-1. Complete Phase E with a trusted-native packaging/loading policy, explicit SDK compatibility and implementation-revision rules, and author-facing examples/docs.
-2. Qualify representative custom studies under sustained concurrent load and verify workspace close/reopen plus provider reconnect without duplicate study/provider/render ownership.
-3. Keep pure trade/quote/depth timelines and additional rich-output shapes deferred until a concrete study requires them; the existing bar-aligned non-bar execution path remains the supported contract.
+The remaining roadmap items are intentionally demand-driven rather than incomplete productization:
+
+1. Keep pure trade/quote/depth output timelines deferred until a concrete study requires a non-bar-owned timeline; the existing bar-aligned borrowed non-bar input contract remains supported.
+2. Add future bands-between-outputs, markers, semantic levels, or table outputs only when a concrete product study requires them.
+3. If user-installable/untrusted study code becomes a product requirement, design a separate sandboxed execution model; the current trusted-native contract deliberately does not claim isolation from malicious in-process Rust code.

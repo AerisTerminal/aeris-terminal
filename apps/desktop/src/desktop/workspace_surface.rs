@@ -207,10 +207,25 @@ fn discard_unregistered_runtime_studies(studies: &mut RuntimeStudiesState) -> bo
     changed
 }
 
+fn next_deferred_runtime_study_index(studies: &RuntimeStudiesState) -> Option<usize> {
+    studies.deferred.iter().position(|state| !state.blocked)
+}
+
 fn runtime_study_registration(
     state: &WorkspaceChartStudyState,
     current_series: &BarSeriesKey,
     active: &[RuntimeStudyState],
+) -> Result<NativeStudyRegistration, String> {
+    let registry = super::study_packages::product_study_registry()
+        .map_err(|error| format!("trusted study package registry is invalid: {error}"))?;
+    runtime_study_registration_with_registry(state, current_series, active, &registry)
+}
+
+fn runtime_study_registration_with_registry(
+    state: &WorkspaceChartStudyState,
+    current_series: &BarSeriesKey,
+    active: &[RuntimeStudyState],
+    registry: &axiusflow_study_sdk::TrustedStudyRegistry<'_>,
 ) -> Result<NativeStudyRegistration, String> {
     let dependencies = state
         .dependencies
@@ -231,13 +246,14 @@ fn runtime_study_registration(
             ))
         })
         .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?;
-    let registration = axiusflow_study_sdk::restore_native_registration(
-        &state.identifier,
-        state.implementation_revision,
-        dependencies,
-        settings,
-    )
-    .map_err(|error| error.to_string())?;
+    let registration = registry
+        .restore(
+            &state.identifier,
+            state.implementation_revision,
+            dependencies,
+            settings,
+        )
+        .map_err(|error| error.to_string())?;
     let output_identifiers = registration
         .definition
         .outputs
@@ -2209,17 +2225,16 @@ impl WorkspaceSurface {
     }
 
     fn dispatch_deferred_runtime_studies(&mut self, cx: &mut Context<Self>) {
-        if self.studies.deferred.is_empty()
-            || self.chart.is_none()
-            || !self.studies.pending.is_empty()
-            || self.studies.deferred[0].blocked
-        {
+        if self.chart.is_none() || !self.studies.pending.is_empty() {
             return;
         }
-        let state = self.studies.deferred.remove(0);
+        let Some(index) = next_deferred_runtime_study_index(&self.studies) else {
+            return;
+        };
+        let state = self.studies.deferred.remove(index);
         if let Err(error) = self.enqueue_runtime_study(state) {
             let (state, message) = *error;
-            self.studies.deferred.insert(0, state);
+            self.studies.deferred.insert(index, state);
             self.indicator_message = Some(message);
         }
         if !self.studies.deferred.is_empty() {
@@ -3782,6 +3797,168 @@ impl WorkspaceSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn custom_package_calculate(
+        context: &mut axiusflow_study_sdk::StudyExecutionContext<'_>,
+    ) -> Result<(), String> {
+        context
+            .output(0)
+            .map(|_| ())
+            .ok_or_else(|| "custom-package test output is unavailable".to_string())
+    }
+
+    fn custom_package_restore(
+        revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: std::collections::BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, axiusflow_study_sdk::StudySdkError> {
+        if revision != 1 {
+            return Err(
+                axiusflow_study_sdk::StudySdkError::UnsupportedImplementationRevision {
+                    identifier: "example.workspace_reconnect".to_string(),
+                    revision,
+                },
+            );
+        }
+        if settings.into_iter().next().is_some() {
+            return Err(
+                axiusflow_study_sdk::StudySdkError::InvalidDependencyContract(
+                    "example.workspace_reconnect".to_string(),
+                ),
+            );
+        }
+        let definition = axiusflow_study_sdk::StudyDefinition {
+            identifier: "example.workspace_reconnect".to_string(),
+            dependencies,
+            settings: Vec::new(),
+            outputs: vec![axiusflow_study_sdk::StudyOutputSpec {
+                identifier: "value".to_string(),
+                title: "Workspace Reconnect Example".to_string(),
+                legend_label: None,
+                plot: StudyPlotKind::Line,
+                pane: StudyPaneTarget::Price,
+                scale: StudyScaleTarget::Primary,
+                threshold_region: None,
+                point_style: StudyPointStyle::Uniform,
+            }],
+            invalidation: axiusflow_study_sdk::StudyInvalidationPolicy::SameRange,
+        };
+        Ok(NativeStudyRegistration {
+            settings: axiusflow_study_sdk::StudySettings::defaults(&definition.settings)?,
+            definition,
+            program: axiusflow_study_sdk::NativeStudyProgram::stateless(custom_package_calculate),
+        })
+    }
+
+    fn custom_package_series(instrument: &str) -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "rithmic".to_string(),
+            instrument_id: instrument.to_string(),
+            entitlement_id: "test".to_string(),
+            period: axiusflow_market_data::BarPeriod::time(60).expect("minute series"),
+            definition_version: 1,
+        }
+    }
+
+    #[test]
+    fn trusted_custom_study_restores_across_workspace_reopen_and_current_series_rebind() {
+        let packages = [axiusflow_study_sdk::TrustedStudyPackage::new(
+            "example.workspace_reconnect",
+            axiusflow_study_sdk::STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            custom_package_restore,
+        )];
+        let registry = axiusflow_study_sdk::TrustedStudyRegistry::from_packages(&packages)
+            .expect("custom package registry");
+        let persisted = WorkspaceChartStudyState {
+            local_id: 7,
+            identifier: "example.workspace_reconnect".to_string(),
+            implementation_revision: 1,
+            settings: Vec::new(),
+            dependencies: vec![WorkspaceStudyDependencyState {
+                kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                ..WorkspaceStudyDependencyState::default()
+            }],
+            visible: true,
+            output_identifiers: vec!["value".to_string()],
+        };
+        let workspace = WorkspaceChartState {
+            studies: vec![persisted.clone()],
+            ..WorkspaceChartState::default()
+        };
+        let restored = persisted_runtime_studies(Some(&workspace));
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].persisted, persisted);
+
+        let first_series = custom_package_series("instrument:rithmic:CME:MNQ");
+        let first = runtime_study_registration_with_registry(
+            &restored[0].persisted,
+            &first_series,
+            &[],
+            &registry,
+        )
+        .expect("custom study restores after workspace reopen");
+        assert_eq!(
+            first.definition.dependencies,
+            vec![StudyDependency::Market(StudyMarketInput {
+                series: first_series,
+                streams: StreamRequirements::BARS,
+            })]
+        );
+
+        let rebound_series = custom_package_series("instrument:rithmic:CME:MES");
+        let rebound = runtime_study_registration_with_registry(
+            &restored[0].persisted,
+            &rebound_series,
+            &[],
+            &registry,
+        )
+        .expect("custom study rebinds after selected series/reconnect recovery");
+        assert_eq!(rebound.definition.identifier, "example.workspace_reconnect");
+        assert_eq!(rebound.definition.outputs[0].identifier, "value");
+        assert_eq!(
+            rebound.definition.dependencies,
+            vec![StudyDependency::Market(StudyMarketInput {
+                series: rebound_series,
+                streams: StreamRequirements::BARS,
+            })]
+        );
+    }
+
+    #[test]
+    fn missing_custom_package_does_not_starve_later_independent_study_restore() {
+        let missing = WorkspaceChartStudyState {
+            local_id: 1,
+            identifier: "example.missing".to_string(),
+            implementation_revision: 1,
+            settings: Vec::new(),
+            dependencies: Vec::new(),
+            visible: true,
+            output_identifiers: vec!["value".to_string()],
+        };
+        let builtin = legacy_runtime_study(2, ChartIndicator::Sma, true).expect("SMA study");
+        let studies = RuntimeStudiesState {
+            deferred: vec![
+                PendingRuntimeStudyState {
+                    persisted: missing,
+                    resolved_chart_series: None,
+                    blocked: true,
+                    remove_on_registration: false,
+                    persist_on_registration: false,
+                },
+                PendingRuntimeStudyState {
+                    persisted: builtin,
+                    resolved_chart_series: None,
+                    blocked: false,
+                    remove_on_registration: false,
+                    persist_on_registration: false,
+                },
+            ],
+            ..RuntimeStudiesState::default()
+        };
+        assert_eq!(next_deferred_runtime_study_index(&studies), Some(1));
+    }
 
     #[test]
     fn study_decimal_editor_round_trips_exact_fixed_point_values() {

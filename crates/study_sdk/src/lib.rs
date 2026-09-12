@@ -10,19 +10,39 @@ pub use axiusflow_market_data::{
 pub use axiusflow_market_runtime::{
     MarketStream, StreamRequirements,
     study::{
-        NativeStudyCalculate, NativeStudyProgram, NativeStudyRegistration, NativeStudyState,
-        NativeStudyStateFactory, StudyBarField, StudyDecimal, StudyDefinition, StudyDependency,
-        StudyDepthView, StudyDirtyRange, StudyExecutionContext, StudyExecutionInputs,
-        StudyInputSeries, StudyInstanceId, StudyInvalidationPolicy, StudyLiveMarketData,
-        StudyMarketInput, StudyMarketSeries, StudyOutputBuffer, StudyOutputId, StudyOutputSpec,
-        StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyQuoteView, StudyRuntimeError,
-        StudyScaleTarget, StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
+        MAXIMUM_STUDY_IDENTIFIER_BYTES, NativeStudyCalculate, NativeStudyProgram,
+        NativeStudyRegistration, NativeStudyState, NativeStudyStateFactory, StudyBarField,
+        StudyDecimal, StudyDefinition, StudyDependency, StudyDepthView, StudyDirtyRange,
+        StudyExecutionContext, StudyExecutionInputs, StudyInputSeries, StudyInstanceId,
+        StudyInvalidationPolicy, StudyLiveMarketData, StudyMarketInput, StudyMarketSeries,
+        StudyOutputBuffer, StudyOutputId, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,
+        StudyPointStyle, StudyQuoteView, StudyRuntimeError, StudyScaleTarget,
+        StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
         StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
         StudyThresholdRegion, StudyTradeSample, StudyTradeWindow,
     },
 };
 use num_traits::ToPrimitive;
-use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    num::NonZeroUsize,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
+
+/// Converts one fixed-point market value into the floating-point representation used by study
+/// formulas without requiring authors to depend on `AxiusFlow`'s internal conversion crate.
+///
+/// The conversion is intentionally explicit because canonical market storage remains fixed-point.
+/// `None` is reserved for a conversion failure; ordinary `i64` market values and the runtime's
+/// bounded decimal scales are representable as finite `f64` values.
+#[must_use]
+pub fn fixed_point_to_f64(value: i64, scale: u8) -> Option<f64> {
+    let value = value.to_f64()?;
+    let divisor = 10_f64.powi(i32::from(scale));
+    (value.is_finite() && divisor.is_finite() && divisor != 0.0).then_some(value / divisor)
+}
 
 /// Stable implementation revision for the built-in Simple Moving Average.
 pub const BUILTIN_SMA_IMPLEMENTATION_REVISION: u32 = 1;
@@ -140,6 +160,17 @@ pub const BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER: &str = "d";
 /// Periods larger than the retained source window cannot produce additional useful warm-up state
 /// and would otherwise make windowed formulas perform needlessly large bounded scans.
 pub const BUILTIN_MAXIMUM_PERIOD: i64 = 16_384;
+/// Durable compatibility epoch for statically linked trusted-native Study SDK packages.
+///
+/// Cargo semver governs source compatibility. This epoch separately fences durable package
+/// descriptors when an incompatible host/package contract would make persisted reconstruction
+/// unsafe.
+pub const STUDY_SDK_COMPATIBILITY_EPOCH: u32 = 1;
+/// Source API version of the Study SDK crate linked into the current product build.
+pub const STUDY_SDK_API_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Maximum number of statically approved external study packages in one product build.
+pub const MAXIMUM_TRUSTED_STUDY_PACKAGES: usize = 128;
+const RESERVED_BUILTIN_STUDY_PREFIX: &str = "builtin.";
 
 /// Failure while resolving durable study data to trusted native code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,6 +178,10 @@ pub enum StudySdkError {
     UnknownStudyIdentifier(String),
     UnsupportedImplementationRevision { identifier: String, revision: u32 },
     InvalidDependencyContract(String),
+    PackageIdentityMismatch { expected: String, actual: String },
+    PackageDependencyMismatch(String),
+    PackageSettingsMismatch(String),
+    PackageRestorePanicked(String),
     Runtime(StudyRuntimeError),
 }
 
@@ -172,6 +207,22 @@ impl fmt::Display for StudySdkError {
                     "native study {identifier} has an invalid dependency contract"
                 )
             }
+            Self::PackageIdentityMismatch { expected, actual } => write!(
+                formatter,
+                "trusted native study package {expected} returned registration identity {actual}"
+            ),
+            Self::PackageDependencyMismatch(identifier) => write!(
+                formatter,
+                "trusted native study package {identifier} changed the durable dependency graph"
+            ),
+            Self::PackageSettingsMismatch(identifier) => write!(
+                formatter,
+                "trusted native study package {identifier} changed the durable settings during restore"
+            ),
+            Self::PackageRestorePanicked(identifier) => write!(
+                formatter,
+                "trusted native study package {identifier} panicked while restoring durable state"
+            ),
             Self::Runtime(error) => error.fmt(formatter),
         }
     }
@@ -190,6 +241,289 @@ impl From<StudyRuntimeError> for StudySdkError {
     fn from(error: StudyRuntimeError) -> Self {
         Self::Runtime(error)
     }
+}
+
+/// Restore callback exported by one statically linked trusted-native study package.
+///
+/// The callback receives only durable study configuration. Provider/account credentials,
+/// `MarketEngine`, GPUI, Nucleus render owners, and desktop state are intentionally absent.
+pub type TrustedStudyRestore = fn(
+    implementation_revision: u32,
+    dependencies: Vec<StudyDependency>,
+    settings: BTreeMap<String, StudySettingValue>,
+) -> Result<NativeStudyRegistration, StudySdkError>;
+
+/// Build-time descriptor for one reviewed trusted-native study package.
+///
+/// `AxiusFlow` does not load arbitrary native libraries at runtime. Product builds statically link
+/// approved study crates and list their descriptors at the desktop packaging boundary. The signed
+/// application therefore defines the trust set.
+#[derive(Clone, Copy)]
+pub struct TrustedStudyPackage {
+    identifier: &'static str,
+    compatibility_epoch: u32,
+    current_implementation_revision: u32,
+    restore: TrustedStudyRestore,
+}
+
+impl TrustedStudyPackage {
+    /// Creates one statically linked trusted-native package descriptor.
+    #[must_use]
+    pub const fn new(
+        identifier: &'static str,
+        compatibility_epoch: u32,
+        current_implementation_revision: u32,
+        restore: TrustedStudyRestore,
+    ) -> Self {
+        Self {
+            identifier,
+            compatibility_epoch,
+            current_implementation_revision,
+            restore,
+        }
+    }
+
+    /// Returns the durable study identifier owned by this package.
+    #[must_use]
+    pub const fn identifier(self) -> &'static str {
+        self.identifier
+    }
+
+    /// Returns the host/package compatibility epoch declared by this build.
+    #[must_use]
+    pub const fn compatibility_epoch(self) -> u32 {
+        self.compatibility_epoch
+    }
+
+    /// Returns the newest durable implementation revision this package can create.
+    #[must_use]
+    pub const fn current_implementation_revision(self) -> u32 {
+        self.current_implementation_revision
+    }
+}
+
+/// Failure while constructing the immutable trusted-native package registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TrustedStudyRegistryError {
+    TooManyPackages {
+        maximum: usize,
+    },
+    InvalidIdentifier(String),
+    ReservedIdentifier(String),
+    DuplicateIdentifier(String),
+    IncompatibleSdkEpoch {
+        identifier: String,
+        package_epoch: u32,
+        host_epoch: u32,
+    },
+    InvalidImplementationRevision(String),
+}
+
+impl fmt::Display for TrustedStudyRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyPackages { maximum } => {
+                write!(formatter, "trusted study package count exceeds {maximum}")
+            }
+            Self::InvalidIdentifier(identifier) => {
+                write!(
+                    formatter,
+                    "invalid trusted study package identifier {identifier}"
+                )
+            }
+            Self::ReservedIdentifier(identifier) => write!(
+                formatter,
+                "trusted study package identifier {identifier} uses the reserved built-in namespace"
+            ),
+            Self::DuplicateIdentifier(identifier) => {
+                write!(
+                    formatter,
+                    "duplicate trusted study package identifier {identifier}"
+                )
+            }
+            Self::IncompatibleSdkEpoch {
+                identifier,
+                package_epoch,
+                host_epoch,
+            } => write!(
+                formatter,
+                "trusted study package {identifier} targets SDK epoch {package_epoch}, host uses {host_epoch}"
+            ),
+            Self::InvalidImplementationRevision(identifier) => write!(
+                formatter,
+                "trusted study package {identifier} declares implementation revision zero"
+            ),
+        }
+    }
+}
+
+impl Error for TrustedStudyRegistryError {}
+
+/// Immutable resolver for built-ins plus statically linked trusted-native study packages.
+#[derive(Clone, Copy)]
+pub struct TrustedStudyRegistry<'a> {
+    packages: &'a [TrustedStudyPackage],
+}
+
+impl TrustedStudyRegistry<'static> {
+    /// Creates a registry containing only built-in studies.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { packages: &[] }
+    }
+}
+
+impl Default for TrustedStudyRegistry<'static> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> TrustedStudyRegistry<'a> {
+    /// Validates and installs the product build's statically approved package descriptors.
+    ///
+    /// # Errors
+    /// Returns an error for an excessive package count, invalid/reserved/duplicate identity,
+    /// incompatible SDK epoch, or zero current implementation revision.
+    pub fn from_packages(
+        packages: &'a [TrustedStudyPackage],
+    ) -> Result<Self, TrustedStudyRegistryError> {
+        if packages.len() > MAXIMUM_TRUSTED_STUDY_PACKAGES {
+            return Err(TrustedStudyRegistryError::TooManyPackages {
+                maximum: MAXIMUM_TRUSTED_STUDY_PACKAGES,
+            });
+        }
+        for (index, package) in packages.iter().copied().enumerate() {
+            validate_trusted_package(package)?;
+            if packages[..index]
+                .iter()
+                .any(|candidate| candidate.identifier == package.identifier)
+            {
+                return Err(TrustedStudyRegistryError::DuplicateIdentifier(
+                    package.identifier.to_string(),
+                ));
+            }
+        }
+        Ok(Self { packages })
+    }
+
+    /// Returns the number of statically approved external packages.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.packages.len()
+    }
+
+    /// Returns whether the product build contains no external trusted-native packages.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty()
+    }
+
+    /// Returns one approved external package descriptor by durable identifier.
+    #[must_use]
+    pub fn package(&self, identifier: &str) -> Option<TrustedStudyPackage> {
+        self.packages
+            .iter()
+            .copied()
+            .find(|package| package.identifier == identifier)
+    }
+
+    /// Restores a built-in or statically approved trusted-native study registration.
+    ///
+    /// # Errors
+    /// Returns the package/built-in restore error, rejects future implementation revisions, catches
+    /// package restore panics, and rejects a package that changes durable identity, dependencies,
+    /// or settings while reconstructing the registration.
+    pub fn restore(
+        &self,
+        identifier: &str,
+        implementation_revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        let Some(package) = self.package(identifier) else {
+            return restore_native_registration(
+                identifier,
+                implementation_revision,
+                dependencies,
+                settings,
+            );
+        };
+        if implementation_revision == 0
+            || implementation_revision > package.current_implementation_revision
+        {
+            return Err(StudySdkError::UnsupportedImplementationRevision {
+                identifier: identifier.to_string(),
+                revision: implementation_revision,
+            });
+        }
+        let durable_dependencies = dependencies.clone();
+        let durable_settings = settings.clone();
+        let registration = catch_unwind(AssertUnwindSafe(|| {
+            (package.restore)(implementation_revision, dependencies, settings)
+        }))
+        .map_err(|_| StudySdkError::PackageRestorePanicked(identifier.to_string()))??;
+        if registration.definition.identifier != identifier {
+            return Err(StudySdkError::PackageIdentityMismatch {
+                expected: identifier.to_string(),
+                actual: registration.definition.identifier,
+            });
+        }
+        if registration.definition.dependencies != durable_dependencies {
+            return Err(StudySdkError::PackageDependencyMismatch(
+                identifier.to_string(),
+            ));
+        }
+        if registration.definition.settings.len() != durable_settings.len()
+            || registration
+                .definition
+                .settings
+                .iter()
+                .any(|spec| !durable_settings.contains_key(&spec.identifier))
+        {
+            return Err(StudySdkError::PackageSettingsMismatch(
+                identifier.to_string(),
+            ));
+        }
+        let expected_settings =
+            StudySettings::with_overrides(&registration.definition.settings, durable_settings)?;
+        if registration.settings != expected_settings {
+            return Err(StudySdkError::PackageSettingsMismatch(
+                identifier.to_string(),
+            ));
+        }
+        Ok(registration)
+    }
+}
+
+fn validate_trusted_package(package: TrustedStudyPackage) -> Result<(), TrustedStudyRegistryError> {
+    let identifier = package.identifier;
+    if identifier.trim().is_empty()
+        || identifier.trim() != identifier
+        || identifier.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES
+    {
+        return Err(TrustedStudyRegistryError::InvalidIdentifier(
+            identifier.to_string(),
+        ));
+    }
+    if identifier.starts_with(RESERVED_BUILTIN_STUDY_PREFIX) {
+        return Err(TrustedStudyRegistryError::ReservedIdentifier(
+            identifier.to_string(),
+        ));
+    }
+    if package.compatibility_epoch != STUDY_SDK_COMPATIBILITY_EPOCH {
+        return Err(TrustedStudyRegistryError::IncompatibleSdkEpoch {
+            identifier: identifier.to_string(),
+            package_epoch: package.compatibility_epoch,
+            host_epoch: STUDY_SDK_COMPATIBILITY_EPOCH,
+        });
+    }
+    if package.current_implementation_revision == 0 {
+        return Err(TrustedStudyRegistryError::InvalidImplementationRevision(
+            identifier.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolves one durable study definition to trusted native executable code.
@@ -447,9 +781,11 @@ pub mod builtins {
             StudySdkError::Runtime(error) => error,
             StudySdkError::InvalidDependencyContract(_) => StudyRuntimeError::MissingDependency,
             StudySdkError::UnknownStudyIdentifier(_)
-            | StudySdkError::UnsupportedImplementationRevision { .. } => {
-                StudyRuntimeError::InvalidIdentifier
-            }
+            | StudySdkError::UnsupportedImplementationRevision { .. }
+            | StudySdkError::PackageIdentityMismatch { .. }
+            | StudySdkError::PackageDependencyMismatch(_)
+            | StudySdkError::PackageSettingsMismatch(_)
+            | StudySdkError::PackageRestorePanicked(_) => StudyRuntimeError::InvalidIdentifier,
         })
     }
 
@@ -691,9 +1027,11 @@ pub mod builtins {
             StudySdkError::Runtime(error) => error,
             StudySdkError::InvalidDependencyContract(_) => StudyRuntimeError::MissingDependency,
             StudySdkError::UnknownStudyIdentifier(_)
-            | StudySdkError::UnsupportedImplementationRevision { .. } => {
-                StudyRuntimeError::InvalidIdentifier
-            }
+            | StudySdkError::UnsupportedImplementationRevision { .. }
+            | StudySdkError::PackageIdentityMismatch { .. }
+            | StudySdkError::PackageDependencyMismatch(_)
+            | StudySdkError::PackageSettingsMismatch(_)
+            | StudySdkError::PackageRestorePanicked(_) => StudyRuntimeError::InvalidIdentifier,
         }
     }
 
@@ -2149,6 +2487,348 @@ mod tests {
                 StudySettingValue::Integer(BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD),
             ),
         ])
+    }
+
+    fn calculate_trusted_package(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        context
+            .output(0)
+            .map(|_| ())
+            .ok_or_else(|| "trusted-package test output is unavailable".to_string())
+    }
+
+    fn trusted_package_restore(
+        implementation_revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        if implementation_revision != 1 {
+            return Err(StudySdkError::UnsupportedImplementationRevision {
+                identifier: "example.trusted".to_string(),
+                revision: implementation_revision,
+            });
+        }
+        if settings.into_iter().next().is_some() {
+            return Err(StudySdkError::InvalidDependencyContract(
+                "example.trusted".to_string(),
+            ));
+        }
+        let definition = StudyDefinition {
+            identifier: "example.trusted".to_string(),
+            dependencies,
+            settings: Vec::new(),
+            outputs: vec![StudyOutputSpec {
+                identifier: "value".to_string(),
+                title: "Trusted Example".to_string(),
+                legend_label: None,
+                plot: StudyPlotKind::Line,
+                pane: StudyPaneTarget::Price,
+                scale: StudyScaleTarget::Primary,
+                threshold_region: None,
+                point_style: StudyPointStyle::Uniform,
+            }],
+            invalidation: StudyInvalidationPolicy::SameRange,
+        };
+        Ok(NativeStudyRegistration {
+            settings: StudySettings::defaults(&definition.settings)?,
+            definition,
+            program: NativeStudyProgram::stateless(calculate_trusted_package),
+        })
+    }
+
+    fn mismatched_trusted_package_restore(
+        revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        let mut registration = trusted_package_restore(revision, dependencies, settings)?;
+        registration.definition.identifier = "example.wrong".to_string();
+        Ok(registration)
+    }
+
+    fn dependency_mismatch_trusted_package_restore(
+        revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        let mut registration = trusted_package_restore(revision, dependencies, settings)?;
+        registration.definition.dependencies.clear();
+        Ok(registration)
+    }
+
+    fn settings_mismatch_trusted_package_restore(
+        revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        if revision != 1 {
+            return Err(StudySdkError::UnsupportedImplementationRevision {
+                identifier: "example.trusted".to_string(),
+                revision,
+            });
+        }
+        let _ = settings.into_iter().next();
+        let setting_specs = vec![StudySettingSpec::new(
+            "period",
+            StudySettingValue::Integer(1),
+        )];
+        let settings = StudySettings::with_overrides(
+            &setting_specs,
+            BTreeMap::from([("period".to_string(), StudySettingValue::Integer(2))]),
+        )?;
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: "example.trusted".to_string(),
+                dependencies,
+                settings: setting_specs,
+                outputs: vec![StudyOutputSpec {
+                    identifier: "value".to_string(),
+                    title: "Trusted Example".to_string(),
+                    legend_label: None,
+                    plot: StudyPlotKind::Line,
+                    pane: StudyPaneTarget::Price,
+                    scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
+                }],
+                invalidation: StudyInvalidationPolicy::SameRange,
+            },
+            settings,
+            program: NativeStudyProgram::stateless(calculate_trusted_package),
+        })
+    }
+
+    fn panicking_trusted_package_restore(
+        _revision: u32,
+        _dependencies: Vec<StudyDependency>,
+        _settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        panic!("intentional trusted package restore panic");
+    }
+
+    fn added_default_trusted_package_restore(
+        revision: u32,
+        dependencies: Vec<StudyDependency>,
+        settings: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        let has_settings = settings.into_iter().next().is_some();
+        if revision != 1 || has_settings {
+            return Err(StudySdkError::InvalidDependencyContract(
+                "example.trusted".to_string(),
+            ));
+        }
+        let setting_specs = vec![StudySettingSpec::new(
+            "period",
+            StudySettingValue::Integer(20),
+        )];
+        Ok(NativeStudyRegistration {
+            settings: StudySettings::defaults(&setting_specs)?,
+            definition: StudyDefinition {
+                identifier: "example.trusted".to_string(),
+                dependencies,
+                settings: setting_specs,
+                outputs: vec![StudyOutputSpec {
+                    identifier: "value".to_string(),
+                    title: "Trusted Example".to_string(),
+                    legend_label: None,
+                    plot: StudyPlotKind::Line,
+                    pane: StudyPaneTarget::Price,
+                    scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
+                }],
+                invalidation: StudyInvalidationPolicy::SameRange,
+            },
+            program: NativeStudyProgram::stateless(calculate_trusted_package),
+        })
+    }
+
+    #[test]
+    fn trusted_registry_validates_static_package_identity_epoch_and_revision() {
+        let package = TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            trusted_package_restore,
+        );
+        let packages = [package];
+        let registry = TrustedStudyRegistry::from_packages(&packages).expect("trusted registry");
+        assert_eq!(registry.len(), 1);
+        let resolved = registry
+            .package("example.trusted")
+            .expect("package resolves");
+        assert_eq!(resolved.identifier(), "example.trusted");
+        assert_eq!(
+            resolved.compatibility_epoch(),
+            STUDY_SDK_COMPATIBILITY_EPOCH
+        );
+        assert_eq!(resolved.current_implementation_revision(), 1);
+        assert!(matches!(
+            TrustedStudyRegistry::from_packages(&[package, package]),
+            Err(TrustedStudyRegistryError::DuplicateIdentifier(identifier))
+                if identifier == "example.trusted"
+        ));
+        assert!(matches!(
+            TrustedStudyRegistry::from_packages(&[TrustedStudyPackage::new(
+                "builtin.shadow",
+                STUDY_SDK_COMPATIBILITY_EPOCH,
+                1,
+                trusted_package_restore,
+            )]),
+            Err(TrustedStudyRegistryError::ReservedIdentifier(identifier))
+                if identifier == "builtin.shadow"
+        ));
+        assert!(matches!(
+            TrustedStudyRegistry::from_packages(&[TrustedStudyPackage::new(
+                "example.old",
+                STUDY_SDK_COMPATIBILITY_EPOCH + 1,
+                1,
+                trusted_package_restore,
+            )]),
+            Err(TrustedStudyRegistryError::IncompatibleSdkEpoch { .. })
+        ));
+    }
+
+    #[test]
+    fn trusted_registry_restores_external_and_builtin_studies_without_identity_escape() {
+        let packages = [TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            trusted_package_restore,
+        )];
+        let registry = TrustedStudyRegistry::from_packages(&packages).expect("trusted registry");
+        let custom = registry
+            .restore(
+                "example.trusted",
+                1,
+                vec![test_market_dependency()],
+                BTreeMap::new(),
+            )
+            .expect("custom study restores");
+        assert_eq!(custom.definition.identifier, "example.trusted");
+        assert!(
+            registry
+                .restore(
+                    BUILTIN_SMA_IDENTIFIER,
+                    BUILTIN_SMA_IMPLEMENTATION_REVISION,
+                    vec![test_market_dependency()],
+                    BTreeMap::from([(
+                        BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                        StudySettingValue::Integer(BUILTIN_SMA_DEFAULT_PERIOD),
+                    )]),
+                )
+                .is_ok()
+        );
+        assert!(matches!(
+            registry.restore(
+                "example.trusted",
+                2,
+                vec![test_market_dependency()],
+                BTreeMap::new(),
+            ),
+            Err(StudySdkError::UnsupportedImplementationRevision { revision: 2, .. })
+        ));
+
+        let mismatched_packages = [TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            mismatched_trusted_package_restore,
+        )];
+        let mismatched = TrustedStudyRegistry::from_packages(&mismatched_packages)
+            .expect("mismatched package descriptor itself is valid");
+        assert!(matches!(
+            mismatched.restore(
+                "example.trusted",
+                1,
+                vec![test_market_dependency()],
+                BTreeMap::new(),
+            ),
+            Err(StudySdkError::PackageIdentityMismatch { .. })
+        ));
+
+        let dependency_mismatch_packages = [TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            dependency_mismatch_trusted_package_restore,
+        )];
+        let dependency_mismatch =
+            TrustedStudyRegistry::from_packages(&dependency_mismatch_packages)
+                .expect("dependency-mismatch descriptor itself is valid");
+        assert!(matches!(
+            dependency_mismatch.restore(
+                "example.trusted",
+                1,
+                vec![test_market_dependency()],
+                BTreeMap::new(),
+            ),
+            Err(StudySdkError::PackageDependencyMismatch(identifier))
+                if identifier == "example.trusted"
+        ));
+
+        let settings_mismatch_packages = [TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            settings_mismatch_trusted_package_restore,
+        )];
+        let settings_mismatch = TrustedStudyRegistry::from_packages(&settings_mismatch_packages)
+            .expect("settings-mismatch descriptor itself is valid");
+        assert!(matches!(
+            settings_mismatch.restore(
+                "example.trusted",
+                1,
+                vec![test_market_dependency()],
+                BTreeMap::from([("period".to_string(), StudySettingValue::Integer(1))]),
+            ),
+            Err(StudySdkError::PackageSettingsMismatch(identifier))
+                if identifier == "example.trusted"
+        ));
+    }
+
+    #[test]
+    fn trusted_registry_contains_package_restore_panics() {
+        let packages = [TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            panicking_trusted_package_restore,
+        )];
+        let registry = TrustedStudyRegistry::from_packages(&packages)
+            .expect("panicking package descriptor itself is valid");
+        assert!(matches!(
+            registry.restore(
+                "example.trusted",
+                1,
+                vec![test_market_dependency()],
+                BTreeMap::new(),
+            ),
+            Err(StudySdkError::PackageRestorePanicked(identifier))
+                if identifier == "example.trusted"
+        ));
+    }
+
+    #[test]
+    fn trusted_registry_rejects_silent_setting_schema_growth_within_one_revision() {
+        let packages = [TrustedStudyPackage::new(
+            "example.trusted",
+            STUDY_SDK_COMPATIBILITY_EPOCH,
+            1,
+            added_default_trusted_package_restore,
+        )];
+        let registry = TrustedStudyRegistry::from_packages(&packages)
+            .expect("schema-growth package descriptor itself is valid");
+        assert!(matches!(
+            registry.restore(
+                "example.trusted",
+                1,
+                vec![test_market_dependency()],
+                BTreeMap::new(),
+            ),
+            Err(StudySdkError::PackageSettingsMismatch(identifier))
+                if identifier == "example.trusted"
+        ));
     }
 
     #[test]

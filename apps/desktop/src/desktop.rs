@@ -35,6 +35,8 @@ mod price_alert_dialog;
 mod readiness_conformance;
 #[path = "rithmic_shell.rs"]
 mod rithmic_shell;
+#[path = "study_packages.rs"]
+mod study_packages;
 #[path = "components/study_settings_dialog.rs"]
 mod study_settings_dialog;
 #[path = "components/symbol_menu.rs"]

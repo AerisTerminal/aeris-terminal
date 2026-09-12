@@ -669,6 +669,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_file_round_trip_preserves_unavailable_trusted_native_study_state() {
+        let path = temporary_workspace_path();
+        let mut workspace = default_workspace();
+        let chart = workspace.workspace_tabs[0].panes[0]
+            .chart
+            .get_or_insert_with(WorkspaceChartState::default);
+        let custom = WorkspaceChartStudyState {
+            local_id: 41,
+            identifier: "example.workspace_reconnect".to_string(),
+            implementation_revision: 3,
+            settings: vec![WorkspaceStudySettingState {
+                identifier: "period".to_string(),
+                value: Some(workspace_study_setting_state::Value::Integer(37)),
+            }],
+            dependencies: vec![WorkspaceStudyDependencyState {
+                kind: WorkspaceStudyDependencyKind::CurrentChartSeries as i32,
+                streams: vec![WorkspaceStudyMarketStream::Bars as i32],
+                ..WorkspaceStudyDependencyState::default()
+            }],
+            visible: false,
+            output_identifiers: vec!["value".to_string()],
+        };
+        chart.studies = vec![custom.clone()];
+
+        save_workspace_to_path(&workspace, &path).expect("workspace saves");
+        let restored = load_workspace_from_path(&path).expect("workspace reloads");
+        assert_eq!(
+            restored.workspace_tabs[0].panes[0]
+                .chart
+                .as_ref()
+                .expect("restored chart")
+                .studies,
+            vec![custom]
+        );
+
+        let parent = path.parent().expect("temporary workspace parent");
+        std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
     fn sanitizer_keeps_only_dependency_ordered_study_graph() {
         let mut workspace = default_workspace();
         let chart = workspace.workspace_tabs[0].panes[0]

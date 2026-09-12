@@ -1778,6 +1778,62 @@ mod tests {
     }
 
     #[test]
+    fn registered_native_study_survives_newer_provider_session_without_duplicate_demand() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+
+        let mut selected = instrument();
+        selected.session_generation = 2;
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(2)),
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("initial session history installs");
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration(selected_series.clone()),
+            )
+            .expect("study registers");
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+
+        let mut replacement = selected;
+        replacement.session_generation = 3;
+        coordinator
+            .install_provider_instrument(&replacement)
+            .expect("newer provider session installs");
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .and_then(|status| status.generation),
+            Some(ProviderGeneration(nonzero(3)))
+        );
+        assert_eq!(coordinator.studies.owner(study_id), Some(owner));
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+        assert!(coordinator.engine.has_subscription(&selected_series));
+        assert_eq!(
+            coordinator
+                .engine
+                .subscription_status(&selected_series)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, StreamRequirements::BARS))
+        );
+    }
+
+    #[test]
     fn newer_provider_session_demand_publishes_retained_older_snapshot_as_partial_baseline() {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
