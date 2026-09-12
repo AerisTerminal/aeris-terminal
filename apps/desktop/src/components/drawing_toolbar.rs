@@ -1,12 +1,13 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct DrawingToolbarState {
     pub(super) availability: DrawingToolbarAvailability,
     pub(super) active_tool: ChartDrawingTool,
     pub(super) drawing_count: usize,
     pub(super) selection: DrawingToolbarSelection,
     pub(super) selected_locked: bool,
+    pub(super) time_axis_height: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -39,6 +40,7 @@ impl DrawingToolbarState {
             drawing_count: chart.drawing_count(),
             selection,
             selected_locked: chart.selected_drawing_locked(),
+            time_axis_height: chart.time_axis_height(),
         }
     }
 }
@@ -195,7 +197,11 @@ pub(super) fn drawing_toolbar(
                     gpui_color(colors.text_secondary),
                 )),
         )
-        .child(drawing_toolbar_collapse(terminal, theme))
+        .child(drawing_toolbar_collapse(
+            terminal,
+            state.time_axis_height,
+            theme,
+        ))
 }
 
 fn drawing_toolbar_actions(
@@ -253,13 +259,11 @@ fn drawing_toolbar_actions(
         ))
 }
 
-// Match Nucleus's default time-axis strip so the drawing rail closes on the
-// same horizontal rhythm as the chart it borders.
-const DRAWING_TOOLBAR_TOGGLE_HEIGHT: f32 = 22.0;
 const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
 
 fn drawing_toolbar_collapse(
     terminal: Entity<TerminalApp>,
+    time_axis_height: f32,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -272,7 +276,7 @@ fn drawing_toolbar_collapse(
     )
     .flex_none()
     .w_full()
-    .h(px(DRAWING_TOOLBAR_TOGGLE_HEIGHT))
+    .h(px(time_axis_height))
     .border_t_1()
     .border_color(gpui_color(colors.border))
 }
@@ -332,6 +336,7 @@ fn drawing_action_control(
 
 pub(super) fn drawing_toolbar_expander(
     terminal: Entity<TerminalApp>,
+    time_axis_height: f32,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -346,7 +351,7 @@ pub(super) fn drawing_toolbar_expander(
     .left_0()
     .bottom_0()
     .w(px(chart_chrome::CHART_CHROME_HEIGHT))
-    .h(px(DRAWING_TOOLBAR_TOGGLE_HEIGHT))
+    .h(px(time_axis_height))
     .border_t_1()
     .border_r_1()
     .border_color(gpui_color(colors.border))

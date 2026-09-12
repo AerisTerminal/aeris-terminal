@@ -302,7 +302,11 @@ pub(super) fn workspace_market_area(
         .track_focus(&chrome_focus)
         .child(grid)
         .when(drawing_toolbar_collapsed, |market| {
-            market.child(drawing_toolbar_expander(terminal.clone(), theme))
+            market.child(drawing_toolbar_expander(
+                terminal.clone(),
+                drawing_state.time_axis_height,
+                theme,
+            ))
         })
         .when(!drawing_toolbar_collapsed, |market| {
             market.child(drawing_toolbar(

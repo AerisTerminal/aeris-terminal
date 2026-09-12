@@ -1,17 +1,19 @@
-use std::ops::Range;
+use std::{ops::Range, time::Duration};
 
-use axiusflow_design_system::{TypographyRole, platform_font_family};
+use axiusflow_design_system::{RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, Role, ShapedLine, SharedString,
-    Style, Subscription, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill,
-    point, prelude::*, px, relative, size,
+    Style, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::platform_font_weight;
+
+const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 /// Events emitted by Axiusflow's single-line text input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,19 +195,24 @@ pub(crate) struct InputState {
     scroll_x: Pixels,
     centered: bool,
     selecting: bool,
+    caret_visible: bool,
+    caret_blink_task: Option<Task<()>>,
     _focus_subscriptions: Vec<Subscription>,
 }
 
 impl InputState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle().tab_stop(true);
-        let focused = cx.on_focus(&focus_handle, window, |_, _, cx| {
+        let focused = cx.on_focus(&focus_handle, window, |input, _, cx| {
+            input.restart_caret_blink(cx);
             cx.emit(InputEvent::Focus);
             cx.notify();
         });
         let blurred = cx.on_blur(&focus_handle, window, |input, _, cx| {
             input.selecting = false;
             input.buffer.marked = None;
+            input.caret_visible = false;
+            input.caret_blink_task = None;
             cx.emit(InputEvent::Blur);
             cx.notify();
         });
@@ -219,6 +226,8 @@ impl InputState {
             scroll_x: px(0.0),
             centered: false,
             selecting: false,
+            caret_visible: false,
+            caret_blink_task: None,
             _focus_subscriptions: vec![focused, blurred],
         }
     }
@@ -260,8 +269,27 @@ impl InputState {
 
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.last_layout = None;
+        self.restart_caret_blink(cx);
         cx.emit(InputEvent::Change);
         cx.notify();
+    }
+
+    fn restart_caret_blink(&mut self, cx: &mut Context<Self>) {
+        self.caret_visible = true;
+        self.caret_blink_task = Some(cx.spawn(async move |input, cx| {
+            loop {
+                cx.background_executor().timer(CARET_BLINK_INTERVAL).await;
+                if input
+                    .update(cx, |input, input_cx| {
+                        input.caret_visible = !input.caret_visible;
+                        input_cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     fn replace_from_user(
@@ -317,6 +345,7 @@ impl InputState {
         } else {
             self.buffer.move_to(self.index_for_position(event.position));
         }
+        self.restart_caret_blink(cx);
         cx.stop_propagation();
         cx.notify();
     }
@@ -414,6 +443,7 @@ impl InputState {
         if changed {
             self.changed(cx);
         } else if handled {
+            self.restart_caret_blink(cx);
             self.invalidate_layout(cx);
         }
         if handled {
@@ -690,7 +720,7 @@ impl RenderOnce for Input {
                         !self.has_presentation(Self::THICK_BORDER),
                         gpui::Styled::border_1,
                     )
-                    .rounded(px(4.0))
+                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_color(border_color)
             })
             .when(
@@ -802,10 +832,9 @@ impl Element for InputTextElement {
                 color.opacity(0.22),
             )
         });
-        let caret = input.buffer.selection.is_empty().then(|| {
-            let x = text_origin.x + caret_x;
+        let caret = (input.buffer.selection.is_empty() && input.caret_visible).then(|| {
             fill(
-                Bounds::new(point(x, bounds.top()), size(px(1.0), bounds.size.height)),
+                caret_bounds(text_origin.x + caret_x, bounds, window.scale_factor()),
                 color,
             )
         });
@@ -917,6 +946,20 @@ fn centered_text_offset(centered: bool, width: Pixels, text_width: Pixels) -> Pi
     } else {
         px(0.0)
     }
+}
+
+fn caret_bounds(x: Pixels, text_bounds: Bounds<Pixels>, scale_factor: f32) -> Bounds<Pixels> {
+    let scale_factor = scale_factor.max(1.0);
+    let snapped_x = px((f32::from(x) * scale_factor).round() / scale_factor);
+    let physical_pixel = px(1.0 / scale_factor);
+    let inset = px(2.0_f32.min(f32::from(text_bounds.size.height) / 4.0));
+    Bounds::new(
+        point(snapped_x, text_bounds.top() + inset),
+        size(
+            physical_pixel,
+            (text_bounds.size.height - inset * 2.0).max(physical_pixel),
+        ),
+    )
 }
 
 fn clamp_byte_offset(text: &str, offset: usize) -> usize {
@@ -1067,6 +1110,17 @@ mod tests {
             horizontal_scroll_for_caret(px(1.0), px(1.0), px(0.0)),
             px(2.0)
         );
+    }
+
+    #[test]
+    fn caret_is_one_physical_pixel_and_stays_inside_the_text_line() {
+        let text_bounds = Bounds::new(point(px(0.0), px(10.0)), size(px(100.0), px(20.0)));
+        let caret = caret_bounds(px(12.37), text_bounds, 1.25);
+
+        assert_eq!(caret.origin.x, px(12.0));
+        assert_eq!(caret.size.width, px(0.8));
+        assert!(caret.top() > text_bounds.top());
+        assert!(caret.bottom() < text_bounds.bottom());
     }
 
     #[test]

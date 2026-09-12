@@ -126,7 +126,7 @@ fn text_control(
                 .flex()
                 .items_center()
                 .px_2()
-                .rounded(px(4.0))
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                 .border_1()
                 .border_color(gpui_color(colors.border))
                 .text_sm()

@@ -712,6 +712,7 @@ fn chart_settings_panel(
                 .icon(header_icon(HugeIcon::Refresh01Icon))
                 .aria_label("Reset settings")
                 .h(px(26.0))
+                .rounded_full()
                 .text_color(gpui_color(colors.text_secondary))
                 .hover(move |button| {
                     button
@@ -917,7 +918,7 @@ fn chart_settings_template_control(
             .absolute()
             .bottom(px(36.0))
             .left_0()
-            .w(px(212.0))
+            .w(px(240.0))
             .max_h(px(360.0))
             .overflow_y_scroll()
             .p_1()
@@ -927,7 +928,7 @@ fn chart_settings_template_control(
             .bg(gpui_color(colors.surface))
             .occlude()
             .child(
-                MenuRow::compact("chart_template_save", "Save…", theme).on_click(
+                MenuRow::compact_inset("chart_template_save", "Save…", theme).on_click(
                     move |_, window, cx| {
                         save.update(cx, |terminal, terminal_cx| {
                             terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
@@ -936,7 +937,7 @@ fn chart_settings_template_control(
                 ),
             )
             .child(
-                MenuRow::compact("chart_template_default", "Set as default", theme).on_click(
+                MenuRow::compact_inset("chart_template_default", "Set as default", theme).on_click(
                     move |_, _, cx| {
                         set_default.update(cx, |terminal, terminal_cx| {
                             terminal
@@ -947,7 +948,7 @@ fn chart_settings_template_control(
             );
         if state.apply_to_all {
             popup = popup.child(
-                MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme)
+                MenuRow::compact_inset("chart_template_apply_all", "Apply to all charts", theme)
                     .on_click(move |_, _, cx| {
                         apply_all.update(cx, |terminal, terminal_cx| {
                             terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
@@ -959,8 +960,8 @@ fn chart_settings_template_control(
             let apply = terminal.clone();
             let apply_menu = menu.clone();
             popup = popup.child(
-                MenuRow::compact(("chart_template", index), template.name.clone(), theme).on_click(
-                    move |_, _, cx| {
+                MenuRow::compact_inset(("chart_template", index), template.name.clone(), theme)
+                    .on_click(move |_, _, cx| {
                         apply.update(cx, |terminal, terminal_cx| {
                             terminal.apply_named_chart_settings_template(
                                 &apply_menu,
@@ -968,8 +969,7 @@ fn chart_settings_template_control(
                                 terminal_cx,
                             );
                         });
-                    },
-                ),
+                    }),
             );
         }
         control = control.child(gpui::deferred(popup));
@@ -998,8 +998,8 @@ fn chart_settings_template_save_dialog(
         .bg(gpui_color(colors.surface.with_alpha(0.72)))
         .child(
             div()
-                .w(px(360.0))
-                .p_3()
+                .w(px(420.0))
+                .p_4()
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -1044,7 +1044,9 @@ fn chart_settings_template_save_dialog(
                         .child(
                             Button::new("chart_template_confirm")
                                 .theme(theme)
-                                .resting_fill(colors.surface)
+                                .resting_fill(colors.primary)
+                                .bg(gpui_color(colors.primary))
+                                .text_color(gpui_color(colors.primary_foreground))
                                 .label("Save")
                                 .on_click(move |_, _, cx| {
                                     save.update(cx, |terminal, terminal_cx| {

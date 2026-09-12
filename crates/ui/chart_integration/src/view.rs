@@ -2176,6 +2176,11 @@ impl NucleusChartView {
         self.engine.options.get().crosshair.mode
     }
 
+    /// Returns the engine-resolved height of the visible time-axis strip.
+    pub fn time_axis_height(&self) -> f32 {
+        self.engine.time_axis_height().to_f32().unwrap_or(0.0)
+    }
+
     /// Drains host-facing alert-create requests produced by Nucleus's
     /// crosshair action chip.
     pub fn take_alert_create_requests(&mut self) -> Vec<AlertCreateRequest> {
