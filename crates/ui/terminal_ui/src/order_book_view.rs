@@ -434,7 +434,7 @@ fn connection_status_banner(
         OrderBookConnectionState::Recovering if !has_frame && !unavailable => return None,
         OrderBookConnectionState::Recovering => (
             "Order Book reconnecting · awaiting fresh snapshot",
-            |theme| theme.colors.bearish,
+            |theme| theme.colors.danger,
         ),
     };
     Some(
@@ -1281,8 +1281,8 @@ fn render_level_row(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let (price_color, row_id) = match side {
-        BookColumnSide::Bid => (colors.bullish, "order_book_bid_row"),
-        BookColumnSide::Ask => (colors.bearish, "order_book_ask_row"),
+        BookColumnSide::Bid => (colors.primary, "order_book_bid_row"),
+        BookColumnSide::Ask => (colors.danger, "order_book_ask_row"),
     };
     let trade_volumes = stats.trade_volumes.unwrap_or_else(|| {
         frame
@@ -1337,8 +1337,8 @@ fn render_empty_price_tick(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let (price_color, row_id) = match side {
-        BookColumnSide::Bid => (colors.bullish, "order_book_bid_price_tick"),
-        BookColumnSide::Ask => (colors.bearish, "order_book_ask_price_tick"),
+        BookColumnSide::Bid => (colors.primary, "order_book_bid_price_tick"),
+        BookColumnSide::Ask => (colors.danger, "order_book_ask_price_tick"),
     };
     let trade_volumes = stats.trade_volumes.unwrap_or_default();
     let quantity_scale = frame.quantity_scale;
@@ -1373,7 +1373,7 @@ fn render_empty_price_tick(
                             width,
                             trade_volumes.sell,
                             quantity_scale,
-                            theme.colors.bearish,
+                            theme.colors.danger,
                             true,
                             stats.maximum_trade_quantity,
                         )
@@ -1382,7 +1382,7 @@ fn render_empty_price_tick(
                             width,
                             trade_volumes.buy,
                             quantity_scale,
-                            theme.colors.bullish,
+                            theme.colors.primary,
                             false,
                             stats.maximum_trade_quantity,
                         )
@@ -1419,7 +1419,7 @@ fn render_level_cell(
         OrderBookColumn::Bid => quantity_cell(
             width,
             (side == BookColumnSide::Bid).then_some(level),
-            context.theme.colors.bullish,
+            context.theme.colors.primary,
             true,
             context.maximum_quantity,
         )
@@ -1428,7 +1428,7 @@ fn render_level_cell(
             width,
             context.trade_volumes.sell,
             context.quantity_scale,
-            context.theme.colors.bearish,
+            context.theme.colors.danger,
             true,
             context.maximum_trade_quantity,
         )
@@ -1443,7 +1443,7 @@ fn render_level_cell(
             width,
             context.trade_volumes.buy,
             context.quantity_scale,
-            context.theme.colors.bullish,
+            context.theme.colors.primary,
             false,
             context.maximum_trade_quantity,
         )
@@ -1451,7 +1451,7 @@ fn render_level_cell(
         OrderBookColumn::Ask => quantity_cell(
             width,
             (side == BookColumnSide::Ask).then_some(level),
-            context.theme.colors.bearish,
+            context.theme.colors.danger,
             false,
             context.maximum_quantity,
         )
@@ -1670,7 +1670,7 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
         OrderBookState::Ready => None,
         OrderBookState::Stale => Some((
             format!("Order Book stale · last sequence {watermark}"),
-            |theme| theme.colors.bearish,
+            |theme| theme.colors.danger,
         )),
         // Awaiting the first snapshot is still loading, not a failure, so
         // it renders neutral. Red is reserved for a book that broke.
@@ -1683,7 +1683,7 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
         )),
         OrderBookState::Recovering(reason) => Some((
             format!("Order Book recovering · {}", recovery_label(reason)),
-            |theme| theme.colors.bearish,
+            |theme| theme.colors.danger,
         )),
     }
 }

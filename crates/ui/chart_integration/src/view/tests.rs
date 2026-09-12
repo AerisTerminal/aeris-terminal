@@ -34,25 +34,26 @@ fn legend_text(row: &LegendRow) -> String {
 }
 
 fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
-    let (surface, foreground, secondary, border, crosshair, label_background) = match theme {
-        ChartTheme::Light => (
-            "#ffffff", "#141414", "#515151", "#f1f1f1", "#141414", "#141414",
-        ),
-        ChartTheme::Dark => (
-            "#141414", "#f0f0f0", "#b7b7b7", "#262626", "#262626", "#262626",
-        ),
-    };
+    let mut reference = ChartEngine::new(1.0, 1.0, 1.0);
+    reference.set_theme(theme);
+    let expected = reference.options.get();
     let options = chart.engine.options.get();
-    assert_eq!(options.layout.background.color, surface);
-    assert_eq!(options.layout.text_color, foreground);
-    assert_eq!(options.layout.muted_text_color, secondary);
+    assert_eq!(
+        options.layout.background.color,
+        expected.layout.background.color
+    );
+    assert_eq!(options.layout.text_color, expected.layout.text_color);
+    assert_eq!(
+        options.layout.muted_text_color,
+        expected.layout.muted_text_color
+    );
     assert_eq!(
         options.left_price_scale.text_color.as_deref(),
-        Some(foreground)
+        expected.left_price_scale.text_color.as_deref()
     );
     assert_eq!(
         options.right_price_scale.text_color.as_deref(),
-        Some(foreground)
+        expected.right_price_scale.text_color.as_deref()
     );
     assert_eq!(
         options.layout.font_family,
@@ -62,11 +63,17 @@ fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
         options.watermark.font_family,
         axiusflow_design_system::platform_font_stack()
     );
-    assert_eq!(options.grid.vert_lines.color, border);
-    assert_eq!(options.crosshair.vert_line.color, crosshair);
+    assert_eq!(
+        options.grid.vert_lines.color,
+        expected.grid.vert_lines.color
+    );
+    assert_eq!(
+        options.crosshair.vert_line.color,
+        expected.crosshair.vert_line.color
+    );
     assert_eq!(
         options.crosshair.vert_line.label_background_color,
-        label_background
+        expected.crosshair.vert_line.label_background_color
     );
 }
 
@@ -103,6 +110,8 @@ fn crosshair_alert_action_reaches_the_host_with_nucleus_price_context() {
         .map(f64::from)
         .find(|x| chart.engine.alert_create_hit_at(*x, y))
         .expect("alert action is hit-testable");
+    chart.update_cursor(action_x, y);
+    assert_eq!(chart.cursor_style, CursorStyle::PointingHand);
     assert!(chart.engine.activate_alert_create_at(action_x, y));
     let requests = chart.take_alert_create_requests();
     assert_eq!(requests.len(), 1);
@@ -505,17 +514,25 @@ fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
 }
 
 #[test]
-fn chart_legend_text_colors_project_the_platform_css_tokens() {
+fn chart_legend_text_colors_project_platform_chrome_and_nucleus_market_colors() {
     for (theme, platform) in [
         (ChartTheme::Light, AxiusflowTheme::light()),
         (ChartTheme::Dark, AxiusflowTheme::dark()),
     ] {
-        let palette = legend_palette(theme);
+        let palette = legend_palette(theme, "#089981", "#f7525f");
         let colors = platform.colors;
         assert_eq!(palette.text, gpui_theme_color(colors.text_primary));
         assert_eq!(palette.muted, gpui_theme_color(colors.text_secondary));
         assert_eq!(palette.hover, gpui_theme_color(colors.hover_bg));
         assert_eq!(palette.danger, gpui_theme_color(colors.danger));
+        assert_eq!(
+            palette.bullish,
+            rgba(Color::parse_css("#089981").expect("valid color").0)
+        );
+        assert_eq!(
+            palette.bearish,
+            rgba(Color::parse_css("#f7525f").expect("valid color").0)
+        );
     }
 }
 
@@ -1290,12 +1307,18 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
 }
 
 #[test]
-fn platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
+fn nucleus_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
     let mut chart = interactive_chart();
-    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#262626");
+    assert_eq!(
+        chart.engine.options.get().grid.vert_lines.color,
+        nucleus_grid_color(ChartTheme::Dark)
+    );
 
     chart.set_theme(ChartTheme::Light);
-    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#f1f1f1");
+    assert_eq!(
+        chart.engine.options.get().grid.vert_lines.color,
+        nucleus_grid_color(ChartTheme::Light)
+    );
 
     let mut custom = chart.appearance_settings();
     custom.grid_color = "#334155".to_string();
@@ -1304,9 +1327,12 @@ fn platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
     assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#334155");
 
     let mut persisted_light_default = chart.appearance_settings();
-    persisted_light_default.grid_color = "#f1f1f1".to_string();
+    persisted_light_default.grid_color = nucleus_grid_color(ChartTheme::Light);
     assert!(chart.set_appearance_settings(&persisted_light_default));
-    assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#262626");
+    assert_eq!(
+        chart.engine.options.get().grid.vert_lines.color,
+        nucleus_grid_color(ChartTheme::Dark)
+    );
 }
 
 #[test]

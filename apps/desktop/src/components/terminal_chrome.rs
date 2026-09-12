@@ -146,7 +146,7 @@ pub(super) fn terminal_header(
     let controls = header_controls(terminal, app, state);
     div()
         .w_full()
-        .h(px(theme.dimensions.app_header_height.logical_pixels))
+        .h(px(theme.dimensions.app_header_height))
         .flex()
         .items_center()
         .px_3()
@@ -1228,8 +1228,8 @@ pub(super) fn connection_presentation(
         FeedConnectionState::Disconnected => ("Offline", |theme| theme.colors.danger),
         FeedConnectionState::Discovering => ("Connecting", |theme| theme.colors.primary),
         FeedConnectionState::Authenticating => ("Authenticating", |theme| theme.colors.primary),
-        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.bullish),
-        FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.bearish),
+        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.primary),
+        FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.danger),
         FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.danger),
     };
     ConnectionPresentation {

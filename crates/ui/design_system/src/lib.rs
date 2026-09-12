@@ -346,30 +346,12 @@ pub struct ThemeColors {
     pub danger: ThemeColor,
     pub danger_foreground: ThemeColor,
     pub ring: ThemeColor,
-    pub bullish: ThemeColor,
-    pub bearish: ThemeColor,
 }
 
-/// A canonical logical length token.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LengthToken {
-    pub canonical_identifier: &'static str,
-    pub source_expression: &'static str,
-    pub logical_pixels: f32,
-}
-
-impl LengthToken {
-    /// Derives the CSS custom-property name from the canonical identifier.
-    #[must_use]
-    pub fn css_custom_property(self) -> String {
-        css_custom_property(self.canonical_identifier)
-    }
-}
-
-/// Application dimensions that are shared across native and browser shells.
+/// Native application dimensions that are not part of the portable CSS token contract.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeDimensions {
-    pub app_header_height: LengthToken,
+    pub app_header_height: f32,
 }
 
 /// A fully resolved Axiusflow theme suitable for a single paint revision.
@@ -391,11 +373,7 @@ impl AxiusflowTheme {
                 ThemeMode::Dark => dark_colors(),
             },
             dimensions: ThemeDimensions {
-                app_header_height: LengthToken {
-                    canonical_identifier: "app_header_height",
-                    source_expression: "2.75rem",
-                    logical_pixels: 44.0,
-                },
+                app_header_height: 44.0,
             },
         }
     }
@@ -547,8 +525,6 @@ fn light_colors() -> ThemeColors {
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
         ring: ThemeColor::from_rgba8(20, 20, 20, 0x33),
-        bullish: ThemeColor::from_rgb8(8, 153, 129),
-        bearish: ThemeColor::from_rgb8(247, 82, 95),
     }
 }
 
@@ -575,8 +551,6 @@ fn dark_colors() -> ThemeColors {
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
         ring: ThemeColor::from_rgba8(240, 240, 240, 0x26),
-        bullish: ThemeColor::from_rgb8(8, 153, 129),
-        bearish: ThemeColor::from_rgb8(247, 82, 95),
     }
 }
 
@@ -654,12 +628,8 @@ mod tests {
         assert_eq!(dark.input_fill, dark.surface_secondary);
         assert_eq!(dark.input_border, dark.border);
         assert_eq!(dark.border_secondary, dark.border);
-        assert_eq!(light.bullish, ThemeColor::from_rgb8(8, 153, 129));
-        assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
         assert_eq!(dark.primary, light.primary);
-        assert_eq!(dark.bullish, light.bullish);
-        assert_eq!(dark.bearish, light.bearish);
         assert_eq!(light.hover_bg, ThemeColor::from_rgba8(20, 20, 20, 0x09));
         assert_eq!(dark.active_bg, ThemeColor::from_rgba8(240, 240, 240, 0x24));
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
@@ -701,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn radius_and_header_dimensions_match_the_platform_contract() {
+    fn radius_tokens_match_the_platform_contract() {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
         assert_eq!(RadiusToken::Default.logical_pixels(), 8);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
@@ -711,10 +681,32 @@ mod tests {
             "--radius-default"
         );
         assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-large");
-        let theme = AxiusflowTheme::dark();
+    }
+
+    #[test]
+    fn bundled_platform_fonts_are_exactly_medium_and_bold() {
+        let font_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
+        let mut bundled_fonts = std::fs::read_dir(font_dir)
+            .expect("platform font directory is readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|extension| {
+                    matches!(
+                        extension.to_string_lossy().to_ascii_lowercase().as_str(),
+                        "ttf" | "otf" | "woff" | "woff2"
+                    )
+                })
+            })
+            .filter_map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect::<Vec<_>>();
+        bundled_fonts.sort();
         assert_eq!(
-            theme.dimensions.app_header_height.css_custom_property(),
-            "--app_header_height"
+            bundled_fonts,
+            ["HKGrotesk-Bold.ttf", "HKGrotesk-Medium.ttf"]
         );
     }
 
@@ -788,8 +780,7 @@ mod tests {
             "font-variant-numeric: tabular-nums;",
             "-webkit-font-smoothing: antialiased;",
             "font-synthesis: none;",
-            "transition: transform 100ms ease-out, background-color 150ms ease, color 150ms ease;",
-            "transform: scale(0.96);",
+            "transition: background-color 150ms ease, color 150ms ease;",
             "outline: 2px solid var(--ring);",
             "outline-offset: 2px;",
             "cursor: not-allowed;",
@@ -799,6 +790,7 @@ mod tests {
         }
         assert!(!css.contains("HKGrotesk-SemiBold.ttf"));
         assert!(!css.contains("font-weight: 600;"));
+        assert!(!css.contains("transform: scale("));
         assert!(!css.contains("/* Chart */"));
         assert!(!css.contains("--bullish:"));
         assert!(!css.contains("--bearish:"));

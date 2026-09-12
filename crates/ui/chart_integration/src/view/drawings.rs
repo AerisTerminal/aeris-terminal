@@ -114,7 +114,7 @@ impl NucleusChartView {
             options["text_v_align"].as_str().unwrap_or("middle"),
             drawing.text.is_empty(),
         );
-        let color = legend_palette(self.theme).text;
+        let color = gpui_theme_color(platform_theme(self.theme).colors.text_primary);
         Some(
             div()
                 .id(("chart_text_caret", id))

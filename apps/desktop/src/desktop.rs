@@ -721,6 +721,13 @@ struct PriceAlertDialogState {
     instrument: InstallProviderInstrument,
     condition: PriceAlertCondition,
     frequency: PriceAlertFrequency,
+    open_dropdown: Option<PriceAlertDropdown>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PriceAlertDropdown {
+    Condition,
+    Frequency,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -343,8 +343,7 @@ pub(super) fn chart_notice(
     }
     let tone = match notice.tone {
         ChartNoticeTone::Muted => colors.text_secondary,
-        ChartNoticeTone::Warning => colors.bearish,
-        ChartNoticeTone::Loss => colors.danger,
+        ChartNoticeTone::Warning | ChartNoticeTone::Loss => colors.danger,
     };
     let label = div()
         .flex()

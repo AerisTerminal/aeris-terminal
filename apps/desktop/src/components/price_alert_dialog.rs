@@ -183,6 +183,7 @@ impl WorkspaceSurface {
                 ChartAlertFrequency::EveryTime => PriceAlertFrequency::EveryTime,
             },
             request,
+            open_dropdown: None,
         });
         self.price_alert_message = None;
     }
@@ -200,6 +201,7 @@ impl WorkspaceSurface {
     ) {
         if let Some(dialog) = &mut self.price_alert_dialog {
             dialog.condition = condition;
+            dialog.open_dropdown = None;
             self.price_alert_message = None;
             cx.notify();
         }
@@ -212,7 +214,19 @@ impl WorkspaceSurface {
     ) {
         if let Some(dialog) = &mut self.price_alert_dialog {
             dialog.frequency = frequency;
+            dialog.open_dropdown = None;
             self.price_alert_message = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_price_alert_dropdown(
+        &mut self,
+        dropdown: PriceAlertDropdown,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.price_alert_dialog {
+            dialog.open_dropdown = (dialog.open_dropdown != Some(dropdown)).then_some(dropdown);
             cx.notify();
         }
     }
@@ -362,46 +376,153 @@ const fn condition_label(condition: PriceAlertCondition) -> &'static str {
     }
 }
 
-fn option_button(
+fn dropdown_trigger(
     app: &Entity<WorkspaceSurface>,
-    condition: PriceAlertCondition,
-    selected: bool,
+    dropdown: PriceAlertDropdown,
+    id: &'static str,
+    label: &'static str,
+    open: bool,
     theme: &AxiusflowTheme,
-) -> Button {
-    let choose = app.clone();
-    Button::new(("price_alert_condition", condition as u32))
-        .theme(theme)
-        .resting_fill(theme.colors.surface)
-        .selected(selected)
-        .label(condition_label(condition))
+) -> Stateful<Div> {
+    let toggle = app.clone();
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .w_full()
+        .h(px(34.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_3()
+        .border_1()
+        .border_color(gpui_color(if open {
+            colors.ring
+        } else {
+            colors.input_border
+        }))
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .bg(gpui_color(colors.input_fill))
+        .text_sm()
+        .text_color(gpui_color(colors.text_primary))
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(label)
+        .hover(move |style| style.bg(gpui_color(colors.hover_bg.over(colors.input_fill))))
         .on_click(move |_, _, cx| {
-            choose.update(cx, |surface, surface_cx| {
-                surface.select_price_alert_condition(condition, surface_cx);
+            toggle.update(cx, |surface, surface_cx| {
+                surface.toggle_price_alert_dropdown(dropdown, surface_cx);
             });
+            cx.stop_propagation();
         })
+        .child(label)
+        .child(header_icon(HugeIcon::ChevronDown).with_size(px(14.0)))
 }
 
-fn frequency_button(
+fn condition_dropdown(
     app: &Entity<WorkspaceSurface>,
-    frequency: PriceAlertFrequency,
-    selected: bool,
+    dialog: &PriceAlertDialogState,
     theme: &AxiusflowTheme,
-) -> Button {
-    let choose = app.clone();
-    let label = match frequency {
+) -> Div {
+    let open = dialog.open_dropdown == Some(PriceAlertDropdown::Condition);
+    let mut field = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(dropdown_trigger(
+            app,
+            PriceAlertDropdown::Condition,
+            "price_alert_condition_select",
+            condition_label(dialog.condition),
+            open,
+            theme,
+        ));
+    if open {
+        let mut menu = div()
+            .w_full()
+            .border_1()
+            .border_color(gpui_color(theme.colors.border_secondary))
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .bg(gpui_color(theme.colors.surface_secondary));
+        for (index, condition) in CONDITIONS.into_iter().enumerate() {
+            let choose = app.clone();
+            menu = menu.child(
+                MenuRow::compact(
+                    ("price_alert_condition_option", condition as u32),
+                    condition_label(condition),
+                    theme,
+                )
+                .highlighted(dialog.condition == condition)
+                .flush_in_panel(index == 0, index + 1 == CONDITIONS.len())
+                .on_click(move |_, _, cx| {
+                    choose.update(cx, |surface, surface_cx| {
+                        surface.select_price_alert_condition(condition, surface_cx);
+                    });
+                }),
+            );
+        }
+        field = field.child(menu);
+    }
+    field
+}
+
+const fn frequency_label(frequency: PriceAlertFrequency) -> &'static str {
+    match frequency {
         PriceAlertFrequency::OnlyOnce => "Only once",
         PriceAlertFrequency::EveryTime => "Every time",
-    };
-    Button::new(("price_alert_frequency", frequency as u32))
-        .theme(theme)
-        .resting_fill(theme.colors.surface)
-        .selected(selected)
-        .label(label)
-        .on_click(move |_, _, cx| {
-            choose.update(cx, |surface, surface_cx| {
-                surface.select_price_alert_frequency(frequency, surface_cx);
-            });
-        })
+    }
+}
+
+fn frequency_dropdown(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &PriceAlertDialogState,
+    theme: &AxiusflowTheme,
+) -> Div {
+    const FREQUENCIES: [PriceAlertFrequency; 2] = [
+        PriceAlertFrequency::OnlyOnce,
+        PriceAlertFrequency::EveryTime,
+    ];
+    let open = dialog.open_dropdown == Some(PriceAlertDropdown::Frequency);
+    let mut field = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(dropdown_trigger(
+            app,
+            PriceAlertDropdown::Frequency,
+            "price_alert_frequency_select",
+            frequency_label(dialog.frequency),
+            open,
+            theme,
+        ));
+    if open {
+        let mut menu = div()
+            .w_full()
+            .border_1()
+            .border_color(gpui_color(theme.colors.border_secondary))
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .bg(gpui_color(theme.colors.surface_secondary));
+        for (index, frequency) in FREQUENCIES.into_iter().enumerate() {
+            let choose = app.clone();
+            menu = menu.child(
+                MenuRow::compact(
+                    ("price_alert_frequency_option", frequency as u32),
+                    frequency_label(frequency),
+                    theme,
+                )
+                .highlighted(dialog.frequency == frequency)
+                .flush_in_panel(index == 0, index + 1 == FREQUENCIES.len())
+                .on_click(move |_, _, cx| {
+                    choose.update(cx, |surface, surface_cx| {
+                        surface.select_price_alert_frequency(frequency, surface_cx);
+                    });
+                }),
+            );
+        }
+        field = field.child(menu);
+    }
+    field
 }
 
 fn alerts_for_instrument(
@@ -595,13 +716,7 @@ fn price_alert_dialog_body(
                 .child("Condition"),
         )
         .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .children(CONDITIONS.map(|condition| {
-                    option_button(app, condition, dialog.condition == condition, theme)
-                })),
+            condition_dropdown(app, dialog, theme),
         )
         .child(
             div()
@@ -610,21 +725,7 @@ fn price_alert_dialog_body(
                 .child("Frequency"),
         )
         .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(frequency_button(
-                    app,
-                    PriceAlertFrequency::OnlyOnce,
-                    dialog.frequency == PriceAlertFrequency::OnlyOnce,
-                    theme,
-                ))
-                .child(frequency_button(
-                    app,
-                    PriceAlertFrequency::EveryTime,
-                    dialog.frequency == PriceAlertFrequency::EveryTime,
-                    theme,
-                )),
+            frequency_dropdown(app, dialog, theme),
         )
         .child(
             div()

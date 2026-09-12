@@ -56,19 +56,15 @@ fn platform_theme(theme: ChartTheme) -> AxiusflowTheme {
     }
 }
 
-fn opaque_css(color: ThemeColor, surface: ThemeColor) -> String {
-    format!("#{:06x}", color.over(surface).rgb_u32())
+fn nucleus_grid_color(theme: ChartTheme) -> String {
+    let mut engine = ChartEngine::new(1.0, 1.0, 1.0);
+    engine.set_theme(theme);
+    engine.options.get().grid.vert_lines.color.clone()
 }
 
-fn platform_grid_color(theme: ChartTheme) -> String {
-    let colors = platform_theme(theme).colors;
-    opaque_css(colors.border, colors.surface)
-}
-
-fn is_platform_grid_default(color: &str) -> bool {
-    color.eq_ignore_ascii_case("#363c4e")
-        || color.eq_ignore_ascii_case(&platform_grid_color(ChartTheme::Light))
-        || color.eq_ignore_ascii_case(&platform_grid_color(ChartTheme::Dark))
+fn is_nucleus_grid_default(color: &str) -> bool {
+    color.eq_ignore_ascii_case(&nucleus_grid_color(ChartTheme::Light))
+        || color.eq_ignore_ascii_case(&nucleus_grid_color(ChartTheme::Dark))
 }
 
 fn gpui_theme_color(color: ThemeColor) -> Rgba {
@@ -80,22 +76,14 @@ fn gpui_theme_color(color: ThemeColor) -> Rgba {
     }
 }
 
-fn apply_platform_text_contract(engine: &mut ChartEngine, theme: ChartTheme) {
-    let platform = platform_theme(theme);
-    let colors = platform.colors;
-    let text_primary = opaque_css(colors.text_primary, colors.surface);
-    let text_secondary = opaque_css(colors.text_secondary, colors.surface);
+fn apply_platform_font_contract(engine: &mut ChartEngine) {
     let options = serde_json::json!({
         "layout": {
             "fontFamily": platform_font_stack(),
-            "textColor": text_primary,
-            "mutedTextColor": text_secondary,
         },
         "watermark": {
             "fontFamily": platform_font_stack(),
         },
-        "leftPriceScale": { "textColor": text_primary },
-        "rightPriceScale": { "textColor": text_primary },
     })
     .to_string();
     engine
@@ -419,7 +407,7 @@ impl Default for ChartAppearanceSettings {
     fn default() -> Self {
         Self {
             grid_visible: true,
-            grid_color: platform_grid_color(ChartTheme::Dark),
+            grid_color: nucleus_grid_color(ChartTheme::Dark),
             grid_style: 2,
             crosshair_color: "#758696".to_string(),
             crosshair_width: 1,
@@ -934,7 +922,7 @@ impl NucleusChartView {
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        apply_platform_text_contract(&mut engine, theme);
+        apply_platform_font_contract(&mut engine);
         let volume_series = install_volume_series(&mut engine);
         Self {
             engine,
@@ -1023,7 +1011,7 @@ impl NucleusChartView {
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        apply_platform_text_contract(&mut engine, theme);
+        apply_platform_font_contract(&mut engine);
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
@@ -1406,11 +1394,11 @@ impl NucleusChartView {
     /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
         let current_grid_color = self.engine.options.get().grid.vert_lines.color.clone();
-        let grid_tracks_platform_theme = is_platform_grid_default(&current_grid_color);
+        let grid_tracks_nucleus_theme = is_nucleus_grid_default(&current_grid_color);
         self.theme = theme;
         self.engine.set_theme(theme);
-        apply_platform_text_contract(&mut self.engine, theme);
-        if !grid_tracks_platform_theme {
+        apply_platform_font_contract(&mut self.engine);
+        if !grid_tracks_nucleus_theme {
             let patch = serde_json::json!({
                 "grid": {
                     "vertLines": { "color": current_grid_color },
@@ -1938,8 +1926,8 @@ impl NucleusChartView {
     /// viewport state and provider ownership are untouched.
     pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
         let mut appearance = appearance.clone();
-        if is_platform_grid_default(&appearance.grid_color) {
-            appearance.grid_color = platform_grid_color(self.theme);
+        if is_nucleus_grid_default(&appearance.grid_color) {
+            appearance.grid_color = nucleus_grid_color(self.theme);
         }
         let current = self.appearance_settings();
         if current == appearance {
@@ -2482,13 +2470,19 @@ impl Default for NucleusChartView {
     }
 }
 
-fn legend_palette(theme: ChartTheme) -> LegendPalette {
+fn legend_palette(theme: ChartTheme, bullish: &str, bearish: &str) -> LegendPalette {
     let colors = platform_theme(theme).colors;
+    let chart_color = |value: &str| {
+        Color::parse_css(value).map_or_else(
+            || gpui_theme_color(colors.text_secondary),
+            |color| rgba(color.0),
+        )
+    };
     LegendPalette {
         text: gpui_theme_color(colors.text_primary),
         muted: gpui_theme_color(colors.text_secondary),
-        bullish: gpui_theme_color(colors.bullish),
-        bearish: gpui_theme_color(colors.bearish),
+        bullish: chart_color(bullish),
+        bearish: chart_color(bearish),
         hover: gpui_theme_color(colors.hover_bg),
         danger: gpui_theme_color(colors.danger),
     }
@@ -2523,9 +2517,11 @@ fn chart_legend_layers(
     rows: &[LegendRow],
     panes: &[LegendPaneLayout],
     theme: ChartTheme,
+    bullish: &str,
+    bearish: &str,
     loading: bool,
 ) -> Vec<AnyElement> {
-    let palette = legend_palette(theme);
+    let palette = legend_palette(theme, bullish, bearish);
     panes
         .iter()
         .copied()
@@ -2772,11 +2768,14 @@ impl Render for NucleusChartView {
             .focus_handle
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
+        let appearance = self.appearance_settings();
         let legends = chart_legend_layers(
             &entity,
             &self.legend_rows(),
             &self.legend_panes,
             self.theme,
+            &appearance.up_color,
+            &appearance.down_color,
             self.asset_loading.is_present(),
         );
         let text_caret = self.text_caret_overlay(window);

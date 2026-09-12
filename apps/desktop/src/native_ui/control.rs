@@ -49,7 +49,7 @@ fn with_pointer_states(
         )
         .when_some(
             active_color.filter(|_| policy.accepts_input()),
-            |this, color| this.active(move |style| style.top(px(1.0)).bg(color).opacity(0.94)),
+            |this, color| this.active(move |style| style.bg(color)),
         )
 }
 

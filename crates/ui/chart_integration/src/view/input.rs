@@ -62,7 +62,9 @@ impl NucleusChartView {
             self.engine.set_hovered_series(hovered_series);
             self.invalidate_series_frame();
         }
-        self.cursor_style = if active_separator || separator.is_some() {
+        self.cursor_style = if self.engine.alert_create_hit_at(pane_x, y) {
+            CursorStyle::PointingHand
+        } else if active_separator || separator.is_some() {
             CursorStyle::ResizeRow
         } else if self.engine.drawing_drag_active() {
             CursorStyle::ClosedHand

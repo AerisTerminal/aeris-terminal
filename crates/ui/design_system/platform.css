@@ -156,13 +156,7 @@ button,
 .button-outline,
 .button-ghost {
   border-radius: var(--radius-default);
-  transition: transform 100ms ease-out, background-color 150ms ease, color 150ms ease;
-}
-
-.button-primary:active:not(:disabled):not([aria-disabled="true"]),
-.button-outline:active:not(:disabled):not([aria-disabled="true"]),
-.button-ghost:active:not(:disabled):not([aria-disabled="true"]) {
-  transform: scale(0.96);
+  transition: background-color 150ms ease, color 150ms ease;
 }
 
 .button-primary {

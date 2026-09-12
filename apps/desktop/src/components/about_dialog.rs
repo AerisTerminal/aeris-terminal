@@ -27,7 +27,7 @@ fn about_update_view(
             ("Checking for updates…".to_string(), colors.text_muted, None)
         }
         Some(UpdateState::Current) => {
-            ("Axiusflow is up to date.".to_string(), colors.bullish, None)
+            ("Axiusflow is up to date.".to_string(), colors.primary, None)
         }
         Some(UpdateState::Downloading { latest_version }) => (
             format!("Downloading Axiusflow {latest_version}…"),
@@ -36,7 +36,7 @@ fn about_update_view(
         ),
         Some(UpdateState::ReadyToRestart { latest_version }) => (
             format!("Axiusflow {latest_version} is ready. Restart to update."),
-            colors.bullish,
+            colors.primary,
             Some(AboutAction::Restart),
         ),
         Some(UpdateState::Error(error)) => (error.clone(), colors.danger, Some(AboutAction::Retry)),
