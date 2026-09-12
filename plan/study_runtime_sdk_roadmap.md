@@ -19,7 +19,9 @@ The intended ownership split is:
 
 ## Current completion state
 
-The planned runtime/SDK foundation through Phase E is implemented and qualified. Remaining work is intentionally demand-driven: pure non-bar output timelines, additional rich output shapes, or a sandboxed untrusted-code model should be added only when a concrete product requirement needs them.
+The planned runtime/SDK foundation through Phase E is implemented and qualified for the Study Runtime/SDK scope. The remaining roadmap work is intentionally demand-driven: pure non-bar output timelines, additional rich output shapes, or a sandboxed untrusted-code model should be added only when a concrete product requirement needs them.
+
+Final integrated qualification closed the residual correctness gaps found by read-only review: transitive recovery readiness through prior-study outputs, exact fixed-time internal-gap containment for non-bar events, bounded output-primary incremental mapping without retained-history timestamp materialization, runtime-first durable study removal, and bounded automatic cleanup retry for registrations canceled before acknowledgement.
 
 ### Completed: runtime ownership and dependency graph
 
@@ -48,14 +50,17 @@ The planned runtime/SDK foundation through Phase E is implemented and qualified.
 - Dirty ranges propagate through dependent outputs in registration/dependency order.
 - Initial historical hydration and ranged historical repair share the same runtime; ranged repairs execute from the actual provider-returned timestamp span so committed checkpoints/state are reused instead of forcing a covering rebuild.
 - Incremental output preparation structurally shares unchanged timeline/value storage, so one-row tail work is bounded by dirty rows and outputs rather than retained history length.
+- Output-primary incremental dirty mapping binary-searches the producer's canonical timeline directly; it does not materialize an O(history) timestamp vector merely because the primary dependency is another study output.
 
 ### Completed: quote, trade, and depth SDK inputs
 
 - Native studies can declare Quotes, Trades, and Depth through the same `StudyMarketInput` stream requirements.
 - Calculations receive borrowed current quote state, bounded retained aggressor trades, and direct canonical depth iteration.
 - Depth is not cloned merely to execute a study.
-- Non-bar market events invalidate the exact containing live bar row by event time, ignore timestamps outside retained bar coverage, and propagate through the DAG according to the study invalidation policy.
-- Borrowed quote/trade/depth state is fenced by the authoritative provider generation and provider health; recovery/session replacement clears or hides stale non-bar state before study execution resumes.
+- Non-bar market events invalidate only the actual containing live bar row by event time. Fixed-time internal gaps do not map to the previous bar, and pre-first/post-tail/out-of-coverage timestamps are ignored.
+- Borrowed quote/trade/depth state is fenced by the authoritative provider generation, provider health, exact series handoff generation, and `Ready` live-history state.
+- A non-bar execution wave is additionally fenced by every reachable market dependency in the study graph, including market ancestry reached through `StudyDependency::Output` producer chains. A ready quote/trade/depth secondary therefore cannot execute a consumer against stale output from a recovering upstream bar study.
+- Rithmic classifies a series into recovery before exposing the recovery-triggering trade to non-bar study execution, closing the one-event stale-bar race while keeping provider-session ownership unchanged.
 - Provider demand remains stream-exact; Hyperliquid quote/BBO demand is separated from L2 depth demand so a quote-only study does not cause unnecessary depth subscriptions.
 
 ### Completed: durability and desktop lifecycle
@@ -65,7 +70,10 @@ The planned runtime/SDK foundation through Phase E is implemented and qualified.
 - Legacy WMA/Bollinger/SMA persistence migrates to the runtime-managed durable study model without duplicate Nucleus execution.
 - Desktop registers, reinitializes, removes, restores, and generation-fences runtime study work through the existing market worker command lane.
 - Changing the chart's selected series reinitializes current-chart study dependencies instead of registering a parallel study.
-- Study-legend removal is a host request that removes the authoritative runtime subtree before durable desktop cleanup, including pending/deferred durable descendants that reference removed local study outputs; dependency-chain rebind keeps presentation suppressed until each study's own reinitialization invalidation completes.
+- Study-legend removal is a host request. Queueing a manual `RemoveStudy` does not remove durable workspace state; the root and its durable descendants remain persisted until authoritative `StudyRemoved` arrives.
+- Authoritative `StudyRemoved` applies durable local-ID dependency closure across active, pending, and deferred descendants, then marks persistence dirty. `StudyRemovalFailed` leaves the manual study graph durable and retryable rather than advancing persistence ahead of runtime truth.
+- A pending registration canceled before acknowledgement is a different lifecycle: it remains excluded from presentation/count/persistence, retains automatic cancellation intent after registration, retries bounded `RemoveStudy` after queue backpressure/disconnect or `StudyRemovalFailed`, and never emits duplicate in-flight remove commands. Authoritative `StudyRemoved` clears that intent.
+- Dependency-chain rebind keeps presentation suppressed until each study's own reinitialization invalidation completes.
 
 ### Completed: rendering boundary
 
@@ -191,11 +199,28 @@ The approved static-native product surface now defines:
 
 - Real Nucleus-backed EMA tail work is measured under an explicit optimized release soak.
 - Runtime-level large-history qualification proves append/revision preparation work stays proportional to dirty rows and output count while prior immutable output snapshots remain stable.
+- A 16,384-row indicator-on-indicator/MTF regression proves output-primary incremental mapping does not materialize the producer's retained-history timestamp vector and prepares only the changed tail row.
 - Sixteen concurrent stateful studies run under sustained revisions while holding one shared `MarketEngine` lease.
 - Repeated reinitialization and historical repair keep state/output accounting bounded.
 - Quote/trade/depth study execution is burst-qualified, and provider-generation replacement preserves the exact non-bar stream union without duplicate leases.
 - One native-study failure cannot starve unrelated ready studies; its dependent subtree is fenced while already successful independent outputs remain publishable in deterministic order.
 - Workspace close/reopen preserves durable custom-study graphs; unavailable packages do not block unrelated restore, and runtime/chart ownership remains singular.
+
+### Qualification status
+
+The final combined tree was qualified with the repository-pinned toolchain and locked dependencies:
+
+- `cargo fmt --all -- --check` — pass.
+- `git diff --check` — pass apart from local LF-to-CRLF conversion warnings emitted by Git on Windows.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` — pass.
+- `axiusflow_market_runtime` — 112 tests passed, 4 intentional release-soak tests ignored in the normal debug suite.
+- `axiusflow_desktop` — 66 library tests plus 209 main-target tests passed; the intentional live Hyperliquid test remains ignored in the normal suite.
+- `axiusflow_study_sdk` — 21 unit tests plus 3 SDK-facade integration tests passed; its explicit release soak remains ignored in the normal suite.
+- Explicit optimized release soaks pass for 10,000,000 one-row EMA revisions, 16 concurrent stateful studies over one shared engine lease, 2,000 reinitialize/historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events.
+
+The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `axiusflow_chart_integration` theme assertions outside this roadmap: `nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
+
+This qualification is source/runtime qualification, not a production deployment claim. No release was published or installed as part of this roadmap completion, and no credentialed Rithmic live session was used as evidence for these Study Runtime/SDK completion claims. Provider recovery and generation statements above are backed by deterministic owner-boundary/runtime tests unless a separate live-market gate is explicitly cited.
 
 ## Execution status
 
@@ -240,7 +265,7 @@ The approved static-native product surface now defines:
 
 - [x] Declare provider Quotes/Trades/Depth through Study market leases.
 - [x] Expose current canonical non-bar state as borrowed execution views.
-- [x] Recalculate bar-aligned studies from intrabar non-bar events.
+- [x] Recalculate bar-aligned studies from intrabar non-bar events with exact containing-row semantics, fixed-time internal-gap rejection, provider/session/series recovery fencing, and transitive market-readiness through prior-study output ancestry.
 - [ ] Add pure non-bar timelines only when required by a concrete study.
 - [x] Add richer scalar presentation only behind concrete product requirements: fixed oscillator threshold regions and momentum-histogram state/color semantics are serial host contracts rendered by Nucleus.
 - [ ] Add future bands-between-outputs, markers, semantic levels, or table outputs only when a concrete study requires them.
@@ -257,10 +282,10 @@ The approved static-native product surface now defines:
   - The Study SDK README documents trust, versioning, revision, failure-isolation, bounded-resource, and approval rules.
   - Compiling examples cover stateless, stateful, multi-output, multi-timeframe, and market-microstructure studies using only the SDK facade.
 - [x] Add sustained performance/soak qualification.
-  - Explicit release-only soaks measure the real Nucleus-backed EMA adapter across 10,000,000 one-row tail revisions, hold 16 concurrent stateful studies over one real shared `MarketEngine` lease across 20,000 tail revisions, run 2,000 reinitialize + historical-repair cycles, and drive 50,000 bar-aligned quote/trade/depth events while asserting bounded output/state accounting and demand.
+  - Explicit release-only soaks pass on the final combined tree: the real Nucleus-backed EMA adapter across 10,000,000 one-row tail revisions, 16 concurrent stateful studies over one real shared `MarketEngine` lease across 20,000 tail revisions, 2,000 reinitialize + historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events while asserting bounded output/state accounting and demand.
 - [x] Add composed workspace restore/rebind and provider-reconnect qualification for representative native studies.
   - Workspace-file round trips preserve unavailable external package state; product-registry restore and current-series rebind preserve durable identity/output contracts; a missing package cannot starve unrelated study restore.
-  - Shipping provider capabilities expose the already-implemented quote/BBO paths alongside bars/trades/depth. A newer provider session preserves registered bar-only and quote/trade/depth native studies, their exact stream demand, and a single shared engine lease without duplicate demand. These persistence, resolver, and runtime recovery tests deliberately cover their owning boundaries rather than pretending one desktop test owns provider recovery.
+  - Shipping provider capabilities expose the already-implemented quote/BBO paths alongside bars/trades/depth. A newer provider session preserves registered bar-only and quote/trade/depth native studies, their exact stream demand, and a single shared engine lease without duplicate demand. Per-series recovery and transitive producer ancestry fence non-bar study execution until every required canonical bar dependency is `Ready`. These persistence, resolver, and runtime recovery tests deliberately cover their owning boundaries rather than pretending one desktop test owns provider recovery.
 
 ## Guardrails that must not regress
 
@@ -280,7 +305,11 @@ The approved static-native product surface now defines:
 
 The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
-Phase E is now implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; transactional state candidates require mutation-isolated cloning; runtime tail output preparation structurally shares unchanged history; ranged provider repairs reuse dirty-range execution; independent calculation failures remain isolated; release qualification measures the real recursive EMA path and verifies bounded concurrent/shared-lease, reinitialization/repair, and quote/trade/depth burst workloads; shipping provider capabilities expose their implemented quote paths; stale non-bar views are provider-generation/recovery fenced; and composed workspace persistence/rebind/removal coverage verifies that runtime study/lease ownership is not duplicated.
+Phase E is implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; transactional state candidates require mutation-isolated cloning; runtime tail output preparation structurally shares unchanged history; output-primary incremental mapping remains bounded without retained-history timestamp materialization; actual provider-returned ranged repairs reuse dirty-range execution; and independent calculation failures remain isolated.
+
+Recovery and desktop lifecycle qualification now cover the final ownership-sensitive cases as well: stale non-bar views are fenced by provider/session/series readiness and by transitive market ancestry through study outputs; the Rithmic recovery-triggering event cannot execute against stale bars; manual study removal remains durable until runtime acknowledgement; acknowledged removal closes the durable descendant subtree; canceled-before-registration studies remain hidden/non-durable while automatic removal retries are bounded and deduplicated; and reinitialization presentation stays suppressed until each study's own invalidation completes.
+
+Release qualification on the final combined tree verifies the real recursive EMA path plus bounded concurrent/shared-lease, reinitialization/repair, and quote/trade/depth burst workloads. Workspace Clippy, formatting, Study Runtime, Study SDK, and desktop gates are green. The only known repository-wide test failures are the two separate chart-theme assertions documented in **Qualification status** above; they are not Study Runtime/SDK regressions and are not counted as completed roadmap work.
 
 The remaining roadmap items are intentionally demand-driven rather than incomplete productization:
 
