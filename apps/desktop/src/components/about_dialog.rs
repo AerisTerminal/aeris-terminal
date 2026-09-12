@@ -233,7 +233,7 @@ pub(super) fn about_dialog_layer(
                 .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                 .border_1()
                 .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface_secondary))
+                .bg(gpui_color(colors.surface))
                 .shadow_lg()
                 .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                 .child(about_dialog_header(terminal, theme))

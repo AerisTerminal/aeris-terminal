@@ -693,14 +693,14 @@ fn chart_settings_panel(
         .child(
             Button::new("chart_settings_reset")
                 .theme(theme)
-                .resting_fill(colors.surface_secondary)
+                .resting_fill(colors.surface)
                 .icon(header_icon(HugeIcon::Refresh01Icon))
                 .aria_label("Reset settings")
                 .h(px(26.0))
                 .text_color(gpui_color(colors.text_secondary))
                 .hover(move |button| {
                     button
-                        .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                        .bg(gpui_color(colors.hover_bg.over(colors.surface)))
                         .text_color(gpui_color(colors.text_primary))
                 })
                 .on_click(move |_, _, cx| {
@@ -729,8 +729,7 @@ fn chart_settings_panel(
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface))
-        .shadow_lg()
+        .bg(gpui_color(colors.surface_secondary))
         .font_family(axiusflow_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_primary))
@@ -747,7 +746,7 @@ fn chart_settings_panel(
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_1()
                     .border_color(gpui_color(colors.border_secondary))
-                    .bg(gpui_color(colors.surface_secondary))
+                    .bg(gpui_color(colors.surface))
                     .overflow_hidden()
                     .child(
                         div()
@@ -1717,7 +1716,7 @@ pub(super) fn account_avatar_button(
             .bg(gpui_color(colors.surface_secondary))
             .cursor_pointer()
             .aria_label("Profile menu")
-            .hover(|button| button.bg(gpui_color(colors.surface)))
+            .hover(|button| button.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
             .on_click(move |event, _, cx| {
                 let anchor = event.position();
                 toggle_terminal.update(cx, |terminal, terminal_cx| {

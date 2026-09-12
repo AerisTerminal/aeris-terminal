@@ -57,11 +57,7 @@ pub(super) fn chrome_overlay_layer(
                     interval_popup: compact_panel,
                     dual_container,
                     primary_surface: quick_timeframe,
-                    elevation: if anchored_menu {
-                        ChromeOverlayElevation::Flat
-                    } else {
-                        ChromeOverlayElevation::Elevated
-                    },
+                    elevation: chrome_overlay_elevation(overlay),
                 },
                 closing,
                 generation,
@@ -188,10 +184,20 @@ pub(super) fn chrome_overlay_content(
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ChromeOverlayElevation {
     Flat,
     Elevated,
+}
+
+const fn chrome_overlay_elevation(overlay: ChromeOverlay) -> ChromeOverlayElevation {
+    match overlay {
+        ChromeOverlay::QuickTimeframe => ChromeOverlayElevation::Elevated,
+        ChromeOverlay::Instrument
+        | ChromeOverlay::Indicator
+        | ChromeOverlay::Timeframe
+        | ChromeOverlay::ChartType => ChromeOverlayElevation::Flat,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -829,4 +835,25 @@ pub(super) fn chart_type_overlay_row(
         );
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_chrome_menus_are_flat_surfaces() {
+        assert_eq!(
+            chrome_overlay_elevation(ChromeOverlay::Instrument),
+            ChromeOverlayElevation::Flat
+        );
+        assert_eq!(
+            chrome_overlay_elevation(ChromeOverlay::Indicator),
+            ChromeOverlayElevation::Flat
+        );
+        assert_eq!(
+            chrome_overlay_elevation(ChromeOverlay::QuickTimeframe),
+            ChromeOverlayElevation::Elevated
+        );
+    }
 }
