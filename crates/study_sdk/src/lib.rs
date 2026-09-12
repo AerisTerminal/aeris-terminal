@@ -2389,6 +2389,69 @@ pub mod builtins {
         }
 
         #[test]
+        #[ignore = "explicit release soak qualification for sustained recursive EMA tail work"]
+        fn ema_live_tail_release_soak_measures_recursive_work() {
+            const HISTORY_ROWS: usize = 5_000;
+            const TAIL_REVISIONS: u32 = 10_000_000;
+
+            let mut source = (0..HISTORY_ROWS)
+                .map(|index| 10_000_i64 + i64::try_from(index).expect("small history index"))
+                .collect::<Vec<_>>();
+            let mut output = vec![None; source.len()];
+            let mut state = nucleuscharts_indicators::IncrementalEmaState::new(
+                NonZeroUsize::new(20).expect("period"),
+            );
+            let divisor = 100.0;
+            rebuild_ema_output(
+                &mut state,
+                source.len(),
+                0,
+                |index| fixed_point_sample(source.get(index).copied(), divisor),
+                |index, value| {
+                    output[index] = value;
+                    Ok(())
+                },
+            )
+            .expect("initial EMA history builds");
+            let expected_runtime_bytes = state.runtime_bytes();
+            let last = source.len() - 1;
+            let mut visited_rows = 0_u64;
+            let started = std::time::Instant::now();
+
+            for _ in 0..TAIL_REVISIONS {
+                source[last] += 1;
+                let mut visited = 0_u64;
+                rebuild_ema_output(
+                    &mut state,
+                    source.len(),
+                    last,
+                    |index| {
+                        visited += 1;
+                        fixed_point_sample(source.get(index).copied(), divisor)
+                    },
+                    |index, value| {
+                        output[index] = value;
+                        Ok(())
+                    },
+                )
+                .expect("EMA tail revision succeeds");
+                visited_rows += visited;
+            }
+
+            let elapsed = started.elapsed();
+            let revisions_per_second =
+                f64::from(TAIL_REVISIONS) / elapsed.as_secs_f64().max(f64::EPSILON);
+            eprintln!(
+                "study_ema_tail_soak revisions={TAIL_REVISIONS} elapsed_us={} revisions_per_second={revisions_per_second:.0}",
+                elapsed.as_micros()
+            );
+            assert_eq!(visited_rows, u64::from(TAIL_REVISIONS));
+            assert_eq!(state.last_work_rows(), 1);
+            assert_eq!(state.runtime_bytes(), expected_runtime_bytes);
+            assert!(output[last].is_some());
+        }
+
+        #[test]
         fn ema_adapter_preserves_output_backed_hard_gaps() {
             let source = [
                 Some(1.0),

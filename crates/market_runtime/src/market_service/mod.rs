@@ -743,6 +743,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
                     realtime_bars: true,
                     streams: StreamRequirements::BARS
                         .with(MarketStream::Trades)
+                        .with(MarketStream::Quotes)
                         .with(MarketStream::Depth),
                 },
                 reconnect_delay: PROVIDER_RECONNECT_DELAY,
@@ -759,6 +760,7 @@ fn configured_engine() -> Result<MarketEngine, String> {
                     realtime_bars: true,
                     streams: StreamRequirements::BARS
                         .with(MarketStream::Trades)
+                        .with(MarketStream::Quotes)
                         .with(MarketStream::Depth),
                 },
                 reconnect_delay: PROVIDER_RECONNECT_DELAY,

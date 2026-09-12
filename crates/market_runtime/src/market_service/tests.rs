@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn shipping_provider_capabilities_accept_the_declared_non_bar_study_streams() {
+    let mut engine = configured_engine().expect("shipping market engine configures");
+    let streams = StreamRequirements::BARS
+        .with(MarketStream::Trades)
+        .with(MarketStream::Quotes)
+        .with(MarketStream::Depth);
+
+    for (provider_id, instrument_id, entitlement_id) in [
+        (
+            "rithmic",
+            "instrument:rithmic:CME:ES",
+            "rithmic-test:CME:ES",
+        ),
+        (
+            "hyperliquid",
+            "instrument:hyperliquid:BTC",
+            "hyperliquid-public",
+        ),
+    ] {
+        let series = BarSeriesKey {
+            provider_id: provider_id.to_string(),
+            instrument_id: instrument_id.to_string(),
+            entitlement_id: entitlement_id.to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        };
+        let (lease_id, snapshot) = engine
+            .acquire_data_lease(&series, streams)
+            .expect("shipping provider accepts the full study stream contract");
+        assert!(snapshot.is_none());
+        assert_eq!(
+            engine
+                .subscription_status(&series)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, streams))
+        );
+        assert!(engine.release_data_lease(lease_id));
+    }
+}
+
+#[test]
 fn provider_wake_is_a_conflated_nonblocking_edge() {
     let (commands, receiver) = mpsc::sync_channel(1);
     let wake = ProviderCoordinatorWake::new(commands);

@@ -1047,12 +1047,15 @@ mod tests {
         }
     }
 
-    fn study_definition(series: BarSeriesKey) -> StudyDefinition {
+    fn study_definition_with_streams(
+        series: BarSeriesKey,
+        streams: StreamRequirements,
+    ) -> StudyDefinition {
         StudyDefinition {
             identifier: "test.study".to_string(),
             dependencies: vec![StudyDependency::Market(StudyMarketInput {
                 series,
-                streams: StreamRequirements::BARS,
+                streams,
             })],
             settings: Vec::new(),
             outputs: vec![StudyOutputSpec {
@@ -1067,6 +1070,10 @@ mod tests {
             }],
             invalidation: StudyInvalidationPolicy::SameRange,
         }
+    }
+
+    fn study_definition(series: BarSeriesKey) -> StudyDefinition {
+        study_definition_with_streams(series, StreamRequirements::BARS)
     }
 
     fn calculate_test_study(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
@@ -1085,6 +1092,21 @@ mod tests {
 
     fn study_registration(series: BarSeriesKey) -> NativeStudyRegistration {
         let definition = study_definition(series);
+        NativeStudyRegistration {
+            settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
+            definition,
+            program: NativeStudyProgram {
+                calculate: calculate_test_study,
+                state_factory: None,
+            },
+        }
+    }
+
+    fn study_registration_with_streams(
+        series: BarSeriesKey,
+        streams: StreamRequirements,
+    ) -> NativeStudyRegistration {
+        let definition = study_definition_with_streams(series, streams);
         NativeStudyRegistration {
             settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
             definition,
@@ -1830,6 +1852,73 @@ mod tests {
                 .subscription_status(&selected_series)
                 .map(|status| (status.consumer_count, status.streams)),
             Some((0, StreamRequirements::BARS))
+        );
+    }
+
+    #[test]
+    fn non_bar_native_study_preserves_stream_demand_across_newer_provider_session() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+
+        let mut selected = instrument();
+        selected.session_generation = 2;
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(2)),
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("initial session history installs");
+        let streams = StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth);
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration_with_streams(selected_series.clone(), streams),
+            )
+            .expect("non-bar study registers");
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+        assert_eq!(
+            coordinator
+                .engine
+                .subscription_status(&selected_series)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, streams))
+        );
+
+        let mut replacement = selected;
+        replacement.session_generation = 3;
+        coordinator
+            .install_provider_instrument(&replacement)
+            .expect("newer provider session installs");
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .and_then(|status| status.generation),
+            Some(ProviderGeneration(nonzero(3)))
+        );
+        assert_eq!(coordinator.studies.owner(study_id), Some(owner));
+        assert_eq!(coordinator.engine.data_lease_count(), 1);
+        assert!(coordinator.engine.has_subscription(&selected_series));
+        assert_eq!(
+            coordinator
+                .engine
+                .subscription_status(&selected_series)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, streams))
         );
     }
 

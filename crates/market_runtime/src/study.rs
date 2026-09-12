@@ -3966,6 +3966,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(runtime.market_requirements().len(), 1);
+        let lease_changes = runtime
+            .reconcile_market_leases(&mut engine)
+            .expect("shared study market lease reconciles");
+        assert_eq!(lease_changes.len(), 1);
+        assert_eq!(engine.data_lease_count(), 1);
+        assert_eq!(
+            engine
+                .subscription_status(&source)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, StreamRequirements::BARS))
+        );
 
         for study in &studies {
             runtime
@@ -3989,6 +4000,13 @@ mod tests {
         assert_eq!(runtime.output_points, expected_points);
         assert_eq!(runtime.state_bytes, expected_state_bytes);
         assert_eq!(runtime.market_requirements().len(), 1);
+        assert_eq!(engine.data_lease_count(), 1);
+        assert_eq!(
+            engine
+                .subscription_status(&source)
+                .map(|status| (status.consumer_count, status.streams)),
+            Some((0, StreamRequirements::BARS))
+        );
         for study in studies {
             let state = committed_test_state(&mut runtime, study);
             assert_eq!(state.executions, TAIL_ITERATIONS + 1);
@@ -3998,6 +4016,160 @@ mod tests {
                 .expect("study output remains installed");
             assert_eq!(output.len(), 2);
         }
+    }
+
+    #[test]
+    #[ignore = "explicit release soak qualification for repeated reinitialize and historical repair"]
+    fn native_study_reinitialize_and_historical_repair_soak_keeps_accounting_bounded() {
+        const CYCLES: u32 = 2_000;
+        const BAR_COUNT: usize = 64;
+
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES");
+        let history = (0..BAR_COUNT)
+            .map(|index| {
+                bar(
+                    u64::try_from(index + 1).expect("small soak sequence"),
+                    i64::try_from(index * 60).expect("small soak timestamp"),
+                    10_000 + i64::try_from(index).expect("small soak close"),
+                )
+            })
+            .collect::<Vec<_>>();
+        engine
+            .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 3, history)
+            .expect("canonical soak history installs");
+        let owner = ConsumerId(NonZeroU64::MIN);
+        let study = runtime
+            .register_native_for_consumer(owner, stateful_registration(source.clone(), 8))
+            .expect("stateful soak study registers");
+        runtime
+            .execute_ready(&engine, study)
+            .expect("initial covering execution succeeds");
+
+        let repair = StudyDirtyRange::bounded(8, 24).expect("bounded historical repair");
+        for _ in 0..CYCLES {
+            assert_eq!(
+                runtime
+                    .reinitialize_native_for_consumer(
+                        owner,
+                        study,
+                        stateful_registration(source.clone(), 8),
+                    )
+                    .expect("study reinitializes in place"),
+                vec![study]
+            );
+            runtime
+                .execute_ready(&engine, study)
+                .expect("covering replay after reinitialize succeeds");
+            runtime
+                .execute_ready_range(&engine, study, Some(repair))
+                .expect("historical repair succeeds");
+
+            assert_eq!(runtime.output_points, BAR_COUNT);
+            assert_eq!(runtime.state_bytes, 8);
+            assert_eq!(runtime.market_requirements().len(), 1);
+            assert_eq!(
+                runtime
+                    .output_series(study.output(0))
+                    .expect("study output remains installed")
+                    .len(),
+                BAR_COUNT
+            );
+        }
+        let state = committed_test_state(&mut runtime, study);
+        assert_eq!(state.executions, 2);
+        assert_eq!(state.accounted_bytes, 8);
+    }
+
+    #[test]
+    #[ignore = "explicit release soak qualification for bar-aligned non-bar burst work"]
+    fn native_non_bar_burst_soak_keeps_output_and_demand_bounded() {
+        const EVENTS: u32 = 50_000;
+
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES");
+        engine
+            .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 0, bars())
+            .expect("canonical history installs");
+        let streams = StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth);
+        let definition = definition(
+            "live_microstructure_soak",
+            vec![market(source, streams)],
+            1,
+            StudyInvalidationPolicy::FromFirstChanged,
+        );
+        let study = runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&definition.settings).expect("defaults"),
+                    definition,
+                    program: NativeStudyProgram::stateless(calculate_live_microstructure),
+                },
+            )
+            .expect("microstructure soak study registers");
+        let live = live_microstructure_fixture();
+        let first_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_one, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut initial_lookup = |_input: &StudyMarketInput| Some(first_live);
+        runtime
+            .execute_ready_with_live(&engine, study, &mut initial_lookup)
+            .expect("initial microstructure execution succeeds");
+
+        let second_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_two, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        for index in 0..EVENTS {
+            let current_live = if index % 2 == 0 {
+                second_live
+            } else {
+                first_live
+            };
+            let mut lookup = |_input: &StudyMarketInput| Some(current_live);
+            let stream = match index % 3 {
+                0 => MarketStream::Quotes,
+                1 => MarketStream::Trades,
+                _ => MarketStream::Depth,
+            };
+            assert_eq!(
+                runtime
+                    .execute_live_non_bar_change_with_live(
+                        &engine,
+                        StudyNonBarChange {
+                            provider_id: "provider",
+                            instrument_id: "ES",
+                            entitlement_id: "entitlement",
+                            stream,
+                            observed_unix_nanos: event_metadata(u64::from(index) + 10, 90)
+                                .timestamps
+                                .exchange_unix_nanos
+                                .expect("exchange timestamp"),
+                        },
+                        &mut lookup,
+                    )
+                    .expect("non-bar burst event recalculates"),
+                vec![study]
+            );
+        }
+
+        assert_eq!(runtime.output_points, bars().len());
+        assert_eq!(runtime.state_bytes, 0);
+        assert_eq!(runtime.market_requirements().len(), 1);
+        let output = runtime
+            .output_series(study.output(0))
+            .expect("microstructure output remains installed");
+        assert_eq!(output.len(), bars().len());
+        assert!(output.values().iter().all(Option::is_some));
     }
 
     fn calculate_secondary_asof(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
