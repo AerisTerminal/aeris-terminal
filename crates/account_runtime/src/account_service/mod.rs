@@ -742,8 +742,12 @@ impl AccountService {
     /// Local deletion happens synchronously so a concurrent login cannot
     /// observe stale material; server-side revocation follows on a bounded
     /// worker with the in-memory refresh copy and never blocks the coordinator.
-    #[must_use]
-    pub fn sign_out(&self) -> AccountView {
+    /// # Errors
+    ///
+    /// Returns an actionable redacted error when saved session credentials
+    /// could not be deleted. In-memory session state is still retired before
+    /// the error is returned.
+    pub fn sign_out(&self) -> Result<AccountView, String> {
         let vault = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE);
         match vault {
             Ok(vault) => self.sign_out_with(&vault),
@@ -751,7 +755,7 @@ impl AccountService {
         }
     }
 
-    fn sign_out_with<V>(&self, vault: &V) -> AccountView
+    fn sign_out_with<V>(&self, vault: &V) -> Result<AccountView, String>
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
@@ -777,19 +781,11 @@ impl AccountService {
             .lock()
             .map(|cached| cached.clone())
             .unwrap_or_default();
-        let revocation = cached.zip(
-            token
-                .filter(|_| refresh_deleted)
-                .and_then(|token| String::from_utf8(token).ok()),
-        );
+        let revocation = cached.zip(token.and_then(|token| String::from_utf8(token).ok()));
         let deleted = lease_deleted && refresh_deleted;
         let view = {
             let Ok(mut state) = self.state.lock() else {
-                return cleared_view(
-                    AccountSessionState::TerminalError,
-                    0,
-                    "account state is unavailable",
-                );
+                return Err("account state is unavailable".to_string());
             };
             // Profile leaves with the session: a later sign-in as another
             // user never inherits these fields, even briefly.
@@ -814,7 +810,11 @@ impl AccountService {
                 })
                 .ok();
         }
-        view
+        if deleted {
+            Ok(view)
+        } else {
+            Err("sign-out could not remove saved credentials; retry sign-out".to_string())
+        }
     }
 
     /// Runs one login transaction to a truthful browser page. The loopback
@@ -1693,6 +1693,30 @@ mod tests {
         }
     }
 
+    struct SelectiveDeleteFailureVault<'a> {
+        inner: &'a MemoryVault,
+        failing_key: &'static str,
+    }
+
+    impl CredentialVault for SelectiveDeleteFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            if key == self.failing_key {
+                return Err("selected delete failure".to_string());
+            }
+            self.inner.delete(key)
+        }
+    }
+
     fn service() -> AccountService {
         use super::oidc::OidcEndpoints;
 
@@ -2448,7 +2472,9 @@ mod tests {
             .lock()
             .expect("endpoint cache locks")
             .take();
-        let signed_out = service.sign_out_with(&vault);
+        let signed_out = service
+            .sign_out_with(&vault)
+            .expect("first account signs out durably");
         assert!(signed_out.display_name.is_empty());
         assert!(signed_out.email.is_empty());
         assert!(signed_out.photo_url.is_empty());
@@ -2502,7 +2528,9 @@ mod tests {
             .take();
         // Seed a profile first: sign-out must clear it with the session.
         service.state.lock().expect("state locks").view.display_name = "ada".to_string();
-        let view = service.sign_out_with(&vault);
+        let view = service
+            .sign_out_with(&vault)
+            .expect("account signs out durably");
         assert_eq!(view.state, AccountSessionState::SignedOut);
         assert!(view.account_id.is_empty());
         assert!(view.display_name.is_empty());
@@ -2532,6 +2560,85 @@ mod tests {
     }
 
     #[test]
+    fn sign_out_refresh_delete_failure_is_actionable_and_survives_restart() {
+        let service = service();
+        let vault = MemoryVault::default();
+        service.begin_login(41).expect("login starts");
+        service.complete_with_tokens(
+            41,
+            &AccountId::try_new("acct_01").expect("identity builds"),
+            PlanId::Pro,
+            &profile("ada", "ada@example.com"),
+            Some("refresh-survives"),
+            &vault,
+        );
+        service
+            .endpoints
+            .lock()
+            .expect("endpoint cache locks")
+            .take();
+        let failing = SelectiveDeleteFailureVault {
+            inner: &vault,
+            failing_key: REFRESH_VAULT_KEY,
+        };
+
+        let error = service
+            .sign_out_with(&failing)
+            .expect_err("surviving refresh material must fail durable sign-out");
+        assert_eq!(
+            error,
+            "sign-out could not remove saved credentials; retry sign-out"
+        );
+        let signed_out = service.account_status();
+        assert_eq!(signed_out.state, AccountSessionState::SignedOut);
+        assert!(signed_out.account_id.is_empty());
+        assert!(signed_out.display_name.is_empty());
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh read succeeds")
+                .is_some()
+        );
+
+        let restarted = restoring_service();
+        let LocalRestore::ContinueOnline { refresh_token, .. } =
+            restarted.restore_local_session(&vault)
+        else {
+            panic!("surviving refresh material remains restorable after restart");
+        };
+        assert_eq!(refresh_token.as_str(), "refresh-survives");
+    }
+
+    #[test]
+    fn sign_out_lease_delete_failure_is_actionable() {
+        let service = service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        let failing = SelectiveDeleteFailureVault {
+            inner: &vault,
+            failing_key: LEASE_VAULT_KEY,
+        };
+
+        let error = service
+            .sign_out_with(&failing)
+            .expect_err("surviving lease material must fail durable sign-out");
+        assert_eq!(
+            error,
+            "sign-out could not remove saved credentials; retry sign-out"
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::SignedOut
+        );
+        assert!(
+            vault
+                .load(LEASE_VAULT_KEY)
+                .expect("lease read succeeds")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn retired_lease_warmup_cannot_touch_a_newer_session() {
         use super::lease::RefreshOutcome;
 
@@ -2558,7 +2665,9 @@ mod tests {
             .lock()
             .expect("endpoint cache locks")
             .take();
-        service.sign_out_with(&vault);
+        service
+            .sign_out_with(&vault)
+            .expect("account signs out durably");
         service.apply_lease_outcome(51, RefreshOutcome::Refreshed(PlanId::Elite));
         let view = service.account_status();
         assert_eq!(view.state, AccountSessionState::SignedOut);

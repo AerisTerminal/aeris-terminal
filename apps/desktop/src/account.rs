@@ -173,6 +173,8 @@ pub struct AccountMenuState {
     pub presentation: AccountPresentation,
     /// Latest redacted account error, if any.
     pub error: Option<String>,
+    /// Whether durable sign-out cleanup is still unresolved and can be retried.
+    pub retry_sign_out: bool,
 }
 
 impl AccountMenuState {
@@ -213,6 +215,7 @@ pub fn unavailable_menu_state() -> AccountMenuState {
     AccountMenuState {
         presentation: unavailable_presentation(),
         error: None,
+        retry_sign_out: false,
     }
 }
 
@@ -262,7 +265,29 @@ enum AccountResponse {
     },
     Cancelled(AccountView),
     SignedOut(AccountView),
+    SignOutFailed {
+        view: AccountView,
+        error: String,
+    },
     Failed(String),
+}
+
+#[derive(Clone, Debug)]
+enum AccountError {
+    Transient(String),
+    SignOutCleanup(String),
+}
+
+impl AccountError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Transient(message) | Self::SignOutCleanup(message) => message,
+        }
+    }
+
+    fn is_sign_out_cleanup(&self) -> bool {
+        matches!(self, Self::SignOutCleanup(_))
+    }
 }
 
 /// Presentation snapshot for account rendering.
@@ -291,7 +316,7 @@ struct AccountShared {
     pending: AtomicBool,
     version: AtomicU64,
     view: Mutex<AccountView>,
-    error: Mutex<Option<String>>,
+    error: Mutex<Option<AccountError>>,
     last_status_poll: Mutex<Instant>,
     profile_refresh_until: Mutex<Option<Instant>>,
     last_seen_version: Mutex<u64>,
@@ -500,9 +525,11 @@ impl DesktopAccount {
     /// Returns the owned settings-menu state for rendering.
     #[must_use]
     pub fn menu_state(&self) -> AccountMenuState {
+        let (error, retry_sign_out) = account_error_snapshot(&self.shared);
         AccountMenuState {
             presentation: self.presentation(),
-            error: self.error(),
+            error,
+            retry_sign_out,
         }
     }
 
@@ -547,11 +574,7 @@ impl DesktopAccount {
     /// Returns the latest redacted account error, if any.
     #[must_use]
     pub fn error(&self) -> Option<String> {
-        self.shared
-            .error
-            .lock()
-            .ok()
-            .and_then(|error| error.clone())
+        account_error_snapshot(&self.shared).0
     }
 
     /// Starts one engine-owned login transaction and opens the browser URL.
@@ -593,17 +616,13 @@ impl DesktopAccount {
             self.fail(busy);
             return Err(busy.to_string());
         }
-        if let Ok(mut error) = self.shared.error.lock() {
-            error.take();
-        }
+        clear_transient_account_error(&self.shared);
         Ok(())
     }
 
     /// Records one actionable failure for the menu error row.
     fn fail(&self, error: &str) {
-        if let Ok(mut slot) = self.shared.error.lock() {
-            *slot = Some(error.to_string());
-        }
+        set_transient_account_error(&self.shared, error.to_string());
         self.shared.version.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -786,9 +805,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             }
             shared.login_open.store(true, Ordering::Release);
             shared.pending.store(false, Ordering::Release);
-            if let Ok(mut error) = shared.error.lock() {
-                error.take();
-            }
+            clear_transient_account_error(shared);
             rewind_status_poll(shared);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
@@ -811,11 +828,17 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
                     url.take();
                 }
             }
+            let authenticated = matches!(
+                view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            );
             if let Ok(mut current) = shared.view.lock() {
                 *current = view;
             }
-            if let Ok(mut error) = shared.error.lock() {
-                error.take();
+            if authenticated {
+                clear_account_error(shared);
+            } else {
+                clear_transient_account_error(shared);
             }
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
@@ -830,9 +853,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             // The transaction stays open: polling continues as the automatic
             // retry while Reopen and Cancel stay enabled. The error is
             // actionable and clears on the next good fetch.
-            if let Ok(mut slot) = shared.error.lock() {
-                *slot = Some(error);
-            }
+            set_transient_account_error(shared, error);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
         AccountResponse::ProfileRefreshQueued { view, epoch } => {
@@ -848,30 +869,84 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             rewind_status_poll(shared);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
-        AccountResponse::Cancelled(view) | AccountResponse::SignedOut(view) => {
-            shared
-                .initial_status_resolved
-                .store(true, Ordering::Release);
-            shared.pending.store(false, Ordering::Release);
-            shared.login_open.store(false, Ordering::Release);
-            if let Ok(mut url) = shared.authorization_url.lock() {
-                url.take();
-            }
-            if let Ok(mut current) = shared.view.lock() {
-                *current = view;
-            }
-            if let Ok(mut error) = shared.error.lock() {
-                error.take();
-            }
+        AccountResponse::Cancelled(view) => {
+            apply_retired_account_view(shared, view);
+            clear_transient_account_error(shared);
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::SignedOut(view) => {
+            apply_retired_account_view(shared, view);
+            clear_account_error(shared);
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::SignOutFailed { view, error } => {
+            apply_retired_account_view(shared, view);
+            set_sign_out_cleanup_error(shared, error);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
         AccountResponse::Failed(error) => {
             shared.pending.store(false, Ordering::Release);
-            if let Ok(mut slot) = shared.error.lock() {
-                *slot = Some(error);
-            }
+            set_transient_account_error(shared, error);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
+    }
+}
+
+fn apply_retired_account_view(shared: &AccountShared, view: AccountView) {
+    shared
+        .initial_status_resolved
+        .store(true, Ordering::Release);
+    shared.pending.store(false, Ordering::Release);
+    shared.login_open.store(false, Ordering::Release);
+    if let Ok(mut url) = shared.authorization_url.lock() {
+        url.take();
+    }
+    if let Ok(mut current) = shared.view.lock() {
+        *current = view;
+    }
+}
+
+fn account_error_snapshot(shared: &AccountShared) -> (Option<String>, bool) {
+    shared.error.lock().map_or((None, false), |error| {
+        let retry_sign_out = error
+            .as_ref()
+            .is_some_and(AccountError::is_sign_out_cleanup);
+        let message = error.as_ref().map(|error| error.message().to_string());
+        (message, retry_sign_out)
+    })
+}
+
+fn clear_account_error(shared: &AccountShared) {
+    if let Ok(mut error) = shared.error.lock() {
+        error.take();
+    }
+}
+
+fn clear_transient_account_error(shared: &AccountShared) {
+    if let Ok(mut error) = shared.error.lock() {
+        if error
+            .as_ref()
+            .is_some_and(AccountError::is_sign_out_cleanup)
+        {
+            return;
+        }
+        error.take();
+    }
+}
+
+fn set_transient_account_error(shared: &AccountShared, message: String) {
+    if let Ok(mut error) = shared.error.lock()
+        && !error
+            .as_ref()
+            .is_some_and(AccountError::is_sign_out_cleanup)
+    {
+        *error = Some(AccountError::Transient(message));
+    }
+}
+
+fn set_sign_out_cleanup_error(shared: &AccountShared, message: String) {
+    if let Ok(mut error) = shared.error.lock() {
+        *error = Some(AccountError::SignOutCleanup(message));
     }
 }
 
@@ -922,7 +997,10 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
         },
         AccountRequest::SignOut => match sign_out(service) {
             Ok(view) => AccountResponse::SignedOut(view),
-            Err(error) => AccountResponse::Failed(error),
+            Err(error) => AccountResponse::SignOutFailed {
+                view: service.account_status(),
+                error,
+            },
         },
     }
 }
@@ -938,7 +1016,7 @@ fn account_service() -> &'static AccountService {
 ///
 /// Returns an error when the request fails or the reply is invalid.
 pub fn sign_out(service: &AccountService) -> Result<AccountView, String> {
-    Ok(service.sign_out())
+    service.sign_out()
 }
 
 #[cfg(test)]
@@ -1183,6 +1261,7 @@ mod tests {
         let signed_out = AccountMenuState {
             presentation: presentation("Sign in", "Signed out"),
             error: None,
+            retry_sign_out: false,
         };
         assert!(signed_out.hides_identity());
         assert!(!signed_out.signed_in());
@@ -1192,6 +1271,7 @@ mod tests {
         let failed = AccountMenuState {
             presentation: presentation("Sign in", "Signed out"),
             error: Some("account request timed out; try again".to_string()),
+            retry_sign_out: false,
         };
         assert!(failed.hides_identity());
         // Every other state names itself: unavailable engine, browser wait,
@@ -1208,6 +1288,7 @@ mod tests {
             let menu = AccountMenuState {
                 presentation: presentation(action, state),
                 error: None,
+                retry_sign_out: false,
             };
             assert!(!menu.hides_identity(), "state must stay visible: {state}");
         }
@@ -1303,6 +1384,141 @@ mod tests {
         assert!(signed_out.display_name.is_empty());
         assert!(signed_out.email.is_empty());
         assert!(signed_out.photo_url.is_empty());
+    }
+
+    #[test]
+    fn failed_durable_sign_out_clears_identity_but_preserves_error() {
+        use super::{AccountResponse, apply_account_response};
+
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        let mut active = view(AccountSessionState::Active);
+        active.account_id = "acct_01".to_string();
+        active.plan_id = "pro".to_string();
+        active.display_name = "Ada Trader".to_string();
+        active.email = "ada@example.com".to_string();
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: active,
+                seq: 1,
+                epoch: 0,
+            },
+        );
+
+        let mut signed_out = view(AccountSessionState::SignedOut);
+        signed_out.detail = "signed out; credential cleanup needs attention".to_string();
+        apply_account_response(
+            &session.shared,
+            AccountResponse::SignOutFailed {
+                view: signed_out,
+                error: "sign-out could not remove saved credentials; retry sign-out".to_string(),
+            },
+        );
+
+        let presentation = session.presentation();
+        assert_eq!(presentation.action, "Sign in");
+        assert!(presentation.display_name.is_empty());
+        assert!(presentation.email.is_empty());
+        assert!(presentation.photo_url.is_empty());
+        assert_eq!(
+            session.error().as_deref(),
+            Some("sign-out could not remove saved credentials; retry sign-out")
+        );
+        assert!(session.menu_state().retry_sign_out);
+        assert!(!presentation.pending);
+    }
+
+    #[test]
+    fn durable_sign_out_failure_survives_status_poll_until_cleanup_succeeds() {
+        use super::{AccountResponse, apply_account_response};
+        use std::sync::atomic::Ordering;
+
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        wait_for(&session, "startup status settles", || {
+            session.error().is_some()
+        });
+        let before_failure = session.shared.version.load(Ordering::Acquire);
+        apply_account_response(
+            &session.shared,
+            AccountResponse::SignOutFailed {
+                view: view(AccountSessionState::SignedOut),
+                error: "sign-out could not remove saved credentials; retry sign-out".to_string(),
+            },
+        );
+        assert_eq!(
+            session.shared.version.load(Ordering::Acquire),
+            before_failure + 1,
+            "retired view and cleanup error publish as one versioned state"
+        );
+
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: view(AccountSessionState::SignedOut),
+                seq: 1,
+                epoch: 0,
+            },
+        );
+        assert_eq!(
+            session.error().as_deref(),
+            Some("sign-out could not remove saved credentials; retry sign-out")
+        );
+        assert!(session.menu_state().retry_sign_out);
+
+        apply_account_response(
+            &session.shared,
+            AccountResponse::StatusFailed {
+                seq: 1,
+                epoch: 0,
+                error: "status unavailable".to_string(),
+            },
+        );
+        assert_eq!(
+            session.error().as_deref(),
+            Some("sign-out could not remove saved credentials; retry sign-out")
+        );
+
+        let before_success = session.shared.version.load(Ordering::Acquire);
+        apply_account_response(
+            &session.shared,
+            AccountResponse::SignedOut(view(AccountSessionState::SignedOut)),
+        );
+        assert_eq!(
+            session.shared.version.load(Ordering::Acquire),
+            before_success + 1,
+            "successful retry clears the sticky error in the same versioned publication"
+        );
+        assert!(session.error().is_none());
+        assert!(!session.menu_state().retry_sign_out);
+    }
+
+    #[test]
+    fn verified_new_session_supersedes_sign_out_cleanup_error() {
+        use super::{AccountResponse, apply_account_response};
+
+        let session = DesktopAccount::spawn_with(inert_engine).expect("isolated session spawns");
+        apply_account_response(
+            &session.shared,
+            AccountResponse::SignOutFailed {
+                view: view(AccountSessionState::SignedOut),
+                error: "sign-out could not remove saved credentials; retry sign-out".to_string(),
+            },
+        );
+        let mut active = view(AccountSessionState::Active);
+        active.account_id = "acct_02".to_string();
+        active.plan_id = "pro".to_string();
+        apply_account_response(
+            &session.shared,
+            AccountResponse::Status {
+                view: active,
+                seq: 1,
+                epoch: 0,
+            },
+        );
+
+        assert!(session.authenticated());
+        assert!(session.error().is_none());
+        assert!(!session.menu_state().retry_sign_out);
     }
 
     #[test]

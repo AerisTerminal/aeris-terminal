@@ -1948,7 +1948,7 @@ pub(super) fn account_menu_layer(
     let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + ACCOUNT_MENU_GAP;
     let anchor = anchor.unwrap_or(point(px(OVERLAY_EDGE_MARGIN), px(header_bottom)));
     let header_rows = if has_header { 2.0 } else { 0.0 };
-    let action_rows = if account.signed_in() || account.authorizing() {
+    let action_rows = if account.signed_in() || account.authorizing() || account.retry_sign_out {
         3.0
     } else {
         2.0
@@ -2097,16 +2097,13 @@ struct AccountMenuRowEdges {
     last: bool,
 }
 
-fn account_menu_actions(
-    action_terminal: &Entity<TerminalApp>,
+type AccountMenuActionRow = Option<(&'static str, &'static str, bool, AccountMenuClick)>;
+
+fn account_menu_action_rows(
     account: &axiusflow_desktop::account::AccountMenuState,
-    theme: &AxiusflowTheme,
-) -> Vec<AnyElement> {
-    // While the browser holds the transaction there are two recovery exits.
-    // Global profile/About actions share the same compact row geometry, while
-    // authentication actions alone respect the account request pending flag.
-    let rows: Vec<Option<(&str, &str, bool, AccountMenuClick)>> = if account.authorizing() {
-        vec![
+) -> Vec<AccountMenuActionRow> {
+    if account.authorizing() {
+        return vec![
             Some((
                 "account_menu_reopen",
                 "Open browser page again",
@@ -2126,9 +2123,10 @@ fn account_menu_actions(
                 false,
                 AccountMenuClick::About,
             )),
-        ]
-    } else if account.signed_in() {
-        vec![
+        ];
+    }
+    if account.signed_in() {
+        return vec![
             Some((
                 "account_menu_manage_profile",
                 "Manage Profile",
@@ -2148,9 +2146,16 @@ fn account_menu_actions(
                 true,
                 AccountMenuClick::SignOut,
             )),
-        ]
-    } else {
-        vec![
+        ];
+    }
+    if account.retry_sign_out {
+        return vec![
+            Some((
+                "account_menu_retry_sign_out",
+                "Retry sign-out",
+                true,
+                AccountMenuClick::SignOut,
+            )),
             Some((
                 "account_menu_sign_in",
                 "Sign in",
@@ -2164,8 +2169,34 @@ fn account_menu_actions(
                 false,
                 AccountMenuClick::About,
             )),
-        ]
-    };
+        ];
+    }
+    vec![
+        Some((
+            "account_menu_sign_in",
+            "Sign in",
+            false,
+            AccountMenuClick::SignIn,
+        )),
+        None,
+        Some((
+            "account_menu_about",
+            "About Axiusflow",
+            false,
+            AccountMenuClick::About,
+        )),
+    ]
+}
+
+fn account_menu_actions(
+    action_terminal: &Entity<TerminalApp>,
+    account: &axiusflow_desktop::account::AccountMenuState,
+    theme: &AxiusflowTheme,
+) -> Vec<AnyElement> {
+    // While the browser holds the transaction there are two recovery exits.
+    // Global profile/About actions share the same compact row geometry, while
+    // authentication actions alone respect the account request pending flag.
+    let rows = account_menu_action_rows(account);
     let authentication_enabled = !account.presentation.pending;
     let first_row = rows.iter().position(Option::is_some);
     let last_row = rows.iter().rposition(Option::is_some);
@@ -2309,5 +2340,22 @@ mod tests {
         let preview = drag.clone();
         preview.set_cursor_offset(point(px(132.0), px(27.0)));
         assert_eq!(drag.cursor_offset(), point(px(132.0), px(27.0)));
+    }
+
+    #[test]
+    fn failed_durable_sign_out_exposes_a_retry_action() {
+        let mut account = axiusflow_desktop::account::unavailable_menu_state();
+        account.presentation.state = "Signed out";
+        account.retry_sign_out = true;
+        account.error = Some("sign-out cleanup failed".to_string());
+
+        let rows = account_menu_action_rows(&account);
+        let Some((id, label, destructive, click)) = rows[0] else {
+            panic!("retry sign-out row must be present");
+        };
+        assert_eq!(id, "account_menu_retry_sign_out");
+        assert_eq!(label, "Retry sign-out");
+        assert!(destructive);
+        assert!(matches!(click, AccountMenuClick::SignOut));
     }
 }
