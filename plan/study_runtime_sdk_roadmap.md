@@ -19,7 +19,7 @@ The intended ownership split is:
 
 ## Current completion state
 
-The foundation is substantially implemented. The remaining work is no longer "create a study runtime"; it is to complete the SDK surface, productionize more input classes and recursive indicators, finish first-class settings UX, and harden the authoring/distribution story.
+The planned runtime/SDK foundation through Phase E is implemented and qualified. Remaining work is intentionally demand-driven: pure non-bar output timelines, additional rich output shapes, or a sandboxed untrusted-code model should be added only when a concrete product requirement needs them.
 
 ### Completed: runtime ownership and dependency graph
 
@@ -78,7 +78,7 @@ The foundation is substantially implemented. The remaining work is no longer "cr
 - WMA and Bollinger delegate formula work to pinned `nucleuscharts_indicators` instead of duplicating formula implementations in Axius.
 - Window/gap behavior and output contracts have focused tests.
 
-## What is still left
+## Completed milestones and demand-gated extensions
 
 ### Completed: first-class study settings schema and desktop editor
 
@@ -97,7 +97,7 @@ Completed additions:
 - Explicit reset-to-default behavior.
 - Tests that failed setting edits preserve the previous durable/runtime configuration.
 
-### 2. Recursive EMA without O(history) conversion
+### 2. Completed — recursive EMA without O(history) conversion
 
 The recursive EMA implementation is complete across the local sibling Nucleus and Axiusflow trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Axiusflow wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
 
@@ -138,22 +138,18 @@ Expected semantics:
 - Historical repair replays from the nearest checkpoint rather than rescanning full history.
 - Market-backed input converts only visited fixed-point rows; output-backed input reads `Option<f64>` directly.
 
-### 3. More built-in indicators through shared primitives
+### 3. Product-driven built-ins through shared primitives
 
-After EMA proves the recursive-state contract, migrate/add indicators only through the SDK/runtime path. Likely sequence:
+Every shipping picker study that belongs in the Study Runtime has been migrated through the SDK/runtime path. Additional built-ins should be added only for concrete product use, and shared Nucleus primitives remain the required formula source when they exist.
 
-- EMA
-- RMA/SMMA if a shared primitive exists
-- RSI
-- ATR / True Range family
-- MACD
-- Stochastic family
-- VWAP/anchored variants where input semantics are defined
-- Order-flow / quote / depth studies using the live input surface
+- Completed shipping/runtime-managed families: SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic.
+- Deferred until concrete demand: RMA/SMMA if a shared primitive and product requirement exist.
+- Deferred until semantics are defined: anchored VWAP variants.
+- Deferred until a concrete product study exists: order-flow / quote / depth studies beyond the supported bar-aligned input contract.
 
 For every built-in, avoid a second formula implementation in the desktop or runtime.
 
-### 4. Pure event-driven non-bar study timelines
+### 4. Deferred — pure event-driven non-bar study timelines
 
 Current quote/trade/depth inputs are exposed to studies whose output timeline is anchored to an existing bar/study dependency. Remaining capability:
 
@@ -165,7 +161,7 @@ Current quote/trade/depth inputs are exposed to studies whose output timeline is
 
 This should be added only after a concrete product study requires it; do not create a speculative generic event engine.
 
-### 5. Richer output semantics
+### 5. Deferred — richer output semantics
 
 Current outputs cover scalar line/histogram/area series. Remaining product requirements may include:
 
@@ -177,26 +173,26 @@ Current outputs cover scalar line/histogram/area series. Remaining product requi
 
 These must remain serial product-owned output contracts. A study must never receive direct Nucleus render handles.
 
-### 6. Authoring, versioning, and compatibility policy
+### 6. Completed — authoring, versioning, and compatibility policy
 
-Before third-party native studies are treated as a supported product surface:
+The approved static-native product surface now defines:
 
-- Define SDK semver/compatibility policy.
-- Define implementation revision migration rules for persisted workspaces.
-- Define trusted-native loading/distribution policy.
-- Define failure isolation expectations and telemetry boundaries.
-- Publish minimal author examples for stateless, stateful, multi-output, MTF, and market-microstructure studies.
-- Keep provider/account credentials and render/runtime owner handles inaccessible to study code.
+- SDK source semver plus a separate durable compatibility epoch.
+- Explicit implementation-revision restoration rules for persisted workspaces.
+- A statically linked, bounded, signed-build trust model with no arbitrary native-library loading.
+- Transactional failure isolation, panic containment, and bounded runtime/state/output accounting.
+- Author examples for stateless, stateful, multi-output, MTF, and market-microstructure studies.
+- No provider/account credentials or render/runtime owner handles in the supported study API.
 
-### 7. Performance and soak coverage
+### 7. Completed — performance and soak coverage
 
-- Measure sustained live recursive workloads rather than infer performance from unit tests.
-- Measure many concurrent studies over shared market leases.
-- Verify bounded state/output memory under repeated reinitialization and historical repair.
-- Verify quote/trade/depth studies under burst traffic and provider reconnects.
-- Verify desktop close/reopen restores durable study graphs without duplicate subscriptions or duplicate Nucleus series.
+- Real Nucleus-backed EMA tail work is measured under an explicit optimized release soak.
+- Sixteen concurrent stateful studies run under sustained revisions while holding one shared `MarketEngine` lease.
+- Repeated reinitialization and historical repair keep state/output accounting bounded.
+- Quote/trade/depth study execution is burst-qualified, and provider-generation replacement preserves the exact non-bar stream union without duplicate leases.
+- Workspace close/reopen preserves durable custom-study graphs; unavailable packages do not block unrelated restore, and runtime/chart ownership remains singular.
 
-## Execution plan / TODO
+## Execution status
 
 ### Phase A — SDK contract completion
 
