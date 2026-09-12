@@ -1233,9 +1233,12 @@ mod tests {
         let prepare = &workspace_tabs[prepare_start..prepare_end];
         assert!(
             prepare.contains("wait.wait(Duration::from_secs(2))")
-                && prepare.contains("let durable_generation = durability.await")
+                && prepare.contains("chart_chrome_wait.wait(Duration::from_secs(2))")
+                && prepare.contains("let durable_generations = durability.await")
+                && prepare.contains("persistence.shutdown_generation_is_current(generation)")
+                && prepare.contains("chart_chrome_shutdown_generation_is_current")
                 && prepare.contains("commit_update_restart_after_persistence"),
-            "update restart must await a bounded generation-fenced workspace durability receipt before commit"
+            "update restart must await bounded generation-fenced workspace and chart durability receipts before commit"
         );
         let commit_start = workspace_tabs
             .find("fn commit_update_restart_after_persistence")

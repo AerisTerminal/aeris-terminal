@@ -54,12 +54,24 @@ impl DesktopLifecycle {
             .drain(..)
             .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
+        let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
         Some(cx.background_executor().spawn(async move {
             let mut failure = None;
             for persistence in workspace_persistence {
                 if let Err(error) = persistence.wait(Duration::from_secs(2)) {
                     failure = Some(error);
                 }
+            }
+            match chart_chrome_persistence.wait(Duration::from_secs(2)) {
+                Ok(generation)
+                    if chart_chrome::chart_chrome_shutdown_generation_is_current(generation) => {}
+                Ok(_) => {
+                    failure = Some(
+                        "chart preferences changed while desktop shutdown was preparing"
+                            .to_string(),
+                    );
+                }
+                Err(error) => failure = Some(error),
             }
             for retirement in retirements {
                 if !retirement.await {

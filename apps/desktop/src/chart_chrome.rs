@@ -5,6 +5,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;
@@ -238,32 +239,78 @@ static CHART_CHROME_FILE_LOCK: Mutex<()> = Mutex::new(());
 static CHART_CHROME_SAVE_STATE: Mutex<ChartChromeSaveState> = Mutex::new(ChartChromeSaveState {
     worker_active: false,
     latest: None,
+    latest_requested_generation: 0,
+    completed: None,
 });
 
 #[derive(Default)]
 struct ChartChromeSaveState {
     worker_active: bool,
-    latest: Option<ChartChromePreferences>,
+    latest: Option<(u64, ChartChromePreferences)>,
+    latest_requested_generation: u64,
+    completed: Option<ChartChromeSaveCompletion>,
+}
+
+#[derive(Clone)]
+struct ChartChromeSaveCompletion {
+    generation: u64,
+    result: Result<(), String>,
 }
 
 impl ChartChromeSaveState {
-    fn request(&mut self, preferences: ChartChromePreferences) -> bool {
-        self.latest = Some(preferences);
+    fn request(&mut self, preferences: ChartChromePreferences) -> Result<bool, String> {
+        let generation = self
+            .latest_requested_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                "desktop chart chrome persistence generation is exhausted".to_string()
+            })?;
+        self.latest_requested_generation = generation;
+        self.latest = Some((generation, preferences));
         if self.worker_active {
-            false
+            Ok(false)
         } else {
             self.worker_active = true;
-            true
+            Ok(true)
         }
     }
 
-    fn take_next(&mut self) -> Option<ChartChromePreferences> {
+    fn take_next(&mut self) -> Option<(u64, ChartChromePreferences)> {
         self.latest.take()
     }
 
     fn finish(&mut self) {
         self.worker_active = false;
     }
+
+    fn fail_latest(&mut self, error: String) {
+        let generation = self.latest_requested_generation;
+        self.latest = None;
+        if generation != 0 {
+            self.completed = Some(ChartChromeSaveCompletion {
+                generation,
+                result: Err(error),
+            });
+        }
+        self.finish();
+    }
+}
+
+pub(crate) struct ChartChromeShutdownWait {
+    expected_generation: Result<u64, String>,
+}
+
+impl ChartChromeShutdownWait {
+    pub(crate) fn wait(self, timeout: Duration) -> Result<u64, String> {
+        let expected_generation = self.expected_generation?;
+        wait_for_chart_chrome_generation(&CHART_CHROME_SAVE_STATE, expected_generation, timeout)
+    }
+}
+
+pub(crate) fn chart_chrome_shutdown_generation_is_current(generation: u64) -> bool {
+    CHART_CHROME_SAVE_STATE
+        .lock()
+        .is_ok_and(|state| chart_chrome_generation_is_current(&state, generation))
 }
 
 fn parse_chrome_flag(value: &str) -> bool {
@@ -344,7 +391,16 @@ pub(crate) fn request_chart_chrome_preferences_save(
     let mut state = CHART_CHROME_SAVE_STATE
         .lock()
         .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
-    Ok(state.request(preferences))
+    state.request(preferences)
+}
+
+pub(crate) fn chart_chrome_shutdown_wait() -> ChartChromeShutdownWait {
+    ChartChromeShutdownWait {
+        expected_generation: CHART_CHROME_SAVE_STATE
+            .lock()
+            .map(|state| state.latest_requested_generation)
+            .map_err(|_| "desktop chart chrome persistence is unavailable".to_string()),
+    }
 }
 
 /// Drains coalesced chart-chrome persistence until no newer UI snapshot remains.
@@ -355,10 +411,11 @@ pub(crate) fn request_chart_chrome_preferences_save(
 /// state is unavailable, or when the latest pending snapshot cannot be saved.
 pub(crate) fn run_chart_chrome_preferences_save_worker() -> Result<(), String> {
     let Some(path) = chart_chrome_state_path() else {
+        let error = "desktop chart chrome directory is unavailable".to_string();
         if let Ok(mut state) = CHART_CHROME_SAVE_STATE.lock() {
-            state.finish();
+            state.fail_latest(error.clone());
         }
-        return Err("desktop chart chrome directory is unavailable".to_string());
+        return Err(error);
     };
     run_chart_chrome_preferences_save_worker_to(&path, &CHART_CHROME_SAVE_STATE)
 }
@@ -368,7 +425,7 @@ fn run_chart_chrome_preferences_save_worker_to(
     state: &Mutex<ChartChromeSaveState>,
 ) -> Result<(), String> {
     loop {
-        let next = {
+        let (generation, next) = {
             let mut state = state
                 .lock()
                 .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
@@ -378,16 +435,66 @@ fn run_chart_chrome_preferences_save_worker_to(
             };
             next
         };
-        if let Err(error) = save_chart_chrome_preferences_to(path, next) {
-            let mut state = state
-                .lock()
-                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
-            if state.latest.is_none() {
-                state.finish();
-                return Err(error);
-            }
+        let result = save_chart_chrome_preferences_to(path, next);
+        let mut state = state
+            .lock()
+            .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
+        state.completed = Some(ChartChromeSaveCompletion {
+            generation,
+            result: result.clone(),
+        });
+        if let Err(error) = result
+            && state.latest.is_none()
+        {
+            state.finish();
+            return Err(error);
         }
     }
+}
+
+fn wait_for_chart_chrome_generation(
+    state: &Mutex<ChartChromeSaveState>,
+    expected_generation: u64,
+    timeout: Duration,
+) -> Result<u64, String> {
+    if expected_generation == 0 {
+        return Ok(0);
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let state = state
+                .lock()
+                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
+            if state.latest_requested_generation != expected_generation {
+                return Err(
+                    "chart preferences changed after shutdown persistence was claimed".to_string(),
+                );
+            }
+            if let Some(completed) = state.completed.as_ref()
+                && completed.generation == expected_generation
+            {
+                return completed.result.clone().map(|()| expected_generation);
+            }
+            if !state.worker_active && state.latest.is_none() {
+                return Err(
+                    "desktop chart chrome persistence stopped before the latest save".to_string(),
+                );
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("desktop chart chrome persistence timed out during shutdown".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn chart_chrome_generation_is_current(state: &ChartChromeSaveState, generation: u64) -> bool {
+    state.latest_requested_generation == generation
+        && (generation == 0
+            || state.completed.as_ref().is_some_and(|completed| {
+                completed.generation == generation && completed.result.is_ok()
+            }))
 }
 
 /// # Errors
@@ -479,9 +586,11 @@ mod tests {
         chart_chrome_staging_path, encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
+        wait_for_chart_chrome_generation,
     };
     use axiusflow_chart_integration::ChartType;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     fn temporary_chart_chrome_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -668,23 +777,35 @@ mod tests {
             chart_type: ChartType::Bars,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
-        let inflight = {
-            let mut state = state.lock().expect("save state locks");
-            assert!(state.request(first), "the first request starts one worker");
-            state.take_next().expect("worker claims first request")
-        };
-        {
+        let (_, inflight) = {
             let mut state = state.lock().expect("save state locks");
             assert!(
-                !state.request(second),
+                state.request(first).expect("first request queues"),
+                "the first request starts one worker"
+            );
+            state.take_next().expect("worker claims first request")
+        };
+        let expected_generation = {
+            let mut state = state.lock().expect("save state locks");
+            assert!(
+                !state.request(second).expect("second request queues"),
                 "a newer request coalesces while the single saver is active"
             );
-        }
+            state.latest_requested_generation
+        };
+        assert!(
+            wait_for_chart_chrome_generation(&state, expected_generation, Duration::ZERO).is_err(),
+            "shutdown cannot report durability before the newest queued snapshot completes"
+        );
         save_chart_chrome_preferences_to(&path, inflight).expect("inflight save succeeds");
         run_chart_chrome_preferences_save_worker_to(&path, &state)
             .expect("worker drains the newer coalesced request");
 
         assert_eq!(load_chart_chrome_preferences_from(&path), second);
+        assert_eq!(
+            wait_for_chart_chrome_generation(&state, expected_generation, Duration::ZERO),
+            Ok(expected_generation)
+        );
         let state = state.lock().expect("save state locks");
         assert!(!state.worker_active);
         assert!(state.latest.is_none());
@@ -692,5 +813,51 @@ mod tests {
         assert!(!chart_chrome_backup_path(&path).exists());
         drop(state);
         remove_chart_chrome_test_files(&path);
+    }
+
+    #[test]
+    fn chart_chrome_shutdown_wait_surfaces_failure_and_newer_requests() {
+        let first = ChartChromePreferences {
+            indicator_name_labels_visible: false,
+            indicator_value_labels_visible: false,
+            indicator_price_lines_visible: true,
+            chart_type: ChartType::Line,
+        };
+        let second = ChartChromePreferences {
+            indicator_name_labels_visible: true,
+            indicator_value_labels_visible: true,
+            indicator_price_lines_visible: false,
+            chart_type: ChartType::Bars,
+        };
+        let state = Mutex::new(ChartChromeSaveState::default());
+        let failed_generation = {
+            let mut state = state.lock().expect("save state locks");
+            assert!(state.request(first).expect("first request queues"));
+            let generation = state.latest_requested_generation;
+            state.fail_latest("chart storage unavailable".to_string());
+            generation
+        };
+
+        assert_eq!(
+            wait_for_chart_chrome_generation(&state, failed_generation, Duration::ZERO),
+            Err("chart storage unavailable".to_string())
+        );
+
+        let claimed_generation = {
+            let mut state = state.lock().expect("save state locks");
+            assert!(state.request(first).expect("retry request queues"));
+            state.latest_requested_generation
+        };
+        {
+            let mut state = state.lock().expect("save state locks");
+            assert!(
+                !state.request(second).expect("newer request coalesces"),
+                "the existing worker remains the single persistence owner"
+            );
+        }
+        assert_eq!(
+            wait_for_chart_chrome_generation(&state, claimed_generation, Duration::ZERO),
+            Err("chart preferences changed after shutdown persistence was claimed".to_string())
+        );
     }
 }
