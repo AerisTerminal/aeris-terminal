@@ -7,24 +7,16 @@ use axiusflow_design_system::{
 };
 use axiusflow_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
 use gpui::{
-    AnyElement, Context, Div, Hsla, IntoElement, Render, ScrollStrategy, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, relative, uniform_list,
+    AnyElement, Context, Div, Hsla, IntoElement, Render, ScrollStrategy, UniformListScrollHandle,
+    Window, div, prelude::*, px, relative, uniform_list,
 };
 #[cfg(test)]
 use std::cmp::Ordering;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 11.0;
-// Ingest every provider update, but present only the newest conflated DOM once
-// per display frame. GPUI rebuilds a retained element tree rather than an iced
-// canvas cache, so copying the reference ladder's 100 ms invalidation interval
-// makes best-price movement visibly step at 10 Hz.
-const PRESENTATION_INTERVAL: Duration = Duration::from_millis(16);
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
 // Match the reference ladder's default server-side Hyperliquid aggregation.
 // The previous 50x bucket collapsed five adjacent provider rows into one and
@@ -180,11 +172,8 @@ impl OrderBookColumnVisibility {
 /// Flush, square-edged GPUI view for one immutable read-only Order Book frame.
 pub struct ReadOnlyOrderBookView {
     frame: Option<Arc<OrderBookFrame>>,
-    pending_frame: Option<Arc<OrderBookFrame>>,
     unavailable: bool,
     connection_state: OrderBookConnectionState,
-    last_presented: Option<Instant>,
-    presentation_task: Option<Task<()>>,
     theme: AxiusflowTheme,
     ladder_scroll: UniformListScrollHandle,
     columns: OrderBookColumnVisibility,
@@ -195,11 +184,8 @@ impl ReadOnlyOrderBookView {
     pub fn new(theme: AxiusflowTheme) -> Self {
         Self {
             frame: None,
-            pending_frame: None,
             unavailable: false,
             connection_state: OrderBookConnectionState::Online,
-            last_presented: None,
-            presentation_task: None,
             theme,
             ladder_scroll: UniformListScrollHandle::new(),
             columns: OrderBookColumnVisibility::default(),
@@ -223,22 +209,21 @@ impl ReadOnlyOrderBookView {
     }
 
     /// Replaces the immutable frame. Older sessions, selections, and revisions are rejected.
+    ///
+    /// The desktop drains the bounded market mailbox from GPUI's `on_next_frame`
+    /// callback. Installing here therefore follows the window's actual display
+    /// cadence, including refresh-rate changes and moves between displays. The
+    /// mailbox coalesces superseded book publications before this boundary.
     pub fn replace_frame(&mut self, frame: OrderBookFrame, cx: &mut Context<Self>) -> bool {
         let frame = Arc::new(frame);
-        let newest = self.pending_frame.as_deref().or(self.frame.as_deref());
-        if newest.is_some_and(|current| frame_precedes(frame.as_ref(), current)) {
+        if self
+            .frame
+            .as_deref()
+            .is_some_and(|current| frame_precedes(frame.as_ref(), current))
+        {
             return false;
         }
-
-        if requires_immediate_presentation(self.frame.as_deref(), frame.as_ref()) {
-            self.pending_frame = None;
-            self.presentation_task = None;
-            self.install_frame(frame, cx);
-            return true;
-        }
-
-        self.pending_frame = Some(frame);
-        self.schedule_presentation(cx);
+        self.install_frame(frame, cx);
         true
     }
 
@@ -263,11 +248,7 @@ impl ReadOnlyOrderBookView {
     }
 
     fn discard_frames(&mut self) -> bool {
-        let had_frame = self.frame.take().is_some();
-        let had_pending_frame = self.pending_frame.take().is_some();
-        self.last_presented = None;
-        self.presentation_task = None;
-        had_frame || had_pending_frame
+        self.frame.take().is_some()
     }
 
     /// Updates the connectivity banner without discarding the last valid book.
@@ -294,31 +275,12 @@ impl ReadOnlyOrderBookView {
         let recenter_index = recenter.then(|| ladder_recenter_index(frame.as_ref()));
         self.frame = Some(frame);
         self.unavailable = false;
-        self.last_presented = Some(Instant::now());
         if let Some(Some(index)) = recenter_index {
             self.ladder_scroll = UniformListScrollHandle::new();
             self.ladder_scroll
                 .scroll_to_item_strict(index, ScrollStrategy::Center);
         }
         cx.notify();
-    }
-
-    fn schedule_presentation(&mut self, cx: &mut Context<Self>) {
-        if self.presentation_task.is_some() {
-            return;
-        }
-        let delay = self.last_presented.map_or(Duration::ZERO, |presented| {
-            PRESENTATION_INTERVAL.saturating_sub(presented.elapsed())
-        });
-        self.presentation_task = Some(cx.spawn(async move |view, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = view.update(cx, |view, view_cx| {
-                view.presentation_task = None;
-                if let Some(frame) = view.pending_frame.take() {
-                    view.install_frame(frame, view_cx);
-                }
-            });
-        }));
     }
 }
 
@@ -347,18 +309,6 @@ fn frame_precedes(candidate: &OrderBookFrame, current: &OrderBookFrame) -> bool 
                         || (candidate.revision == current.revision
                             && candidate.trade_source_watermark
                                 < current.trade_source_watermark)))))
-}
-
-fn requires_immediate_presentation(
-    current: Option<&OrderBookFrame>,
-    next: &OrderBookFrame,
-) -> bool {
-    current.is_none_or(|current| {
-        next.selection_generation != current.selection_generation
-            || next.session_generation != current.session_generation
-            || next.state != current.state
-            || (current.rows.is_empty() && !next.rows.is_empty())
-    })
 }
 
 impl Render for ReadOnlyOrderBookView {
@@ -1744,15 +1694,11 @@ mod tests {
     }
 
     #[test]
-    fn retiring_a_book_discards_both_displayed_and_scheduled_frames() {
+    fn retiring_a_book_discards_the_displayed_frame() {
         let mut view = ReadOnlyOrderBookView::new(AxiusflowTheme::dark());
         view.frame = Some(Arc::new(frame(1, 8, 40, OrderBookState::Ready, true)));
-        view.pending_frame = Some(Arc::new(frame(1, 8, 41, OrderBookState::Ready, true)));
-        view.last_presented = Some(Instant::now());
         assert!(view.discard_frames());
         assert!(view.frame.is_none());
-        assert!(view.pending_frame.is_none());
-        assert!(view.last_presented.is_none());
         assert!(!view.discard_frames());
     }
 
@@ -1874,34 +1820,6 @@ mod tests {
         assert_ne!(awaiting.1(&theme), stale.1(&theme));
         assert_ne!(awaiting.1(&theme), gap.1(&theme));
         assert_eq!(stale.1(&theme), gap.1(&theme));
-    }
-
-    #[test]
-    fn active_book_updates_are_conflated_but_transitions_present_immediately() {
-        let current = frame(2, 4, 10, OrderBookState::Ready, true);
-        let update = frame(2, 4, 11, OrderBookState::Ready, true);
-        assert!(!requires_immediate_presentation(Some(&current), &update));
-
-        let recovering = frame(
-            2,
-            4,
-            12,
-            OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap),
-            true,
-        );
-        assert!(requires_immediate_presentation(Some(&current), &recovering));
-        assert!(requires_immediate_presentation(
-            Some(&current),
-            &frame(3, 4, 1, OrderBookState::Ready, false)
-        ));
-        assert!(requires_immediate_presentation(
-            Some(&current),
-            &frame(2, 5, 1, OrderBookState::Ready, true)
-        ));
-        assert!(requires_immediate_presentation(
-            Some(&frame(2, 4, 1, OrderBookState::Ready, false)),
-            &current
-        ));
     }
 
     #[test]

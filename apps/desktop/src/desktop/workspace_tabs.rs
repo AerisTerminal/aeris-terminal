@@ -1880,6 +1880,11 @@ impl TerminalApp {
         }
     }
 
+    /// Schedules the single presentation boundary for live market state.
+    ///
+    /// `on_next_frame` follows the window's compositor cadence, so the bounded
+    /// mailbox is drained at the active display's refresh rate without a second
+    /// fixed-frequency timer in an individual chart or order-book surface.
     pub(super) fn schedule_market_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.frame_poll_gate.try_schedule() {
             return;
