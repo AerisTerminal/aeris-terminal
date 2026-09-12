@@ -264,7 +264,7 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
-        self.chart_settings_menu = None;
+        self.close_chart_settings_menu(cx);
         self.chart_settings_color_picker = None;
         self.chart_context_menu = Some(menu);
         cx.notify();
@@ -277,7 +277,8 @@ impl TerminalApp {
     }
 
     pub(super) fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
-        if self.chart_settings_menu.take().is_some() {
+        if let Some(menu) = self.chart_settings_menu.take() {
+            self.update_context_menu_pane(&menu, WorkspaceSurface::resume_chart_pointer, cx);
             self.chart_settings_color_picker = None;
             self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
             self.chart_settings_template_name = None;
@@ -316,6 +317,19 @@ impl TerminalApp {
         if self.chart_settings_section != section {
             self.chart_settings_section = section;
             self.chart_settings_color_picker = None;
+            self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn dismiss_chart_settings_overlays(&mut self, cx: &mut Context<Self>) {
+        let color_was_open = self.chart_settings_color_picker.take().is_some();
+        let template_was_open =
+            self.chart_settings_template_overlay == ChartSettingsTemplateOverlay::Menu;
+        if template_was_open {
+            self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        }
+        if color_was_open || template_was_open {
             cx.notify();
         }
     }

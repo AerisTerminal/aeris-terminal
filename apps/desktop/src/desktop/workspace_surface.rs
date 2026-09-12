@@ -3015,6 +3015,12 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn resume_chart_pointer(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, _| chart.resume_pointer_interaction());
+        }
+    }
+
     pub(super) fn set_chart_appearance(
         &mut self,
         appearance: &ChartAppearanceSettings,

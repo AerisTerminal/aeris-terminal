@@ -2684,6 +2684,15 @@ fn host_modal_suspension_clears_crosshair_and_active_pointer_gestures() {
     assert!(chart.engine.crosshair.is_none());
     assert!(chart.drag.is_none());
     assert!(chart.engine.separator_hover.is_none());
+    assert_eq!(
+        chart.pointer_interaction,
+        PointerInteractionState::Suspended
+    );
+    assert_eq!(chart.cursor_style, CursorStyle::Arrow);
+
+    chart.resume_pointer_interaction();
+    assert_eq!(chart.pointer_interaction, PointerInteractionState::Active);
+    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
 }
 
 #[test]
@@ -2711,6 +2720,8 @@ fn platform_crosshair_time_label_keeps_time_of_day_visible() {
         .find(|label| label.midpoint == AxisTextMidpoint::StableTime)
         .expect("crosshair time label is present");
 
+    assert!(chart.engine.time_visible);
+    assert!(!chart.engine.seconds_visible);
     assert!(label.text.contains(':'), "time missing from {}", label.text);
 }
 

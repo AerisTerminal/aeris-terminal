@@ -695,45 +695,8 @@ fn chart_settings_panel(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let close_terminal = terminal.clone();
-    let reset_terminal = terminal.clone();
-    let reset_menu = menu.clone();
-    let actions = div()
-        .absolute()
-        .top(px(10.0))
-        .right(px(10.0))
-        .flex()
-        .items_center()
-        .gap_1()
-        .child(
-            Button::new("chart_settings_reset")
-                .theme(theme)
-                .resting_fill(colors.surface_secondary)
-                .icon(header_icon(HugeIcon::Refresh01Icon))
-                .aria_label("Reset settings")
-                .h(px(26.0))
-                .rounded_full()
-                .text_color(gpui_color(colors.text_secondary))
-                .hover(move |button| {
-                    button
-                        .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .on_click(move |_, _, cx| {
-                    reset_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.reset_chart_settings(&reset_menu, terminal_cx);
-                    });
-                }),
-        )
-        .child(chrome_close_button(
-            "chart_settings_close",
-            theme,
-            move |_, cx| {
-                close_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.close_chart_settings_menu(terminal_cx);
-                });
-            },
-        ));
+    let dismiss_overlays = terminal.clone();
+    let actions = chart_settings_actions(terminal, menu, theme);
     div()
         .id("chart_settings_menu")
         .absolute()
@@ -750,7 +713,12 @@ fn chart_settings_panel(
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_primary))
         .occlude()
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .on_any_mouse_down(move |_, _, cx| {
+            dismiss_overlays.update(cx, |terminal, terminal_cx| {
+                terminal.dismiss_chart_settings_overlays(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
         .child(chart_settings_sidebar(
             terminal,
             menu,
@@ -793,6 +761,53 @@ fn chart_settings_panel(
                 )
             }),
         )
+}
+
+fn chart_settings_actions(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let close_terminal = terminal.clone();
+    let reset_terminal = terminal.clone();
+    let reset_menu = menu.clone();
+    div()
+        .absolute()
+        .top(px(10.0))
+        .right(px(10.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(
+            Button::new("chart_settings_reset")
+                .theme(theme)
+                .resting_fill(colors.surface_secondary)
+                .icon(header_icon(HugeIcon::Refresh01Icon))
+                .aria_label("Reset settings")
+                .h(px(26.0))
+                .rounded_full()
+                .text_color(gpui_color(colors.text_secondary))
+                .hover(move |button| {
+                    button
+                        .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                        .text_color(gpui_color(colors.text_primary))
+                })
+                .on_click(move |_, _, cx| {
+                    reset_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.reset_chart_settings(&reset_menu, terminal_cx);
+                    });
+                }),
+        )
+        .child(chrome_close_button(
+            "chart_settings_close",
+            theme,
+            move |_, cx| {
+                close_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_chart_settings_menu(terminal_cx);
+                });
+            },
+        ))
 }
 
 fn chart_settings_centered_origin(
@@ -894,19 +909,23 @@ fn chart_settings_template_control(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let toggle = terminal.clone();
-    let mut control = div().relative().w_full().child(
-        Button::new("chart_settings_templates")
-            .theme(theme)
-            .resting_fill(colors.surface)
-            .w_full()
-            .label("Template")
-            .caret(header_icon(HugeIcon::ChevronDown))
-            .on_click(move |_, _, cx| {
-                toggle.update(cx, |terminal, terminal_cx| {
-                    terminal.toggle_chart_settings_template_menu(terminal_cx);
-                });
-            }),
-    );
+    let mut control = div()
+        .relative()
+        .w_full()
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .child(
+            Button::new("chart_settings_templates")
+                .theme(theme)
+                .resting_fill(colors.surface)
+                .w_full()
+                .label("Template")
+                .caret(header_icon(HugeIcon::ChevronDown))
+                .on_click(move |_, _, cx| {
+                    toggle.update(cx, |terminal, terminal_cx| {
+                        terminal.toggle_chart_settings_template_menu(terminal_cx);
+                    });
+                }),
+        );
     if state.overlay == ChartSettingsTemplateOverlay::Menu {
         let save = terminal.clone();
         let set_default = terminal.clone();
@@ -1678,6 +1697,7 @@ fn settings_color_row(
                         .items_center()
                         .gap_2()
                         .cursor_pointer()
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                         .on_click(move |_, window, cx| {
                             terminal_for_toggle.update(cx, |terminal, terminal_cx| {
                                 terminal.toggle_chart_color_picker(

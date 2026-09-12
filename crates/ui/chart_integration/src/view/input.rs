@@ -3,14 +3,24 @@
 use super::{
     ActivationRequest, ChartDrag, ChartDrawingTool, ChartType, Context, CursorStyle,
     DrawingModifiers, KEYBOARD_PAGE_FRACTION, KeyDownEvent, ModifiersChangedEvent, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, NucleusChartView, PANE_SEPARATOR_HIT, PriceScaleTarget,
-    ScrollWheelEvent, WHEEL_LINE_HEIGHT, Window, px, should_stop_mouse_up_propagation,
+    MouseMoveEvent, MouseUpEvent, NucleusChartView, PANE_SEPARATOR_HIT, PointerInteractionState,
+    PriceScaleTarget, ScrollWheelEvent, WHEEL_LINE_HEIGHT, Window, px,
+    should_stop_mouse_up_propagation,
 };
 
 impl NucleusChartView {
     /// Cancels transient pointer state before a host-owned modal occludes the chart.
     pub fn suspend_pointer_interaction(&mut self) {
+        self.pointer_interaction = PointerInteractionState::Suspended;
         self.cancel_pointer_gesture();
+        self.cursor_style = CursorStyle::Arrow;
+    }
+
+    /// Restores pointer handling after the host-owned modal has closed.
+    pub fn resume_pointer_interaction(&mut self) {
+        self.pointer_interaction = PointerInteractionState::Active;
+        self.cursor_style = CursorStyle::Crosshair;
+        self.invalidate_series_frame();
     }
 
     pub(super) fn local_position(&self, position: gpui::Point<gpui::Pixels>) -> (f64, f64) {
@@ -381,6 +391,10 @@ impl NucleusChartView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            cx.stop_propagation();
+            return;
+        }
         #[cfg(feature = "diagnostics")]
         if self.live_evidence_enabled && self.live_evidence_mouse_downs < 8 {
             self.live_evidence_mouse_downs = self.live_evidence_mouse_downs.saturating_add(1);
@@ -430,6 +444,10 @@ impl NucleusChartView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            cx.stop_propagation();
+            return;
+        }
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);
         }
@@ -447,6 +465,9 @@ impl NucleusChartView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
         if self.apply_text_edit_key(event) {
             window.prevent_default();
             cx.stop_propagation();
@@ -468,6 +489,9 @@ impl NucleusChartView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         cx.notify();
     }
@@ -477,6 +501,9 @@ impl NucleusChartView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
         self.move_pointer(
@@ -499,6 +526,9 @@ impl NucleusChartView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
         self.finish_mouse_up(event);
         if should_stop_mouse_up_propagation(false) {
             cx.stop_propagation();
@@ -511,6 +541,9 @@ impl NucleusChartView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
         self.finish_mouse_up(event);
         if should_stop_mouse_up_propagation(true) {
             cx.stop_propagation();
@@ -523,6 +556,9 @@ impl NucleusChartView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
         let (pane_x, y) = self.local_position(event.position);
         let delta = event.delta.pixel_delta(px(WHEEL_LINE_HEIGHT));
         let dx: f32 = delta.x.into();

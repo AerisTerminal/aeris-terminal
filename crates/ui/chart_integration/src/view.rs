@@ -128,8 +128,7 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine) {
     })
     .to_string();
     engine
-        .options
-        .apply_str(&options)
+        .apply_options(&options)
         .expect("the platform text options derived from platform.css are valid");
 }
 
@@ -858,6 +857,13 @@ enum ActivationRequest {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PointerInteractionState {
+    #[default]
+    Active,
+    Suspended,
+}
+
 impl LegendItem {
     fn key(self) -> u64 {
         match self {
@@ -1013,6 +1019,7 @@ pub struct NucleusChartView {
     locked_drawings: HashSet<DrawingId>,
     focus_handle: Option<FocusHandle>,
     cursor_style: CursorStyle,
+    pointer_interaction: PointerInteractionState,
     pending_context_menu: Option<ChartContextRequest>,
     pending_activate: ActivationRequest,
     pending_study_settings: Option<u64>,
@@ -1088,6 +1095,7 @@ impl NucleusChartView {
             locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
+            pointer_interaction: PointerInteractionState::Active,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
             pending_study_settings: None,
@@ -1187,6 +1195,7 @@ impl NucleusChartView {
             locked_drawings: HashSet::new(),
             focus_handle: None,
             cursor_style: CursorStyle::Crosshair,
+            pointer_interaction: PointerInteractionState::Active,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
             pending_study_settings: None,
