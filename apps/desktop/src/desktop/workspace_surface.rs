@@ -3783,6 +3783,16 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    pub(super) fn has_removable_indicators(&self, cx: &App) -> bool {
+        !self.studies.active.is_empty()
+            || !self.studies.pending.is_empty()
+            || !self.studies.deferred.is_empty()
+            || self
+                .chart
+                .as_ref()
+                .is_some_and(|chart| chart.read(cx).has_indicators())
+    }
+
     pub(super) fn add_indicator(
         &mut self,
         indicator: ChartIndicator,

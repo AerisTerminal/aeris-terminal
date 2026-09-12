@@ -24,8 +24,8 @@ use gpui::{
 };
 use nucleuscharts_engine::{
     AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
-    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS,
-    NativePrimitiveId, PaneId, PriceScaleTarget,
+    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_COLORS,
+    EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PaneId, PriceScaleTarget,
 };
 use nucleuscharts_render::color::Color;
 use nucleuscharts_render::draw_list::Prim;
@@ -56,15 +56,52 @@ fn platform_theme(theme: ChartTheme) -> AxiusflowTheme {
     }
 }
 
-fn nucleus_grid_color(theme: ChartTheme) -> String {
+#[derive(Clone, Debug)]
+struct NucleusThemeAppearanceDefaults {
+    grid: String,
+    crosshair: String,
+    bullish: String,
+    bearish: String,
+}
+
+fn nucleus_theme_appearance_defaults(theme: ChartTheme) -> NucleusThemeAppearanceDefaults {
     let mut engine = ChartEngine::new(1.0, 1.0, 1.0);
     engine.set_theme(theme);
-    engine.options.get().grid.vert_lines.color.clone()
+    let options = engine.options.get();
+    NucleusThemeAppearanceDefaults {
+        grid: options.grid.vert_lines.color.clone(),
+        crosshair: options.crosshair.vert_line.color.clone(),
+        bullish: options.layout.bullish_color.clone(),
+        bearish: options.layout.bearish_color.clone(),
+    }
+}
+
+#[cfg(test)]
+fn nucleus_grid_color(theme: ChartTheme) -> String {
+    nucleus_theme_appearance_defaults(theme).grid
+}
+
+fn same_css_color(left: &str, right: &str) -> bool {
+    match (Color::parse_css(left), Color::parse_css(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.eq_ignore_ascii_case(right),
+    }
+}
+
+fn matches_nucleus_theme_color(color: &str, light: &str, dark: &str) -> bool {
+    same_css_color(color, light) || same_css_color(color, dark)
 }
 
 fn is_nucleus_grid_default(color: &str) -> bool {
-    color.eq_ignore_ascii_case(&nucleus_grid_color(ChartTheme::Light))
-        || color.eq_ignore_ascii_case(&nucleus_grid_color(ChartTheme::Dark))
+    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
+    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    matches_nucleus_theme_color(color, &light.grid, &dark.grid)
+}
+
+fn is_nucleus_crosshair_default(color: &str) -> bool {
+    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
+    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    matches_nucleus_theme_color(color, &light.crosshair, &dark.crosshair)
 }
 
 fn gpui_theme_color(color: ThemeColor) -> Rgba {
@@ -405,19 +442,20 @@ pub struct ChartAppearanceSettings {
 
 impl Default for ChartAppearanceSettings {
     fn default() -> Self {
+        let nucleus = nucleus_theme_appearance_defaults(ChartTheme::Dark);
         Self {
             grid_visible: true,
-            grid_color: nucleus_grid_color(ChartTheme::Dark),
+            grid_color: nucleus.grid,
             grid_style: 2,
-            crosshair_color: "#758696".to_string(),
+            crosshair_color: nucleus.crosshair,
             crosshair_width: 1,
             crosshair_style: 2,
-            up_color: "#089981".to_string(),
-            down_color: "#f7525f".to_string(),
-            wick_up_color: "#089981".to_string(),
-            wick_down_color: "#f7525f".to_string(),
-            border_up_color: "#089981".to_string(),
-            border_down_color: "#f7525f".to_string(),
+            up_color: nucleus.bullish.clone(),
+            down_color: nucleus.bearish.clone(),
+            wick_up_color: nucleus.bullish.clone(),
+            wick_down_color: nucleus.bearish.clone(),
+            border_up_color: nucleus.bullish,
+            border_down_color: nucleus.bearish,
             wick_visible: true,
             border_visible: true,
             open_visible: true,
@@ -431,6 +469,104 @@ impl Default for ChartAppearanceSettings {
             baseline_bottom_color: "#f7525f".to_string(),
         }
     }
+}
+
+const TRACK_UP: usize = 0;
+const TRACK_DOWN: usize = 1;
+const TRACK_WICK_UP: usize = 2;
+const TRACK_WICK_DOWN: usize = 3;
+const TRACK_BORDER_UP: usize = 4;
+const TRACK_BORDER_DOWN: usize = 5;
+
+fn normalize_theme_color(color: &mut String, active: &str, light: &str, dark: &str) -> bool {
+    let tracks_nucleus = matches_nucleus_theme_color(color, light, dark);
+    if tracks_nucleus {
+        color.clear();
+        color.push_str(active);
+    }
+    tracks_nucleus
+}
+
+fn normalize_nucleus_appearance(
+    theme: ChartTheme,
+    appearance: &ChartAppearanceSettings,
+) -> (ChartAppearanceSettings, [bool; 6]) {
+    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
+    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    let active = match theme {
+        ChartTheme::Light => &light,
+        ChartTheme::Dark => &dark,
+    };
+    let mut normalized = appearance.clone();
+    normalize_theme_color(
+        &mut normalized.grid_color,
+        &active.grid,
+        &light.grid,
+        &dark.grid,
+    );
+    normalize_theme_color(
+        &mut normalized.crosshair_color,
+        &active.crosshair,
+        &light.crosshair,
+        &dark.crosshair,
+    );
+    let up = normalize_theme_color(
+        &mut normalized.up_color,
+        &active.bullish,
+        &light.bullish,
+        &dark.bullish,
+    );
+    let down = normalize_theme_color(
+        &mut normalized.down_color,
+        &active.bearish,
+        &light.bearish,
+        &dark.bearish,
+    );
+    let effective_up = normalized.up_color.clone();
+    let effective_down = normalized.down_color.clone();
+    let wick_up = normalize_theme_color(
+        &mut normalized.wick_up_color,
+        &effective_up,
+        &light.bullish,
+        &dark.bullish,
+    );
+    let wick_down = normalize_theme_color(
+        &mut normalized.wick_down_color,
+        &effective_down,
+        &light.bearish,
+        &dark.bearish,
+    );
+    let border_up = normalize_theme_color(
+        &mut normalized.border_up_color,
+        &effective_up,
+        &light.bullish,
+        &dark.bullish,
+    );
+    let border_down = normalize_theme_color(
+        &mut normalized.border_down_color,
+        &effective_down,
+        &light.bearish,
+        &dark.bearish,
+    );
+    (
+        normalized,
+        [up, down, wick_up, wick_down, border_up, border_down],
+    )
+}
+
+fn primary_series_requires_theme_unpin(engine: &ChartEngine, tracking: [bool; 6]) -> bool {
+    engine
+        .series
+        .iter()
+        .find(|series| series.id == 0)
+        .is_some_and(|series| {
+            (tracking[TRACK_UP] && series.up_color.is_some())
+                || (tracking[TRACK_DOWN] && series.down_color.is_some())
+                || (tracking[TRACK_WICK_UP] && series.wick_up_color.is_some())
+                || (tracking[TRACK_WICK_DOWN] && series.wick_down_color.is_some())
+                || (tracking[TRACK_BORDER_UP] && series.border_up_color.is_some())
+                || (tracking[TRACK_BORDER_DOWN] && series.border_down_color.is_some())
+        })
 }
 
 impl ChartType {
@@ -1395,6 +1531,8 @@ impl NucleusChartView {
     pub fn set_theme(&mut self, theme: ChartTheme) {
         let current_grid_color = self.engine.options.get().grid.vert_lines.color.clone();
         let grid_tracks_nucleus_theme = is_nucleus_grid_default(&current_grid_color);
+        let current_crosshair_color = self.engine.options.get().crosshair.vert_line.color.clone();
+        let crosshair_tracks_nucleus_theme = is_nucleus_crosshair_default(&current_crosshair_color);
         self.theme = theme;
         self.engine.set_theme(theme);
         apply_platform_font_contract(&mut self.engine);
@@ -1403,6 +1541,16 @@ impl NucleusChartView {
                 "grid": {
                     "vertLines": { "color": current_grid_color },
                     "horzLines": { "color": current_grid_color },
+                }
+            })
+            .to_string();
+            let _ = self.engine.apply_options(&patch);
+        }
+        if !crosshair_tracks_nucleus_theme {
+            let patch = serde_json::json!({
+                "crosshair": {
+                    "vertLine": { "color": current_crosshair_color },
+                    "horzLine": { "color": current_crosshair_color },
                 }
             })
             .to_string();
@@ -1483,10 +1631,27 @@ impl NucleusChartView {
         if series == 0 {
             return false;
         }
+        if let Some(study_id) = self
+            .study_series
+            .iter()
+            .find_map(|((study_id, _), state)| (state.series_id == series).then_some(*study_id))
+        {
+            self.pending_study_remove = Some(study_id);
+            self.engine.set_selected_series(None);
+            return true;
+        }
         if series == self.volume_series {
             self.engine.set_series_visible(series, false);
             self.volume_legend = LegendPresence::Absent;
             self.engine.set_selected_series(None);
+        } else if let Some(binding) = self
+            .engine
+            .indicator_info(series)
+            .map(|info| info.binding_id)
+        {
+            if !self.remove_legend_indicator(LegendItem::Indicator(binding)) {
+                return false;
+            }
         } else if !self.engine.remove_series(series) {
             return false;
         }
@@ -1882,8 +2047,8 @@ impl NucleusChartView {
                 .unwrap_or(fallback)
                 .to_string()
         };
-        appearance.up_color = color("up_color", &appearance.up_color);
-        appearance.down_color = color("down_color", &appearance.down_color);
+        appearance.up_color = color("up_color", &options.layout.bullish_color);
+        appearance.down_color = color("down_color", &options.layout.bearish_color);
         appearance.wick_up_color = color("wick_up_color", &appearance.up_color);
         appearance.wick_down_color = color("wick_down_color", &appearance.down_color);
         appearance.border_up_color = color("border_up_color", &appearance.up_color);
@@ -1925,12 +2090,11 @@ impl NucleusChartView {
     /// Applies host-authored series/canvas presentation in place. Market data,
     /// viewport state and provider ownership are untouched.
     pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        let mut appearance = appearance.clone();
-        if is_nucleus_grid_default(&appearance.grid_color) {
-            appearance.grid_color = nucleus_grid_color(self.theme);
-        }
+        let (appearance, tracking) = normalize_nucleus_appearance(self.theme, appearance);
         let current = self.appearance_settings();
-        if current == appearance {
+        let primary_series_requires_unpin =
+            primary_series_requires_theme_unpin(&self.engine, tracking);
+        if current == appearance && !primary_series_requires_unpin {
             return false;
         }
         let chart_patch = serde_json::json!({
@@ -1964,12 +2128,12 @@ impl NucleusChartView {
             return false;
         }
         let series_patch = serde_json::json!({
-            "up_color": appearance.up_color,
-            "down_color": appearance.down_color,
-            "wick_up_color": appearance.wick_up_color,
-            "wick_down_color": appearance.wick_down_color,
-            "border_up_color": appearance.border_up_color,
-            "border_down_color": appearance.border_down_color,
+            "up_color": if tracking[TRACK_UP] { "" } else { appearance.up_color.as_str() },
+            "down_color": if tracking[TRACK_DOWN] { "" } else { appearance.down_color.as_str() },
+            "wick_up_color": if tracking[TRACK_WICK_UP] { "" } else { appearance.wick_up_color.as_str() },
+            "wick_down_color": if tracking[TRACK_WICK_DOWN] { "" } else { appearance.wick_down_color.as_str() },
+            "border_up_color": if tracking[TRACK_BORDER_UP] { "" } else { appearance.border_up_color.as_str() },
+            "border_down_color": if tracking[TRACK_BORDER_DOWN] { "" } else { appearance.border_down_color.as_str() },
             "wick_visible": appearance.wick_visible,
             "border_visible": appearance.border_visible,
             "open_visible": appearance.open_visible,

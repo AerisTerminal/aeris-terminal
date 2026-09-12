@@ -406,7 +406,7 @@ const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const CHART_SETTINGS_PANEL_WIDTH: f32 = 840.0;
 const CHART_SETTINGS_PANEL_HEIGHT: f32 = 620.0;
-const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 184.0;
+const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 160.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
 const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
@@ -2255,13 +2255,6 @@ impl ChartSettingsSection {
         match self {
             Self::Series => "Series",
             Self::Canvas => "Canvas",
-        }
-    }
-
-    const fn description(self) -> &'static str {
-        match self {
-            Self::Series => "Price series",
-            Self::Canvas => "Grid & crosshair",
         }
     }
 }

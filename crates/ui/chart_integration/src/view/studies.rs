@@ -55,7 +55,11 @@ impl NucleusChartView {
             })
         });
         for series_id in series_ids {
-            self.engine.set_series_visible(series_id, visible);
+            if self.engine.series_entries().iter().any(|series| {
+                series.id == series_id && !series.removed && series.visible != visible
+            }) {
+                self.engine.set_series_visible(series_id, visible);
+            }
         }
         if changed {
             self.invalidate_series_layout();
@@ -163,6 +167,7 @@ impl NucleusChartView {
         let columns = prepare_study_columns(timestamps_unix_nanos, values)?;
         validate_study_presentation(descriptor)?;
         let existing = self.study_series.get(&key).cloned();
+        let created = existing.is_none();
         let series_id = match existing {
             Some(state) => {
                 set_study_series_data(&mut self.engine, state.series_id, &columns)?;
@@ -170,7 +175,7 @@ impl NucleusChartView {
             }
             None => self.install_new_study_series(study_id, descriptor, &columns)?,
         };
-        apply_study_series_presentation(&mut self.engine, series_id, descriptor);
+        apply_study_series_presentation(&mut self.engine, series_id, output_index, descriptor);
         self.study_series.insert(
             key,
             ChartStudySeriesState {
@@ -180,7 +185,12 @@ impl NucleusChartView {
                 legend_label: descriptor.legend_label.map(str::to_string),
             },
         );
-        self.invalidate_series_layout();
+        if created {
+            self.apply_indicator_chrome_to_series(series_id);
+            self.invalidate_series_layout();
+        } else {
+            self.invalidate_series_frame();
+        }
         Ok(true)
     }
 
@@ -321,8 +331,18 @@ fn validate_study_presentation(
 fn apply_study_series_presentation(
     engine: &mut nucleuscharts_engine::ChartEngine,
     series_id: u32,
+    output_index: usize,
     descriptor: ChartStudyOutputDescriptor<'_>,
 ) {
+    if let Some(series) = engine
+        .series
+        .iter_mut()
+        .find(|series| series.id == series_id && !series.removed)
+    {
+        series.line_color = Some(
+            EMA_RIBBON_DEFAULT_COLORS[output_index % EMA_RIBBON_DEFAULT_COLORS.len()].to_string(),
+        );
+    }
     let threshold =
         descriptor
             .threshold_region

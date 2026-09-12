@@ -97,12 +97,37 @@ impl NucleusChartView {
     pub(super) fn select_series_at(&mut self, pane_x: f64, y: f64) -> bool {
         let selected = self.engine.hit_test_series(pane_x, y);
         let previous_series = self.engine.selected_series();
+        let previous_members = self.engine.selected_series_members().collect::<Vec<_>>();
         let previous_drawing = self.engine.selected_drawing();
-        self.engine.set_selected_series(selected);
+        if let Some(selected) = selected {
+            let study = self.study_series.iter().find_map(|((study_id, _), state)| {
+                (state.series_id == selected).then_some(*study_id)
+            });
+            let members = study.map(|study_id| {
+                self.study_series
+                    .iter()
+                    .filter_map(|((candidate, _), state)| {
+                        (*candidate == study_id).then_some(state.series_id)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if !members
+                .as_deref()
+                .is_some_and(|members| self.engine.set_selected_series_group(selected, members))
+            {
+                self.engine.set_selected_series(Some(selected));
+            }
+        } else {
+            self.engine.set_selected_series(None);
+        }
         if selected.is_some() {
             self.engine.set_selected_drawing(None);
         }
-        if previous_series != selected || (selected.is_some() && previous_drawing.is_some()) {
+        let selected_members = self.engine.selected_series_members().collect::<Vec<_>>();
+        if previous_series != selected
+            || previous_members != selected_members
+            || (selected.is_some() && previous_drawing.is_some())
+        {
             self.invalidate_series_frame();
         }
         selected.is_some()

@@ -686,10 +686,13 @@ impl TerminalApp {
             .iter()
             .find(|workspace| workspace.id == menu.workspace_id)
             .and_then(|workspace| workspace.panes.iter().find(|pane| pane.id == menu.pane_id))
-            .and_then(|pane| pane.surface.read(cx).chart.as_ref())
-            .map_or((false, false), |chart| {
-                let chart = chart.read(cx);
-                (chart.drawing_count() > 0, chart.has_indicators())
+            .map_or((false, false), |pane| {
+                let surface = pane.surface.read(cx);
+                let drawings = surface
+                    .chart
+                    .as_ref()
+                    .is_some_and(|chart| chart.read(cx).drawing_count() > 0);
+                (drawings, surface.has_removable_indicators(cx))
             })
     }
 

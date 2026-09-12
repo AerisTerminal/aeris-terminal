@@ -75,6 +75,8 @@ fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
         options.crosshair.vert_line.label_background_color,
         expected.crosshair.vert_line.label_background_color
     );
+    assert_eq!(options.layout.bullish_color, expected.layout.bullish_color);
+    assert_eq!(options.layout.bearish_color, expected.layout.bearish_color);
 }
 
 fn visible_series_point(chart: &NucleusChartView, id: u32) -> (f64, f64) {
@@ -1336,6 +1338,117 @@ fn nucleus_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
 }
 
 #[test]
+fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
+    let light = NucleusChartView::empty_with_theme(ChartTheme::Light);
+    let persisted = light.appearance_settings();
+    let light_defaults = nucleus_theme_appearance_defaults(ChartTheme::Light);
+    assert_eq!(persisted.up_color, light_defaults.bullish);
+    assert_eq!(persisted.down_color, light_defaults.bearish);
+
+    let mut dark = NucleusChartView::empty_with_theme(ChartTheme::Dark);
+    let _ = dark.set_appearance_settings(&persisted);
+
+    let series = series_entry(&dark, 0);
+    assert!(series.up_color.is_none());
+    assert!(series.down_color.is_none());
+    assert!(series.wick_up_color.is_none());
+    assert!(series.wick_down_color.is_none());
+    assert!(series.border_up_color.is_none());
+    assert!(series.border_down_color.is_none());
+
+    let dark_defaults = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    assert_eq!(dark_defaults.bullish, "#7c8db0");
+    let effective = dark.appearance_settings();
+    assert_eq!(effective.up_color, dark_defaults.bullish);
+    assert_eq!(effective.down_color, dark_defaults.bearish);
+    assert_eq!(effective.wick_up_color, effective.up_color);
+    assert_eq!(effective.wick_down_color, effective.down_color);
+    assert_eq!(effective.border_up_color, effective.up_color);
+    assert_eq!(effective.border_down_color, effective.down_color);
+
+    let palette = legend_palette(dark.theme, &effective.up_color, &effective.down_color);
+    assert_eq!(
+        palette.bullish,
+        rgba(
+            Color::parse_css(&dark_defaults.bullish)
+                .expect("Nucleus bullish color is valid CSS")
+                .0
+        )
+    );
+    assert_eq!(
+        palette.bearish,
+        rgba(
+            Color::parse_css(&dark_defaults.bearish)
+                .expect("Nucleus bearish color is valid CSS")
+                .0
+        )
+    );
+}
+
+#[test]
+fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
+    let mut chart = NucleusChartView::empty_with_theme(ChartTheme::Dark);
+    let mut custom = chart.appearance_settings();
+    custom.up_color = "#112233".to_string();
+    custom.down_color = "#445566".to_string();
+    custom.wick_up_color = "#778899".to_string();
+    custom.wick_down_color = "#AABBCC".to_string();
+    custom.border_up_color = "#123456".to_string();
+    custom.border_down_color = "#654321".to_string();
+    custom.crosshair_color = "#ABCDEF".to_string();
+
+    assert!(chart.set_appearance_settings(&custom));
+    chart.set_theme(ChartTheme::Light);
+
+    let series = series_entry(&chart, 0);
+    assert_eq!(series.up_color.as_deref(), Some("#112233"));
+    assert_eq!(series.down_color.as_deref(), Some("#445566"));
+    assert_eq!(series.wick_up_color.as_deref(), Some("#778899"));
+    assert_eq!(series.wick_down_color.as_deref(), Some("#AABBCC"));
+    assert_eq!(series.border_up_color.as_deref(), Some("#123456"));
+    assert_eq!(series.border_down_color.as_deref(), Some("#654321"));
+    assert_eq!(
+        chart.engine.options.get().crosshair.vert_line.color,
+        "#ABCDEF"
+    );
+
+    chart.set_theme(ChartTheme::Dark);
+    assert_eq!(chart.appearance_settings(), custom);
+
+    let reset = ChartAppearanceSettings::default();
+    assert!(chart.set_appearance_settings(&reset));
+    let series = series_entry(&chart, 0);
+    assert!(series.up_color.is_none());
+    assert!(series.down_color.is_none());
+    assert!(series.wick_up_color.is_none());
+    assert!(series.wick_down_color.is_none());
+    assert!(series.border_up_color.is_none());
+    assert!(series.border_down_color.is_none());
+    let defaults = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    let effective = chart.appearance_settings();
+    assert_eq!(effective.up_color, defaults.bullish);
+    assert_eq!(effective.down_color, defaults.bearish);
+    assert_eq!(effective.crosshair_color, defaults.crosshair);
+}
+
+#[test]
+fn canonical_crosshair_color_tracks_nucleus_theme() {
+    let mut chart = NucleusChartView::empty_with_theme(ChartTheme::Light);
+    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
+    assert_eq!(
+        chart.engine.options.get().crosshair.vert_line.color,
+        light.crosshair
+    );
+
+    chart.set_theme(ChartTheme::Dark);
+    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    assert_eq!(
+        chart.engine.options.get().crosshair.vert_line.color,
+        dark.crosshair
+    );
+}
+
+#[test]
 fn legend_values_follow_volume_direction_and_indicator_series_colors() {
     let mut chart = interactive_chart();
     chart
@@ -1651,7 +1764,8 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
     assert_eq!(points[2].close.to_bits(), 30.0_f64.to_bits());
     assert_eq!(series_entry(&chart, state.series_id).title, "Test Study");
     assert!(!series_entry(&chart, state.series_id).countdown_visible);
-    assert!(!chart.has_indicators());
+    assert!(chart.has_indicators());
+    assert!(!chart.clear_indicators());
     assert_eq!(chart.study_visible(7), Some(true));
     assert!(chart.set_study_visible(7, false));
     assert_eq!(chart.study_visible(7), Some(false));
@@ -1821,6 +1935,99 @@ fn study_remove_request_targets_one_runtime_study() {
 }
 
 #[test]
+fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_line() {
+    let mut chart = NucleusChartView::empty();
+    let timestamps = [60_i64 * 1_000_000_000];
+    let values = [Some(20.0)];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "EMA Ribbon",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+    };
+    assert_eq!(
+        chart.install_study_output(11, 0, descriptor, 1, &timestamps, &values),
+        Ok(true)
+    );
+    assert_eq!(
+        chart.install_study_output(11, 1, descriptor, 1, &timestamps, &values),
+        Ok(true)
+    );
+    let series_ids = chart
+        .study_series
+        .values()
+        .map(|state| state.series_id)
+        .collect::<Vec<_>>();
+    chart.engine.set_selected_series(Some(series_ids[1]));
+
+    assert!(chart.remove_selected_chart_object());
+    assert_eq!(chart.take_study_remove_request(), Some(11));
+    assert_eq!(chart.engine.selected_series(), None);
+    assert!(
+        series_ids
+            .iter()
+            .all(|id| !series_entry(&chart, *id).removed)
+    );
+}
+
+#[test]
+fn selecting_one_runtime_study_output_selects_the_complete_indicator() {
+    let mut chart = interactive_chart();
+    let source = chart.engine.series_data(0);
+    let timestamps = source
+        .iter()
+        .map(|point| point.time.saturating_mul(1_000_000_000))
+        .collect::<Vec<_>>();
+    let upper = source
+        .iter()
+        .map(|point| Some(point.close + 10.0))
+        .collect::<Vec<_>>();
+    let lower = source
+        .iter()
+        .map(|point| Some(point.close - 10.0))
+        .collect::<Vec<_>>();
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "EMA Ribbon",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+    };
+    assert_eq!(
+        chart.install_study_output(11, 0, descriptor, 1, &timestamps, &upper),
+        Ok(true)
+    );
+    assert_eq!(
+        chart.install_study_output(11, 1, descriptor, 1, &timestamps, &lower),
+        Ok(true)
+    );
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    let series_ids = chart
+        .study_series
+        .values()
+        .map(|state| state.series_id)
+        .collect::<Vec<_>>();
+    let selected = series_ids[1];
+    let (x, y) = visible_series_point(&chart, selected);
+
+    assert!(chart.select_series_at(x, y));
+    assert_eq!(chart.engine.selected_series(), Some(selected));
+    assert_eq!(
+        chart.engine.selected_series_members().collect::<Vec<_>>(),
+        series_ids
+    );
+}
+
+#[test]
 fn multi_output_study_legend_visibility_toggles_the_whole_study() {
     let mut chart = NucleusChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000];
@@ -1848,6 +2055,18 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
         chart.install_study_output(11, 1, lower, 1, &timestamps, &values),
         Ok(true)
     );
+    let colors = chart
+        .study_series
+        .iter()
+        .filter(|((study_id, _), _)| *study_id == 11)
+        .map(|(_, state)| {
+            series_entry(&chart, state.series_id)
+                .line_color
+                .clone()
+                .expect("study output has a stable color")
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(colors.len(), 2);
     let legend_rows = chart
         .legend_rows()
         .into_iter()
@@ -1880,6 +2099,40 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
     );
     assert!(chart.set_legend_item_visible(legend_item, true));
     assert_eq!(chart.study_visible(11), Some(true));
+}
+
+#[test]
+fn study_outputs_inherit_indicator_chrome_and_live_updates_do_not_dirty_layout() {
+    let mut chart = NucleusChartView::empty();
+    chart.apply_indicator_chrome_preferences(false, false, false);
+    let timestamps = [60_i64 * 1_000_000_000];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "EMA 20",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+    };
+
+    assert_eq!(
+        chart.install_study_output(7, 0, descriptor, 1, &timestamps, &[Some(20.0)]),
+        Ok(true)
+    );
+    let series_id = chart.study_series[&(7, 0)].series_id;
+    let series = series_entry(&chart, series_id);
+    assert!(!series.title_visible);
+    assert!(!series.last_value_visible);
+    assert!(!series.price_line_visible);
+
+    chart.layout_dirty = false;
+    assert_eq!(
+        chart.install_study_output(7, 0, descriptor, 2, &timestamps, &[Some(21.0)]),
+        Ok(true)
+    );
+    assert!(!chart.layout_dirty);
 }
 
 #[test]

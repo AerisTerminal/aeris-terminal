@@ -1,32 +1,5 @@
 use super::*;
 
-#[derive(Clone)]
-struct ChartSettingsDrag {
-    cursor_offset: std::rc::Rc<std::cell::Cell<gpui::Point<Pixels>>>,
-}
-
-impl ChartSettingsDrag {
-    fn new() -> Self {
-        Self {
-            cursor_offset: std::rc::Rc::new(std::cell::Cell::new(point(px(0.0), px(0.0)))),
-        }
-    }
-
-    fn cursor_offset(&self) -> gpui::Point<Pixels> {
-        self.cursor_offset.get()
-    }
-
-    fn set_cursor_offset(&self, cursor_offset: gpui::Point<Pixels>) {
-        self.cursor_offset.set(cursor_offset);
-    }
-}
-
-impl Render for ChartSettingsDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size(px(1.0)).opacity(0.0)
-    }
-}
-
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
     2.0 + CHART_CONTEXT_MENU_ROW_HEIGHT * rows + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
@@ -666,9 +639,9 @@ pub(super) fn chart_settings_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
-    let origin = clamp_chart_settings_origin(menu.position, viewport);
+    let panel_size = chart_settings_panel_size(viewport);
+    let origin = chart_settings_centered_origin(viewport, panel_size);
     let dismiss = terminal.clone();
-    let move_terminal = terminal.clone();
     let content = match section {
         ChartSettingsSection::Series => {
             chart_series_settings(terminal, menu, snapshot, color_picker, theme)
@@ -691,41 +664,60 @@ pub(super) fn chart_settings_menu_layer(
             });
             cx.stop_propagation();
         })
-        .on_drag_move::<ChartSettingsDrag>(move |event, _, cx| {
-            let drag = event.drag(cx);
-            let next =
-                chart_settings_drag_origin(event.event.position, drag.cursor_offset(), viewport);
-            move_terminal.update(cx, |terminal, terminal_cx| {
-                if let Some(menu) = terminal.chart_settings_menu.as_mut()
-                    && menu.position != next
-                {
-                    menu.position = next;
-                    terminal_cx.notify();
-                }
-            });
-        })
         .child(chart_settings_panel(
-            terminal,
-            origin,
-            chart_settings_panel_size(viewport),
-            section,
-            chart_settings_header(terminal, menu, section, snapshot, theme).into_any_element(),
-            content,
-            theme,
+            terminal, menu, origin, panel_size, section, content, theme,
         ))
         .into_any_element()
 }
 
 fn chart_settings_panel(
     terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
     origin: gpui::Point<Pixels>,
     panel_size: gpui::Size<Pixels>,
     section: ChartSettingsSection,
-    header: AnyElement,
     content: AnyElement,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
+    let close_terminal = terminal.clone();
+    let reset_terminal = terminal.clone();
+    let reset_menu = menu.clone();
+    let actions = div()
+        .absolute()
+        .top(px(10.0))
+        .right(px(10.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(
+            Button::new("chart_settings_reset")
+                .theme(theme)
+                .resting_fill(colors.surface_secondary)
+                .icon(header_icon(HugeIcon::Refresh01Icon))
+                .aria_label("Reset settings")
+                .h(px(26.0))
+                .text_color(gpui_color(colors.text_secondary))
+                .hover(move |button| {
+                    button
+                        .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                        .text_color(gpui_color(colors.text_primary))
+                })
+                .on_click(move |_, _, cx| {
+                    reset_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.reset_chart_settings(&reset_menu, terminal_cx);
+                    });
+                }),
+        )
+        .child(chrome_close_button(
+            "chart_settings_close",
+            theme,
+            move |_, cx| {
+                close_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_chart_settings_menu(terminal_cx);
+                });
+            },
+        ));
     div()
         .id("chart_settings_menu")
         .absolute()
@@ -734,7 +726,6 @@ fn chart_settings_panel(
         .w(panel_size.width)
         .h(panel_size.height)
         .flex()
-        .flex_col()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
@@ -745,146 +736,40 @@ fn chart_settings_panel(
         .text_color(gpui_color(colors.text_primary))
         .occlude()
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .child(header)
+        .child(chart_settings_sidebar(terminal, section, theme))
         .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .child(chart_settings_sidebar(terminal, section, theme))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .id("chart_settings_content_scroll")
-                        .overflow_y_scroll()
-                        .px_5()
-                        .py_4()
-                        .child(content),
-                ),
+            div().flex_1().min_w_0().min_h_0().p_2().child(
+                div()
+                    .id("chart_settings_content_surface")
+                    .relative()
+                    .size_full()
+                    .min_h_0()
+                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                    .border_1()
+                    .border_color(gpui_color(colors.border_secondary))
+                    .bg(gpui_color(colors.surface_secondary))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("chart_settings_content_scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .px_4()
+                            .py_3()
+                            .child(content),
+                    )
+                    .child(actions),
+            ),
         )
 }
 
-fn chart_settings_header(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    section: ChartSettingsSection,
-    snapshot: &ChartSettingsSnapshot,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels()) - 1.0).max(0.0));
-    let close_terminal = terminal.clone();
-    let reset_terminal = terminal.clone();
-    let reset_menu = menu.clone();
-    let drag = ChartSettingsDrag::new();
-    div()
-        .h(px(58.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .pr_3()
-        .rounded_tl(inner_radius)
-        .rounded_tr(inner_radius)
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .child(
-            div()
-                .id("chart_settings_drag_handle")
-                .h_full()
-                .flex_1()
-                .min_w_0()
-                .pl_4()
-                .flex()
-                .items_center()
-                .on_drag(drag, move |drag, cursor_offset, _, cx| {
-                    // GPUI keeps the original drag payload as the active value;
-                    // the preview entity returned here is separate. Share the
-                    // grab offset through the payload so the panel does not jump
-                    // its top-left corner to the pointer when dragging starts.
-                    drag.set_cursor_offset(cursor_offset);
-                    cx.new(|_| drag.clone())
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(platform_font_weight(TypographyRole::Strong))
-                                .text_color(gpui_color(colors.text_primary))
-                                .child("Chart settings"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(gpui_color(colors.text_muted))
-                                .child(format!(
-                                    "{} · {}",
-                                    snapshot.chart_type.label(),
-                                    section.label()
-                                )),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    Button::new("chart_settings_reset")
-                        .theme(theme)
-                        .resting_fill(colors.surface_secondary)
-                        .label("Reset")
-                        .h(px(28.0))
-                        .text_sm()
-                        .text_color(gpui_color(colors.text_secondary))
-                        .hover(move |button| {
-                            button
-                                .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                                .text_color(gpui_color(colors.text_primary))
-                        })
-                        .on_click(move |_, _, cx| {
-                            reset_terminal.update(cx, |terminal, terminal_cx| {
-                                terminal.reset_chart_settings(&reset_menu, terminal_cx);
-                            });
-                        }),
-                )
-                .child(chrome_close_button(
-                    "chart_settings_close",
-                    theme,
-                    move |_, cx| {
-                        close_terminal.update(cx, |terminal, terminal_cx| {
-                            terminal.close_chart_settings_menu(terminal_cx);
-                        });
-                    },
-                )),
-        )
-}
-
-fn clamp_chart_settings_origin(
-    origin: gpui::Point<Pixels>,
+fn chart_settings_centered_origin(
     viewport: gpui::Size<Pixels>,
+    panel_size: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    let panel_size = chart_settings_panel_size(viewport);
-    let width = panel_size.width;
-    let height = panel_size.height;
-    let margin = px(OVERLAY_EDGE_MARGIN);
     point(
-        origin
-            .x
-            .max(margin)
-            .min((viewport.width - width - margin).max(margin)),
-        origin
-            .y
-            .max(margin)
-            .min((viewport.height - height - margin).max(margin)),
+        (viewport.width - panel_size.width) / 2.0,
+        (viewport.height - panel_size.height) / 2.0,
     )
 }
 
@@ -896,17 +781,6 @@ fn chart_settings_panel_size(viewport: gpui::Size<Pixels>) -> gpui::Size<Pixels>
             .min((f32::from(viewport.width) - horizontal_margin).max(0.0))),
         px(CHART_SETTINGS_PANEL_HEIGHT
             .min((f32::from(viewport.height) - vertical_margin).max(0.0))),
-    )
-}
-
-fn chart_settings_drag_origin(
-    pointer: gpui::Point<Pixels>,
-    cursor_offset: gpui::Point<Pixels>,
-    viewport: gpui::Size<Pixels>,
-) -> gpui::Point<Pixels> {
-    clamp_chart_settings_origin(
-        point(pointer.x - cursor_offset.x, pointer.y - cursor_offset.y),
-        viewport,
     )
 }
 
@@ -924,12 +798,13 @@ fn chart_settings_sidebar(
         .flex_none()
         .flex()
         .flex_col()
-        .gap_1()
-        .p_3()
+        .gap_0p5()
+        .p_2()
         .border_r_1()
         .border_color(gpui_color(colors.border_secondary))
+        .rounded_tl(inner_radius)
         .rounded_bl(inner_radius)
-        .bg(gpui_color(colors.surface_secondary));
+        .bg(gpui_color(colors.surface));
     for section in ChartSettingsSection::ALL {
         let active = selected == section;
         let terminal = terminal.clone();
@@ -937,21 +812,18 @@ fn chart_settings_sidebar(
             div()
                 .id(("chart_settings_section", section as usize))
                 .w_full()
-                .px_3()
-                .py_2()
+                .h(px(32.0))
+                .px_2()
                 .flex()
-                .flex_col()
-                .gap_0p5()
+                .items_center()
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
                 .role(Role::Button)
                 .cursor_pointer()
                 .when(active, |item| {
-                    item.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
+                    item.bg(gpui_color(colors.active_bg.over(colors.surface)))
                 })
                 .when(!active, |item| {
-                    item.hover(|item| {
-                        item.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                    })
+                    item.hover(|item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
                 })
                 .on_click(move |_, _, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
@@ -973,12 +845,6 @@ fn chart_settings_sidebar(
                             colors.text_secondary
                         }))
                         .child(section.label()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(section.description()),
                 ),
         );
     }
@@ -1466,6 +1332,7 @@ fn settings_content_header(
         .flex()
         .flex_col()
         .gap_2()
+        .pr(px(72.0))
         .child(
             div()
                 .text_base()
@@ -2300,46 +2167,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chart_settings_drag_preserves_grab_offset_and_clamps_to_viewport() {
+    fn chart_settings_panel_is_centered_at_its_preferred_size() {
         let viewport = size(px(1_400.0), px(1_000.0));
-        let offset = point(px(120.0), px(24.0));
-
+        let panel_size = chart_settings_panel_size(viewport);
         assert_eq!(
-            chart_settings_drag_origin(point(px(520.0), px(300.0)), offset, viewport),
-            point(px(400.0), px(276.0))
-        );
-        assert_eq!(
-            chart_settings_drag_origin(point(px(20.0), px(20.0)), offset, viewport),
-            point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
-        );
-        assert_eq!(
-            chart_settings_drag_origin(point(px(1_500.0), px(1_200.0)), offset, viewport),
-            point(
-                px(1_400.0 - CHART_SETTINGS_PANEL_WIDTH - OVERLAY_EDGE_MARGIN),
-                px(1_000.0 - CHART_SETTINGS_PANEL_HEIGHT - OVERLAY_EDGE_MARGIN),
+            panel_size,
+            size(
+                px(CHART_SETTINGS_PANEL_WIDTH),
+                px(CHART_SETTINGS_PANEL_HEIGHT)
             )
         );
+        assert_eq!(
+            chart_settings_centered_origin(viewport, panel_size),
+            point(px(280.0), px(190.0))
+        );
     }
 
     #[test]
-    fn chart_settings_origin_stays_recoverable_in_small_viewports() {
+    fn chart_settings_panel_stays_centered_and_inset_in_small_viewports() {
         let viewport = size(px(480.0), px(320.0));
+        let panel_size = chart_settings_panel_size(viewport);
+        assert_eq!(panel_size, size(px(464.0), px(304.0)));
         assert_eq!(
-            chart_settings_panel_size(viewport),
-            size(px(464.0), px(304.0))
-        );
-        assert_eq!(
-            clamp_chart_settings_origin(point(px(300.0), px(220.0)), viewport),
+            chart_settings_centered_origin(viewport, panel_size),
             point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
         );
-    }
-
-    #[test]
-    fn chart_settings_drag_payload_shares_the_real_grab_offset() {
-        let drag = ChartSettingsDrag::new();
-        let preview = drag.clone();
-        preview.set_cursor_offset(point(px(132.0), px(27.0)));
-        assert_eq!(drag.cursor_offset(), point(px(132.0), px(27.0)));
     }
 
     #[test]

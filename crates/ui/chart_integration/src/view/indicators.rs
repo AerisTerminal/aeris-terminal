@@ -134,15 +134,9 @@ impl NucleusChartView {
     /// Returns whether any native indicator or the reusable volume series is currently shown.
     #[must_use]
     pub fn has_indicators(&self) -> bool {
-        let study_series = self
-            .study_series
-            .values()
-            .map(|state| state.series_id)
-            .collect::<HashSet<_>>();
         self.engine.series_entries().iter().any(|series| {
             !series.removed
                 && series.id != 0
-                && !study_series.contains(&series.id)
                 && (series.id != self.volume_series || self.volume_legend.is_present())
         })
     }
@@ -151,16 +145,6 @@ impl NucleusChartView {
     /// The product-owned price series is left in place. Volume stays allocated so the catalog can
     /// show it again without rebuilding live weights.
     pub fn clear_indicators(&mut self) -> bool {
-        if !self.has_indicators() {
-            return false;
-        }
-        if self
-            .engine
-            .selected_series()
-            .is_some_and(|series| series != 0)
-        {
-            self.engine.set_selected_series(None);
-        }
         let study_series = self
             .study_series
             .values()
@@ -171,10 +155,23 @@ impl NucleusChartView {
             .series_entries()
             .iter()
             .filter(|series| {
-                !series.removed && series.id != 0 && !study_series.contains(&series.id)
+                !series.removed
+                    && series.id != 0
+                    && !study_series.contains(&series.id)
+                    && (series.id != self.volume_series || self.volume_legend.is_present())
             })
             .map(|series| series.id)
             .collect();
+        if ids.is_empty() {
+            return false;
+        }
+        if self
+            .engine
+            .selected_series()
+            .is_some_and(|series| ids.contains(&series))
+        {
+            self.engine.set_selected_series(None);
+        }
         for id in ids {
             if id == self.volume_series {
                 self.engine.set_series_visible(id, false);
@@ -380,7 +377,24 @@ impl NucleusChartView {
                 true
             }
             LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
-            LegendItem::Indicator(binding) => self.engine.remove_series(binding),
+            LegendItem::Indicator(binding) => {
+                let ids = self
+                    .engine
+                    .series_order()
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        self.engine
+                            .indicator_info(*id)
+                            .is_some_and(|info| info.binding_id == binding)
+                    })
+                    .collect::<Vec<_>>();
+                let mut removed = false;
+                for id in ids {
+                    removed |= self.engine.remove_series(id);
+                }
+                removed
+            }
         };
         if removed {
             self.invalidate_series_layout();
@@ -389,32 +403,29 @@ impl NucleusChartView {
         removed
     }
     pub(super) fn indicator_series_ids(&self) -> Vec<u32> {
-        let study_series = self
-            .study_series
-            .values()
-            .map(|state| state.series_id)
-            .collect::<HashSet<_>>();
         self.engine
             .series_entries()
             .iter()
             .filter(|series| {
                 !series.removed
                     && series.id != 0
-                    && !study_series.contains(&series.id)
-                    && (series.id != self.volume_series || series.visible)
+                    && (series.id != self.volume_series || self.volume_legend.is_present())
             })
             .map(|series| series.id)
             .collect()
     }
-    pub(super) fn apply_indicator_chrome_options(&mut self) {
+    pub(super) fn apply_indicator_chrome_to_series(&mut self, series_id: u32) {
         let names = self.indicator_name_labels.visible();
         let values = self.indicator_value_labels.visible();
         let price_lines = self.indicator_price_lines.visible();
         let json = format!(
             r#"{{"last_value_visible":{values},"title_visible":{names},"price_line_visible":{price_lines}}}"#
         );
+        let _ = self.engine.series_apply_options_json(series_id, &json);
+    }
+    pub(super) fn apply_indicator_chrome_options(&mut self) {
         for id in self.indicator_series_ids() {
-            let _ = self.engine.series_apply_options_json(id, &json);
+            self.apply_indicator_chrome_to_series(id);
         }
     }
     /// Host-owned indicator name-chip chrome for every native indicator on this chart.
