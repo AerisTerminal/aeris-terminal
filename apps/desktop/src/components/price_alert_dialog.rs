@@ -657,18 +657,13 @@ fn price_alert_dialog_header(
                         ),
                 ),
         )
-        .child(
-            Button::new("price_alert_close")
-                .theme(theme)
-                .with_size(px(WORKSPACE_TAB_ICON_HIT))
-                .rounded_full()
-                .resting_fill(colors.surface_secondary)
-                .icon(header_icon(HugeIcon::CancelIcon01))
-                .aria_label("Close price alert dialog")
-                .on_click(move |_, _, cx| {
-                    close.update(cx, WorkspaceSurface::close_price_alert_dialog);
-                }),
-        )
+        .child(chrome_close_button(
+            "price_alert_close",
+            theme,
+            move |_, cx| {
+                close.update(cx, WorkspaceSurface::close_price_alert_dialog);
+            },
+        ))
         .into_any_element()
 }
 

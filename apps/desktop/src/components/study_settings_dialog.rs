@@ -346,18 +346,13 @@ fn study_settings_header(
                         .child(dialog.title.clone()),
                 ),
         )
-        .child(
-            Button::new("study_settings_close")
-                .theme(theme)
-                .with_size(px(WORKSPACE_TAB_ICON_HIT))
-                .rounded_full()
-                .resting_fill(colors.surface_secondary)
-                .icon(header_icon(HugeIcon::CancelIcon01))
-                .aria_label("Close study settings")
-                .on_click(move |_, _, cx| {
-                    cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
-                }),
-        )
+        .child(chrome_close_button(
+            "study_settings_close",
+            theme,
+            move |_, cx| {
+                cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
+            },
+        ))
 }
 
 fn study_settings_footer(

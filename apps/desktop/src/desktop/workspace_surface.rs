@@ -3330,17 +3330,25 @@ impl WorkspaceSurface {
     pub(super) fn toggle_order_book(&mut self, cx: &mut Context<Self>) {
         if self.has_market_selection() {
             let visible = self.side_panel != Some(SidePanel::OrderBook);
-            self.side_panel = visible.then_some(SidePanel::OrderBook);
-            if visible {
-                self.order_book
-                    .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
-            }
-            let _ = self.market_worker.try_set_order_book_visible(visible);
-            if self.side_panel.is_none() {
-                self.menu_state.order_book_column_open = false;
-            }
-            cx.notify();
+            self.set_order_book_visible(visible, cx);
         }
+    }
+
+    pub(super) fn set_order_book_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let next_panel = visible.then_some(SidePanel::OrderBook);
+        if self.side_panel == next_panel {
+            return;
+        }
+        self.side_panel = next_panel;
+        if visible {
+            self.order_book
+                .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
+        } else {
+            self.menu_state.order_book_column_open = false;
+            self.side_panel_resize = None;
+        }
+        let _ = self.market_worker.try_set_order_book_visible(visible);
+        cx.notify();
     }
 
     pub(super) fn toggle_order_book_column_menu(&mut self, cx: &mut Context<Self>) {
@@ -3356,11 +3364,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn close_side_panel(&mut self, cx: &mut Context<Self>) {
-        self.side_panel_resize = None;
-        self.menu_state.order_book_column_open = false;
-        if self.side_panel.take().is_some() {
-            cx.notify();
-        }
+        self.set_order_book_visible(false, cx);
     }
 
     pub(super) fn begin_side_panel_resize(&mut self, pointer_x: f32) {

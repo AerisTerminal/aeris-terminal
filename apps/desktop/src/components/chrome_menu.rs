@@ -165,8 +165,8 @@ pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
         .aria_label("Close")
         .hover(move |close| {
             close
-                .bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                .text_color(gpui_color(colors.text_primary))
+                .bg(gpui_color(colors.danger))
+                .text_color(gpui_color(colors.danger_foreground))
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             on_close(window, cx);

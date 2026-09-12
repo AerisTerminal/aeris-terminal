@@ -9,16 +9,10 @@ use super::{
 };
 
 pub(super) struct MarketWorkspaceState<'a> {
-    pub(super) app: Entity<WorkspaceSurface>,
     pub(super) pane_id: u64,
     pub(super) chart: Option<&'a Entity<NucleusChartView>>,
     pub(super) chart_has_market_data: bool,
     pub(super) chart_is_superseded: bool,
-    pub(super) order_book: Entity<ReadOnlyOrderBookView>,
-    pub(super) side_panel: Option<SidePanel>,
-    pub(super) side_panel_width: f32,
-    pub(super) order_book_column_menu_open: bool,
-    pub(super) order_book_columns: OrderBookColumnVisibility,
     pub(super) chart_state: ChartState,
     pub(super) chart_status_detail: String,
     pub(super) theme: &'a AxiusflowTheme,
@@ -27,16 +21,10 @@ pub(super) struct MarketWorkspaceState<'a> {
 #[allow(clippy::too_many_lines)]
 pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<> {
     let MarketWorkspaceState {
-        app,
         pane_id,
         chart,
         chart_has_market_data,
         chart_is_superseded,
-        order_book,
-        side_panel,
-        side_panel_width,
-        order_book_column_menu_open,
-        order_book_columns,
         chart_state,
         chart_status_detail,
         theme,
@@ -52,84 +40,92 @@ pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElem
         .id(("primary_chart", pane_id))
         .bg(gpui_color(colors.surface))
         .children(notice.map(|notice| chart_notice(notice, theme)));
-    let content = if let Some(side_panel) = side_panel {
-        let resize_app = app.clone();
-        let move_app = app.clone();
-        let release_app = app.clone();
-        let side_panel_content =
-            div().w(px(side_panel_width)).flex_none().child(
-                div()
-                    .size_full()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .bg(gpui_color(colors.surface))
-                    .border_l_1()
-                    .border_color(gpui_color(colors.border))
-                    .child(side_panel_header(
-                        side_panel,
-                        app.clone(),
-                        order_book_column_menu_open,
-                        theme,
-                    ))
-                    .child(div().flex_1().overflow_hidden().children(
-                        (side_panel == SidePanel::OrderBook).then_some(order_book.clone()),
-                    ))
-                    .children(
-                        (side_panel == SidePanel::OrderBook && order_book_column_menu_open).then(
-                            || {
-                                order_book_column_menu_layer(
-                                    app,
-                                    &order_book,
-                                    order_book_columns,
-                                    theme,
-                                )
-                            },
-                        ),
-                    ),
-            );
-        div()
-            .id(("market_workspace", pane_id))
-            .size_full()
-            .relative()
-            .flex()
-            .child(chart_surface)
-            .child(side_panel_content)
-            .child(
-                div()
-                    .id(("side_panel_resize", pane_id))
-                    .absolute()
-                    .occlude()
-                    .top_0()
-                    .right(px(side_panel_width - SIDE_PANEL_RESIZE_HANDLE_WIDTH / 2.0))
-                    .h_full()
-                    .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
-                    .cursor_col_resize()
-                    .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                        resize_app.update(cx, |surface, _| {
-                            surface.begin_side_panel_resize(f32::from(event.position.x));
-                        });
-                        cx.stop_propagation();
-                    }),
-            )
-            .on_mouse_move(move |event, _, cx| {
-                move_app.update(cx, |surface, surface_cx| {
-                    surface.update_side_panel_resize(
-                        f32::from(event.position.x),
-                        event.pressed_button == Some(MouseButton::Left),
-                        surface_cx,
-                    );
-                });
-            })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                release_app.update(cx, |surface, _| surface.end_side_panel_resize());
-            })
-            .into_any_element()
-    } else {
-        chart_surface.into_any_element()
-    };
-    div().size_full().overflow_hidden().child(content)
+    div().size_full().overflow_hidden().child(chart_surface)
+}
+
+pub(super) struct WorkspaceSidePanelState<'a> {
+    pub(super) app: Entity<WorkspaceSurface>,
+    pub(super) workspace_id: u64,
+    pub(super) panel: SidePanel,
+    pub(super) width: f32,
+    pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
+    pub(super) order_book_column_menu_open: bool,
+    pub(super) order_book_columns: OrderBookColumnVisibility,
+    pub(super) theme: &'a AxiusflowTheme,
+}
+
+pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
+    let WorkspaceSidePanelState {
+        app,
+        workspace_id,
+        panel,
+        width,
+        order_book,
+        order_book_column_menu_open,
+        order_book_columns,
+        theme,
+    } = state;
+    let colors = theme.colors;
+    let resize_app = app.clone();
+    let move_app = app.clone();
+    let release_app = app.clone();
+    div()
+        .id(("workspace_side_panel", workspace_id))
+        .w(px(width))
+        .h_full()
+        .flex_none()
+        .relative()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(gpui_color(colors.surface))
+        .border_l_1()
+        .border_color(gpui_color(colors.border))
+        .child(side_panel_header(
+            panel,
+            app.clone(),
+            order_book_column_menu_open,
+            theme,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .children((panel == SidePanel::OrderBook).then_some(order_book.clone())),
+        )
+        .children(
+            (panel == SidePanel::OrderBook && order_book_column_menu_open)
+                .then(|| order_book_column_menu_layer(app, order_book, order_book_columns, theme)),
+        )
+        .child(
+            div()
+                .id(("side_panel_resize", workspace_id))
+                .absolute()
+                .occlude()
+                .top_0()
+                .left(px(-SIDE_PANEL_RESIZE_HANDLE_WIDTH / 2.0))
+                .h_full()
+                .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
+                .cursor_col_resize()
+                .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                    resize_app.update(cx, |surface, _| {
+                        surface.begin_side_panel_resize(f32::from(event.position.x));
+                    });
+                    cx.stop_propagation();
+                }),
+        )
+        .on_mouse_move(move |event, _, cx| {
+            move_app.update(cx, |surface, surface_cx| {
+                surface.update_side_panel_resize(
+                    f32::from(event.position.x),
+                    event.pressed_button == Some(MouseButton::Left),
+                    surface_cx,
+                );
+            });
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            release_app.update(cx, |surface, _| surface.end_side_panel_resize());
+        })
 }
 
 pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {

@@ -198,18 +198,11 @@ pub(super) fn workspace_pane_element(
         .is_some_and(|chart| chart.read(cx).has_market_data());
     let chart_state =
         connectivity_chart_state(surface.chart_state, connection_state, chart_has_market_data);
-    let order_book_columns = surface.order_book.read(cx).columns();
     let content = market_workspace(MarketWorkspaceState {
-        app: pane.surface.clone(),
         pane_id,
         chart: surface.chart.as_ref(),
         chart_has_market_data,
         chart_is_superseded: surface.showing_superseded_series(),
-        order_book: surface.order_book.clone(),
-        side_panel: surface.side_panel,
-        side_panel_width: surface.side_panel_width,
-        order_book_column_menu_open: surface.menu_state.order_book_column_open,
-        order_book_columns,
         chart_state,
         chart_status_detail: chart_status_detail(
             chart_state,
@@ -286,6 +279,18 @@ pub(super) fn workspace_market_area(
     let drawing_state = surface.drawing_toolbar_state(cx);
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
+    let side_panel = surface.side_panel.map(|panel| {
+        workspace_side_panel(WorkspaceSidePanelState {
+            app: active_surface.clone(),
+            workspace_id: workspace.id,
+            panel,
+            width: surface.side_panel_width,
+            order_book: &surface.order_book,
+            order_book_column_menu_open: surface.menu_state.order_book_column_open,
+            order_book_columns: surface.order_book.read(cx).columns(),
+            theme,
+        })
+    });
     let grid = div()
         .h_full()
         .flex_1()
@@ -301,6 +306,7 @@ pub(super) fn workspace_market_area(
         .overflow_hidden()
         .track_focus(&chrome_focus)
         .child(grid)
+        .children(side_panel)
         .when(drawing_toolbar_collapsed, |market| {
             market.child(drawing_toolbar_expander(
                 terminal.clone(),

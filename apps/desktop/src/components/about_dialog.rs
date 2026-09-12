@@ -94,20 +94,15 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
                         ),
                 ),
         )
-        .child(
-            Button::new("about_dialog_close")
-                .theme(theme)
-                .with_size(px(WORKSPACE_TAB_ICON_HIT))
-                .rounded_full()
-                .resting_fill(colors.surface_secondary)
-                .icon(header_icon(HugeIcon::CancelIcon01))
-                .aria_label("Close About")
-                .on_click(move |_, _, cx| {
-                    close_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.close_about_dialog(terminal_cx);
-                    });
-                }),
-        )
+        .child(chrome_close_button(
+            "about_dialog_close",
+            theme,
+            move |_, cx| {
+                close_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_about_dialog(terminal_cx);
+                });
+            },
+        ))
         .into_any_element()
 }
 

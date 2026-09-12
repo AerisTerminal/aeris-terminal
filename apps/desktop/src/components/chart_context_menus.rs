@@ -785,7 +785,7 @@ fn chart_settings_actions(
                 .resting_fill(colors.surface_secondary)
                 .icon(header_icon(HugeIcon::Refresh01Icon))
                 .aria_label("Reset settings")
-                .h(px(26.0))
+                .with_size(px(WORKSPACE_TAB_ICON_HIT))
                 .rounded_full()
                 .text_color(gpui_color(colors.text_secondary))
                 .hover(move |button| {

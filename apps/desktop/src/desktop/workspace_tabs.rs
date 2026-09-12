@@ -136,22 +136,42 @@ impl TerminalApp {
     }
 
     pub(super) fn select_pane(&mut self, workspace_id: u64, pane_id: u64, cx: &mut Context<Self>) {
-        let Some(workspace) = self
+        let Some(workspace_index) = self
             .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == workspace_id)
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
         else {
             return;
         };
+        let workspace = &self.workspaces[workspace_index];
         let Some(index) = workspace.panes.iter().position(|pane| pane.id == pane_id) else {
             return;
         };
-        if workspace.active_pane != index {
-            workspace.active_pane = index;
-            workspace.generation = workspace.generation.saturating_add(1);
-            self.persist_workspace_layout_if_changed(cx);
-            cx.notify();
+        if workspace.active_pane == index {
+            return;
         }
+
+        let previous = workspace.panes[workspace.active_pane].surface.clone();
+        let next = workspace.panes[index].surface.clone();
+        let (order_book_visible, side_panel_width) = previous.read_with(cx, |surface, _| {
+            (
+                surface.side_panel == Some(SidePanel::OrderBook),
+                surface.side_panel_width,
+            )
+        });
+        previous.update(cx, |surface, surface_cx| {
+            surface.set_order_book_visible(false, surface_cx);
+        });
+        next.update(cx, |surface, surface_cx| {
+            surface.side_panel_width = side_panel_width;
+            surface.set_order_book_visible(order_book_visible, surface_cx);
+        });
+
+        let workspace = &mut self.workspaces[workspace_index];
+        workspace.active_pane = index;
+        workspace.generation = workspace.generation.saturating_add(1);
+        self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
     }
 
     pub(super) fn absorb_pane_activate_requests(&mut self, cx: &mut Context<Self>) {
@@ -1489,7 +1509,7 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let (product, interval, drawing_tool) = {
+        let (product, interval, drawing_tool, order_book_visible, side_panel_width) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.product.clone() else {
                 self.workspace_error = Some("The active pane has no market to copy".to_string());
@@ -1500,8 +1520,11 @@ impl TerminalApp {
                 product,
                 source.interval,
                 source.drawing_toolbar_state(cx).active_tool,
+                source.side_panel == Some(SidePanel::OrderBook),
+                source.side_panel_width,
             )
         };
+        let source_surface = workspace.panes[workspace.active_pane].surface.clone();
         let workspace_id = workspace.id;
         let insertion_index = workspace.active_pane.saturating_add(1);
         let pane = match factory.create_pane(workspace_id, product, interval) {
@@ -1548,6 +1571,13 @@ impl TerminalApp {
             cx.notify();
             return;
         }
+        source_surface.update(cx, |surface, surface_cx| {
+            surface.set_order_book_visible(false, surface_cx);
+        });
+        surface.update(cx, |surface, surface_cx| {
+            surface.side_panel_width = side_panel_width;
+            surface.set_order_book_visible(order_book_visible, surface_cx);
+        });
         workspace.panes.insert(
             insertion_index,
             WorkspacePane {
@@ -1598,6 +1628,15 @@ impl TerminalApp {
             cx.notify();
             return;
         }
+        let (removed_order_book_visible, removed_side_panel_width) = workspace.panes
+            [workspace.active_pane]
+            .surface
+            .read_with(cx, |surface, _| {
+                (
+                    surface.side_panel == Some(SidePanel::OrderBook),
+                    surface.side_panel_width,
+                )
+            });
         let removed = workspace.panes.remove(workspace.active_pane);
         let pane_order = workspace.layout.layout().pane_ids();
         let recipient_id = pane_order
@@ -1616,9 +1655,16 @@ impl TerminalApp {
         workspace.active_pane = recipient;
         workspace.generation = workspace.generation.saturating_add(1);
         removed.surface.update(cx, |surface, surface_cx| {
+            surface.set_order_book_visible(false, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Detached);
             surface.retire_market_worker(surface_cx);
         });
+        workspace.panes[recipient]
+            .surface
+            .update(cx, |surface, surface_cx| {
+                surface.side_panel_width = removed_side_panel_width;
+                surface.set_order_book_visible(removed_order_book_visible, surface_cx);
+            });
         workspace.panes[recipient].focus.focus(window, cx);
         self.workspace_error = None;
         self.persist_workspace_layout_if_changed(cx);

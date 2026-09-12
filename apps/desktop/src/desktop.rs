@@ -104,7 +104,9 @@ use chart_context_menus::{
     PriceAxisMenuRow, chart_context_menu_items, clamp_chart_context_menu_origin,
     clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
 };
-use chart_surface::{MarketWorkspaceState, market_workspace};
+use chart_surface::{
+    MarketWorkspaceState, WorkspaceSidePanelState, market_workspace, workspace_side_panel,
+};
 use chart_toolbar_menus::{
     chrome_overlay_layer, chrome_typeahead_blocked, chrome_typeahead_char,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
