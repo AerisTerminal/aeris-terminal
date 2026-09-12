@@ -195,7 +195,7 @@ fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) {
 
 fn browser_platform_styles() -> &'static str {
     PLATFORM_STYLESHEET
-        .find(":root,")
+        .find(":root")
         .map_or(PLATFORM_STYLESHEET, |start| &PLATFORM_STYLESHEET[start..])
 }
 
@@ -225,7 +225,7 @@ fn outcome_page(success: bool, detail: &str) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>{title}</title>{SYSTEM_THEME_BOOTSTRAP}<style>
 {platform}
-html,body{{margin:0;min-height:100%}}body{{min-height:100vh;display:grid;place-items:center;background:var(--surface);color:var(--text-primary);padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{margin-bottom:38px;color:var(--text-secondary);font-size:11px;font-weight:700;letter-spacing:.2em}}.mark{{width:64px;height:64px;margin:0 auto 24px;display:grid;place-items:center;border:1px solid var(--border);border-radius:var(--radius-large);background:var(--surface-secondary);font-size:27px;font-weight:700;animation:arrive .34s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{color:var(--bullish)}}.failure .mark{{color:var(--bearish)}}svg{{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .4s .18s ease-out forwards}}h1{{margin:0 0 9px;font-size:24px;font-weight:700;letter-spacing:-.025em}}p{{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.55}}.detail{{margin:16px auto 0;max-width:360px;color:var(--bearish);font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,svg path{{animation:none}}svg path{{stroke-dashoffset:0}}}}
+html,body{{margin:0;min-height:100%}}body{{min-height:100vh;display:grid;place-items:center;background:var(--surface);color:var(--text-primary);padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{margin-bottom:38px;color:var(--text-secondary);font-size:11px;font-weight:700;letter-spacing:.2em}}.mark{{width:64px;height:64px;margin:0 auto 24px;display:grid;place-items:center;border:1px solid var(--border);border-radius:var(--radius-large);background:var(--surface-secondary);font-size:27px;font-weight:700;animation:arrive .34s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{color:var(--primary)}}.failure .mark{{color:var(--danger)}}svg{{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .4s .18s ease-out forwards}}h1{{margin:0 0 9px;font-size:24px;font-weight:700;letter-spacing:-.025em}}p{{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.55}}.detail{{margin:16px auto 0;max-width:360px;color:var(--danger);font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,svg path{{animation:none}}svg path{{stroke-dashoffset:0}}}}
 </style></head><body><main class="{state}"><div class="brand">AXIUSFLOW</div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
     )
 }
@@ -400,7 +400,8 @@ mod tests {
         );
         assert!(response.contains("--surface: #ffffff"));
         assert!(response.contains("--surface: #141414"));
-        assert!(response.contains("var(--bullish)"));
+        assert!(response.contains("var(--primary)"));
+        assert!(!response.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
         assert!(!response.contains("font-family:Inter"));
         assert!(response.contains("Content-Type: text/html; charset=utf-8"));
@@ -453,7 +454,9 @@ mod tests {
         let page = outcome_page(false, "failed <script>alert('x')</script>");
         assert!(page.contains("&lt;script&gt;"));
         assert!(!page.contains("<script>alert('x')</script>"));
-        assert!(page.contains("data-theme"));
-        assert!(page.contains("var(--bearish)"));
+        assert!(page.contains(":root"));
+        assert!(!page.contains("@font-face"));
+        assert!(page.contains("var(--danger)"));
+        assert!(!page.contains("var(--bearish)"));
     }
 }
