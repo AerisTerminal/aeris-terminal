@@ -298,12 +298,36 @@ impl TerminalApp {
 
     pub(super) fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.chart_settings_menu.take() {
-            self.update_context_menu_pane(&menu, WorkspaceSurface::resume_chart_pointer, cx);
+            self.set_workspace_chart_pointers_suspended(menu.workspace_id, false, cx);
             self.chart_settings_color_picker = None;
             self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
             self.chart_settings_template_name = None;
             self.chart_settings_template_error = None;
             cx.notify();
+        }
+    }
+
+    fn set_workspace_chart_pointers_suspended(
+        &self,
+        workspace_id: u64,
+        suspended: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        for pane in &workspace.panes {
+            pane.surface.update(cx, |surface, surface_cx| {
+                if suspended {
+                    surface.suspend_chart_pointer(surface_cx);
+                } else {
+                    surface.resume_chart_pointer(surface_cx);
+                }
+            });
         }
     }
 
@@ -910,7 +934,7 @@ impl TerminalApp {
                 self.close_active_pane(&ClosePane, window, cx);
             }
             ChartContextAction::Settings => {
-                self.update_context_menu_pane(&menu, WorkspaceSurface::suspend_chart_pointer, cx);
+                self.set_workspace_chart_pointers_suspended(menu.workspace_id, true, cx);
                 self.chart_settings_section = ChartSettingsSection::Series;
                 self.chart_settings_color_picker = None;
                 self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;

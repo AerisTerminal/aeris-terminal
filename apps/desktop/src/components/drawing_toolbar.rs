@@ -275,7 +275,7 @@ fn drawing_toolbar_collapse(
         move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
     )
     .flex_none()
-    .w_full()
+    .w(px(time_axis_height))
     .h(px(time_axis_height))
     .mb(px(WORKSPACE_PANE_BOTTOM_INSET))
     .border_t_1()
@@ -351,7 +351,7 @@ pub(super) fn drawing_toolbar_expander(
     .absolute()
     .left_0()
     .bottom(px(WORKSPACE_PANE_BOTTOM_INSET))
-    .w(px(chart_chrome::CHART_CHROME_HEIGHT))
+    .w(px(time_axis_height))
     .h(px(time_axis_height))
     .border_t_1()
     .border_r_1()
