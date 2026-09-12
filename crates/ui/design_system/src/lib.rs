@@ -10,10 +10,7 @@ use std::sync::OnceLock;
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
 /// Bundled platform faces referenced by `platform.css`.
-pub static PLATFORM_FONT_BYTES: [&[u8]; 2] = [
-    include_bytes!("../assets/fonts/HKGrotesk-Medium.ttf"),
-    include_bytes!("../assets/fonts/HKGrotesk-Bold.ttf"),
-];
+pub static PLATFORM_FONT_BYTES: [&[u8]; 1] = [include_bytes!("../assets/fonts/DMSans-Regular.ttf")];
 
 static PLATFORM_TYPOGRAPHY: OnceLock<PlatformTypography> = OnceLock::new();
 
@@ -800,14 +797,13 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"HK Grotesk\", sans-serif;",
-            "--font-weight-normal: 500;",
-            "--font-weight-emphasis: 700;",
-            "--font-weight-strong: 700;",
+            "--font-sans: \"DM Sans\", sans-serif;",
+            "--font-weight-normal: 400;",
+            "--font-weight-emphasis: 400;",
+            "--font-weight-strong: 400;",
             "--font-feature-tabular-numerals: \"tnum\";",
-            "HKGrotesk-Medium.ttf",
-            "HKGrotesk-Bold.ttf",
-            "font-weight: 700;",
+            "DMSans-Regular.ttf",
+            "font-weight: 400;",
             "font-variant-numeric: tabular-nums;",
             "-webkit-font-smoothing: antialiased;",
             "font-synthesis: none;",
@@ -822,13 +818,13 @@ mod tests {
         }
         assert!(!css.contains("HKGrotesk-SemiBold.ttf"));
         assert!(!css.contains("font-weight: 600;"));
-        assert_eq!(platform_font_family(), "HK Grotesk");
-        assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
+        assert_eq!(platform_font_family(), "DM Sans");
+        assert_eq!(platform_font_stack(), "\"DM Sans\", sans-serif");
 
         let typography = platform_typography();
-        assert_eq!(typography.weight(TypographyRole::Normal), 500);
-        assert_eq!(typography.weight(TypographyRole::Emphasis), 700);
-        assert_eq!(typography.weight(TypographyRole::Strong), 700);
+        assert_eq!(typography.weight(TypographyRole::Normal), 400);
+        assert_eq!(typography.weight(TypographyRole::Emphasis), 400);
+        assert_eq!(typography.weight(TypographyRole::Strong), 400);
         assert_eq!(typography.tabular_numerals_feature(), "tnum");
     }
 }
