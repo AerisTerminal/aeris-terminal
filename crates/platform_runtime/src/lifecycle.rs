@@ -23,9 +23,9 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
-use sysinfo::{Pid, ProcessesToUpdate, System};
 
 pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const RELEASE_CHANNEL_SCHEMA_VERSION: u32 = 1;
@@ -538,6 +538,7 @@ struct RetainedRollbackJournal {
 pub struct ReleaseInstaller {
     install_root: PathBuf,
     lifecycle_root: PathBuf,
+    lifecycle_lock_path: PathBuf,
     verifying_key: VerifyingKey,
     policy: ReleasePolicy,
 }
@@ -564,6 +565,7 @@ impl ReleaseInstaller {
             .ok_or(LifecycleError::InvalidInventory)?;
         Ok(Self {
             lifecycle_root: parent.join(format!(".{name}-lifecycle")),
+            lifecycle_lock_path: parent.join(format!(".{name}-lifecycle.lock")),
             install_root,
             verifying_key,
             policy,
@@ -652,7 +654,7 @@ impl ReleaseInstaller {
         &self,
         hooks: &H,
     ) -> Result<ActiveRelease, LifecycleError> {
-        let _lock = LifecycleLock::acquire(&self.lifecycle_root)?;
+        let _lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
         if self.lifecycle_root.join("uninstall.json").exists() {
             return Err(LifecycleError::UninstallPendingCleanup);
         }
@@ -749,7 +751,10 @@ impl ReleaseInstaller {
         bundle_root: &Path,
         hooks: &H,
     ) -> Result<UpdateOutcome, LifecycleError> {
-        let _lock = LifecycleLock::acquire(&self.lifecycle_root)?;
+        let _lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
+        if self.lifecycle_root.join("uninstall.json").exists() {
+            return Err(LifecycleError::UninstallPendingCleanup);
+        }
         let previous = self.audit_active_release()?;
         let previous_retained = self.retained_known_good_release()?;
         let mut policy = self.policy.clone();
@@ -830,7 +835,7 @@ impl ReleaseInstaller {
     /// # Errors
     /// Returns a pending-cleanup category until exact owned artifacts are gone.
     pub fn recover<H: LifecycleHooks>(&self, hooks: &H) -> Result<(), LifecycleError> {
-        let _lock = LifecycleLock::acquire(&self.lifecycle_root)?;
+        let _lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
         if self.lifecycle_root.join("uninstall.json").exists() {
             return Err(LifecycleError::UninstallPendingCleanup);
         }
@@ -909,7 +914,7 @@ impl ReleaseInstaller {
         hooks: &H,
     ) -> Result<UninstallOutcome, LifecycleError> {
         self.validate_inventory(inventory)?;
-        let lock = LifecycleLock::acquire(&self.lifecycle_root)?;
+        let lock = LifecycleLock::acquire(&self.lifecycle_lock_path)?;
         let uninstall_journal = self.lifecycle_root.join("uninstall.json");
         if !uninstall_journal.exists() {
             write_json_atomic(
@@ -939,10 +944,9 @@ impl ReleaseInstaller {
         if roots.iter().any(|path| path.exists()) {
             return Err(LifecycleError::UninstallPendingCleanup);
         }
-        let _ = fs::remove_file(self.lifecycle_root.join("uninstall.json"));
-        lock.release()?;
-        remove_owned_path(&self.lifecycle_root)
+        remove_lifecycle_root_after_uninstall(&self.lifecycle_root)
             .map_err(|_| LifecycleError::UninstallPendingCleanup)?;
+        lock.release()?;
         Ok(UninstallOutcome {
             removed_roots: roots.len().saturating_add(1),
             removed_vault_keys: inventory.vault_entries.len(),
@@ -2082,6 +2086,27 @@ fn remove_owned_path(path: &Path) -> std::io::Result<()> {
     fs::remove_dir(path)
 }
 
+fn remove_lifecycle_root_after_uninstall(root: &Path) -> std::io::Result<()> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return remove_owned_path(root);
+    }
+    let uninstall_marker = root.join("uninstall.json");
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path == uninstall_marker {
+            continue;
+        }
+        remove_owned_path(&path)?;
+    }
+    remove_file_if_present(&uninstall_marker)?;
+    fs::remove_dir(root)
+}
+
 fn count_entries(path: &Path) -> Result<usize, LifecycleError> {
     fs::read_dir(path)
         .map_err(|_| LifecycleError::UpdatePendingCleanup)?
@@ -2093,63 +2118,78 @@ fn count_entries(path: &Path) -> Result<usize, LifecycleError> {
 }
 
 struct LifecycleLock {
-    path: Option<PathBuf>,
+    path: PathBuf,
+    file: Option<File>,
 }
 
 impl LifecycleLock {
-    fn acquire(root: &Path) -> Result<Self, LifecycleError> {
-        fs::create_dir_all(root).map_err(|_| LifecycleError::UpdateLocked)?;
-        let path = root.join("transaction.lock");
-        for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    writeln!(file, "{}", std::process::id())
-                        .and_then(|()| file.sync_all())
-                        .map_err(|_| LifecycleError::UpdateLocked)?;
-                    return Ok(Self { path: Some(path) });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let pid = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|value| value.trim().parse::<usize>().ok());
-                    let live = pid.is_some_and(process_is_live);
-                    if live || remove_file_if_present(&path).is_err() {
-                        return Err(LifecycleError::UpdateLocked);
-                    }
-                }
-                Err(_) => return Err(LifecycleError::UpdateLocked),
+    fn acquire(path: &Path) -> Result<Self, LifecycleError> {
+        let parent = path.parent().ok_or(LifecycleError::UpdateLocked)?;
+        fs::create_dir_all(parent).map_err(|_| LifecycleError::UpdateLocked)?;
+        for _ in 0..3 {
+            if fs::symlink_metadata(path)
+                .is_ok_and(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
+            {
+                return Err(LifecycleError::UpdateLocked);
             }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(|_| LifecycleError::UpdateLocked)?;
+            file.try_lock().map_err(|_| LifecycleError::UpdateLocked)?;
+            if !lock_handle_matches_path(&file, path) {
+                let _ = file.unlock();
+                continue;
+            }
+            file.set_len(0)
+                .and_then(|()| writeln!(file, "{}", std::process::id()))
+                .and_then(|()| file.sync_all())
+                .map_err(|_| LifecycleError::UpdateLocked)?;
+            return Ok(Self {
+                path: path.to_path_buf(),
+                file: Some(file),
+            });
         }
         Err(LifecycleError::UpdateLocked)
     }
 
     fn release(mut self) -> Result<(), LifecycleError> {
-        let Some(path) = self.path.take() else {
+        self.release_inner()
+            .map_err(|_| LifecycleError::UninstallPendingCleanup)
+    }
+
+    fn release_inner(&mut self) -> std::io::Result<()> {
+        let Some(file) = self.file.take() else {
             return Ok(());
         };
-        remove_file_if_present(&path).map_err(|_| LifecycleError::UninstallPendingCleanup)
+        let remove_result = remove_file_if_present(&self.path);
+        let unlock_result = file.unlock();
+        remove_result.and(unlock_result)
     }
 }
 
 impl Drop for LifecycleLock {
     fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = remove_file_if_present(&path);
-        }
+        let _ = self.release_inner();
     }
 }
 
-fn process_is_live(pid: usize) -> bool {
-    let mut system = System::new();
-    let pid = Pid::from(pid);
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).is_some()
+fn lock_handle_matches_path(file: &File, path: &Path) -> bool {
+    let Ok(opened) = file.try_clone().and_then(FileIdentity::from_file) else {
+        return false;
+    };
+    FileIdentity::from_path(path).is_ok_and(|current| current == opened)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Barrier, Mutex};
+
+    const LIFECYCLE_LOCK_CHILD_PATH_ENV: &str = "AXIUSFLOW_TEST_LIFECYCLE_LOCK_PATH";
 
     #[derive(Default)]
     struct Hooks {
@@ -2229,6 +2269,116 @@ mod tests {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos())
+    }
+
+    #[test]
+    fn lifecycle_lock_excludes_other_owners_and_recovers_a_crash_stale_file() {
+        let root = temporary_root("transaction-lock");
+        let lock_path = root.join("transaction.lock");
+        fs::write(&lock_path, b"stale diagnostic pid\n").expect("stale lock fixture");
+
+        let first = LifecycleLock::acquire(&lock_path).expect("first lock");
+        assert!(matches!(
+            LifecycleLock::acquire(&lock_path),
+            Err(LifecycleError::UpdateLocked)
+        ));
+        assert!(lock_path.is_file());
+        drop(first);
+        assert!(!lock_path.exists(), "normal release removes lock artifact");
+
+        let second = LifecycleLock::acquire(&lock_path).expect("lock after release");
+        assert!(lock_path.is_file());
+        drop(second);
+        assert!(!lock_path.exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn lifecycle_lock_concurrent_attempts_have_exactly_one_owner() {
+        const ATTEMPTS: usize = 8;
+        let root = temporary_root("transaction-lock-concurrent");
+        let lock_path = root.join("transaction.lock");
+        let start = Arc::new(Barrier::new(ATTEMPTS));
+        let attempted = Arc::new(Barrier::new(ATTEMPTS));
+        let threads = (0..ATTEMPTS)
+            .map(|_| {
+                let lock_path = lock_path.clone();
+                let start = Arc::clone(&start);
+                let attempted = Arc::clone(&attempted);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let lock = LifecycleLock::acquire(&lock_path);
+                    let acquired = lock.is_ok();
+                    attempted.wait();
+                    drop(lock);
+                    acquired
+                })
+            })
+            .collect::<Vec<_>>();
+        let acquired = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("lock contender joins"))
+            .filter(|acquired| *acquired)
+            .count();
+        assert_eq!(acquired, 1);
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn lifecycle_lock_child_process() {
+        let Some(path) = std::env::var_os(LIFECYCLE_LOCK_CHILD_PATH_ENV) else {
+            return;
+        };
+        let _lock =
+            LifecycleLock::acquire(Path::new(&path)).expect("child acquires lifecycle lock");
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn lifecycle_lock_is_released_by_abrupt_process_exit() {
+        let root = temporary_root("transaction-lock-crash");
+        let lock_path = root.join("transaction.lock");
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("lifecycle::tests::lifecycle_lock_child_process")
+            .env(LIFECYCLE_LOCK_CHILD_PATH_ENV, &lock_path)
+            .status()
+            .expect("crash-lock child starts");
+        assert!(status.success());
+        assert!(
+            lock_path.exists(),
+            "crashed owner leaves only an unlocked file"
+        );
+
+        let lock = LifecycleLock::acquire(&lock_path)
+            .expect("operating system releases lock when owner process exits");
+        drop(lock);
+        assert!(!lock_path.exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn lifecycle_lock_stays_authoritative_through_lifecycle_root_teardown() {
+        let root = temporary_root("transaction-lock-teardown");
+        let lifecycle_root = root.join("lifecycle");
+        fs::create_dir_all(&lifecycle_root).expect("lifecycle root");
+        fs::write(lifecycle_root.join("uninstall.json"), b"{}").expect("uninstall marker fixture");
+        let lock_path = root.join("lifecycle.lock");
+        let lock = LifecycleLock::acquire(&lock_path).expect("teardown lock");
+
+        remove_lifecycle_root_after_uninstall(&lifecycle_root).expect("lifecycle root removes");
+        assert!(!lifecycle_root.exists());
+        assert!(matches!(
+            LifecycleLock::acquire(&lock_path),
+            Err(LifecycleError::UpdateLocked)
+        ));
+
+        lock.release().expect("teardown lock releases");
+        assert!(!lock_path.exists());
+        let next =
+            LifecycleLock::acquire(&lock_path).expect("next lifecycle owner starts afterward");
+        drop(next);
+        let _ = remove_owned_path(&root);
     }
 
     fn release_with_rollback_bytes(
@@ -3694,7 +3844,7 @@ mod tests {
     #[test]
     fn unfinished_uninstall_blocks_normal_launch_recovery() {
         let root = temporary_root("uninstall-recovery");
-        let (_, key, _) = release(&root, 1);
+        let (signed, key, bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
             root.join("install"),
             key.verifying_key(),
@@ -3709,6 +3859,10 @@ mod tests {
         .expect("write uninstall journal");
         assert_eq!(
             installer.recover(&Hooks::default()),
+            Err(LifecycleError::UninstallPendingCleanup)
+        );
+        assert_eq!(
+            installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::UninstallPendingCleanup)
         );
         let _ = remove_owned_path(&root);

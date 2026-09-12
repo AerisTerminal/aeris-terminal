@@ -737,6 +737,7 @@ dependencies = [
  "embed-resource",
  "keyring",
  "notify-rust",
+ "same-file",
  "semver",
  "serde",
  "serde_json",

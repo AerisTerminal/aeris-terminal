@@ -41,6 +41,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.43"
 serde_json = "=1.0.151"
 semver = "=1.0.28"
+same-file = "=1.0.6"
 webpki-roots = "=1.0.9"
 sha2 = "=0.11.0"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
