@@ -1064,6 +1064,12 @@ impl Coordinator<'_> {
             return Ok(());
         }
         if series.provider_id == "hyperliquid" {
+            // Hyperliquid drains controls newest-wins, so a replacement
+            // Subscribe can cancel an already queued idle Stop without the
+            // worker ever emitting Disconnected. Resuming accepted demand must
+            // therefore retire the old stop fence here; otherwise valid events
+            // from the still-current generation remain suppressed forever.
+            self.hyperliquid_stop_pending = None;
             // Hyperliquid multiplexes every demand over one connection, so a
             // timeframe change only changes this series' candle feed and a
             // symbol change only adds its feeds: neither reconnects. The full

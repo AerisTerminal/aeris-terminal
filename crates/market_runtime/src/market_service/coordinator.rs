@@ -9,8 +9,9 @@ use super::{
     ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
     ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
     REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
-    RithmicLiveHandoff, RithmicRealtimeDemand, StreamRequirements, StudyMarketLeaseChangeKind,
-    StudyRuntime, StudyRuntimeConfig, authorize_consumer, thread,
+    RithmicLiveHandoff, RithmicRealtimeDemand, SeriesLoadState, StreamRequirements,
+    StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
+    publish_state, thread,
 };
 use crate::{
     MarketRuntimeEvent, MarketStudyOutputSnapshot,
@@ -404,12 +405,61 @@ impl Coordinator<'_> {
         reply: &Reply<()>,
     ) {
         let result = authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
+            let mut needs_covering_repair = false;
+            let retained_before = self
+                .engine
+                .current_demand(consumer_id)
+                .is_some_and(|demand| demand.resource_class.retains_subscription());
             let publication = self
                 .engine
                 .set_resource_class(consumer_id, resource_class)
                 .map_err(|error| error.to_string())?;
+            if !retained_before
+                && resource_class.retains_subscription()
+                && let Some((series, streams)) = self
+                    .engine
+                    .current_demand(consumer_id)
+                    .and_then(|demand| demand.series.clone().zip(demand.streams))
+            {
+                // Background consumers intentionally release provider demand and
+                // `release_unused_live_market_data` prunes their live handoff.
+                // When the same consumer returns to Foreground the engine restores
+                // its subscription from retained demand; rebuild the runtime handoff
+                // in the same transition so cached publication cannot leave the
+                // chart detached from upstream live data.
+                self.ensure_realtime(&series)?;
+                if streams.contains(MarketStream::Bars) {
+                    let provider_generation = self.provider_generation_for_series(&series)?;
+                    if let Some(snapshot) = publication
+                        .as_ref()
+                        .map(|publication| Arc::clone(&publication.snapshot))
+                        .or_else(|| self.engine.series_snapshot(&series))
+                    {
+                        needs_covering_repair =
+                            self.prepare_cached_demand(&series, provider_generation, &snapshot)?;
+                    } else if self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .is_some_and(|status| status.health != ProviderHealth::Disconnected)
+                    {
+                        self.enqueue_history_recovery(&series, provider_generation)
+                            .map_err(str::to_string)?;
+                    }
+                }
+            }
             if let Some(publication) = publication {
-                self.publish_current_snapshot(&publication);
+                if needs_covering_repair {
+                    if let Some(events) = self.events.get_mut(&publication.consumer_id) {
+                        publish_state(
+                            events,
+                            &publication,
+                            SeriesLoadState::Partial,
+                            Some("Refreshing provider coverage"),
+                        );
+                    }
+                } else {
+                    self.publish_current_snapshot(&publication);
+                }
             }
             if let Some(events) = self.events.get_mut(&consumer_id)
                 && !resource_class.publishes_ui()
@@ -963,6 +1013,9 @@ mod tests {
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
         StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
         StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettings,
+    };
+    use crate::{
+        hyperliquid_realtime::HyperliquidRealtimeEvent, rithmic_realtime::RithmicRealtimeEvent,
     };
     use axiusflow_contracts::ProviderInstrumentSearchResult;
     use axiusflow_market_data::{
@@ -2382,6 +2435,378 @@ mod tests {
                 .and_then(|demand| demand.generation),
             Some(generation(9))
         );
+    }
+
+    #[test]
+    fn foreground_restore_recreates_rithmic_live_demand_across_idle_stop_overlap() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        let selected = series();
+        let selected_instrument = instrument();
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&selected_instrument)
+            .expect("Rithmic instrument installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("foreground Rithmic demand installs");
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(1)),
+                &selected,
+                2,
+                0,
+                minute_bars(0, 1),
+            )
+            .expect("Rithmic cached history installs");
+        coordinator
+            .ensure_realtime(&selected)
+            .expect("initial Rithmic live handoff exists");
+        assert!(coordinator.rithmic_live.contains_key(&selected));
+
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Background,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("background reply arrives")
+            .expect("consumer backgrounds");
+        assert!(!coordinator.engine.has_subscription(&selected));
+        assert!(coordinator.rithmic_live.is_empty());
+
+        let provider_generation = ProviderGeneration(nonzero(1));
+        coordinator.rithmic_stop_pending = Some(provider_generation);
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Foreground,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("foreground reply arrives")
+            .expect("consumer returns to foreground");
+        assert!(coordinator.engine.has_subscription(&selected));
+        let live = coordinator
+            .rithmic_live
+            .get(&selected)
+            .expect("Rithmic live handoff is recreated");
+        assert_eq!(live.history_state, LiveHistoryState::Ready);
+        assert_eq!(live.coverage(), Some((0, 0)));
+        let demand = coordinator
+            .rithmic_realtime_demand()
+            .expect("Rithmic demand rebuilds");
+        assert_eq!(demand.instruments.len(), 1);
+        assert!(demand.instruments[0].trades);
+
+        coordinator.handle_rithmic_realtime(RithmicRealtimeEvent::Disconnected(1, None));
+        assert!(coordinator.rithmic_stop_pending.is_none());
+        let provider = coordinator
+            .engine
+            .provider_status("rithmic")
+            .expect("Rithmic provider remains installed");
+        assert_eq!(provider.generation, Some(provider_generation));
+        assert_eq!(provider.health, ProviderHealth::Recovering);
+        assert!(
+            coordinator.rithmic_live.contains_key(&selected),
+            "the idle-stop completion must restart rather than retire restored demand"
+        );
+    }
+
+    #[test]
+    fn foreground_restore_keeps_stale_cached_rithmic_baseline_partial_until_current_history() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        let selected = series();
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&instrument())
+            .expect("Rithmic instrument installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("foreground Rithmic demand installs");
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(1)),
+                &selected,
+                2,
+                0,
+                minute_bars(0, 1),
+            )
+            .expect("generation-one cache installs");
+
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Background,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("background reply arrives")
+            .expect("consumer backgrounds");
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", ProviderGeneration(nonzero(2)))
+            .expect("provider advances while workspace is backgrounded");
+
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Foreground,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("foreground reply arrives")
+            .expect("consumer resumes from retained stale cache");
+
+        let live = coordinator
+            .rithmic_live
+            .get(&selected)
+            .expect("current-generation live handoff is recreated");
+        assert_eq!(live.generation, ProviderGeneration(nonzero(2)));
+        assert_eq!(live.history_state, LiveHistoryState::AwaitingHistory);
+        let events = coordinator.events.get(&consumer).expect("consumer outbox");
+        assert!(matches!(
+            events.series.front(),
+            Some(MarketRuntimeEvent::SeriesSnapshot(snapshot))
+                if snapshot.snapshot.provider_generation == ProviderGeneration(nonzero(1))
+        ));
+        assert!(matches!(
+            events.series_state,
+            Some(MarketRuntimeEvent::SeriesState(ref state))
+                if state.state == SeriesLoadState::Partial
+                    && state.detail.as_deref() == Some("Refreshing provider coverage")
+        ));
+    }
+
+    #[test]
+    fn foreground_restore_recreates_hyperliquid_live_demand_across_idle_stop_overlap() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        let selected = hyperliquid_series();
+        let selected_instrument = hyperliquid_instrument();
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&selected_instrument)
+            .expect("Hyperliquid instrument installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("foreground Hyperliquid demand installs");
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(1)),
+                &selected,
+                2,
+                8,
+                minute_bars(0, 1),
+            )
+            .expect("Hyperliquid cached history installs");
+        coordinator
+            .ensure_realtime(&selected)
+            .expect("initial Hyperliquid live handoff exists");
+        assert!(coordinator.hyperliquid_live.contains_key(&selected));
+
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Background,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("background reply arrives")
+            .expect("consumer backgrounds");
+        assert!(!coordinator.engine.has_subscription(&selected));
+        assert!(coordinator.hyperliquid_live.is_empty());
+
+        let provider_generation = ProviderGeneration(nonzero(1));
+        coordinator.hyperliquid_stop_pending = Some(provider_generation);
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Foreground,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("foreground reply arrives")
+            .expect("consumer returns to foreground");
+        assert!(coordinator.engine.has_subscription(&selected));
+        let live = coordinator
+            .hyperliquid_live
+            .get(&selected)
+            .expect("Hyperliquid live handoff is recreated");
+        assert_eq!(live.history_state, LiveHistoryState::Ready);
+        assert_eq!(live.coverage(), Some((0, 0)));
+        let demand = coordinator.hyperliquid_demand();
+        assert_eq!(demand.candles.len(), 1);
+        assert_eq!(demand.candles[0].instrument.wire_coin, "BTC");
+        assert_eq!(demand.candles[0].interval, "1m");
+        assert!(
+            coordinator.hyperliquid_stop_pending.is_none(),
+            "replacement demand must retire the cancellable idle-stop fence even without Disconnected"
+        );
+        assert!(coordinator.hyperliquid_demand_dirty);
+
+        coordinator.handle_hyperliquid_realtime(HyperliquidRealtimeEvent::Heartbeat(1, None));
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("hyperliquid")
+                .map(|status| status.health),
+            Some(ProviderHealth::Online),
+            "same-generation live events must be accepted when Subscribe cancels the idle Stop"
+        );
+        assert!(
+            coordinator
+                .hyperliquid_live
+                .get(&selected)
+                .is_some_and(|live| live.connected),
+            "the accepted heartbeat marks the restored handoff connected"
+        );
+        assert!(
+            coordinator.hyperliquid_live.contains_key(&selected),
+            "restored Hyperliquid demand remains live without requiring Disconnected"
+        );
+    }
+
+    #[test]
+    fn foreground_restore_without_cache_waits_for_new_session_history_after_idle_stop() {
+        let mut coordinator = coordinator();
+        let (history_sender, history_receiver) = std::sync::mpsc::sync_channel(1);
+        let history_sender = Box::leak(Box::new(history_sender));
+        coordinator.providers.records.insert(
+            "rithmic",
+            super::super::ProviderDispatchRecord {
+                history: history_sender,
+                lifecycle: None,
+                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                catalog: super::super::ProviderCatalogDispatch::Disabled,
+            },
+        );
+        let consumer = consumer(1);
+        let selected = series();
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        coordinator
+            .install_provider_instrument(&instrument())
+            .expect("Rithmic instrument installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("foreground Rithmic demand installs");
+        coordinator
+            .ensure_realtime(&selected)
+            .expect("initial Rithmic handoff exists");
+
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Background,
+            &reply,
+        );
+        result
+            .recv()
+            .expect("background reply arrives")
+            .expect("consumer backgrounds");
+        let first_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .end_provider_session("rithmic", first_generation)
+            .expect("completed idle stop ends the first provider session");
+        assert!(coordinator.engine.series_snapshot(&selected).is_none());
+
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_resource_class(
+            client(1),
+            consumer,
+            ConsumerResourceClass::Foreground,
+            &reply,
+        );
+        result.recv().expect("foreground reply arrives").expect(
+            "foreground resume waits for the worker instead of failing unavailable history",
+        );
+        assert!(coordinator.engine.has_subscription(&selected));
+        let live = coordinator
+            .rithmic_live
+            .get(&selected)
+            .expect("Rithmic handoff is recreated before reconnect");
+        assert_eq!(live.history_state, LiveHistoryState::AwaitingHistory);
+        assert_eq!(live.generation, first_generation);
+        assert!(matches!(
+            history_receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        coordinator.handle_rithmic_realtime(RithmicRealtimeEvent::Connecting(2));
+        let second_generation = ProviderGeneration(nonzero(2));
+        let provider = coordinator
+            .engine
+            .provider_status("rithmic")
+            .expect("Rithmic provider remains installed");
+        assert_eq!(provider.generation, Some(second_generation));
+        assert_eq!(provider.health, ProviderHealth::Connecting);
+        let live = coordinator
+            .rithmic_live
+            .get(&selected)
+            .expect("Rithmic handoff survives reconnect");
+        assert_eq!(live.generation, second_generation);
+        assert_eq!(live.history_state, LiveHistoryState::AwaitingHistory);
+        let history = history_receiver
+            .try_recv()
+            .expect("new provider session enqueues covering history");
+        assert_eq!(history.series, selected);
+        assert_eq!(history.provider_generation, second_generation);
+        assert!(history.range.is_none());
     }
 
     fn queued_state(consumer_id: ConsumerId, value: u64) -> MarketRuntimeEvent {
