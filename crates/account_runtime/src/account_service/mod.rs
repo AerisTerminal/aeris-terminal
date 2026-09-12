@@ -12,6 +12,9 @@ pub mod oidc;
 pub mod pkce;
 
 use std::{
+    fs::{self, OpenOptions},
+    io::ErrorKind,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -44,6 +47,7 @@ const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
 const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
 const DEVICE_VAULT_KEY: &str = "account-device-key-v1";
+const REJECTED_RESTORE_MARKER_FILE: &str = "account-restore-rejected-v1";
 
 /// Local startup readiness of the production saved-session restore path.
 ///
@@ -124,10 +128,19 @@ struct ServiceState {
 
 type LeaseKey = (String, [u8; 32]);
 
+#[derive(Clone)]
+enum RejectedRestoreMarker {
+    #[cfg(test)]
+    Disabled,
+    Unavailable,
+    Path(PathBuf),
+}
+
 /// Engine-owned account session shared by all desktop windows.
 #[derive(Clone)]
 pub struct AccountService {
     config: AccountServiceConfig,
+    rejected_restore_marker: RejectedRestoreMarker,
     state: Arc<Mutex<ServiceState>>,
     endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
     lease_keys: Arc<Mutex<Vec<LeaseKey>>>,
@@ -148,8 +161,20 @@ impl AccountService {
     /// Creates an account session starting signed out.
     #[must_use]
     pub fn new(config: AccountServiceConfig) -> Self {
+        let rejected_restore_marker = axiusflow_platform_runtime::native_data_root()
+            .map_or(RejectedRestoreMarker::Unavailable, |root| {
+                RejectedRestoreMarker::Path(root.join(REJECTED_RESTORE_MARKER_FILE))
+            });
+        Self::new_with_rejected_restore_marker(config, rejected_restore_marker)
+    }
+
+    fn new_with_rejected_restore_marker(
+        config: AccountServiceConfig,
+        rejected_restore_marker: RejectedRestoreMarker,
+    ) -> Self {
         Self {
             config,
+            rejected_restore_marker,
             state: Arc::new(Mutex::new(ServiceState {
                 view: cleared_view(AccountSessionState::SignedOut, 0, "signed out"),
                 pending: None,
@@ -162,6 +187,69 @@ impl AccountService {
             profile_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             restore_readiness: Arc::new(AtomicU8::new(AccountRestoreReadiness::Ready as u8)),
         }
+    }
+
+    fn rejected_restore_marker_present(&self) -> Result<bool, ()> {
+        let path = match &self.rejected_restore_marker {
+            #[cfg(test)]
+            RejectedRestoreMarker::Disabled => return Ok(false),
+            RejectedRestoreMarker::Unavailable => return Err(()),
+            RejectedRestoreMarker::Path(path) => path,
+        };
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Ok(_) | Err(_) => Err(()),
+        }
+    }
+
+    fn persist_rejected_restore_marker(&self) -> Result<(), ()> {
+        let path = match &self.rejected_restore_marker {
+            #[cfg(test)]
+            RejectedRestoreMarker::Disabled => return Err(()),
+            RejectedRestoreMarker::Unavailable => return Err(()),
+            RejectedRestoreMarker::Path(path) => path,
+        };
+        let parent = path.parent().ok_or(())?;
+        fs::create_dir_all(parent).map_err(|_| ())?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                return Ok(());
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => return Err(()),
+        }
+        let file = match OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                return self
+                    .rejected_restore_marker_present()
+                    .and_then(|present| present.then_some(()).ok_or(()));
+            }
+            Err(_) => return Err(()),
+        };
+        file.sync_all().map_err(|_| ())?;
+        #[cfg(unix)]
+        sync_account_marker_directory(parent)?;
+        Ok(())
+    }
+
+    fn clear_rejected_restore_marker(&self) -> Result<(), ()> {
+        let path = match &self.rejected_restore_marker {
+            #[cfg(test)]
+            RejectedRestoreMarker::Disabled => return Ok(()),
+            RejectedRestoreMarker::Unavailable => return Err(()),
+            RejectedRestoreMarker::Path(path) => path,
+        };
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Ok(_) | Err(_) => return Err(()),
+        }
+        fs::remove_file(path).map_err(|_| ())?;
+        #[cfg(unix)]
+        sync_account_marker_directory(path.parent().ok_or(())?)?;
+        Ok(())
     }
 
     /// Creates the production account service and attempts a server-verified
@@ -275,6 +363,15 @@ impl AccountService {
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
+        if !matches!(self.rejected_restore_marker_present(), Ok(false)) {
+            self.set_restore_readiness(AccountRestoreReadiness::Failed);
+            self.complete_restore_without_session(
+                AccountSessionState::TerminalError,
+                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in",
+            );
+            return LocalRestore::Settled;
+        }
+        let refresh_material = vault.load(REFRESH_VAULT_KEY);
         let (cached_expiry, cached_lease_read_failed) =
             if let Ok(expiry) = self.restore_cached_lease(vault) {
                 (expiry, false)
@@ -287,7 +384,7 @@ impl AccountService {
                 (None, true)
             };
         let cached_session = cached_expiry.is_some();
-        let refresh_token = match vault.load(REFRESH_VAULT_KEY) {
+        let refresh_token = match refresh_material {
             Ok(Some(bytes)) => String::from_utf8(bytes)
                 .ok()
                 .filter(|token| !token.is_empty())
@@ -458,17 +555,17 @@ impl AccountService {
         let tokens = match outcome {
             Ok(tokens) => tokens,
             Err(error) => {
-                let (state, detail) = match error {
-                    oidc::RefreshGrantError::Rejected => (
-                        AccountSessionState::ReauthenticationRequired,
-                        "saved sign-in expired; sign in again",
-                    ),
-                    oidc::RefreshGrantError::Unavailable => (
-                        AccountSessionState::TerminalError,
-                        "saved sign-in could not be verified; check your connection and retry sign-in",
-                    ),
-                };
-                self.complete_restore_without_session(state, detail);
+                match error {
+                    oidc::RefreshGrantError::Rejected => {
+                        self.retire_rejected_restore(vault);
+                    }
+                    oidc::RefreshGrantError::Unavailable => {
+                        self.complete_restore_without_session(
+                            AccountSessionState::TerminalError,
+                            "saved sign-in could not be verified; check your connection and retry sign-in",
+                        );
+                    }
+                }
                 return None;
             }
         };
@@ -519,6 +616,85 @@ impl AccountService {
             photo_url: profile.photo_url,
         };
         Some((account_id, tokens))
+    }
+
+    /// Retires an authoritatively rejected saved grant and every durable
+    /// credential that could otherwise re-authenticate the same restore on a
+    /// later process start. The generation-zero lifecycle fence stays held
+    /// while deleting so a stale restore cannot erase credentials written by
+    /// a newer interactive login.
+    fn retire_rejected_restore<V>(&self, vault: &V)
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return;
+        }
+
+        // `restore_cached_lease` may already have installed the durable
+        // directory into memory before the online grant is rejected. Retire
+        // that validation authority under the same lifecycle fence as the
+        // durable credentials so a later interactive login cannot reuse the
+        // rejected lease during a transient refresh failure.
+        self.lease_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        // Persist the independent rejection fence before mutating vault state.
+        // A crash during cleanup therefore cannot make the previously rejected
+        // cached lease look authoritative again on the next process start.
+        let marker_persisted = self.persist_rejected_restore_marker().is_ok();
+        let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
+        let lease_retired = if lease_deleted {
+            true
+        } else {
+            // The cached lease cannot authenticate without both its verified
+            // key directory and device binding. If the lease entry itself
+            // cannot be removed, retire either validation artifact instead.
+            // Replacement fallbacks cover vault backends where update is
+            // available even when deletion is not.
+            let directory_retired = vault.delete(LEASE_DIRECTORY_VAULT_KEY).is_ok()
+                || vault.store(LEASE_DIRECTORY_VAULT_KEY, b"[]").is_ok();
+            if directory_retired || vault.delete(DEVICE_VAULT_KEY).is_ok() {
+                true
+            } else {
+                let mut replacement = Zeroizing::new(vec![0_u8; 32]);
+                getrandom::fill(replacement.as_mut_slice()).is_ok()
+                    && vault
+                        .store(DEVICE_VAULT_KEY, replacement.as_slice())
+                        .is_ok()
+            }
+        };
+        // When the independent marker could not be persisted, keep the rejected
+        // refresh token unless the cached lease is already non-restorable. That
+        // preserves the authoritative rejection evidence for a later retry.
+        let refresh_deleted =
+            (lease_retired || marker_persisted) && vault.delete(REFRESH_VAULT_KEY).is_ok();
+        let direct_cleanup = lease_deleted && refresh_deleted;
+        let marker_cleared = if direct_cleanup && marker_persisted {
+            self.clear_rejected_restore_marker().is_ok()
+        } else {
+            !marker_persisted
+        };
+        state.restore_allowed = false;
+        let (target, detail) = if direct_cleanup && marker_cleared {
+            (
+                AccountSessionState::ReauthenticationRequired,
+                "saved sign-in expired; sign in again",
+            )
+        } else {
+            (
+                AccountSessionState::TerminalError,
+                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in",
+            )
+        };
+        // Unlike transient restore failures, an authoritative rejected grant
+        // must never retain cached offline access in memory.
+        state.view = cleared_view(target, 0, detail);
     }
 
     fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) -> bool {
@@ -1003,13 +1179,18 @@ impl AccountService {
             return false;
         }
         let stored = store_refresh_material(vault, refresh_token).is_ok();
-        if !stored {
+        let marker_cleared = stored && self.clear_rejected_restore_marker().is_ok();
+        if !marker_cleared {
             let generation = state.last_generation;
             state.pending = None;
             state.view = cleared_view(
                 AccountSessionState::TerminalError,
                 generation,
-                "credential storage is unavailable; retry sign-in",
+                if stored {
+                    "saved sign-in cleanup is unavailable; retry sign-in"
+                } else {
+                    "credential storage is unavailable; retry sign-in"
+                },
             );
             return false;
         }
@@ -1608,6 +1789,13 @@ where
         .map_err(|_| "credential storage is unavailable".to_string())
 }
 
+#[cfg(unix)]
+fn sync_account_marker_directory(path: &std::path::Path) -> Result<(), ()> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| ())
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1619,7 +1807,7 @@ mod tests {
     use super::{
         AccountRestoreReadiness, AccountService, AccountServiceConfig, DEVICE_VAULT_KEY,
         LEASE_DIRECTORY_VAULT_KEY, LEASE_VAULT_KEY, LOGIN_TIMEOUT, LocalRestore, REFRESH_VAULT_KEY,
-        UnavailableVault, claim_profile_refresh,
+        RejectedRestoreMarker, UnavailableVault, claim_profile_refresh,
         oidc::{self, AccountProfile, VerifiedTokens},
     };
     use axiusflow_account::{AccountId, PlanId};
@@ -1629,11 +1817,15 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::{
         collections::HashMap,
+        fs,
+        path::PathBuf,
         sync::{
             Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
     };
+
+    static MARKER_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct MemoryVault {
@@ -1717,15 +1909,114 @@ mod tests {
         }
     }
 
-    fn service() -> AccountService {
+    struct LeaseArtifactDeleteFailureVault<'a> {
+        inner: &'a MemoryVault,
+    }
+
+    impl CredentialVault for LeaseArtifactDeleteFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            if matches!(key, LEASE_VAULT_KEY | LEASE_DIRECTORY_VAULT_KEY) {
+                return Err("lease artifact delete failure".to_string());
+            }
+            self.inner.delete(key)
+        }
+    }
+
+    struct LeaseArtifactMutationFailureVault<'a> {
+        inner: &'a MemoryVault,
+    }
+
+    impl CredentialVault for LeaseArtifactMutationFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            if key == LEASE_DIRECTORY_VAULT_KEY {
+                return Err("lease directory store failure".to_string());
+            }
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            if matches!(key, LEASE_VAULT_KEY | LEASE_DIRECTORY_VAULT_KEY) {
+                return Err("lease artifact delete failure".to_string());
+            }
+            self.inner.delete(key)
+        }
+    }
+
+    struct LeaseArtifactAndDeviceDeleteFailureVault<'a> {
+        inner: &'a MemoryVault,
+    }
+
+    impl CredentialVault for LeaseArtifactAndDeviceDeleteFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            if key == LEASE_DIRECTORY_VAULT_KEY {
+                return Err("lease directory store failure".to_string());
+            }
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            if matches!(
+                key,
+                LEASE_VAULT_KEY | LEASE_DIRECTORY_VAULT_KEY | DEVICE_VAULT_KEY
+            ) {
+                return Err("selected delete failure".to_string());
+            }
+            self.inner.delete(key)
+        }
+    }
+
+    struct AllMutationFailureVault<'a> {
+        inner: &'a MemoryVault,
+    }
+
+    impl CredentialVault for AllMutationFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, _key: &str, _secret: &[u8]) -> Result<(), Self::Error> {
+            Err("vault store failure".to_string())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.inner.load(key)
+        }
+
+        fn delete(&self, _key: &str) -> Result<(), Self::Error> {
+            Err("vault delete failure".to_string())
+        }
+    }
+
+    fn service_with_marker_state(rejected_restore_marker: RejectedRestoreMarker) -> AccountService {
         use super::oidc::OidcEndpoints;
 
-        let service = AccountService::new(
+        let service = AccountService::new_with_rejected_restore_marker(
             AccountServiceConfig::try_new(
                 "https://auth.axiusflow.com/api/auth",
                 "axiusflow-desktop",
             )
             .expect("test config builds"),
+            rejected_restore_marker,
         );
         // Stub discovery so unit tests never touch the network.
         service
@@ -1746,8 +2037,34 @@ mod tests {
         service
     }
 
+    fn service_with_marker(rejected_restore_marker: Option<PathBuf>) -> AccountService {
+        service_with_marker_state(
+            rejected_restore_marker
+                .map_or(RejectedRestoreMarker::Disabled, RejectedRestoreMarker::Path),
+        )
+    }
+
+    fn service() -> AccountService {
+        service_with_marker(None)
+    }
+
+    fn marker_fixture() -> (PathBuf, PathBuf) {
+        let sequence = MARKER_FIXTURE_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+        let root = std::env::temp_dir().join(format!(
+            "axiusflow-account-restore-marker-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("marker fixture directory creates");
+        let marker = root.join("rejected-restore");
+        (root, marker)
+    }
+
     fn restoring_service() -> AccountService {
-        let service = service();
+        restoring_service_with_marker(None)
+    }
+
+    fn restoring_service_with_marker(rejected_restore_marker: Option<PathBuf>) -> AccountService {
+        let service = service_with_marker(rejected_restore_marker);
         service.set_restore_readiness(AccountRestoreReadiness::Pending);
         service.state.lock().expect("account state locks").view = super::cleared_view(
             AccountSessionState::Authorizing,
@@ -1814,6 +2131,33 @@ mod tests {
             service.account_status().state,
             AccountSessionState::SignedOut
         );
+    }
+
+    #[test]
+    fn unavailable_rejected_restore_marker_path_blocks_cached_offline_restore() {
+        let service = service_with_marker_state(RejectedRestoreMarker::Unavailable);
+        service.set_restore_readiness(AccountRestoreReadiness::Pending);
+        service.state.lock().expect("account state locks").view = super::cleared_view(
+            AccountSessionState::Authorizing,
+            0,
+            "restoring saved sign-in",
+        );
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(!service.is_authenticated());
     }
 
     #[test]
@@ -2187,6 +2531,458 @@ mod tests {
                 .is_none(),
             "a retired restore cannot rotate current vault material"
         );
+    }
+
+    #[test]
+    fn rejected_online_restore_removes_every_restorable_session_credential() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+            .expect("refresh fixture stores");
+
+        let LocalRestore::ContinueOnline { refresh_token, .. } =
+            service.restore_local_session(&vault)
+        else {
+            panic!("cached lease plus refresh must continue online restore");
+        };
+        assert_eq!(refresh_token.as_str(), "rejected-refresh");
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::OfflineLease
+        );
+
+        assert!(
+            service
+                .apply_online_restore(&vault, Err(oidc::RefreshGrantError::Rejected), |_| panic!(
+                    "an invalid grant must never reach account linking"
+                ))
+                .is_none()
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::ReauthenticationRequired
+        );
+        assert!(!service.is_authenticated());
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .is_none()
+        );
+        assert!(vault.load(LEASE_VAULT_KEY).expect("lease reads").is_none());
+
+        let restarted = restoring_service();
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::SignedOut,
+            "authoritatively rejected credentials must not authenticate after restart"
+        );
+        assert!(!restarted.is_authenticated());
+    }
+
+    #[test]
+    fn rejected_online_restore_cleanup_failure_clears_access_and_reports_storage_failure() {
+        for failing_key in [REFRESH_VAULT_KEY, LEASE_VAULT_KEY] {
+            let service = restoring_service();
+            let vault = MemoryVault::default();
+            seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+            vault
+                .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+                .expect("refresh fixture stores");
+            assert!(matches!(
+                service.restore_local_session(&vault),
+                LocalRestore::ContinueOnline { .. }
+            ));
+            assert!(service.is_authenticated());
+            let failing = SelectiveDeleteFailureVault {
+                inner: &vault,
+                failing_key,
+            };
+
+            assert!(
+                service
+                    .apply_online_restore(
+                        &failing,
+                        Err(oidc::RefreshGrantError::Rejected),
+                        |_| panic!("an invalid grant must never reach account linking")
+                    )
+                    .is_none()
+            );
+            let view = service.account_status();
+            assert_eq!(view.state, AccountSessionState::TerminalError);
+            assert_eq!(
+                view.detail,
+                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in"
+            );
+            assert!(!service.is_authenticated());
+            assert!(
+                vault
+                    .load(failing_key)
+                    .expect("failed key remains")
+                    .is_some(),
+                "cleanup failure must not be represented as durable retirement"
+            );
+            let other_key = if failing_key == REFRESH_VAULT_KEY {
+                LEASE_VAULT_KEY
+            } else {
+                REFRESH_VAULT_KEY
+            };
+            assert!(
+                vault.load(other_key).expect("other key reads").is_none(),
+                "both cleanup attempts must run even when one deletion fails"
+            );
+
+            let restarted = restoring_service();
+            let restart = restarted.restore_local_session(&vault);
+            assert!(
+                !restarted.is_authenticated(),
+                "known rejected credentials must never recover offline access after restart"
+            );
+            if failing_key == LEASE_VAULT_KEY {
+                assert!(matches!(restart, LocalRestore::Settled));
+                assert_eq!(
+                    restarted.account_status().state,
+                    AccountSessionState::SignedOut
+                );
+                assert!(
+                    vault
+                        .load(LEASE_DIRECTORY_VAULT_KEY)
+                        .expect("lease directory reads")
+                        .is_none(),
+                    "a failed lease deletion must retire the cached lease validation artifact"
+                );
+                assert!(
+                    service
+                        .lease_keys
+                        .lock()
+                        .expect("lease keys lock")
+                        .is_empty(),
+                    "the rejected lease validation directory must also retire in memory"
+                );
+
+                service.begin_login(61).expect("fresh sign-in starts");
+                assert!(service.complete_with_tokens(
+                    61,
+                    &AccountId::try_new("acct_cached").expect("cached account id builds"),
+                    PlanId::Elite,
+                    &profile("fresh", "fresh@example.test"),
+                    Some("fresh-refresh"),
+                    &vault,
+                ));
+                let session = super::lease_session(&service, 61, &vault)
+                    .expect("fresh active session builds");
+                assert!(matches!(
+                    super::cached_outcome(&service, &session, &vault, super::unix_now()),
+                    super::lease::RefreshOutcome::Unavailable
+                ));
+                assert_eq!(
+                    service.account_status().state,
+                    AccountSessionState::Active,
+                    "a transient post-login lease miss must not reuse the retired cached lease"
+                );
+            } else {
+                assert!(matches!(restart, LocalRestore::ContinueOnline { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_restore_replaces_directory_when_lease_artifact_deletes_fail() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let failing = LeaseArtifactDeleteFailureVault { inner: &vault };
+
+        assert!(
+            service
+                .apply_online_restore(
+                    &failing,
+                    Err(oidc::RefreshGrantError::Rejected),
+                    |_| panic!("an invalid grant must never reach account linking")
+                )
+                .is_none()
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert_eq!(
+            vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads"),
+            Some(b"[]".to_vec()),
+            "replacement must invalidate a lease when both lease-artifact deletes fail"
+        );
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .is_none()
+        );
+
+        let restarted = restoring_service();
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::SignedOut
+        );
+        assert!(!restarted.is_authenticated());
+    }
+
+    #[test]
+    fn rejected_restore_retires_device_when_lease_directory_cannot_mutate() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let failing = LeaseArtifactMutationFailureVault { inner: &vault };
+
+        assert!(
+            service
+                .apply_online_restore(
+                    &failing,
+                    Err(oidc::RefreshGrantError::Rejected),
+                    |_| panic!("an invalid grant must never reach account linking")
+                )
+                .is_none()
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(
+            vault.load(LEASE_VAULT_KEY).expect("lease reads").is_some(),
+            "the failing backend preserves the rejected lease entry"
+        );
+        assert!(
+            vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .is_some(),
+            "the failing backend preserves the rejected lease directory"
+        );
+        assert!(
+            vault
+                .load(DEVICE_VAULT_KEY)
+                .expect("device key reads")
+                .is_none(),
+            "device binding must retire when lease and directory cannot mutate"
+        );
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .is_none()
+        );
+
+        let restarted = restoring_service();
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::SignedOut
+        );
+        assert!(!restarted.is_authenticated());
+    }
+
+    #[test]
+    fn rejected_restore_marker_blocks_restart_when_no_lease_validation_artifact_can_mutate() {
+        let (marker_root, marker_path) = marker_fixture();
+        let service = restoring_service_with_marker(Some(marker_path.clone()));
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let failing = AllMutationFailureVault { inner: &vault };
+
+        assert!(
+            service
+                .apply_online_restore(
+                    &failing,
+                    Err(oidc::RefreshGrantError::Rejected),
+                    |_| panic!("an invalid grant must never reach account linking")
+                )
+                .is_none()
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert_eq!(
+            vault.load(REFRESH_VAULT_KEY).expect("refresh reads"),
+            Some(b"rejected-refresh".to_vec()),
+            "failed vault cleanup must preserve rejected refresh evidence"
+        );
+        assert!(
+            marker_path.is_file(),
+            "independent rejection marker must persist"
+        );
+        assert!(vault.load(LEASE_VAULT_KEY).expect("lease reads").is_some());
+        assert!(
+            vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .is_some()
+        );
+        assert!(
+            vault
+                .load(DEVICE_VAULT_KEY)
+                .expect("device key reads")
+                .is_some()
+        );
+
+        let restarted = restoring_service_with_marker(Some(marker_path.clone()));
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.restore_readiness(),
+            AccountRestoreReadiness::Failed
+        );
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(!restarted.is_authenticated());
+
+        let signed_in = service_with_marker(Some(marker_path.clone()));
+        signed_in.begin_login(71).expect("fresh sign-in starts");
+        assert!(signed_in.complete_with_tokens(
+            71,
+            &AccountId::try_new("acct_cached").expect("cached account id builds"),
+            PlanId::Elite,
+            &profile("fresh", "fresh@example.test"),
+            Some("fresh-refresh"),
+            &vault,
+        ));
+        assert_eq!(
+            signed_in.account_status().state,
+            AccountSessionState::Active
+        );
+        assert!(
+            !marker_path.exists(),
+            "verified sign-in must clear the rejected-restore marker before Active publishes"
+        );
+
+        let _ = fs::remove_dir_all(marker_root);
+    }
+
+    #[test]
+    fn rejected_restore_rotates_device_when_device_delete_also_fails() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        let old_device = vault
+            .load(DEVICE_VAULT_KEY)
+            .expect("device key reads")
+            .expect("device key exists");
+        vault
+            .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let failing = LeaseArtifactAndDeviceDeleteFailureVault { inner: &vault };
+
+        assert!(
+            service
+                .apply_online_restore(
+                    &failing,
+                    Err(oidc::RefreshGrantError::Rejected),
+                    |_| panic!("an invalid grant must never reach account linking")
+                )
+                .is_none()
+        );
+        let replacement_device = vault
+            .load(DEVICE_VAULT_KEY)
+            .expect("device key reads")
+            .expect("replacement device key exists");
+        assert_ne!(replacement_device, old_device);
+        assert!(vault.load(LEASE_VAULT_KEY).expect("lease reads").is_some());
+        assert!(
+            vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .is_some()
+        );
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .is_none()
+        );
+
+        let restarted = restoring_service();
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::SignedOut
+        );
+        assert!(!restarted.is_authenticated());
+    }
+
+    #[test]
+    fn stale_rejected_restore_cannot_delete_newer_session_credentials() {
+        let service = service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"newer-refresh")
+            .expect("refresh fixture stores");
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.last_generation = 7;
+            state.restore_allowed = false;
+            state.view = super::cleared_view(AccountSessionState::SignedOut, 7, "signed out");
+        }
+
+        assert!(
+            service
+                .apply_online_restore(&vault, Err(oidc::RefreshGrantError::Rejected), |_| panic!(
+                    "retired restore must never reach account linking"
+                ))
+                .is_none()
+        );
+        assert_eq!(service.account_status().request_generation, 7);
+        assert_eq!(
+            vault.load(REFRESH_VAULT_KEY).expect("refresh reads"),
+            Some(b"newer-refresh".to_vec())
+        );
+        assert!(vault.load(LEASE_VAULT_KEY).expect("lease reads").is_some());
     }
 
     #[test]
