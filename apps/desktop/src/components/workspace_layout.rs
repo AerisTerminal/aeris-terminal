@@ -237,7 +237,7 @@ pub(super) fn workspace_pane_element(
         .min_w_0()
         .min_h_0()
         .pr(px(3.0))
-        .pb(px(2.0))
+        .pb(px(WORKSPACE_PANE_BOTTOM_INSET))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.select_pane(workspace_id, pane_id, terminal_cx);

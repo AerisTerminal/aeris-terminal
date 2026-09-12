@@ -144,10 +144,20 @@ pub(super) fn chrome_menu_search_header(
 /// control whose 75% icon scaling and inner wrapper throw the X off-center.
 ///
 /// Every close control in the chrome shares this so they stay identical.
-pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
+#[derive(Clone, Copy)]
+pub(super) enum ChromeIconButtonTone {
+    Neutral,
+    Destructive,
+}
+
+pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
     id: &'static str,
+    icon: HugeIcon,
+    icon_size: f32,
+    label: &'static str,
+    tone: ChromeIconButtonTone,
     theme: &AxiusflowTheme,
-    on_close: F,
+    on_activate: F,
 ) -> impl IntoElement + use<F> {
     let colors = theme.colors;
     div()
@@ -162,17 +172,36 @@ pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
         .text_color(gpui_color(colors.icon))
         .cursor_pointer()
         .role(Role::Button)
-        .aria_label("Close")
-        .hover(move |close| {
-            close
+        .aria_label(label)
+        .hover(move |button| match tone {
+            ChromeIconButtonTone::Neutral => button
+                .bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                .text_color(gpui_color(colors.text_primary)),
+            ChromeIconButtonTone::Destructive => button
                 .bg(gpui_color(colors.danger))
-                .text_color(gpui_color(colors.danger_foreground))
+                .text_color(gpui_color(colors.danger_foreground)),
         })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            on_close(window, cx);
+            on_activate(window, cx);
             cx.stop_propagation();
         })
-        .child(header_icon(HugeIcon::CancelIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
+        .child(header_icon(icon).with_size(px(icon_size)))
+}
+
+pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
+    id: &'static str,
+    theme: &AxiusflowTheme,
+    on_close: F,
+) -> impl IntoElement + use<F> {
+    chrome_icon_button(
+        id,
+        HugeIcon::CancelIcon01,
+        WORKSPACE_TAB_ICON_GLYPH,
+        "Close",
+        ChromeIconButtonTone::Destructive,
+        theme,
+        on_close,
+    )
 }
 
 pub(super) fn chrome_menu_close_button(

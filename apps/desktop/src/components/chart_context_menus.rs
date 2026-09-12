@@ -1,5 +1,9 @@
 use super::*;
 
+// The refresh artwork spans 18/24 of its SVG viewbox while the close artwork spans
+// 14/24. Scale the refresh canvas so both header actions have the same optical size.
+const CHART_SETTINGS_RESET_ICON_GLYPH: f32 = WORKSPACE_TAB_ICON_GLYPH * 14.0 / 18.0;
+
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
     2.0 + CHART_CONTEXT_MENU_ROW_HEIGHT * rows + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
@@ -768,7 +772,6 @@ fn chart_settings_actions(
     menu: &ChartContextMenu,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let close_terminal = terminal.clone();
     let reset_terminal = terminal.clone();
     let reset_menu = menu.clone();
@@ -779,26 +782,19 @@ fn chart_settings_actions(
         .flex()
         .items_center()
         .gap_1()
-        .child(
-            Button::new("chart_settings_reset")
-                .theme(theme)
-                .resting_fill(colors.surface_secondary)
-                .icon(header_icon(HugeIcon::Refresh01Icon))
-                .aria_label("Reset settings")
-                .with_size(px(WORKSPACE_TAB_ICON_HIT))
-                .rounded_full()
-                .text_color(gpui_color(colors.text_secondary))
-                .hover(move |button| {
-                    button
-                        .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .on_click(move |_, _, cx| {
-                    reset_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.reset_chart_settings(&reset_menu, terminal_cx);
-                    });
-                }),
-        )
+        .child(chrome_icon_button(
+            "chart_settings_reset",
+            HugeIcon::Refresh01Icon,
+            CHART_SETTINGS_RESET_ICON_GLYPH,
+            "Reset settings",
+            ChromeIconButtonTone::Neutral,
+            theme,
+            move |_, cx| {
+                reset_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.reset_chart_settings(&reset_menu, terminal_cx);
+                });
+            },
+        ))
         .child(chrome_close_button(
             "chart_settings_close",
             theme,
@@ -2359,6 +2355,13 @@ fn account_menu_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_settings_header_actions_have_equal_optical_glyph_bounds() {
+        let close_artwork = WORKSPACE_TAB_ICON_GLYPH * 14.0;
+        let reset_artwork = CHART_SETTINGS_RESET_ICON_GLYPH * 18.0;
+        assert!((close_artwork - reset_artwork).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn chart_settings_panel_is_centered_at_its_preferred_size() {

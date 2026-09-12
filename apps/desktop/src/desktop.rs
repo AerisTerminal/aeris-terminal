@@ -122,8 +122,8 @@ use chrome_menu::{
     CHROME_MENU_FOOTER_HEIGHT, CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_WIDTH,
 };
 use chrome_menu::{
-    CHROME_MENU_INDICATOR_SEARCH_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, chrome_close_button,
-    chrome_menu_extent,
+    CHROME_MENU_INDICATOR_SEARCH_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, ChromeIconButtonTone,
+    chrome_close_button, chrome_icon_button, chrome_menu_extent,
 };
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
 use gpui::{
@@ -413,6 +413,7 @@ const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 160.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
 const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
+const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;

@@ -277,6 +277,7 @@ fn drawing_toolbar_collapse(
     .flex_none()
     .w_full()
     .h(px(time_axis_height))
+    .mb(px(WORKSPACE_PANE_BOTTOM_INSET))
     .border_t_1()
     .border_color(gpui_color(colors.border))
 }
@@ -349,7 +350,7 @@ pub(super) fn drawing_toolbar_expander(
     )
     .absolute()
     .left_0()
-    .bottom_0()
+    .bottom(px(WORKSPACE_PANE_BOTTOM_INSET))
     .w(px(chart_chrome::CHART_CHROME_HEIGHT))
     .h(px(time_axis_height))
     .border_t_1()
