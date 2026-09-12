@@ -1434,8 +1434,9 @@ mod tests {
             readiness_fn.contains("AccountService::new_restoring")
                 && readiness_fn.contains("wait_for_account_restore_readiness")
                 && readiness_fn.contains("restore_readiness()")
+                && readiness_fn.contains("validate_workspace_boot_for_readiness")
                 && !readiness_fn.contains("AccountService::new("),
-            "release readiness must exercise production saved-session restore and bounded local readiness"
+            "release readiness must exercise production workspace bootstrap and saved-session restore with bounded local readiness"
         );
 
         let update = manifest("apps/desktop/src/update.rs");

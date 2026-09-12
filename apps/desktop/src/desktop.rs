@@ -1487,6 +1487,12 @@ fn wait_for_account_restore_readiness(
     }
 }
 
+fn validate_workspace_boot_for_readiness(workspace: &WorkspaceState) -> Result<(), String> {
+    engine_market_worker::restored_workspace_boot_plan(workspace)
+        .map(|_| ())
+        .map_err(|error| format!("candidate workspace bootstrap failed: {error}"))
+}
+
 #[cfg(test)]
 mod desktop_readiness_account_tests {
     use super::wait_for_account_restore_readiness;
@@ -1538,6 +1544,29 @@ mod desktop_readiness_account_tests {
     }
 }
 
+#[cfg(test)]
+mod desktop_readiness_workspace_tests {
+    use super::validate_workspace_boot_for_readiness;
+    use axiusflow_contracts::WorkspacePaneKind;
+
+    #[test]
+    fn readiness_reuses_the_production_workspace_boot_planner() {
+        let valid = super::local_state::sanitize_workspace(super::local_state::default_workspace());
+        assert!(validate_workspace_boot_for_readiness(&valid).is_ok());
+
+        let mut parser_valid_but_unbootable = super::local_state::default_workspace();
+        parser_valid_but_unbootable.workspace_tabs[0].panes[0].kind =
+            WorkspacePaneKind::OrderBook as i32;
+        let parser_valid_but_unbootable =
+            super::local_state::sanitize_workspace(parser_valid_but_unbootable);
+        assert!(!parser_valid_but_unbootable.workspace_tabs.is_empty());
+        assert!(
+            validate_workspace_boot_for_readiness(&parser_valid_but_unbootable).is_err(),
+            "readiness must reject persistence that production startup cannot turn into chart workers"
+        );
+    }
+}
+
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
@@ -1548,6 +1577,7 @@ fn run_desktop_readiness_command(
     }
     let workspace = local_state::load_workspace_for_readiness()
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
+    validate_workspace_boot_for_readiness(&workspace)?;
     let account_service = axiusflow_account_runtime::AccountService::new_restoring(
         axiusflow_account_runtime::AccountServiceConfig::from_environment(),
     );
