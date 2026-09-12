@@ -320,7 +320,7 @@ mod lifecycle;
 use lifecycle::DesktopLifecycle;
 
 mod workspace_persistence;
-use workspace_persistence::WorkspaceLayoutPersistence;
+use workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceLayoutShutdownWait};
 
 actions!(
     axiusflow,
@@ -1092,6 +1092,7 @@ fn resized_side_panel_width(resize: SidePanelResize, pointer_x: f32) -> f32 {
         .clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
 }
 
+#[cfg(test)]
 fn claim_once(claimed: &mut bool) -> bool {
     if *claimed {
         return false;
@@ -2115,6 +2116,7 @@ struct TerminalApp {
     profile_refresh_on_activation: bool,
     about_dialog_open: bool,
     updater: Option<DesktopUpdater>,
+    update_restart_persistence_pending: bool,
     chart_chrome: chart_chrome::ChartChromePreferences,
     window_move_pending: bool,
     closing: bool,

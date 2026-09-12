@@ -256,6 +256,12 @@ impl DesktopUpdater {
         prepared.commit();
         Ok(())
     }
+
+    pub(super) fn cancel_prepared_restart(&mut self, error: String) -> Option<PreparedRestart> {
+        self.request_pending = false;
+        self.presentation.state = UpdateState::Error(error);
+        self.prepared_restart.take()
+    }
 }
 
 fn run_update_worker(requests: &Receiver<UpdateRequest>, results: &SyncSender<UpdateResult>) {
@@ -576,7 +582,7 @@ impl Drop for RestartSlot {
 }
 
 #[derive(Debug)]
-struct PreparedRestart {
+pub(super) struct PreparedRestart {
     child: Option<Child>,
     slot: RestartSlot,
     committed: bool,
@@ -992,6 +998,39 @@ mod tests {
         assert!(!SLOT.load(Ordering::Acquire));
         assert!(RestartSlot::claim(&SLOT).is_ok());
         SLOT.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn cancelling_prepared_restart_returns_cleanup_to_a_background_owner() {
+        static SLOT: AtomicBool = AtomicBool::new(false);
+        SLOT.store(false, Ordering::Release);
+        let (requests, _request_rx) = mpsc::sync_channel(1);
+        let (_result_tx, results) = mpsc::sync_channel(1);
+        let mut updater = DesktopUpdater {
+            requests,
+            results,
+            presentation: UpdatePresentation {
+                system_version: "Windows".to_string(),
+                state: UpdateState::PreparingRestart,
+            },
+            request_pending: false,
+            prepared_restart: Some(PreparedRestart {
+                child: None,
+                slot: RestartSlot::claim(&SLOT).expect("slot claims"),
+                committed: false,
+            }),
+        };
+
+        let cleanup = updater
+            .cancel_prepared_restart("workspace durability failed".to_string())
+            .expect("prepared restart transfers to cleanup owner");
+        assert_eq!(
+            updater.presentation.state,
+            UpdateState::Error("workspace durability failed".to_string())
+        );
+        assert!(SLOT.load(Ordering::Acquire));
+        drop(cleanup);
+        assert!(!SLOT.load(Ordering::Acquire));
     }
 
     #[test]

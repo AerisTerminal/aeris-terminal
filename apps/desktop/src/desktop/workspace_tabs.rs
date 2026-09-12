@@ -86,6 +86,7 @@ impl TerminalApp {
             updater: DesktopUpdater::new()
                 .map_err(|error| eprintln!("Axiusflow update UI degraded: {error}"))
                 .ok(),
+            update_restart_persistence_pending: false,
             chart_chrome: init.chart_chrome,
             window_move_pending: false,
             closing: false,
@@ -457,6 +458,85 @@ impl TerminalApp {
         cx.notify();
     }
 
+    fn cancel_update_restart_after_persistence_failure(&mut self, error: String, cx: &App) {
+        self.update_restart_persistence_pending = false;
+        self.workspace_error = Some(error.clone());
+        if let Some(cleanup) = self
+            .updater
+            .as_mut()
+            .and_then(|updater| updater.cancel_prepared_restart(error))
+        {
+            cx.background_executor()
+                .spawn(async move { drop(cleanup) })
+                .detach();
+        }
+    }
+
+    fn commit_update_restart_after_persistence(&mut self, cx: &mut Context<Self>) {
+        self.update_restart_persistence_pending = false;
+        let Some(updater) = self.updater.as_mut() else {
+            self.workspace_error = Some("update client is unavailable".to_string());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = updater.commit_restart() {
+            self.workspace_error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.about_dialog_open = false;
+        self.claim_close(cx);
+        self.lifecycle.quit_after_shutdown(cx);
+    }
+
+    fn prepare_update_restart_after_workspace_persistence(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.update_restart_persistence_pending || self.closing {
+            return;
+        }
+        self.persist_workspace_layout_if_changed(cx);
+        let Some(persistence) = self.workspace_persistence.as_ref() else {
+            self.commit_update_restart_after_persistence(cx);
+            return;
+        };
+        let wait = persistence.shutdown_wait();
+        self.update_restart_persistence_pending = true;
+        let durability = cx
+            .background_executor()
+            .spawn(async move { wait.wait(Duration::from_secs(2)) });
+        cx.spawn_in(window, async move |terminal, cx| {
+            let durable_generation = durability.await;
+            let _ = terminal.update_in(cx, |terminal, _, terminal_cx| {
+                match durable_generation {
+                    Ok(generation)
+                        if terminal
+                            .workspace_persistence
+                            .as_ref()
+                            .is_none_or(|persistence| {
+                                persistence.shutdown_generation_is_current(generation)
+                            }) =>
+                    {
+                        terminal.commit_update_restart_after_persistence(terminal_cx);
+                    }
+                    Ok(_) => terminal.cancel_update_restart_after_persistence_failure(
+                        "workspace changed while update restart was preparing; retry the update"
+                            .to_string(),
+                        terminal_cx,
+                    ),
+                    Err(error) => {
+                        terminal
+                            .cancel_update_restart_after_persistence_failure(error, terminal_cx);
+                    }
+                }
+                terminal_cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn update_presentation(&self) -> Option<&UpdatePresentation> {
         self.updater.as_ref().map(DesktopUpdater::presentation)
     }
@@ -703,6 +783,9 @@ impl TerminalApp {
     }
 
     fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
+        if self.closing {
+            return;
+        }
         let Some(persistence) = self.workspace_persistence.as_ref() else {
             return;
         };
@@ -1297,14 +1380,14 @@ impl TerminalApp {
     }
 
     pub(super) fn claim_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if !claim_once(&mut self.closing) {
+        if self.closing {
             return false;
         }
         self.persist_workspace_layout_if_changed(cx);
-        if let Some(persistence) = self.workspace_persistence.as_ref()
-            && let Err(error) = persistence.flush(Duration::from_secs(2))
-        {
-            self.workspace_error = Some(error);
+        self.closing = true;
+        if let Some(persistence) = self.workspace_persistence.as_ref() {
+            self.lifecycle
+                .await_workspace_persistence(persistence.shutdown_wait());
         }
         self.retire_workspaces(cx);
         true
@@ -1422,10 +1505,11 @@ impl TerminalApp {
                 {
                     cx.notify();
                 }
-                if terminal
-                    .workspace_persistence
-                    .as_ref()
-                    .is_some_and(WorkspaceLayoutPersistence::poll)
+                if !terminal.closing
+                    && terminal
+                        .workspace_persistence
+                        .as_ref()
+                        .is_some_and(WorkspaceLayoutPersistence::poll)
                 {
                     terminal.workspace_error = terminal
                         .workspace_persistence
@@ -1489,20 +1573,21 @@ impl TerminalApp {
                     .await;
                 if terminal
                     .update_in(cx, |terminal, window, terminal_cx| {
-                        if let Some(updater) = terminal.updater.as_mut() {
+                        let restart_prepared = if let Some(updater) = terminal.updater.as_mut() {
                             let update = updater.poll();
                             if update.changed {
                                 terminal_cx.notify();
                             }
-                            if update.restart_prepared {
-                                if updater.commit_restart().is_ok() {
-                                    terminal.about_dialog_open = false;
-                                    terminal.lifecycle.quit_after_shutdown(terminal_cx);
-                                } else {
-                                    terminal_cx.notify();
-                                }
-                                return;
-                            }
+                            update.restart_prepared
+                        } else {
+                            false
+                        };
+                        if restart_prepared {
+                            terminal.prepare_update_restart_after_workspace_persistence(
+                                window,
+                                terminal_cx,
+                            );
+                            return;
                         }
                         if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
                             && account.poll()

@@ -1206,14 +1206,69 @@ mod tests {
         let persistence = manifest("apps/desktop/src/desktop/workspace_persistence.rs");
         for contract in [
             "active_workspace_id",
-            "flush_commits_the_latest_active_workspace_before_shutdown",
-            "flush_surfaces_current_persistence_failure",
+            "shutdown_wait_observes_latest_active_workspace_durability_without_stealing_ui_result",
+            "shutdown_wait_surfaces_current_persistence_failure",
+            "shutdown_wait_is_captured_without_waiting_on_the_ui_owner",
+            "shutdown_wait_rejects_a_newer_layout_request_before_commit",
         ] {
             assert!(
                 persistence.contains(contract),
                 "local workspace persistence lost {contract}"
             );
         }
+        let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
+        assert!(
+            !workspace_tabs.contains("persistence.flush(")
+                && workspace_tabs
+                    .contains("await_workspace_persistence(persistence.shutdown_wait())"),
+            "window shutdown must hand workspace durability to the lifecycle owner without blocking GPUI"
+        );
+        let prepare_start = workspace_tabs
+            .find("fn prepare_update_restart_after_workspace_persistence")
+            .expect("update restart persistence preparation");
+        let prepare_end = workspace_tabs[prepare_start..]
+            .find("pub(super) fn update_presentation")
+            .map(|offset| prepare_start + offset)
+            .expect("update restart persistence preparation boundary");
+        let prepare = &workspace_tabs[prepare_start..prepare_end];
+        assert!(
+            prepare.contains("wait.wait(Duration::from_secs(2))")
+                && prepare.contains("let durable_generation = durability.await")
+                && prepare.contains("commit_update_restart_after_persistence"),
+            "update restart must await a bounded generation-fenced workspace durability receipt before commit"
+        );
+        let commit_start = workspace_tabs
+            .find("fn commit_update_restart_after_persistence")
+            .expect("update restart commit phase");
+        let commit_end = workspace_tabs[commit_start..]
+            .find("fn prepare_update_restart_after_workspace_persistence")
+            .map(|offset| commit_start + offset)
+            .expect("update restart commit boundary");
+        let commit = &workspace_tabs[commit_start..commit_end];
+        let restart = commit
+            .find("updater.commit_restart()")
+            .expect("prepared update restart commit");
+        let close = commit
+            .find("self.claim_close(cx)")
+            .expect("update restart claims the shared close path");
+        let quit = commit
+            .find("self.lifecycle.quit_after_shutdown(cx)")
+            .expect("update restart requests lifecycle quit");
+        assert!(
+            restart < close && close < quit,
+            "update restart must commit only after durability, then claim shared close before lifecycle quit"
+        );
+        assert!(
+            workspace_tabs.contains("cx.background_executor()")
+                && workspace_tabs.contains("spawn(async move { drop(cleanup) })"),
+            "failed update restart preparation must retire its uncommitted helper off GPUI"
+        );
+        let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
+        assert!(
+            lifecycle.contains("await_workspace_persistence")
+                && lifecycle.contains("persistence.wait(Duration::from_secs(2))"),
+            "desktop lifecycle must own the bounded off-UI workspace durability wait"
+        );
         let local = manifest("apps/desktop/src/desktop/local_state.rs");
         assert!(local.contains("WorkspaceState::decode") && local.contains("encode_to_vec"));
         assert!(local.contains("LEGACY_WORKSPACE_FILE"));

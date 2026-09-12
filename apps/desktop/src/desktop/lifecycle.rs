@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct DesktopLifecycle {
     retirements: Rc<RefCell<Vec<Task<bool>>>>,
+    workspace_persistence: Rc<RefCell<Vec<WorkspaceLayoutShutdownWait>>>,
     terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
     shutdown_started: Rc<Cell<bool>>,
 }
@@ -14,6 +15,7 @@ impl DesktopLifecycle {
     pub(super) fn new() -> Self {
         Self {
             retirements: Rc::new(RefCell::new(Vec::new())),
+            workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
         }
@@ -30,6 +32,10 @@ impl DesktopLifecycle {
         );
     }
 
+    pub(super) fn await_workspace_persistence(&self, wait: WorkspaceLayoutShutdownWait) {
+        self.workspace_persistence.borrow_mut().push(wait);
+    }
+
     pub(super) fn begin_quit(&self, cx: &mut App) -> Option<Task<Result<(), String>>> {
         if self.shutdown_started.replace(true) {
             return None;
@@ -42,19 +48,27 @@ impl DesktopLifecycle {
                 })
                 .ok();
         }
+        let workspace_persistence = self
+            .workspace_persistence
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         Some(cx.background_executor().spawn(async move {
-            let mut detach_failed = false;
-            for retirement in retirements {
-                if !retirement.await {
-                    detach_failed = true;
+            let mut failure = None;
+            for persistence in workspace_persistence {
+                if let Err(error) = persistence.wait(Duration::from_secs(2)) {
+                    failure = Some(error);
                 }
             }
-            if detach_failed {
-                Err("desktop market worker did not retire before its deadline".to_string())
-            } else {
-                Ok(())
+            for retirement in retirements {
+                if !retirement.await {
+                    failure = Some(
+                        "desktop market worker did not retire before its deadline".to_string(),
+                    );
+                }
             }
+            failure.map_or(Ok(()), Err)
         }))
     }
 
