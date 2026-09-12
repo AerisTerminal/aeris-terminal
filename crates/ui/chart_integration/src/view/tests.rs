@@ -1600,10 +1600,13 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
     let first = [None, Some(20.0), Some(30.0)];
     let descriptor = ChartStudyOutputDescriptor {
         title: "Test Study",
+        legend_label: None,
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,
         scale: ChartStudyScaleTarget::Primary,
         settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
     };
 
     assert_eq!(
@@ -1613,7 +1616,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
     let state = chart
         .study_series
         .get(&(7, 0))
-        .copied()
+        .cloned()
         .expect("study series is tracked");
     let points = chart.engine.series_data(state.series_id);
     assert_eq!(points.len(), 3);
@@ -1685,6 +1688,74 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
 }
 
 #[test]
+fn study_output_projection_inherits_native_series_defaults() {
+    let mut chart = NucleusChartView::empty();
+    assert!(
+        chart.engine.series_apply_price_format_json(
+            0,
+            r#"{"type":"price","precision":4,"min_move":0.0001}"#,
+        )
+    );
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Defaults",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: false,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+    };
+    chart
+        .install_study_output(
+            88,
+            0,
+            descriptor,
+            1,
+            &[60_i64 * 1_000_000_000],
+            &[Some(1.0)],
+        )
+        .expect("study installs");
+    let series_id = chart.study_series[&(88, 0)].series_id;
+    let entry = series_entry(&chart, series_id);
+    assert_eq!(entry.line_width, Some(2.0));
+    assert_eq!(entry.price_format.precision, 4);
+}
+
+#[test]
+fn study_output_projection_rejects_invalid_presentation_before_creating_series() {
+    let mut chart = NucleusChartView::empty();
+    let initial_series = chart.engine.series.len();
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Invalid Threshold Histogram",
+        legend_label: Some("Histogram"),
+        plot: ChartStudyPlotKind::Histogram,
+        pane: ChartStudyPaneTarget::Dedicated { group: 0 },
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: false,
+        threshold_region: Some(ChartStudyThresholdRegion {
+            lower: 20.0,
+            upper: 80.0,
+        }),
+        point_style: ChartStudyPointStyle::Uniform,
+    };
+
+    assert_eq!(
+        chart.install_study_output(
+            99,
+            0,
+            descriptor,
+            1,
+            &[60_i64 * 1_000_000_000],
+            &[Some(50.0)],
+        ),
+        Err(ChartStudyOutputError::InvalidPresentation)
+    );
+    assert!(chart.study_series.is_empty());
+    assert_eq!(chart.engine.series.len(), initial_series);
+}
+
+#[test]
 fn study_legend_control_ids_do_not_overflow_or_alias_control_kinds() {
     let study = LegendItem::Study {
         study_id: u64::MAX,
@@ -1720,14 +1791,17 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
     let timestamps = [60_i64 * 1_000_000_000];
     let values = [Some(20.0)];
     let upper = ChartStudyOutputDescriptor {
-        title: "Bollinger Upper",
+        title: "Bollinger 20 2",
+        legend_label: Some("Upper"),
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,
         scale: ChartStudyScaleTarget::Primary,
         settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
     };
     let lower = ChartStudyOutputDescriptor {
-        title: "Bollinger Lower",
+        legend_label: Some("Lower"),
         ..upper
     };
 
@@ -1739,12 +1813,26 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
         chart.install_study_output(11, 1, lower, 1, &timestamps, &values),
         Ok(true)
     );
-    let legend_item = chart
+    let legend_rows = chart
         .legend_rows()
         .into_iter()
-        .find(|row| row.title == "Bollinger Upper")
-        .map(|row| row.item)
-        .expect("upper study legend row");
+        .filter(|row| matches!(row.item, LegendItem::Study { study_id: 11, .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(legend_rows.len(), 1);
+    assert_eq!(legend_rows[0].title, "Bollinger 20 2");
+    assert!(
+        legend_rows[0]
+            .values
+            .iter()
+            .any(|value| value.text.starts_with("Upper "))
+    );
+    assert!(
+        legend_rows[0]
+            .values
+            .iter()
+            .any(|value| value.text.starts_with("Lower "))
+    );
+    let legend_item = legend_rows[0].item;
 
     assert!(chart.set_legend_item_visible(legend_item, false));
     assert_eq!(chart.study_visible(11), Some(false));
@@ -1770,10 +1858,13 @@ fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state()
             0,
             ChartStudyOutputDescriptor {
                 title: "Tick Study",
+                legend_label: None,
                 plot: ChartStudyPlotKind::Line,
                 pane: ChartStudyPaneTarget::Price,
                 scale: ChartStudyScaleTarget::Primary,
                 settings_available: false,
+                threshold_region: None,
+                point_style: ChartStudyPointStyle::Uniform,
             },
             1,
             &[1_000_000_001],
@@ -1797,10 +1888,13 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
             0,
             ChartStudyOutputDescriptor {
                 title: "Signal",
+                legend_label: Some("Signal"),
                 plot: ChartStudyPlotKind::Line,
                 pane: ChartStudyPaneTarget::Dedicated { group: 3 },
                 scale: ChartStudyScaleTarget::Primary,
                 settings_available: true,
+                threshold_region: None,
+                point_style: ChartStudyPointStyle::Uniform,
             },
             1,
             &timestamps,
@@ -1814,10 +1908,13 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
             1,
             ChartStudyOutputDescriptor {
                 title: "Histogram",
+                legend_label: Some("Histogram"),
                 plot: ChartStudyPlotKind::Histogram,
                 pane: ChartStudyPaneTarget::Dedicated { group: 3 },
                 scale: ChartStudyScaleTarget::Left,
                 settings_available: true,
+                threshold_region: None,
+                point_style: ChartStudyPointStyle::Uniform,
             },
             2,
             &timestamps,
@@ -1826,8 +1923,8 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
         Ok(true)
     );
 
-    let line = chart.study_series[&(11, 0)];
-    let histogram = chart.study_series[&(11, 1)];
+    let line = &chart.study_series[&(11, 0)];
+    let histogram = &chart.study_series[&(11, 1)];
     let line_entry = series_entry(&chart, line.series_id);
     let histogram_entry = series_entry(&chart, histogram.series_id);
     assert_eq!(line_entry.kind, nucleuscharts_engine::SeriesKind::Line);

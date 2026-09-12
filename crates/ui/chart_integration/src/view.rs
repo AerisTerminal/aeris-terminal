@@ -110,11 +110,12 @@ const LEGEND_MAX_WIDTH: f32 = 640.0;
 const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
 const TEXT_EDIT_PAD: f32 = 4.0;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ChartStudySeriesState {
     series_id: u32,
     generation: u64,
     settings_available: bool,
+    legend_label: Option<String>,
 }
 
 /// Scalar plot family requested by a runtime study output.
@@ -140,14 +141,32 @@ pub enum ChartStudyScaleTarget {
     Overlay,
 }
 
+/// Fixed-value background channel requested behind one scalar output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChartStudyThresholdRegion {
+    pub lower: f64,
+    pub upper: f64,
+}
+
+/// Semantic per-row styling policy requested by one scalar output.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChartStudyPointStyle {
+    #[default]
+    Uniform,
+    MomentumHistogram,
+}
+
 /// Borrowed semantic presentation contract for one scalar study output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChartStudyOutputDescriptor<'a> {
     pub title: &'a str,
+    pub legend_label: Option<&'a str>,
     pub plot: ChartStudyPlotKind,
     pub pane: ChartStudyPaneTarget,
     pub scale: ChartStudyScaleTarget,
     pub settings_available: bool,
+    pub threshold_region: Option<ChartStudyThresholdRegion>,
+    pub point_style: ChartStudyPointStyle,
 }
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
@@ -332,6 +351,7 @@ pub enum ChartStudyOutputError {
     UnsupportedTimestampPrecision,
     NonIncreasingTimestamp,
     InvalidValue,
+    InvalidPresentation,
     InstallationRejected,
 }
 
@@ -344,6 +364,7 @@ impl fmt::Display for ChartStudyOutputError {
             }
             Self::NonIncreasingTimestamp => "study output timestamps must strictly increase",
             Self::InvalidValue => "study output contains a value Nucleus cannot render",
+            Self::InvalidPresentation => "study output presentation metadata is invalid",
             Self::InstallationRejected => "Nucleus rejected the study output series",
         })
     }

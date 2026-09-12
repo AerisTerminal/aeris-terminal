@@ -133,6 +133,24 @@ const fn chart_study_scale(scale: StudyScaleTarget) -> ChartStudyScaleTarget {
     }
 }
 
+const fn chart_study_point_style(style: StudyPointStyle) -> ChartStudyPointStyle {
+    match style {
+        StudyPointStyle::Uniform => ChartStudyPointStyle::Uniform,
+        StudyPointStyle::MomentumHistogram => ChartStudyPointStyle::MomentumHistogram,
+    }
+}
+
+fn chart_study_threshold(
+    region: Option<StudyThresholdRegion>,
+) -> Option<ChartStudyThresholdRegion> {
+    region.and_then(|region| {
+        Some(ChartStudyThresholdRegion {
+            lower: region.lower.mantissa.to_f64()? / 10_f64.powi(i32::from(region.lower.scale)),
+            upper: region.upper.mantissa.to_f64()? / 10_f64.powi(i32::from(region.upper.scale)),
+        })
+    })
+}
+
 const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
     matches!(
         indicator,
@@ -142,6 +160,9 @@ const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
             | ChartIndicator::Wma
             | ChartIndicator::Bollinger
             | ChartIndicator::Vwap
+            | ChartIndicator::Rsi
+            | ChartIndicator::Macd
+            | ChartIndicator::Stochastic
             | ChartIndicator::Atr
     )
 }
@@ -416,6 +437,9 @@ pub(super) fn study_display_name(identifier: &str) -> String {
         axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
         axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
         axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER => "Volume Weighted Average Price".to_string(),
+        axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER => "Relative Strength Index".to_string(),
+        axiusflow_study_sdk::BUILTIN_MACD_IDENTIFIER => "MACD".to_string(),
+        axiusflow_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER => "Stochastic".to_string(),
         axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER => "Average True Range".to_string(),
         _ => identifier.to_string(),
     }
@@ -587,6 +611,17 @@ fn legacy_runtime_study_contract(
             Vec::new(),
             vec![axiusflow_study_sdk::BUILTIN_VWAP_OUTPUT_IDENTIFIER.to_string()],
         ),
+        ChartIndicator::Rsi => (
+            axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_RSI_IMPLEMENTATION_REVISION,
+            vec![legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_RSI_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_RSI_DEFAULT_PERIOD,
+            )],
+            vec![axiusflow_study_sdk::BUILTIN_RSI_OUTPUT_IDENTIFIER.to_string()],
+        ),
+        ChartIndicator::Macd => legacy_macd_contract(),
+        ChartIndicator::Stochastic => legacy_stochastic_contract(),
         ChartIndicator::Atr => (
             axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER,
             axiusflow_study_sdk::BUILTIN_ATR_IMPLEMENTATION_REVISION,
@@ -596,7 +631,7 @@ fn legacy_runtime_study_contract(
             )],
             vec![axiusflow_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
         ),
-        _ => return None,
+        ChartIndicator::Volume => return None,
     };
     Some(contract)
 }
@@ -619,6 +654,63 @@ fn legacy_ema_ribbon_contract() -> (
             .iter()
             .map(|identifier| (*identifier).to_string())
             .collect(),
+    )
+}
+
+fn legacy_macd_contract() -> (
+    &'static str,
+    u32,
+    Vec<WorkspaceStudySettingState>,
+    Vec<String>,
+) {
+    (
+        axiusflow_study_sdk::BUILTIN_MACD_IDENTIFIER,
+        axiusflow_study_sdk::BUILTIN_MACD_IMPLEMENTATION_REVISION,
+        vec![
+            legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_MACD_FAST_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_MACD_DEFAULT_FAST_PERIOD,
+            ),
+            legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_MACD_SLOW_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
+            ),
+            legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_MACD_SIGNAL_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD,
+            ),
+        ],
+        vec![
+            axiusflow_study_sdk::BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER.to_string(),
+            axiusflow_study_sdk::BUILTIN_MACD_SIGNAL_OUTPUT_IDENTIFIER.to_string(),
+            axiusflow_study_sdk::BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER.to_string(),
+        ],
+    )
+}
+
+fn legacy_stochastic_contract() -> (
+    &'static str,
+    u32,
+    Vec<WorkspaceStudySettingState>,
+    Vec<String>,
+) {
+    (
+        axiusflow_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER,
+        axiusflow_study_sdk::BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
+        vec![
+            legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_STOCHASTIC_K_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD,
+            ),
+            legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_STOCHASTIC_D_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD,
+            ),
+        ],
+        vec![
+            axiusflow_study_sdk::BUILTIN_STOCHASTIC_K_OUTPUT_IDENTIFIER.to_string(),
+            axiusflow_study_sdk::BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER.to_string(),
+        ],
     )
 }
 
@@ -684,22 +776,46 @@ fn persisted_runtime_studies(
     let Some(state) = restored_chart_state else {
         return Vec::new();
     };
-    let persisted = if state.studies.is_empty() {
-        state
-            .indicators
-            .iter()
-            .filter_map(|item| {
-                let indicator = ChartIndicator::from_identifier(&item.kind)?;
-                runtime_managed_indicator(indicator).then_some((indicator, item.visible))
-            })
-            .enumerate()
-            .filter_map(|(index, (indicator, visible))| {
-                legacy_runtime_study(index as u64 + 1, indicator, visible)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        state.studies.clone()
-    };
+    let mut persisted = state.studies.clone();
+    let mut durable_identifiers = std::collections::BTreeMap::<String, usize>::new();
+    for study in &persisted {
+        *durable_identifiers
+            .entry(study.identifier.clone())
+            .or_default() += 1;
+    }
+    let mut used_local_ids = persisted
+        .iter()
+        .map(|study| study.local_id)
+        .collect::<Vec<_>>();
+    for item in &state.indicators {
+        let Some(indicator) = ChartIndicator::from_identifier(&item.kind) else {
+            continue;
+        };
+        if !runtime_managed_indicator(indicator) {
+            continue;
+        }
+        let mut local_id = 1_u64;
+        while used_local_ids.contains(&local_id) {
+            let Some(next) = local_id.checked_add(1) else {
+                break;
+            };
+            local_id = next;
+        }
+        if used_local_ids.contains(&local_id) {
+            continue;
+        }
+        let Some(legacy) = legacy_runtime_study(local_id, indicator, item.visible) else {
+            continue;
+        };
+        if let Some(remaining) = durable_identifiers.get_mut(&legacy.identifier)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            continue;
+        }
+        used_local_ids.push(local_id);
+        persisted.push(legacy);
+    }
     persisted
         .into_iter()
         .map(|persisted| PendingRuntimeStudyState {
@@ -2303,10 +2419,13 @@ impl WorkspaceSurface {
                 snapshot.output_id.output_index,
                 ChartStudyOutputDescriptor {
                     title: &snapshot.output.title,
+                    legend_label: snapshot.output.legend_label.as_deref(),
                     plot: chart_study_plot(snapshot.output.plot),
                     pane: chart_study_pane(snapshot.output.pane),
                     scale: chart_study_scale(snapshot.output.scale),
                     settings_available,
+                    threshold_region: chart_study_threshold(snapshot.output.threshold_region),
+                    point_style: chart_study_point_style(snapshot.output.point_style),
                 },
                 snapshot.series.generation(),
                 snapshot.series.timestamps(),
@@ -3760,26 +3879,35 @@ mod tests {
                     kind: "rsi".to_string(),
                     visible: true,
                 },
+                WorkspaceChartIndicatorState {
+                    kind: "macd".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "stochastic".to_string(),
+                    visible: true,
+                },
             ],
             ..WorkspaceChartState::default()
         };
         let restored = persisted_runtime_studies(Some(&state));
-        assert_eq!(restored.len(), 7);
-        assert_eq!(
-            restored[0].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER
-        );
-        assert!(!restored[0].persisted.visible);
-        assert_eq!(
-            restored[1].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER
-        );
-        assert!(restored[1].persisted.visible);
-        assert_eq!(
-            restored[2].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER
-        );
-        assert!(!restored[2].persisted.visible);
+        assert_eq!(restored.len(), 10);
+        let expected = [
+            (axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER, false),
+            (axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER, true),
+            (axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER, false),
+            (axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER, true),
+            (axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER, false),
+            (axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER, true),
+            (axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER, false),
+            (axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER, true),
+            (axiusflow_study_sdk::BUILTIN_MACD_IDENTIFIER, false),
+            (axiusflow_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER, true),
+        ];
+        for (state, (identifier, visible)) in restored.iter().zip(expected) {
+            assert_eq!(state.persisted.identifier, identifier);
+            assert_eq!(state.persisted.visible, visible);
+        }
         assert_eq!(
             restored[2].persisted.output_identifiers,
             axiusflow_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
@@ -3788,16 +3916,6 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            restored[3].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER
-        );
-        assert!(restored[3].persisted.visible);
-        assert_eq!(
-            restored[4].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
-        );
-        assert!(!restored[4].persisted.visible);
-        assert_eq!(
             restored[4].persisted.output_identifiers,
             vec![
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
@@ -3805,16 +3923,6 @@ mod tests {
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
             ]
         );
-        assert_eq!(
-            restored[5].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER
-        );
-        assert!(restored[5].persisted.visible);
-        assert_eq!(
-            restored[6].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER
-        );
-        assert!(!restored[6].persisted.visible);
         assert!(restored.iter().all(|state| {
             runtime_study_uses_current_chart(&state.persisted)
                 && state.resolved_chart_series.is_none()
@@ -3825,21 +3933,49 @@ mod tests {
     }
 
     #[test]
-    fn durable_study_graph_suppresses_legacy_runtime_indicator_migration() {
-        let durable = legacy_runtime_study(7, ChartIndicator::Wma, true).expect("WMA study");
+    fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicates() {
+        let durable_wma = legacy_runtime_study(7, ChartIndicator::Wma, true).expect("WMA study");
+        let durable_rsi = legacy_runtime_study(8, ChartIndicator::Rsi, true).expect("RSI study");
         let state = WorkspaceChartState {
-            studies: vec![durable.clone()],
-            indicators: vec![WorkspaceChartIndicatorState {
-                kind: "bollinger".to_string(),
-                visible: false,
-            }],
+            studies: vec![durable_wma.clone(), durable_rsi.clone()],
+            indicators: vec![
+                WorkspaceChartIndicatorState {
+                    kind: "wma".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "rsi".to_string(),
+                    visible: true,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "rsi".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "bollinger".to_string(),
+                    visible: false,
+                },
+            ],
             ..WorkspaceChartState::default()
         };
 
         let restored = persisted_runtime_studies(Some(&state));
 
-        assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].persisted, durable);
+        assert_eq!(restored.len(), 4);
+        assert_eq!(restored[0].persisted, durable_wma);
+        assert_eq!(restored[1].persisted, durable_rsi);
+        assert_eq!(restored[2].persisted.local_id, 1);
+        assert_eq!(
+            restored[2].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER
+        );
+        assert!(!restored[2].persisted.visible);
+        assert_eq!(restored[3].persisted.local_id, 2);
+        assert_eq!(
+            restored[3].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
+        );
+        assert!(!restored[3].persisted.visible);
     }
 
     #[test]
@@ -3850,8 +3986,11 @@ mod tests {
         assert!(runtime_managed_indicator(ChartIndicator::Wma));
         assert!(runtime_managed_indicator(ChartIndicator::Bollinger));
         assert!(runtime_managed_indicator(ChartIndicator::Vwap));
+        assert!(runtime_managed_indicator(ChartIndicator::Rsi));
+        assert!(runtime_managed_indicator(ChartIndicator::Macd));
+        assert!(runtime_managed_indicator(ChartIndicator::Stochastic));
         assert!(runtime_managed_indicator(ChartIndicator::Atr));
-        assert!(!runtime_managed_indicator(ChartIndicator::Rsi));
+        assert!(!runtime_managed_indicator(ChartIndicator::Volume));
     }
 
     #[test]
@@ -3889,13 +4028,25 @@ mod tests {
                 indicator: ChartIndicator::Rsi,
                 visible: false,
             },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Macd,
+                visible: true,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Stochastic,
+                visible: false,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Volume,
+                visible: true,
+            },
         ]);
 
         assert_eq!(
             persisted,
             vec![WorkspaceChartIndicatorState {
-                kind: "rsi".to_string(),
-                visible: false,
+                kind: "volume".to_string(),
+                visible: true,
             }]
         );
     }

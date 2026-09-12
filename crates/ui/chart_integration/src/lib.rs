@@ -22,7 +22,8 @@ pub use nucleuscharts_engine::{
 pub use view::{
     ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingTool,
     ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyOutputDescriptor,
-    ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyScaleTarget,
-    ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, DrawingsLockSummary,
+    NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

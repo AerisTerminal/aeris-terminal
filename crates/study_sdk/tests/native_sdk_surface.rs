@@ -2,7 +2,7 @@ use axiusflow_study_sdk::{
     BarPeriod, BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, NativeStudyState,
     StreamRequirements, StudyDefinition, StudyDependency, StudyExecutionContext, StudyInstanceId,
     StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,
-    StudyScaleTarget, StudySettings,
+    StudyPointStyle, StudyScaleTarget, StudySettings,
 };
 
 #[derive(Clone)]
@@ -98,9 +98,12 @@ fn a_stateful_native_study_can_be_defined_through_the_sdk_facade_only() {
         outputs: vec![StudyOutputSpec {
             identifier: "count".to_string(),
             title: "Counter".to_string(),
+            legend_label: None,
             plot: StudyPlotKind::Line,
             pane: StudyPaneTarget::Price,
             scale: StudyScaleTarget::Primary,
+            threshold_region: None,
+            point_style: StudyPointStyle::default(),
         }],
         invalidation: StudyInvalidationPolicy::FromFirstChanged,
     };
@@ -148,9 +151,12 @@ fn quote_trade_and_depth_inputs_are_expressible_through_the_sdk_facade_only() {
         outputs: vec![StudyOutputSpec {
             identifier: "spread".to_string(),
             title: "Spread".to_string(),
+            legend_label: None,
             plot: StudyPlotKind::Line,
             pane: StudyPaneTarget::Price,
             scale: StudyScaleTarget::Primary,
+            threshold_region: None,
+            point_style: StudyPointStyle::default(),
         }],
         invalidation: StudyInvalidationPolicy::FromFirstChanged,
     };

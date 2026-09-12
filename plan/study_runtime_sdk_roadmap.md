@@ -101,7 +101,7 @@ Completed additions:
 
 The recursive EMA implementation is complete across the local sibling Nucleus and Axiusflow trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Axiusflow wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
 
-The production dependency is pinned to Nucleus `feb6b0c45d448d978c1ef2a32502b2de87610722`, which contains the reviewed indexed optional-sample EMA state and copy-on-write sparse checkpoints used by Axiusflow.
+The production dependency is pinned to Nucleus `0d7d0ae52760c4a71ea17e81e33ba8d2f71c07fc`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Axiusflow.
 
 Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Axius.
 
@@ -224,16 +224,16 @@ Before third-party native studies are treated as a supported product surface:
 - [x] Prioritize indicators by product use rather than breadth alone.
   - First production slice: EMA Ribbon, ATR, and session VWAP because the existing scalar output contract preserves their shipping presentation without introducing a second formula path.
   - RSI/Stochastic/MACD follow only with their existing threshold-band / histogram semantics preserved through product-owned richer output metadata.
-- [ ] Reuse Nucleus/shared primitives for every formula that already exists.
+- [x] Reuse Nucleus/shared primitives for every migrated formula that already exists.
   - [x] EMA Ribbon uses five Nucleus `IncrementalEmaState` instances.
   - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; Axius lazily converts only replayed fixed-point rows.
-  - [ ] Add equivalent owner-correct Nucleus state for the remaining recursive RSI/MACD/Stochastic migrations rather than copying recurrence into Axius.
-- [ ] Add durable implementation revisions and migration tests per built-in.
+  - [x] RSI/MACD/Stochastic use owner-correct indexed Nucleus states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into Axius.
+- [x] Add durable implementation revisions and migration tests per migrated built-in.
   - [x] SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, and VWAP have exact revision binding plus legacy-picker migration coverage.
-  - [ ] Complete the same contract for RSI/MACD/Stochastic when their richer output metadata lands.
-- [ ] Add multi-output/pane/scale integration coverage where needed.
+  - [x] RSI/MACD/Stochastic have the same exact revision binding, durable restore, unsupported-revision rejection, and legacy-picker migration contract.
+- [x] Add multi-output/pane/scale integration coverage where needed.
   - [x] EMA Ribbon proves five stable price-pane outputs; Bollinger proves multi-output price-pane projection; ATR proves a dedicated primary-scale pane.
-  - [ ] Preserve oscillator threshold regions and MACD histogram semantics before those legacy paths are retired.
+  - [x] RSI/Stochastic preserve their threshold channels and dotted boundaries; MACD preserves its four-state momentum histogram palette; multi-output studies keep one grouped legend row and shared visibility/settings controls.
 
 ### Phase D — non-bar studies and richer outputs
 
@@ -241,7 +241,8 @@ Before third-party native studies are treated as a supported product surface:
 - [x] Expose current canonical non-bar state as borrowed execution views.
 - [x] Recalculate bar-aligned studies from intrabar non-bar events.
 - [ ] Add pure non-bar timelines only when required by a concrete study.
-- [ ] Add semantic/marker/fill outputs only behind concrete product requirements.
+- [x] Add richer scalar presentation only behind concrete product requirements: fixed oscillator threshold regions and momentum-histogram state/color semantics are serial host contracts rendered by Nucleus.
+- [ ] Add future bands-between-outputs, markers, semantic levels, or table outputs only when a concrete study requires them.
 
 ### Phase E — SDK productization
 
@@ -267,10 +268,10 @@ Before third-party native studies are treated as a supported product surface:
 
 ## Current checkpoint
 
-The runtime foundation, generic settings declaration/editor contract, recursive EMA proof, and first Phase C production migration are implemented and verified across both repositories. EMA Ribbon, ATR, and session VWAP now use the same durable Study SDK/runtime path as SMA/EMA/WMA/Bollinger. Nucleus retains recursive formula/checkpoint ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays.
+The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
 The immediate next architecture milestones are:
 
-1. Preserve the shipping RSI/Stochastic threshold regions and MACD histogram semantics through serial product-owned richer-output metadata, then migrate those remaining picker studies through the SDK/runtime path.
-2. Keep pure trade/quote/depth timelines deferred until a concrete study requires one; the existing bar-aligned non-bar execution path remains the supported contract.
-3. Complete Phase E with a static trusted-native packaging policy, compatibility/revision rules, author examples, sustained bounded-load qualification, and restore/reconnect validation.
+1. Complete Phase E with a trusted-native packaging/loading policy, explicit SDK compatibility and implementation-revision rules, and author-facing examples/docs.
+2. Qualify representative custom studies under sustained concurrent load and verify workspace close/reopen plus provider reconnect without duplicate study/provider/render ownership.
+3. Keep pure trade/quote/depth timelines and additional rich-output shapes deferred until a concrete study requires them; the existing bar-aligned non-bar execution path remains the supported contract.

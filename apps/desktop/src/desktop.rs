@@ -57,9 +57,9 @@ use axiusflow_chart_integration::{
     ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
     ChartDrawingTool, ChartIndicator, ChartIndicatorState, ChartSplitDirection,
-    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyScaleTarget,
-    ChartType, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView, NucleusWorkspace,
-    PriceAxisMenuAction, PriceAxisMenuState,
+    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, ChartWorkspaceLayout,
+    NucleusChartTheme, NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
 use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
@@ -84,8 +84,8 @@ use axiusflow_market_data::{BarSeriesKey, ChartAggregation, ChartInterval};
 use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
 use axiusflow_market_runtime::study::{
     NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
-    StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettingCondition, StudySettingControl,
-    StudySettingSpec, StudySettingValue,
+    StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettingCondition,
+    StudySettingControl, StudySettingSpec, StudySettingValue, StudyThresholdRegion,
 };
 use axiusflow_market_runtime::{
     MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,

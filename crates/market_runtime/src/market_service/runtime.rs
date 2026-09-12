@@ -1334,7 +1334,7 @@ mod tests {
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
         StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
-        StudyPaneTarget, StudyPlotKind, StudyScaleTarget, StudySettings,
+        StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettings,
     };
     use axiusflow_market_data::{BarPeriod, MarketBar};
 
@@ -1416,9 +1416,12 @@ mod tests {
             outputs: vec![StudyOutputSpec {
                 identifier: "value".to_string(),
                 title: "Runtime History Study".to_string(),
+                legend_label: None,
                 plot: StudyPlotKind::Line,
                 pane: StudyPaneTarget::Price,
                 scale: StudyScaleTarget::Primary,
+                threshold_region: None,
+                point_style: StudyPointStyle::default(),
             }],
             invalidation: StudyInvalidationPolicy::SameRange,
         }

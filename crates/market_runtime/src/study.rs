@@ -1002,14 +1002,37 @@ pub enum StudyScaleTarget {
     Overlay,
 }
 
+/// One fixed-value background channel requested behind a scalar output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StudyThresholdRegion {
+    pub lower: StudyDecimal,
+    pub upper: StudyDecimal,
+}
+
+/// Semantic per-point styling policy for one scalar output.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StudyPointStyle {
+    /// One ordinary series color for every row.
+    #[default]
+    Uniform,
+    /// Four-state histogram coloring based on sign and movement toward/away from zero.
+    MomentumHistogram,
+}
+
 /// Declarative presentation metadata for one scalar study output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StudyOutputSpec {
     pub identifier: String,
     pub title: String,
+    /// Optional short label used when a host groups multiple outputs into one legend row.
+    /// `None` leaves the value unlabeled, which is useful for visually grouped families such as
+    /// EMA ribbons.
+    pub legend_label: Option<String>,
     pub plot: StudyPlotKind,
     pub pane: StudyPaneTarget,
     pub scale: StudyScaleTarget,
+    pub threshold_region: Option<StudyThresholdRegion>,
+    pub point_style: StudyPointStyle,
 }
 
 /// Runtime-independent definition for one native study instance.
@@ -1563,6 +1586,7 @@ pub enum StudyRuntimeError {
     MissingOutput,
     InvalidOutputIdentifier,
     InvalidOutputTitle,
+    InvalidOutputPresentation,
     DuplicateOutputIdentifier,
     OutputMetadataTooLong {
         maximum: usize,
@@ -1649,6 +1673,7 @@ impl fmt::Display for StudyRuntimeError {
             Self::MissingOutput
             | Self::InvalidOutputIdentifier
             | Self::InvalidOutputTitle
+            | Self::InvalidOutputPresentation
             | Self::DuplicateOutputIdentifier
             | Self::OutputMetadataTooLong { .. } => fmt_output_metadata_error(self, formatter),
             Self::TooManySettings { .. }
@@ -1802,6 +1827,9 @@ fn fmt_output_metadata_error(
         StudyRuntimeError::InvalidOutputTitle => {
             formatter.write_str("study output title is invalid")
         }
+        StudyRuntimeError::InvalidOutputPresentation => {
+            formatter.write_str("study output presentation metadata is invalid")
+        }
         StudyRuntimeError::DuplicateOutputIdentifier => {
             formatter.write_str("study output identifiers must be unique")
         }
@@ -1881,6 +1909,61 @@ pub struct StudyRuntime {
     state_bytes: usize,
     next_id: u64,
     next_output_generation: u64,
+}
+
+fn validate_study_outputs(outputs: &[StudyOutputSpec]) -> Result<(), StudyRuntimeError> {
+    let mut identifiers = BTreeSet::new();
+    for output in outputs {
+        let identifier = output.identifier.trim();
+        if identifier.is_empty() {
+            return Err(StudyRuntimeError::InvalidOutputIdentifier);
+        }
+        if output.title.trim().is_empty()
+            || output
+                .legend_label
+                .as_ref()
+                .is_some_and(|label| label.trim().is_empty())
+        {
+            return Err(StudyRuntimeError::InvalidOutputTitle);
+        }
+        if identifier.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES
+            || output.title.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES
+            || output
+                .legend_label
+                .as_ref()
+                .is_some_and(|label| label.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES)
+        {
+            return Err(StudyRuntimeError::OutputMetadataTooLong {
+                maximum: MAXIMUM_STUDY_IDENTIFIER_BYTES,
+            });
+        }
+        if !identifiers.insert(identifier) {
+            return Err(StudyRuntimeError::DuplicateOutputIdentifier);
+        }
+        if let Some(region) = output.threshold_region {
+            let scale = region.lower.scale.max(region.upper.scale);
+            if scale > MAXIMUM_STUDY_SETTING_DECIMAL_SCALE {
+                return Err(StudyRuntimeError::InvalidOutputPresentation);
+            }
+            let lower = region
+                .lower
+                .scaled_mantissa(scale)
+                .ok_or(StudyRuntimeError::InvalidOutputPresentation)?;
+            let upper = region
+                .upper
+                .scaled_mantissa(scale)
+                .ok_or(StudyRuntimeError::InvalidOutputPresentation)?;
+            if lower >= upper || !matches!(output.plot, StudyPlotKind::Line | StudyPlotKind::Area) {
+                return Err(StudyRuntimeError::InvalidOutputPresentation);
+            }
+        }
+        if output.point_style == StudyPointStyle::MomentumHistogram
+            && output.plot != StudyPlotKind::Histogram
+        {
+            return Err(StudyRuntimeError::InvalidOutputPresentation);
+        }
+    }
+    Ok(())
 }
 
 impl StudyRuntime {
@@ -3317,26 +3400,7 @@ impl StudyRuntime {
                 maximum: self.config.maximum_outputs_per_study.get(),
             });
         }
-        let mut output_identifiers = BTreeSet::new();
-        for output in &definition.outputs {
-            let identifier = output.identifier.trim();
-            if identifier.is_empty() {
-                return Err(StudyRuntimeError::InvalidOutputIdentifier);
-            }
-            if output.title.trim().is_empty() {
-                return Err(StudyRuntimeError::InvalidOutputTitle);
-            }
-            if identifier.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES
-                || output.title.len() > MAXIMUM_STUDY_IDENTIFIER_BYTES
-            {
-                return Err(StudyRuntimeError::OutputMetadataTooLong {
-                    maximum: MAXIMUM_STUDY_IDENTIFIER_BYTES,
-                });
-            }
-            if !output_identifiers.insert(identifier) {
-                return Err(StudyRuntimeError::DuplicateOutputIdentifier);
-            }
-        }
+        validate_study_outputs(&definition.outputs)?;
         validate_setting_specs(&definition.settings)?;
 
         for dependency in &definition.dependencies {
@@ -3630,9 +3694,12 @@ mod tests {
             .map(|index| StudyOutputSpec {
                 identifier: format!("output_{index}"),
                 title: format!("Output {}", index + 1),
+                legend_label: None,
                 plot: StudyPlotKind::Line,
                 pane: StudyPaneTarget::Price,
                 scale: StudyScaleTarget::Primary,
+                threshold_region: None,
+                point_style: StudyPointStyle::Uniform,
             })
             .collect()
     }
@@ -5764,5 +5831,122 @@ mod tests {
                 .expect_err("visible output title is required"),
             StudyRuntimeError::InvalidOutputTitle
         );
+
+        let mut empty_legend_label = definition(
+            "empty_legend_label",
+            vec![market(series("ES"), StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        empty_legend_label.outputs[0].legend_label = Some("   ".to_string());
+        assert_eq!(
+            runtime
+                .validate_definition(None, &empty_legend_label)
+                .expect_err("visible legend labels cannot be empty"),
+            StudyRuntimeError::InvalidOutputTitle
+        );
+
+        let mut long_legend_label = definition(
+            "long_legend_label",
+            vec![market(series("ES"), StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        long_legend_label.outputs[0].legend_label =
+            Some("x".repeat(MAXIMUM_STUDY_IDENTIFIER_BYTES + 1));
+        assert_eq!(
+            runtime
+                .validate_definition(None, &long_legend_label)
+                .expect_err("legend labels share the bounded output metadata budget"),
+            StudyRuntimeError::OutputMetadataTooLong {
+                maximum: MAXIMUM_STUDY_IDENTIFIER_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn output_presentation_semantics_are_validated_before_registration() {
+        let runtime = StudyRuntime::new(config(4));
+
+        let mut reversed_threshold = definition(
+            "reversed_threshold",
+            vec![market(series("ES"), StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        reversed_threshold.outputs[0].threshold_region = Some(StudyThresholdRegion {
+            lower: StudyDecimal {
+                mantissa: 70,
+                scale: 0,
+            },
+            upper: StudyDecimal {
+                mantissa: 30,
+                scale: 0,
+            },
+        });
+        assert_eq!(
+            runtime
+                .validate_definition(None, &reversed_threshold)
+                .expect_err("threshold regions must be strictly ordered"),
+            StudyRuntimeError::InvalidOutputPresentation
+        );
+
+        let mut threshold_histogram = definition(
+            "threshold_histogram",
+            vec![market(series("ES"), StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        threshold_histogram.outputs[0].plot = StudyPlotKind::Histogram;
+        threshold_histogram.outputs[0].threshold_region = Some(StudyThresholdRegion {
+            lower: StudyDecimal {
+                mantissa: 20,
+                scale: 0,
+            },
+            upper: StudyDecimal {
+                mantissa: 80,
+                scale: 0,
+            },
+        });
+        assert_eq!(
+            runtime
+                .validate_definition(None, &threshold_histogram)
+                .expect_err("threshold region is a line/area presentation"),
+            StudyRuntimeError::InvalidOutputPresentation
+        );
+
+        let mut momentum_line = definition(
+            "momentum_line",
+            vec![market(series("ES"), StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        momentum_line.outputs[0].point_style = StudyPointStyle::MomentumHistogram;
+        assert_eq!(
+            runtime
+                .validate_definition(None, &momentum_line)
+                .expect_err("momentum point style is histogram-only"),
+            StudyRuntimeError::InvalidOutputPresentation
+        );
+
+        let mut valid = definition(
+            "valid_richer_output",
+            vec![market(series("ES"), StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        valid.outputs[0].threshold_region = Some(StudyThresholdRegion {
+            lower: StudyDecimal {
+                mantissa: 30,
+                scale: 0,
+            },
+            upper: StudyDecimal {
+                mantissa: 70,
+                scale: 0,
+            },
+        });
+        runtime
+            .validate_definition(None, &valid)
+            .expect("valid threshold presentation is accepted");
     }
 }

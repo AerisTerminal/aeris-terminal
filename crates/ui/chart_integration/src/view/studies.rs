@@ -70,28 +70,62 @@ impl NucleusChartView {
         snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
         rows: &mut Vec<LegendRow>,
     ) {
-        for ((study_id, _), state) in &self.study_series {
-            let Some(series) = entries
-                .iter()
-                .find(|series| series.id == state.series_id && !series.removed)
-            else {
+        let mut emitted = HashSet::new();
+        for (study_id, _) in self.study_series.keys() {
+            if !emitted.insert(*study_id) {
                 continue;
+            }
+            let outputs = self
+                .study_series
+                .iter()
+                .filter_map(|((candidate, _), state)| {
+                    if *candidate != *study_id {
+                        return None;
+                    }
+                    entries
+                        .iter()
+                        .find(|series| series.id == state.series_id && !series.removed)
+                        .map(|series| (state, series))
+                })
+                .collect::<Vec<_>>();
+            let Some((first_state, first_series)) = outputs.first().copied() else {
+                continue;
+            };
+            let visible = outputs.iter().any(|(_, series)| series.visible);
+            let values = if visible {
+                outputs
+                    .iter()
+                    .filter(|(_, series)| series.visible)
+                    .filter_map(|(state, series)| {
+                        let value = legend_series_value(snapshots, state.series_id);
+                        if value.is_empty() {
+                            return None;
+                        }
+                        Some(LegendValue {
+                            text: state
+                                .legend_label
+                                .as_ref()
+                                .map_or(value.clone(), |label| format!("{label} {value}")),
+                            color: Some(series.line_color.clone().unwrap_or_else(|| {
+                                nucleuscharts_engine::DEFAULT_LINE_COLOR.to_css()
+                            })),
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
             };
             rows.push(LegendRow {
                 item: LegendItem::Study {
                     study_id: *study_id,
-                    series_id: state.series_id,
+                    series_id: first_state.series_id,
                 },
-                pane: series.pane_index,
-                title: series.title.clone(),
-                values: if series.visible {
-                    legend_series_values(snapshots, state.series_id)
-                } else {
-                    Vec::new()
-                },
+                pane: first_series.pane_index,
+                title: first_series.title.clone(),
+                values,
                 values_tone: LegendValueTone::Neutral,
-                visible: series.visible,
-                settings_available: state.settings_available,
+                visible,
+                settings_available: outputs.iter().any(|(state, _)| state.settings_available),
             });
         }
     }
@@ -127,7 +161,8 @@ impl NucleusChartView {
             return Ok(false);
         }
         let columns = prepare_study_columns(timestamps_unix_nanos, values)?;
-        let existing = self.study_series.get(&key).copied();
+        validate_study_presentation(descriptor)?;
+        let existing = self.study_series.get(&key).cloned();
         let series_id = match existing {
             Some(state) => {
                 set_study_series_data(&mut self.engine, state.series_id, &columns)?;
@@ -135,12 +170,14 @@ impl NucleusChartView {
             }
             None => self.install_new_study_series(study_id, descriptor, &columns)?,
         };
+        apply_study_series_presentation(&mut self.engine, series_id, descriptor);
         self.study_series.insert(
             key,
             ChartStudySeriesState {
                 series_id,
                 generation,
                 settings_available: descriptor.settings_available,
+                legend_label: descriptor.legend_label.map(str::to_string),
             },
         );
         self.invalidate_series_layout();
@@ -153,6 +190,18 @@ impl NucleusChartView {
         descriptor: ChartStudyOutputDescriptor<'_>,
         columns: &PreparedStudyColumns,
     ) -> Result<u32, ChartStudyOutputError> {
+        let source_price_format = self
+            .engine
+            .series_entries()
+            .iter()
+            .find(|series| series.id == 0 && !series.removed)
+            .map(|series| {
+                (
+                    series.price_format.kind,
+                    series.price_format.precision,
+                    series.price_format.min_move,
+                )
+            });
         let series_id = self.engine.add_series(study_series_kind(descriptor.plot));
         if let Err(error) = set_study_series_data(&mut self.engine, series_id, columns) {
             let _ = self.engine.remove_series(series_id);
@@ -167,6 +216,12 @@ impl NucleusChartView {
             series.title = descriptor.title.to_string();
             series.title_visible = true;
             series.countdown_visible = false;
+            series.line_width = Some(2.0);
+            if let Some((kind, precision, min_move)) = source_price_format {
+                series.price_format.kind = kind;
+                series.price_format.precision = precision;
+                series.price_format.min_move = min_move;
+            }
         }
         let mut created_pane = None;
         let pane_index = match descriptor.pane {
@@ -241,6 +296,43 @@ impl NucleusChartView {
             .retain(|(study_id, _), _| !study_ids.contains(study_id));
         self.invalidate_series_layout();
         true
+    }
+}
+
+fn validate_study_presentation(
+    descriptor: ChartStudyOutputDescriptor<'_>,
+) -> Result<(), ChartStudyOutputError> {
+    if descriptor.threshold_region.is_some_and(|region| {
+        !region.lower.is_finite()
+            || !region.upper.is_finite()
+            || region.lower >= region.upper
+            || !matches!(
+                descriptor.plot,
+                ChartStudyPlotKind::Line | ChartStudyPlotKind::Area
+            )
+    }) || (descriptor.point_style == ChartStudyPointStyle::MomentumHistogram
+        && descriptor.plot != ChartStudyPlotKind::Histogram)
+    {
+        return Err(ChartStudyOutputError::InvalidPresentation);
+    }
+    Ok(())
+}
+
+fn apply_study_series_presentation(
+    engine: &mut nucleuscharts_engine::ChartEngine,
+    series_id: u32,
+    descriptor: ChartStudyOutputDescriptor<'_>,
+) {
+    let threshold =
+        descriptor
+            .threshold_region
+            .map(|region| nucleuscharts_engine::SeriesThresholdRegion {
+                lower: region.lower,
+                upper: region.upper,
+            });
+    let _ = engine.set_series_threshold_region(series_id, threshold);
+    if descriptor.point_style == ChartStudyPointStyle::MomentumHistogram {
+        let _ = engine.apply_momentum_histogram_colors(series_id);
     }
 }
 

@@ -15,10 +15,10 @@ pub use axiusflow_market_runtime::{
         StudyDepthView, StudyDirtyRange, StudyExecutionContext, StudyExecutionInputs,
         StudyInputSeries, StudyInstanceId, StudyInvalidationPolicy, StudyLiveMarketData,
         StudyMarketInput, StudyMarketSeries, StudyOutputBuffer, StudyOutputId, StudyOutputSpec,
-        StudyPaneTarget, StudyPlotKind, StudyQuoteView, StudyRuntimeError, StudyScaleTarget,
-        StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
+        StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyQuoteView, StudyRuntimeError,
+        StudyScaleTarget, StudySettingChoiceOption, StudySettingCondition, StudySettingControl,
         StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
-        StudyTradeSample, StudyTradeWindow,
+        StudyThresholdRegion, StudyTradeSample, StudyTradeWindow,
     },
 };
 use num_traits::ToPrimitive;
@@ -103,6 +103,43 @@ pub const BUILTIN_VWAP_IMPLEMENTATION_REVISION: u32 = 1;
 pub const BUILTIN_VWAP_IDENTIFIER: &str = "builtin.vwap";
 /// Stable output identifier exposed by the built-in session VWAP.
 pub const BUILTIN_VWAP_OUTPUT_IDENTIFIER: &str = "vwap";
+/// Stable implementation revision for the built-in Relative Strength Index.
+pub const BUILTIN_RSI_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in Relative Strength Index.
+pub const BUILTIN_RSI_IDENTIFIER: &str = "builtin.rsi";
+/// Stable durable setting identifier for the RSI period.
+pub const BUILTIN_RSI_PERIOD_SETTING: &str = "period";
+/// Default RSI period used by legacy workspace migration and product UI.
+pub const BUILTIN_RSI_DEFAULT_PERIOD: i64 = 14;
+/// Stable RSI output identifier.
+pub const BUILTIN_RSI_OUTPUT_IDENTIFIER: &str = "rsi";
+/// Stable implementation revision for the built-in MACD study.
+pub const BUILTIN_MACD_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in MACD study.
+pub const BUILTIN_MACD_IDENTIFIER: &str = "builtin.macd";
+pub const BUILTIN_MACD_FAST_PERIOD_SETTING: &str = "fast_period";
+pub const BUILTIN_MACD_SLOW_PERIOD_SETTING: &str = "slow_period";
+pub const BUILTIN_MACD_SIGNAL_PERIOD_SETTING: &str = "signal_period";
+pub const BUILTIN_MACD_DEFAULT_FAST_PERIOD: i64 = 12;
+pub const BUILTIN_MACD_DEFAULT_SLOW_PERIOD: i64 = 26;
+pub const BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD: i64 = 9;
+pub const BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER: &str = "macd";
+pub const BUILTIN_MACD_SIGNAL_OUTPUT_IDENTIFIER: &str = "signal";
+pub const BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER: &str = "histogram";
+/// Stable implementation revision for the built-in Stochastic oscillator.
+pub const BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in Stochastic oscillator.
+pub const BUILTIN_STOCHASTIC_IDENTIFIER: &str = "builtin.stochastic";
+pub const BUILTIN_STOCHASTIC_K_PERIOD_SETTING: &str = "k_period";
+pub const BUILTIN_STOCHASTIC_D_PERIOD_SETTING: &str = "d_period";
+pub const BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD: i64 = 14;
+pub const BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD: i64 = 3;
+pub const BUILTIN_STOCHASTIC_K_OUTPUT_IDENTIFIER: &str = "k";
+pub const BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER: &str = "d";
+/// Built-in period ceiling aligned with the production study runtime's per-series point bound.
+/// Periods larger than the retained source window cannot produce additional useful warm-up state
+/// and would otherwise make windowed formulas perform needlessly large bounded scans.
+pub const BUILTIN_MAXIMUM_PERIOD: i64 = 16_384;
 
 /// Failure while resolving durable study data to trusted native code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -236,6 +273,33 @@ pub fn restore_native_registration(
             }
             builtins::vwap_registration(dependencies, settings)
         }
+        BUILTIN_RSI_IDENTIFIER => {
+            if implementation_revision != BUILTIN_RSI_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::rsi_registration(dependencies, settings)
+        }
+        BUILTIN_MACD_IDENTIFIER => {
+            if implementation_revision != BUILTIN_MACD_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::macd_registration(dependencies, settings)
+        }
+        BUILTIN_STOCHASTIC_IDENTIFIER => {
+            if implementation_revision != BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::stochastic_registration(dependencies, settings)
+        }
         _ => Err(StudySdkError::UnknownStudyIdentifier(
             identifier.to_string(),
         )),
@@ -255,16 +319,27 @@ pub mod builtins {
         BUILTIN_EMA_DEFAULT_PERIOD, BUILTIN_EMA_IDENTIFIER, BUILTIN_EMA_OUTPUT_IDENTIFIER,
         BUILTIN_EMA_PERIOD_SETTING, BUILTIN_EMA_RIBBON_DEFAULT_PERIODS,
         BUILTIN_EMA_RIBBON_IDENTIFIER, BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS,
-        BUILTIN_EMA_RIBBON_PERIOD_SETTINGS, BUILTIN_SMA_DEFAULT_PERIOD, BUILTIN_SMA_IDENTIFIER,
-        BUILTIN_SMA_OUTPUT_IDENTIFIER, BUILTIN_SMA_PERIOD_SETTING, BUILTIN_VWAP_IDENTIFIER,
-        BUILTIN_VWAP_OUTPUT_IDENTIFIER, BUILTIN_WMA_DEFAULT_PERIOD, BUILTIN_WMA_IDENTIFIER,
-        BUILTIN_WMA_OUTPUT_IDENTIFIER, BUILTIN_WMA_PERIOD_SETTING, BarSeriesKey,
-        NativeStudyProgram, NativeStudyRegistration, NativeStudyState, NonZeroUsize,
+        BUILTIN_EMA_RIBBON_PERIOD_SETTINGS, BUILTIN_MACD_DEFAULT_FAST_PERIOD,
+        BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD, BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
+        BUILTIN_MACD_FAST_PERIOD_SETTING, BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER,
+        BUILTIN_MACD_IDENTIFIER, BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER,
+        BUILTIN_MACD_SIGNAL_OUTPUT_IDENTIFIER, BUILTIN_MACD_SIGNAL_PERIOD_SETTING,
+        BUILTIN_MACD_SLOW_PERIOD_SETTING, BUILTIN_MAXIMUM_PERIOD, BUILTIN_RSI_DEFAULT_PERIOD,
+        BUILTIN_RSI_IDENTIFIER, BUILTIN_RSI_OUTPUT_IDENTIFIER, BUILTIN_RSI_PERIOD_SETTING,
+        BUILTIN_SMA_DEFAULT_PERIOD, BUILTIN_SMA_IDENTIFIER, BUILTIN_SMA_OUTPUT_IDENTIFIER,
+        BUILTIN_SMA_PERIOD_SETTING, BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER,
+        BUILTIN_STOCHASTIC_D_PERIOD_SETTING, BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD,
+        BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD, BUILTIN_STOCHASTIC_IDENTIFIER,
+        BUILTIN_STOCHASTIC_K_OUTPUT_IDENTIFIER, BUILTIN_STOCHASTIC_K_PERIOD_SETTING,
+        BUILTIN_VWAP_IDENTIFIER, BUILTIN_VWAP_OUTPUT_IDENTIFIER, BUILTIN_WMA_DEFAULT_PERIOD,
+        BUILTIN_WMA_IDENTIFIER, BUILTIN_WMA_OUTPUT_IDENTIFIER, BUILTIN_WMA_PERIOD_SETTING,
+        BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, NativeStudyState, NonZeroUsize,
         StreamRequirements, StudyBarField, StudyDecimal, StudyDefinition, StudyDependency,
         StudyExecutionContext, StudyInputSeries, StudyInvalidationPolicy, StudyMarketInput,
-        StudyOutputBuffer, StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyRuntimeError,
-        StudyScaleTarget, StudySdkError, StudySettingControl, StudySettingPresentation,
-        StudySettingSpec, StudySettingValue, StudySettings, ToPrimitive,
+        StudyOutputBuffer, StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyPointStyle,
+        StudyRuntimeError, StudyScaleTarget, StudySdkError, StudySettingControl,
+        StudySettingPresentation, StudySettingSpec, StudySettingValue, StudySettings,
+        StudyThresholdRegion, ToPrimitive,
     };
 
     fn period_setting_spec(identifier: &str, default: i64) -> StudySettingSpec {
@@ -275,7 +350,29 @@ pub mod builtins {
                 group: Some("Inputs".to_string()),
                 control: StudySettingControl::Integer {
                     minimum: Some(1),
-                    maximum: None,
+                    maximum: Some(BUILTIN_MAXIMUM_PERIOD),
+                    step: Some(1),
+                },
+                visible_when: None,
+                enabled_when: None,
+            },
+        )
+    }
+
+    fn named_period_setting_spec(
+        identifier: &str,
+        default: i64,
+        label: &str,
+        description: &str,
+    ) -> StudySettingSpec {
+        StudySettingSpec::new(identifier, StudySettingValue::Integer(default)).with_presentation(
+            StudySettingPresentation {
+                label: label.to_string(),
+                description: Some(description.to_string()),
+                group: Some("Inputs".to_string()),
+                control: StudySettingControl::Integer {
+                    minimum: Some(1),
+                    maximum: Some(BUILTIN_MAXIMUM_PERIOD),
                     step: Some(1),
                 },
                 visible_when: None,
@@ -295,7 +392,7 @@ pub mod builtins {
             group: Some("Periods".to_string()),
             control: StudySettingControl::Integer {
                 minimum: Some(1),
-                maximum: None,
+                maximum: Some(BUILTIN_MAXIMUM_PERIOD),
                 step: Some(1),
             },
             visible_when: None,
@@ -499,6 +596,96 @@ pub mod builtins {
         .map_err(sdk_error_to_runtime)
     }
 
+    /// Builds a Relative Strength Index registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when the period or dependency contract is invalid.
+    pub fn rsi(
+        series: BarSeriesKey,
+        period: NonZeroUsize,
+    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        let period =
+            i64::try_from(period.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)?;
+        rsi_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::from([(
+                BUILTIN_RSI_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(period),
+            )]),
+        )
+        .map_err(sdk_error_to_runtime)
+    }
+
+    /// Builds a MACD registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when any period or the dependency contract is invalid.
+    pub fn macd(
+        series: BarSeriesKey,
+        fast: NonZeroUsize,
+        slow: NonZeroUsize,
+        signal: NonZeroUsize,
+    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        let integer = |value: NonZeroUsize| {
+            i64::try_from(value.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)
+        };
+        macd_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::from([
+                (
+                    BUILTIN_MACD_FAST_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(integer(fast)?),
+                ),
+                (
+                    BUILTIN_MACD_SLOW_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(integer(slow)?),
+                ),
+                (
+                    BUILTIN_MACD_SIGNAL_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(integer(signal)?),
+                ),
+            ]),
+        )
+        .map_err(sdk_error_to_runtime)
+    }
+
+    /// Builds a Stochastic oscillator registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when either period or the bar dependency is invalid.
+    pub fn stochastic(
+        series: BarSeriesKey,
+        k_period: NonZeroUsize,
+        d_period: NonZeroUsize,
+    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        let integer = |value: NonZeroUsize| {
+            i64::try_from(value.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)
+        };
+        stochastic_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::from([
+                (
+                    BUILTIN_STOCHASTIC_K_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(integer(k_period)?),
+                ),
+                (
+                    BUILTIN_STOCHASTIC_D_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(integer(d_period)?),
+                ),
+            ]),
+        )
+        .map_err(sdk_error_to_runtime)
+    }
+
     fn sdk_error_to_runtime(error: StudySdkError) -> StudyRuntimeError {
         match error {
             StudySdkError::Runtime(error) => error,
@@ -545,9 +732,12 @@ pub mod builtins {
                 outputs: vec![StudyOutputSpec {
                     identifier: BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
                     title: format!("SMA {}", period.get()),
+                    legend_label: None,
                     plot: StudyPlotKind::Line,
                     pane: StudyPaneTarget::Price,
                     scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
                 }],
                 invalidation: StudyInvalidationPolicy::TrailingWindow { bars: period },
             },
@@ -575,9 +765,12 @@ pub mod builtins {
                 outputs: vec![StudyOutputSpec {
                     identifier: BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string(),
                     title: format!("WMA {}", period.get()),
+                    legend_label: None,
                     plot: StudyPlotKind::Line,
                     pane: StudyPaneTarget::Price,
                     scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
                 }],
                 invalidation: StudyInvalidationPolicy::TrailingWindow { bars: period },
             },
@@ -605,9 +798,12 @@ pub mod builtins {
                 outputs: vec![StudyOutputSpec {
                     identifier: BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string(),
                     title: format!("EMA {}", period.get()),
+                    legend_label: None,
                     plot: StudyPlotKind::Line,
                     pane: StudyPaneTarget::Price,
                     scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
                 }],
                 invalidation: StudyInvalidationPolicy::FromFirstChanged,
             },
@@ -632,9 +828,12 @@ pub mod builtins {
             .map(|(identifier, period)| StudyOutputSpec {
                 identifier: (*identifier).to_string(),
                 title: format!("EMA {}", period.get()),
+                legend_label: None,
                 plot: StudyPlotKind::Line,
                 pane: StudyPaneTarget::Price,
                 scale: StudyScaleTarget::Primary,
+                threshold_region: None,
+                point_style: StudyPointStyle::Uniform,
             })
             .collect();
         Ok(NativeStudyRegistration {
@@ -664,7 +863,9 @@ pub mod builtins {
         ];
         let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
         let period = positive_period(&settings, BUILTIN_BOLLINGER_PERIOD_SETTING)?;
-        decimal_setting(&settings, BUILTIN_BOLLINGER_DEVIATION_SETTING)?;
+        let deviation = decimal_setting(&settings, BUILTIN_BOLLINGER_DEVIATION_SETTING)?;
+        let deviation_title = deviation.to_string();
+        let title = format!("Bollinger {} {deviation_title}", period.get());
         Ok(NativeStudyRegistration {
             definition: StudyDefinition {
                 identifier: BUILTIN_BOLLINGER_IDENTIFIER.to_string(),
@@ -673,24 +874,33 @@ pub mod builtins {
                 outputs: vec![
                     StudyOutputSpec {
                         identifier: BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
-                        title: "Bollinger Upper".to_string(),
+                        title: title.clone(),
+                        legend_label: Some("Upper".to_string()),
                         plot: StudyPlotKind::Line,
                         pane: StudyPaneTarget::Price,
                         scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::Uniform,
                     },
                     StudyOutputSpec {
                         identifier: BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
-                        title: format!("Bollinger {}", period.get()),
+                        title: title.clone(),
+                        legend_label: Some("Basis".to_string()),
                         plot: StudyPlotKind::Line,
                         pane: StudyPaneTarget::Price,
                         scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::Uniform,
                     },
                     StudyOutputSpec {
                         identifier: BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
-                        title: "Bollinger Lower".to_string(),
+                        title,
+                        legend_label: Some("Lower".to_string()),
                         plot: StudyPlotKind::Line,
                         pane: StudyPaneTarget::Price,
                         scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::Uniform,
                     },
                 ],
                 invalidation: StudyInvalidationPolicy::TrailingWindow { bars: period },
@@ -719,9 +929,12 @@ pub mod builtins {
                 outputs: vec![StudyOutputSpec {
                     identifier: BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string(),
                     title: format!("ATR {}", period.get()),
+                    legend_label: None,
                     plot: StudyPlotKind::Line,
                     pane: StudyPaneTarget::Dedicated { group: 0 },
                     scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
                 }],
                 invalidation: StudyInvalidationPolicy::FromFirstChanged,
             },
@@ -745,14 +958,198 @@ pub mod builtins {
                 outputs: vec![StudyOutputSpec {
                     identifier: BUILTIN_VWAP_OUTPUT_IDENTIFIER.to_string(),
                     title: "VWAP".to_string(),
+                    legend_label: None,
                     plot: StudyPlotKind::Line,
                     pane: StudyPaneTarget::Price,
                     scale: StudyScaleTarget::Primary,
+                    threshold_region: None,
+                    point_style: StudyPointStyle::Uniform,
                 }],
                 invalidation: StudyInvalidationPolicy::FromFirstChanged,
             },
             settings,
             program: NativeStudyProgram::stateful(calculate_vwap, create_vwap_state),
+        })
+    }
+
+    pub(super) fn rsi_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_numeric_dependency(BUILTIN_RSI_IDENTIFIER, &dependencies)?;
+        let settings_spec = vec![period_setting_spec(
+            BUILTIN_RSI_PERIOD_SETTING,
+            BUILTIN_RSI_DEFAULT_PERIOD,
+        )];
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        let period = positive_period(&settings, BUILTIN_RSI_PERIOD_SETTING)?;
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_RSI_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs: vec![StudyOutputSpec {
+                    identifier: BUILTIN_RSI_OUTPUT_IDENTIFIER.to_string(),
+                    title: format!("RSI {}", period.get()),
+                    legend_label: None,
+                    plot: StudyPlotKind::Line,
+                    pane: StudyPaneTarget::Dedicated { group: 0 },
+                    scale: StudyScaleTarget::Primary,
+                    threshold_region: Some(StudyThresholdRegion {
+                        lower: StudyDecimal {
+                            mantissa: 30,
+                            scale: 0,
+                        },
+                        upper: StudyDecimal {
+                            mantissa: 70,
+                            scale: 0,
+                        },
+                    }),
+                    point_style: StudyPointStyle::Uniform,
+                }],
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_rsi, create_rsi_state),
+        })
+    }
+
+    pub(super) fn macd_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_numeric_dependency(BUILTIN_MACD_IDENTIFIER, &dependencies)?;
+        let settings_spec = vec![
+            named_period_setting_spec(
+                BUILTIN_MACD_FAST_PERIOD_SETTING,
+                BUILTIN_MACD_DEFAULT_FAST_PERIOD,
+                "Fast period",
+                "Fast EMA period.",
+            ),
+            named_period_setting_spec(
+                BUILTIN_MACD_SLOW_PERIOD_SETTING,
+                BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
+                "Slow period",
+                "Slow EMA period.",
+            ),
+            named_period_setting_spec(
+                BUILTIN_MACD_SIGNAL_PERIOD_SETTING,
+                BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD,
+                "Signal period",
+                "Signal EMA period.",
+            ),
+        ];
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        let (fast, slow, signal) = macd_periods(&settings)?;
+        let pane = StudyPaneTarget::Dedicated { group: 0 };
+        let title = format!("MACD {} {} {}", fast.get(), slow.get(), signal.get());
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_MACD_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs: vec![
+                    StudyOutputSpec {
+                        identifier: BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER.to_string(),
+                        title: title.clone(),
+                        legend_label: Some("MACD".to_string()),
+                        plot: StudyPlotKind::Line,
+                        pane,
+                        scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::Uniform,
+                    },
+                    StudyOutputSpec {
+                        identifier: BUILTIN_MACD_SIGNAL_OUTPUT_IDENTIFIER.to_string(),
+                        title: title.clone(),
+                        legend_label: Some("Signal".to_string()),
+                        plot: StudyPlotKind::Line,
+                        pane,
+                        scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::Uniform,
+                    },
+                    StudyOutputSpec {
+                        identifier: BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER.to_string(),
+                        title,
+                        legend_label: Some("Histogram".to_string()),
+                        plot: StudyPlotKind::Histogram,
+                        pane,
+                        scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::MomentumHistogram,
+                    },
+                ],
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_macd, create_macd_state),
+        })
+    }
+
+    pub(super) fn stochastic_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_bar_market_dependency(BUILTIN_STOCHASTIC_IDENTIFIER, &dependencies)?;
+        let settings_spec = vec![
+            named_period_setting_spec(
+                BUILTIN_STOCHASTIC_K_PERIOD_SETTING,
+                BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD,
+                "%K period",
+                "Lookback window for the fast oscillator.",
+            ),
+            named_period_setting_spec(
+                BUILTIN_STOCHASTIC_D_PERIOD_SETTING,
+                BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD,
+                "%D period",
+                "Smoothing window for the signal line.",
+            ),
+        ];
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        let (k_period, d_period) = stochastic_periods(&settings)?;
+        let pane = StudyPaneTarget::Dedicated { group: 0 };
+        let title = format!("Stochastic {} {}", k_period.get(), d_period.get());
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_STOCHASTIC_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs: vec![
+                    StudyOutputSpec {
+                        identifier: BUILTIN_STOCHASTIC_K_OUTPUT_IDENTIFIER.to_string(),
+                        title: title.clone(),
+                        legend_label: Some("%K".to_string()),
+                        plot: StudyPlotKind::Line,
+                        pane,
+                        scale: StudyScaleTarget::Primary,
+                        threshold_region: Some(StudyThresholdRegion {
+                            lower: StudyDecimal {
+                                mantissa: 20,
+                                scale: 0,
+                            },
+                            upper: StudyDecimal {
+                                mantissa: 80,
+                                scale: 0,
+                            },
+                        }),
+                        point_style: StudyPointStyle::Uniform,
+                    },
+                    StudyOutputSpec {
+                        identifier: BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER.to_string(),
+                        title,
+                        legend_label: Some("%D".to_string()),
+                        plot: StudyPlotKind::Line,
+                        pane,
+                        scale: StudyScaleTarget::Primary,
+                        threshold_region: None,
+                        point_style: StudyPointStyle::Uniform,
+                    },
+                ],
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_stochastic, create_stochastic_state),
         })
     }
 
@@ -812,6 +1209,25 @@ pub mod builtins {
         periods
             .try_into()
             .map_err(|_| StudyRuntimeError::InvalidSettingValue)
+    }
+
+    fn macd_periods(
+        settings: &StudySettings,
+    ) -> Result<(NonZeroUsize, NonZeroUsize, NonZeroUsize), StudyRuntimeError> {
+        Ok((
+            positive_period(settings, BUILTIN_MACD_FAST_PERIOD_SETTING)?,
+            positive_period(settings, BUILTIN_MACD_SLOW_PERIOD_SETTING)?,
+            positive_period(settings, BUILTIN_MACD_SIGNAL_PERIOD_SETTING)?,
+        ))
+    }
+
+    fn stochastic_periods(
+        settings: &StudySettings,
+    ) -> Result<(NonZeroUsize, NonZeroUsize), StudyRuntimeError> {
+        Ok((
+            positive_period(settings, BUILTIN_STOCHASTIC_K_PERIOD_SETTING)?,
+            positive_period(settings, BUILTIN_STOCHASTIC_D_PERIOD_SETTING)?,
+        ))
     }
 
     fn wma_period(settings: &StudySettings) -> Result<NonZeroUsize, StudyRuntimeError> {
@@ -931,6 +1347,50 @@ pub mod builtins {
 
     fn vwap_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalVwapState) -> usize {
         std::mem::size_of::<nucleuscharts_indicators::IncrementalVwapState>()
+            .saturating_add(state.runtime_bytes())
+    }
+
+    fn create_rsi_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        let period = positive_period(settings, BUILTIN_RSI_PERIOD_SETTING)
+            .map_err(|_| "RSI period is unavailable".to_string())?;
+        Ok(NativeStudyState::new(
+            nucleuscharts_indicators::IncrementalRsiState::new(period),
+            rsi_state_runtime_bytes,
+        ))
+    }
+
+    fn rsi_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalRsiState) -> usize {
+        std::mem::size_of::<nucleuscharts_indicators::IncrementalRsiState>()
+            .saturating_add(state.runtime_bytes())
+    }
+
+    fn create_macd_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        let (fast, slow, signal) =
+            macd_periods(settings).map_err(|_| "MACD periods are unavailable".to_string())?;
+        Ok(NativeStudyState::new(
+            nucleuscharts_indicators::IncrementalMacdState::new(fast, slow, signal),
+            macd_state_runtime_bytes,
+        ))
+    }
+
+    fn macd_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalMacdState) -> usize {
+        std::mem::size_of::<nucleuscharts_indicators::IncrementalMacdState>()
+            .saturating_add(state.runtime_bytes())
+    }
+
+    fn create_stochastic_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        let (k_period, d_period) = stochastic_periods(settings)
+            .map_err(|_| "Stochastic periods are unavailable".to_string())?;
+        Ok(NativeStudyState::new(
+            nucleuscharts_indicators::IncrementalStochasticState::new(k_period, d_period),
+            stochastic_state_runtime_bytes,
+        ))
+    }
+
+    fn stochastic_state_runtime_bytes(
+        state: &nucleuscharts_indicators::IncrementalStochasticState,
+    ) -> usize {
+        std::mem::size_of::<nucleuscharts_indicators::IncrementalStochasticState>()
             .saturating_add(state.runtime_bytes())
     }
 
@@ -1106,6 +1566,145 @@ pub mod builtins {
             |index, value| {
                 if write_error.is_none() {
                     write_error = output.set(index, value).err();
+                }
+            },
+        );
+        write_error.map_or(Ok(()), Err)
+    }
+
+    fn calculate_rsi(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) =
+            context.split_with_state::<nucleuscharts_indicators::IncrementalRsiState>()
+        else {
+            return Err("RSI runtime state is unavailable".to_string());
+        };
+        let output = outputs
+            .get_mut(0)
+            .ok_or_else(|| "RSI output is unavailable".to_string())?;
+        let from = inputs.dirty_range().start.min(output.len());
+        if from >= output.len() {
+            return Ok(());
+        }
+        let input = inputs
+            .input(0)
+            .ok_or_else(|| "RSI requires one numeric study input".to_string())?;
+        let mut write_error = None;
+        match input {
+            StudyInputSeries::Market(series) => {
+                let close = series.field(StudyBarField::Close);
+                let divisor = 10_f64.powi(i32::from(close.scale()));
+                state.rebuild_from_indexed(
+                    output.len(),
+                    from,
+                    |index| fixed_point_sample(close.value(index), divisor),
+                    |index, value| {
+                        if write_error.is_none() {
+                            write_error = output.set(index, value).err();
+                        }
+                    },
+                );
+            }
+            StudyInputSeries::Output(series) => state.rebuild_from_indexed(
+                output.len(),
+                from,
+                |index| series.value(index).flatten(),
+                |index, value| {
+                    if write_error.is_none() {
+                        write_error = output.set(index, value).err();
+                    }
+                },
+            ),
+        }
+        write_error.map_or(Ok(()), Err)
+    }
+
+    fn calculate_macd(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) =
+            context.split_with_state::<nucleuscharts_indicators::IncrementalMacdState>()
+        else {
+            return Err("MACD runtime state is unavailable".to_string());
+        };
+        let [line, signal, histogram, ..] = outputs else {
+            return Err("MACD outputs are unavailable".to_string());
+        };
+        let len = line.len().min(signal.len()).min(histogram.len());
+        let from = inputs.dirty_range().start.min(len);
+        if from >= len {
+            return Ok(());
+        }
+        let input = inputs
+            .input(0)
+            .ok_or_else(|| "MACD requires one numeric study input".to_string())?;
+        let mut write_error = None;
+        let mut write = |index: usize, point: nucleuscharts_indicators::MacdPoint| {
+            if write_error.is_some() {
+                return;
+            }
+            write_error = line
+                .set(index, point.macd)
+                .and_then(|()| signal.set(index, point.signal))
+                .and_then(|()| histogram.set(index, point.histogram))
+                .err();
+        };
+        match input {
+            StudyInputSeries::Market(series) => {
+                let close = series.field(StudyBarField::Close);
+                let divisor = 10_f64.powi(i32::from(close.scale()));
+                state.rebuild_from_indexed(
+                    len,
+                    from,
+                    |index| fixed_point_sample(close.value(index), divisor),
+                    &mut write,
+                );
+            }
+            StudyInputSeries::Output(series) => state.rebuild_from_indexed(
+                len,
+                from,
+                |index| series.value(index).flatten(),
+                &mut write,
+            ),
+        }
+        write_error.map_or(Ok(()), Err)
+    }
+
+    fn calculate_stochastic(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) =
+            context.split_with_state::<nucleuscharts_indicators::IncrementalStochasticState>()
+        else {
+            return Err("Stochastic runtime state is unavailable".to_string());
+        };
+        let [k_output, d_output, ..] = outputs else {
+            return Err("Stochastic outputs are unavailable".to_string());
+        };
+        let len = k_output.len().min(d_output.len());
+        let from = inputs.dirty_range().start.min(len);
+        if from >= len {
+            return Ok(());
+        }
+        let Some(StudyInputSeries::Market(series)) = inputs.input(0) else {
+            return Err("Stochastic requires one canonical bar input".to_string());
+        };
+        let high = series.field(StudyBarField::High);
+        let low = series.field(StudyBarField::Low);
+        let close = series.field(StudyBarField::Close);
+        let divisor = 10_f64.powi(i32::from(close.scale()));
+        let mut write_error = None;
+        state.rebuild_from_indexed(
+            len,
+            from,
+            |index| {
+                Some(nucleuscharts_indicators::StochasticSample {
+                    high: fixed_point_sample(high.value(index), divisor)?,
+                    low: fixed_point_sample(low.value(index), divisor)?,
+                    close: fixed_point_sample(close.value(index), divisor)?,
+                })
+            },
+            |index, point| {
+                if write_error.is_none() {
+                    write_error = k_output
+                        .set(index, point.k)
+                        .and_then(|()| d_output.set(index, point.d))
+                        .err();
                 }
             },
         );
@@ -1492,6 +2091,66 @@ mod tests {
     use super::*;
     use axiusflow_market_data::BarPeriod;
 
+    fn test_series() -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "provider".to_string(),
+            instrument_id: "instrument".to_string(),
+            entitlement_id: "entitlement".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        }
+    }
+
+    fn test_market_dependency() -> StudyDependency {
+        StudyDependency::Market(StudyMarketInput {
+            series: test_series(),
+            streams: StreamRequirements::BARS,
+        })
+    }
+
+    fn ribbon_settings() -> BTreeMap<String, StudySettingValue> {
+        BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
+            .iter()
+            .zip(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
+            .map(|(identifier, period)| {
+                (
+                    (*identifier).to_string(),
+                    StudySettingValue::Integer(period),
+                )
+            })
+            .collect()
+    }
+
+    fn macd_settings() -> BTreeMap<String, StudySettingValue> {
+        BTreeMap::from([
+            (
+                BUILTIN_MACD_FAST_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_MACD_DEFAULT_FAST_PERIOD),
+            ),
+            (
+                BUILTIN_MACD_SLOW_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_MACD_DEFAULT_SLOW_PERIOD),
+            ),
+            (
+                BUILTIN_MACD_SIGNAL_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD),
+            ),
+        ])
+    }
+
+    fn stochastic_settings() -> BTreeMap<String, StudySettingValue> {
+        BTreeMap::from([
+            (
+                BUILTIN_STOCHASTIC_K_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD),
+            ),
+            (
+                BUILTIN_STOCHASTIC_D_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD),
+            ),
+        ])
+    }
+
     #[test]
     fn builtin_sma_uses_the_shared_ta_contract_and_declares_price_pane_output() {
         let registration = builtins::sma(
@@ -1702,7 +2361,7 @@ mod tests {
             wma_period.presentation.control,
             StudySettingControl::Integer {
                 minimum: Some(1),
-                maximum: None,
+                maximum: Some(BUILTIN_MAXIMUM_PERIOD),
                 step: Some(1),
             }
         ));
@@ -1809,14 +2468,8 @@ mod tests {
     }
 
     #[test]
-    fn priority_phase_c_builtins_preserve_recursive_state_panes_and_stable_outputs() {
-        let source = BarSeriesKey {
-            provider_id: "provider".to_string(),
-            instrument_id: "instrument".to_string(),
-            entitlement_id: "entitlement".to_string(),
-            period: BarPeriod::time(60).expect("minute period"),
-            definition_version: 1,
-        };
+    fn phase_c_scalar_builtins_preserve_recursive_state_panes_and_stable_outputs() {
+        let source = test_series();
         let ribbon = builtins::ema_ribbon(
             source.clone(),
             [5, 10, 20, 50, 200].map(|period| NonZeroUsize::new(period).expect("period")),
@@ -1824,7 +2477,7 @@ mod tests {
         .expect("EMA Ribbon registration");
         let atr = builtins::atr(source.clone(), NonZeroUsize::new(14).expect("period"))
             .expect("ATR registration");
-        let vwap = builtins::vwap(source).expect("VWAP registration");
+        let vwap = builtins::vwap(source.clone()).expect("VWAP registration");
 
         assert_eq!(ribbon.definition.identifier, BUILTIN_EMA_RIBBON_IDENTIFIER);
         assert_eq!(
@@ -1871,33 +2524,112 @@ mod tests {
     }
 
     #[test]
-    fn priority_phase_c_builtins_restore_exact_revisions_and_dependency_contracts() {
-        let source = BarSeriesKey {
-            provider_id: "provider".to_string(),
-            instrument_id: "instrument".to_string(),
-            entitlement_id: "entitlement".to_string(),
-            period: BarPeriod::time(60).expect("minute period"),
-            definition_version: 1,
-        };
-        let market = StudyDependency::Market(StudyMarketInput {
-            series: source,
-            streams: StreamRequirements::BARS,
-        });
-        let ribbon_settings = BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
-            .iter()
-            .zip(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
-            .map(|(identifier, period)| {
-                (
-                    (*identifier).to_string(),
-                    StudySettingValue::Integer(period),
-                )
+    fn richer_builtins_preserve_panes_semantic_presentation_and_stable_outputs() {
+        let source = test_series();
+        let rsi = builtins::rsi(source.clone(), NonZeroUsize::new(14).expect("period"))
+            .expect("RSI registration");
+        let macd = builtins::macd(
+            source.clone(),
+            NonZeroUsize::new(12).expect("fast"),
+            NonZeroUsize::new(26).expect("slow"),
+            NonZeroUsize::new(9).expect("signal"),
+        )
+        .expect("MACD registration");
+        let stochastic = builtins::stochastic(
+            source,
+            NonZeroUsize::new(14).expect("k"),
+            NonZeroUsize::new(3).expect("d"),
+        )
+        .expect("Stochastic registration");
+
+        assert_eq!(rsi.definition.identifier, BUILTIN_RSI_IDENTIFIER);
+        assert_eq!(
+            rsi.definition.outputs[0].threshold_region,
+            Some(StudyThresholdRegion {
+                lower: StudyDecimal {
+                    mantissa: 30,
+                    scale: 0,
+                },
+                upper: StudyDecimal {
+                    mantissa: 70,
+                    scale: 0,
+                },
             })
-            .collect();
+        );
+        assert_eq!(
+            rsi.definition.outputs[0].point_style,
+            StudyPointStyle::Uniform
+        );
+        assert!(rsi.program.state_factory.is_some());
+
+        assert_eq!(macd.definition.identifier, BUILTIN_MACD_IDENTIFIER);
+        assert_eq!(macd.definition.outputs.len(), 3);
+        assert!(
+            macd.definition
+                .outputs
+                .iter()
+                .all(|output| output.title == "MACD 12 26 9")
+        );
+        assert_eq!(
+            macd.definition
+                .outputs
+                .iter()
+                .map(|output| output.legend_label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("MACD"), Some("Signal"), Some("Histogram")]
+        );
+        assert_eq!(macd.definition.outputs[2].plot, StudyPlotKind::Histogram);
+        assert_eq!(
+            macd.definition.outputs[2].point_style,
+            StudyPointStyle::MomentumHistogram
+        );
+        assert!(macd.program.state_factory.is_some());
+
+        assert_eq!(
+            stochastic.definition.identifier,
+            BUILTIN_STOCHASTIC_IDENTIFIER
+        );
+        assert_eq!(stochastic.definition.outputs.len(), 2);
+        assert!(
+            stochastic
+                .definition
+                .outputs
+                .iter()
+                .all(|output| output.title == "Stochastic 14 3")
+        );
+        assert_eq!(
+            stochastic
+                .definition
+                .outputs
+                .iter()
+                .map(|output| output.legend_label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("%K"), Some("%D")]
+        );
+        assert_eq!(
+            stochastic.definition.outputs[0].threshold_region,
+            Some(StudyThresholdRegion {
+                lower: StudyDecimal {
+                    mantissa: 20,
+                    scale: 0,
+                },
+                upper: StudyDecimal {
+                    mantissa: 80,
+                    scale: 0,
+                },
+            })
+        );
+        assert!(stochastic.program.state_factory.is_some());
+    }
+
+    #[test]
+    fn phase_c_scalar_builtins_restore_exact_revisions() {
+        let market = test_market_dependency();
         let ribbon = restore_native_registration(
             BUILTIN_EMA_RIBBON_IDENTIFIER,
             BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
             vec![market.clone()],
-            ribbon_settings,
+            ribbon_settings(),
         )
         .expect("durable EMA Ribbon resolves");
         let atr = restore_native_registration(
@@ -1942,23 +2674,93 @@ mod tests {
                 Err(StudySdkError::UnsupportedImplementationRevision { .. })
             ));
         }
+    }
 
+    #[test]
+    fn richer_builtins_restore_exact_revisions() {
+        let market = test_market_dependency();
+        let rsi = restore_native_registration(
+            BUILTIN_RSI_IDENTIFIER,
+            BUILTIN_RSI_IMPLEMENTATION_REVISION,
+            vec![market.clone()],
+            BTreeMap::from([(
+                BUILTIN_RSI_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_RSI_DEFAULT_PERIOD),
+            )]),
+        )
+        .expect("durable RSI resolves");
+        let macd = restore_native_registration(
+            BUILTIN_MACD_IDENTIFIER,
+            BUILTIN_MACD_IMPLEMENTATION_REVISION,
+            vec![market.clone()],
+            macd_settings(),
+        )
+        .expect("durable MACD resolves");
+        let stochastic = restore_native_registration(
+            BUILTIN_STOCHASTIC_IDENTIFIER,
+            BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
+            vec![market.clone()],
+            stochastic_settings(),
+        )
+        .expect("durable Stochastic resolves");
+        assert_eq!(rsi.definition.outputs.len(), 1);
+        assert_eq!(macd.definition.outputs.len(), 3);
+        assert_eq!(stochastic.definition.outputs.len(), 2);
+
+        for (identifier, revision) in [
+            (BUILTIN_RSI_IDENTIFIER, BUILTIN_RSI_IMPLEMENTATION_REVISION),
+            (
+                BUILTIN_MACD_IDENTIFIER,
+                BUILTIN_MACD_IMPLEMENTATION_REVISION,
+            ),
+            (
+                BUILTIN_STOCHASTIC_IDENTIFIER,
+                BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
+            ),
+        ] {
+            assert!(matches!(
+                restore_native_registration(
+                    identifier,
+                    revision + 1,
+                    vec![market.clone()],
+                    BTreeMap::new(),
+                ),
+                Err(StudySdkError::UnsupportedImplementationRevision { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn builtin_dependency_contracts_distinguish_numeric_outputs_from_bar_only_studies() {
         let upstream = StudyInstanceId::try_from_u64(9).expect("upstream study id");
+        let output = StudyDependency::Output(upstream.output(0));
         assert!(
             restore_native_registration(
                 BUILTIN_EMA_RIBBON_IDENTIFIER,
                 BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
-                vec![StudyDependency::Output(upstream.output(0))],
-                BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
-                    .iter()
-                    .zip(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
-                    .map(|(identifier, period)| {
-                        (
-                            (*identifier).to_string(),
-                            StudySettingValue::Integer(period),
-                        )
-                    })
-                    .collect(),
+                vec![output.clone()],
+                ribbon_settings(),
+            )
+            .is_ok()
+        );
+        assert!(
+            restore_native_registration(
+                BUILTIN_RSI_IDENTIFIER,
+                BUILTIN_RSI_IMPLEMENTATION_REVISION,
+                vec![output.clone()],
+                BTreeMap::from([(
+                    BUILTIN_RSI_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(BUILTIN_RSI_DEFAULT_PERIOD),
+                )]),
+            )
+            .is_ok()
+        );
+        assert!(
+            restore_native_registration(
+                BUILTIN_MACD_IDENTIFIER,
+                BUILTIN_MACD_IMPLEMENTATION_REVISION,
+                vec![output.clone()],
+                macd_settings(),
             )
             .is_ok()
         );
@@ -1966,11 +2768,20 @@ mod tests {
             restore_native_registration(
                 BUILTIN_ATR_IDENTIFIER,
                 BUILTIN_ATR_IMPLEMENTATION_REVISION,
-                vec![StudyDependency::Output(upstream.output(0))],
+                vec![output.clone()],
                 BTreeMap::from([(
                     BUILTIN_ATR_PERIOD_SETTING.to_string(),
                     StudySettingValue::Integer(BUILTIN_ATR_DEFAULT_PERIOD),
                 )]),
+            ),
+            Err(StudySdkError::InvalidDependencyContract(_))
+        ));
+        assert!(matches!(
+            restore_native_registration(
+                BUILTIN_STOCHASTIC_IDENTIFIER,
+                BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
+                vec![output],
+                stochastic_settings(),
             ),
             Err(StudySdkError::InvalidDependencyContract(_))
         ));
@@ -1997,6 +2808,37 @@ mod tests {
                 BTreeMap::from([(
                     BUILTIN_WMA_PERIOD_SETTING.to_string(),
                     StudySettingValue::Integer(i64::MAX),
+                )]),
+            ),
+            Err(StudySdkError::Runtime(
+                StudyRuntimeError::InvalidSettingValue
+            ))
+        ));
+    }
+
+    #[test]
+    fn built_in_period_settings_reject_values_beyond_the_runtime_source_ceiling() {
+        let source = BarSeriesKey {
+            provider_id: "provider".to_string(),
+            instrument_id: "instrument".to_string(),
+            entitlement_id: "entitlement".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        };
+        let dependency = StudyDependency::Market(StudyMarketInput {
+            series: source,
+            streams: StreamRequirements::BARS,
+        });
+        let oversized = BUILTIN_MAXIMUM_PERIOD + 1;
+
+        assert!(matches!(
+            restore_native_registration(
+                BUILTIN_RSI_IDENTIFIER,
+                BUILTIN_RSI_IMPLEMENTATION_REVISION,
+                vec![dependency],
+                BTreeMap::from([(
+                    BUILTIN_RSI_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(oversized),
                 )]),
             ),
             Err(StudySdkError::Runtime(
