@@ -8,6 +8,7 @@ mod credential_vault;
 mod display_timing;
 mod io_cancellation;
 mod lifecycle;
+mod live_market_gate;
 mod network_notifications;
 mod power_notifications;
 mod release_delivery;
@@ -36,6 +37,12 @@ pub use lifecycle::{
     UninstallOutcome, UpdateOutcome, VaultEntry, native_data_root, native_install_root,
     native_installation_inventory, sign_release_manifest, verify_release_file,
     verify_release_manifest, verify_release_manifest_signature,
+};
+pub use live_market_gate::{
+    LIVE_MARKET_GATE_EVIDENCE_SCOPE, LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES,
+    LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,
+    LIVE_MARKET_GATE_SCHEMA_VERSION, LiveMarketGateCompletion, LiveMarketGateEvidence,
+    LiveMarketGateOutcome, LiveMarketGateRecorder,
 };
 pub use network_notifications::{
     NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,

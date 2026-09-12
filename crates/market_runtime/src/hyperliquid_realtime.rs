@@ -1153,6 +1153,7 @@ fn unix_nanos_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axiusflow_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
 
     type FrameHarness = (
         BTreeMap<String, HyperliquidInstrumentDemand>,
@@ -1486,6 +1487,8 @@ mod tests {
     #[test]
     #[ignore = "drives the live Hyperliquid public feed"]
     fn live_worker_cancellation_is_prompt() {
+        let recorder =
+            LiveMarketGateRecorder::start("hyperliquid").expect("live gate evidence starts");
         let (controls, control_rx) = std::sync::mpsc::sync_channel(2);
         let (events, event_rx) = std::sync::mpsc::sync_channel(32);
         let stop = Arc::new(AtomicBool::new(false));
@@ -1520,12 +1523,14 @@ mod tests {
             }))
             .expect("demand");
         let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if matches!(
-                event_rx.recv_timeout(Duration::from_millis(100)),
-                Ok(HyperliquidRealtimeEvent::Connected(_))
-            ) {
-                break;
+        let mut connected = false;
+        let mut candle = false;
+        while Instant::now() < deadline && !(connected && candle) {
+            match event_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(HyperliquidRealtimeEvent::Connected(_)) => connected = true,
+                Ok(HyperliquidRealtimeEvent::Candle(_, _, _, _)) => candle = true,
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         stop.store(true, Ordering::Release);
@@ -1535,6 +1540,14 @@ mod tests {
         }
         assert!(worker.is_finished(), "live worker ignored cancellation");
         worker.join().expect("worker");
+        assert!(connected, "live Hyperliquid worker never connected");
+        assert!(candle, "live Hyperliquid worker never published a candle");
+        recorder
+            .finish(
+                LiveMarketGateOutcome::Passed,
+                "connected, published a live candle, and cancelled promptly",
+            )
+            .expect("live gate evidence completes");
     }
 
     #[test]

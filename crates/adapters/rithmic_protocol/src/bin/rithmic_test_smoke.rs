@@ -1,4 +1,6 @@
-use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
+use axiusflow_platform_runtime::{
+    CredentialVault, LiveMarketGateOutcome, LiveMarketGateRecorder, NativeCredentialVault,
+};
 use axiusflow_rithmic_protocol_adapter::{
     AuthenticationState, CollectionProgress, DecodedCatalogMessage, DecodedControlMessage,
     DecodedMarketMessage, DecodedTimeBarType, DepthByOrderSnapshotMessage,
@@ -80,6 +82,11 @@ fn main() -> Result<(), String> {
     if let RunMode::ProviderObservedSilence { provenance, .. } = &mode {
         provenance.verify_current_executable()?;
     }
+    let live_gate = if mode == RunMode::Smoke {
+        Some(LiveMarketGateRecorder::start("rithmic")?)
+    } else {
+        None
+    };
     let credentials = load_credentials()?;
     match mode {
         RunMode::AuthorizedClientLocalSilence => {
@@ -152,6 +159,12 @@ fn main() -> Result<(), String> {
         "rithmic_test_smoke=passed symbol={} exchange={}",
         selected.symbol, selected.exchange
     );
+    if let Some(recorder) = live_gate {
+        recorder.finish(
+            LiveMarketGateOutcome::Passed,
+            "live trades, quotes, depth, history, heartbeat, and reconnect passed",
+        )?;
+    }
     Ok(())
 }
 

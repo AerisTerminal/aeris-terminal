@@ -1719,6 +1719,40 @@ mod tests {
     }
 
     #[test]
+    fn live_market_gates_keep_candidate_bound_evidence_producers() {
+        let workflow = manifest(".github/workflows/live_market_gates.yml");
+        assert!(
+            workflow.contains("live_worker_cancellation_is_prompt")
+                && workflow.contains("live_market_gate_hyperliquid.*"),
+            "Hyperliquid live workflow must execute and upload its self-recording gate"
+        );
+        assert!(
+            workflow.contains("--bin rithmic_test_smoke")
+                && workflow.contains("live_market_gate_rithmic.*"),
+            "Rithmic live workflow must execute and upload its self-recording gate"
+        );
+
+        let hyperliquid = manifest("crates/market_runtime/src/hyperliquid_realtime.rs");
+        assert!(
+            hyperliquid.contains("LiveMarketGateRecorder::start(\"hyperliquid\")")
+                && hyperliquid.contains("live Hyperliquid worker never connected")
+                && hyperliquid.contains("live Hyperliquid worker never published a candle")
+                && hyperliquid
+                    .contains("connected, published a live candle, and cancelled promptly"),
+            "Hyperliquid live gate must bind evidence to a real connection and live payload"
+        );
+
+        let rithmic = manifest("crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs");
+        assert!(
+            rithmic.contains("LiveMarketGateRecorder::start(\"rithmic\")")
+                && rithmic.contains(
+                    "live trades, quotes, depth, history, heartbeat, and reconnect passed"
+                ),
+            "Rithmic default smoke must retain candidate-bound evidence recording"
+        );
+    }
+
+    #[test]
     fn desktop_transition_capture_command_matches_tool_contract() {
         assert!(
             !repository_root()

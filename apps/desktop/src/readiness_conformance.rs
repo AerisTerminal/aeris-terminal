@@ -22,8 +22,14 @@ use axiusflow_market_data::{
     BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, OrderBook,
     OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
+use axiusflow_platform_runtime::{
+    LIVE_MARKET_GATE_EVIDENCE_SCOPE, LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES,
+    LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,
+    LIVE_MARKET_GATE_SCHEMA_VERSION, LiveMarketGateCompletion, LiveMarketGateEvidence,
+    LiveMarketGateOutcome,
+};
 use axiusflow_terminal_ui::{OrderBookSelection, project_order_book};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::Digest as _;
 use std::{
     error::Error,
@@ -47,11 +53,8 @@ const LIVE_GATE_REPORTS: [(&str, &str); 2] = [
     ),
     ("rithmic", ".cache/evidence/live_market_gate_rithmic.json"),
 ];
-const LIVE_GATE_SCHEMA_VERSION: u32 = 1;
-const LIVE_GATE_EVIDENCE_SCOPE: &str = "engine_live_market_gate";
 const LIVE_GATE_MAXIMUM_AGE_SECONDS: u64 = 24 * 60 * 60;
 const LIVE_GATE_MAXIMUM_FUTURE_SKEW_SECONDS: u64 = 5 * 60;
-const LIVE_GATE_MAXIMUM_REPORT_BYTES: u64 = 16 * 1_024;
 const MAXIMUM_WORKING_SET_GROWTH_BYTES: u64 = 64 * 1_024 * 1_024;
 const ENDURANCE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ENDURANCE_BURST_UPDATES: usize = 1_000;
@@ -71,36 +74,6 @@ enum LiveMarketGate {
     NotRun,
     Passed,
     Failed,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecordedLiveMarketGate {
-    schema_version: u32,
-    evidence_scope: String,
-    provider: String,
-    outcome: RecordedLiveMarketGateOutcome,
-    completion_state: RecordedLiveMarketGateCompletion,
-    recorded_at_unix_seconds: u64,
-    source_revision: String,
-    source_clean: bool,
-    binary_path: PathBuf,
-    binary_sha256: String,
-    detail: String,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RecordedLiveMarketGateOutcome {
-    Passed,
-    Failed,
-}
-
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum RecordedLiveMarketGateCompletion {
-    Incomplete,
-    Completed,
 }
 
 /// Reads what each live market gate recorded, and reports the worst of them.
@@ -138,28 +111,28 @@ fn recorded_gate(
     };
     let mut contents = Vec::new();
     if file
-        .take(LIVE_GATE_MAXIMUM_REPORT_BYTES + 1)
+        .take(LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES + 1)
         .read_to_end(&mut contents)
         .is_err()
-        || u64::try_from(contents.len()).unwrap_or(u64::MAX) > LIVE_GATE_MAXIMUM_REPORT_BYTES
+        || u64::try_from(contents.len()).unwrap_or(u64::MAX) > LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES
     {
         return LiveMarketGate::NotRun;
     }
-    let Ok(report) = serde_json::from_slice::<RecordedLiveMarketGate>(&contents) else {
+    let Ok(report) = serde_json::from_slice::<LiveMarketGateEvidence>(&contents) else {
         return LiveMarketGate::NotRun;
     };
     let freshest_allowed = now_unix_seconds.saturating_add(LIVE_GATE_MAXIMUM_FUTURE_SKEW_SECONDS);
     let age = now_unix_seconds.saturating_sub(report.recorded_at_unix_seconds);
     let expected_binary_name = format!("live_market_gate_{expected_provider}.bin");
-    if report.schema_version != LIVE_GATE_SCHEMA_VERSION
-        || report.evidence_scope != LIVE_GATE_EVIDENCE_SCOPE
+    if report.schema_version != LIVE_MARKET_GATE_SCHEMA_VERSION
+        || report.evidence_scope != LIVE_MARKET_GATE_EVIDENCE_SCOPE
         || report.provider != expected_provider
-        || report.completion_state != RecordedLiveMarketGateCompletion::Completed
+        || report.completion_state != LiveMarketGateCompletion::Completed
         || !report.source_clean
         || report.source_revision != expected_source_revision
         || report.recorded_at_unix_seconds > freshest_allowed
         || age > LIVE_GATE_MAXIMUM_AGE_SECONDS
-        || report.detail.len() > 4 * 1_024
+        || report.detail.len() > LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES
         || report.binary_path.to_str() != Some(expected_binary_name.as_str())
         || report.binary_sha256.len() != 64
         || !report
@@ -179,8 +152,8 @@ fn recorded_gate(
         return LiveMarketGate::NotRun;
     }
     match report.outcome {
-        RecordedLiveMarketGateOutcome::Passed => LiveMarketGate::Passed,
-        RecordedLiveMarketGateOutcome::Failed => LiveMarketGate::Failed,
+        LiveMarketGateOutcome::Passed => LiveMarketGate::Passed,
+        LiveMarketGateOutcome::Failed => LiveMarketGate::Failed,
     }
 }
 
@@ -213,14 +186,35 @@ fn git_output(repository: &Path, arguments: &[&str]) -> Option<String> {
 
 fn file_sha256_hex(path: &Path) -> Result<String, std::io::Error> {
     let mut file = fs::File::open(path)?;
+    let expected_bytes = file.metadata()?.len();
+    if expected_bytes == 0 || expected_bytes > LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "live market gate binary size is invalid",
+        ));
+    }
     let mut hasher = sha2::Sha256::new();
     let mut buffer = [0_u8; 16 * 1_024];
+    let mut hashed_bytes = 0_u64;
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        hashed_bytes = hashed_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if hashed_bytes > LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "live market gate binary exceeds its bound",
+            ));
+        }
         hasher.update(&buffer[..read]);
+    }
+    if hashed_bytes != expected_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "live market gate binary size changed while hashing",
+        ));
     }
     Ok(lower_hex(hasher.finalize()))
 }
@@ -1320,6 +1314,24 @@ mod tests {
 
         std::fs::write(&fixture.report_path, br#"{"outcome":"passed"}"#)
             .expect("malformed evidence fixture is written");
+        assert_eq!(
+            recorded_gate(
+                &fixture.report_path,
+                "rithmic",
+                &fixture.source_revision,
+                fixture.now
+            ),
+            super::LiveMarketGate::NotRun
+        );
+
+        write_json(&fixture.report_path, &fixture.report("passed", "completed"));
+        let oversized_binary = std::fs::OpenOptions::new()
+            .write(true)
+            .open(fixture.directory.join("live_market_gate_rithmic.bin"))
+            .expect("candidate binary fixture opens");
+        oversized_binary
+            .set_len(super::LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES + 1)
+            .expect("candidate binary fixture is oversized");
         assert_eq!(
             recorded_gate(
                 &fixture.report_path,
