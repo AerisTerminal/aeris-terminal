@@ -1463,6 +1463,81 @@ fn usize_generation(generation: u64) -> Option<std::num::NonZeroUsize> {
         .and_then(std::num::NonZeroUsize::new)
 }
 
+const ACCOUNT_RESTORE_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const ACCOUNT_RESTORE_READINESS_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(10);
+
+fn wait_for_account_restore_readiness(
+    timeout: std::time::Duration,
+    mut readiness: impl FnMut() -> axiusflow_account_runtime::AccountRestoreReadiness,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match readiness() {
+            axiusflow_account_runtime::AccountRestoreReadiness::Ready => return Ok(()),
+            axiusflow_account_runtime::AccountRestoreReadiness::Failed => {
+                return Err("candidate account restore failed local readiness".to_string());
+            }
+            axiusflow_account_runtime::AccountRestoreReadiness::Pending => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("candidate account restore local readiness timed out".to_string());
+        }
+        std::thread::sleep(ACCOUNT_RESTORE_READINESS_POLL_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod desktop_readiness_account_tests {
+    use super::wait_for_account_restore_readiness;
+    use axiusflow_account_runtime::AccountRestoreReadiness;
+    use std::{cell::Cell, time::Duration};
+
+    #[test]
+    fn account_restore_readiness_accepts_ready_without_network_or_ui() {
+        assert!(
+            wait_for_account_restore_readiness(Duration::ZERO, || {
+                AccountRestoreReadiness::Ready
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn account_restore_readiness_fails_closed_on_failed_or_pending() {
+        assert!(
+            wait_for_account_restore_readiness(Duration::from_secs(1), || {
+                AccountRestoreReadiness::Failed
+            })
+            .is_err()
+        );
+        assert!(
+            wait_for_account_restore_readiness(Duration::ZERO, || {
+                AccountRestoreReadiness::Pending
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn account_restore_readiness_can_settle_after_bounded_pending_work() {
+        let polls = Cell::new(0_u8);
+        assert!(
+            wait_for_account_restore_readiness(Duration::from_secs(1), || {
+                let next = polls.get().saturating_add(1);
+                polls.set(next);
+                if next < 2 {
+                    AccountRestoreReadiness::Pending
+                } else {
+                    AccountRestoreReadiness::Ready
+                }
+            })
+            .is_ok()
+        );
+        assert_eq!(polls.get(), 2);
+    }
+}
+
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
@@ -1473,14 +1548,17 @@ fn run_desktop_readiness_command(
     }
     let workspace = local_state::load_workspace_for_readiness()
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
+    let account_service = axiusflow_account_runtime::AccountService::new_restoring(
+        axiusflow_account_runtime::AccountServiceConfig::from_environment(),
+    );
+    wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
+        account_service.restore_readiness()
+    })?;
     let market = axiusflow_market_runtime::MarketService::start()?;
     let status = market.status()?;
     if status.providers.is_empty() {
         return Err("candidate market service did not reach readiness".to_string());
     }
-    let _account_service = axiusflow_account_runtime::AccountService::new(
-        axiusflow_account_runtime::AccountServiceConfig::from_environment(),
-    );
     let release = axiusflow_platform_runtime::current_release_identity();
     let report = LifecycleReadinessReport {
         schema_version: 2,

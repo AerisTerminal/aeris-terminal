@@ -6,4 +6,4 @@
 
 mod account_service;
 
-pub use account_service::{AccountService, AccountServiceConfig};
+pub use account_service::{AccountRestoreReadiness, AccountService, AccountServiceConfig};

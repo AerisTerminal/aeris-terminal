@@ -1422,6 +1422,21 @@ mod tests {
             readiness < account,
             "headless readiness must run before interactive account startup"
         );
+        let readiness_fn_start = desktop
+            .find("fn run_desktop_readiness_command")
+            .expect("desktop readiness command");
+        let readiness_fn_end = desktop[readiness_fn_start..]
+            .find("#[derive(serde::Serialize)]")
+            .map(|offset| readiness_fn_start + offset)
+            .expect("desktop readiness command boundary");
+        let readiness_fn = &desktop[readiness_fn_start..readiness_fn_end];
+        assert!(
+            readiness_fn.contains("AccountService::new_restoring")
+                && readiness_fn.contains("wait_for_account_restore_readiness")
+                && readiness_fn.contains("restore_readiness()")
+                && !readiness_fn.contains("AccountService::new("),
+            "release readiness must exercise production saved-session restore and bounded local readiness"
+        );
 
         let update = manifest("apps/desktop/src/update.rs");
         assert!(

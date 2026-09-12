@@ -14,7 +14,7 @@ pub mod pkce;
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -44,6 +44,22 @@ const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
 const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
 const DEVICE_VAULT_KEY: &str = "account-device-key-v1";
+
+/// Local startup readiness of the production saved-session restore path.
+///
+/// This covers native-vault access and cached-session classification only.
+/// Remote OIDC refresh/link work remains asynchronous and is intentionally not
+/// part of candidate activation health.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AccountRestoreReadiness {
+    /// Local saved-session state has not been classified yet.
+    Pending = 0,
+    /// Native storage was readable and local saved-session state was classified.
+    Ready = 1,
+    /// Native storage or local restore startup failed before that boundary.
+    Failed = 2,
+}
 
 /// Control-plane configuration for one account service.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +133,15 @@ pub struct AccountService {
     lease_keys: Arc<Mutex<Vec<LeaseKey>>>,
     refresh_gate: Arc<Mutex<()>>,
     profile_refresh_in_flight: Arc<AtomicBool>,
+    restore_readiness: Arc<AtomicU8>,
+}
+
+enum LocalRestore {
+    Settled,
+    ContinueOnline {
+        refresh_token: Zeroizing<String>,
+        cached_expiry: Option<u64>,
+    },
 }
 
 impl AccountService {
@@ -135,6 +160,7 @@ impl AccountService {
             lease_keys: Arc::new(Mutex::new(Vec::new())),
             refresh_gate: Arc::new(Mutex::new(())),
             profile_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+            restore_readiness: Arc::new(AtomicU8::new(AccountRestoreReadiness::Ready as u8)),
         }
     }
 
@@ -147,6 +173,7 @@ impl AccountService {
     #[must_use]
     pub fn new_restoring(config: AccountServiceConfig) -> Self {
         let service = Self::new(config);
+        service.set_restore_readiness(AccountRestoreReadiness::Pending);
         if let Ok(mut state) = service.state.lock() {
             state.view = cleared_view(
                 AccountSessionState::Authorizing,
@@ -154,12 +181,21 @@ impl AccountService {
                 "restoring saved sign-in",
             );
         }
+        if !service.config.is_configured() {
+            service.set_restore_readiness(AccountRestoreReadiness::Failed);
+            service.complete_restore_without_session(
+                AccountSessionState::TerminalError,
+                "sign-in is unavailable; the account service is not configured",
+            );
+            return service;
+        }
         let restoring = service.clone();
         if std::thread::Builder::new()
             .name("axiusflow-account-restore".to_string())
             .spawn(move || restoring.restore_online_session())
             .is_err()
         {
+            service.set_restore_readiness(AccountRestoreReadiness::Failed);
             service.complete_restore_without_session(
                 AccountSessionState::TerminalError,
                 "saved sign-in restore could not start; retry sign-in",
@@ -168,50 +204,40 @@ impl AccountService {
         service
     }
 
+    /// Returns the bounded local readiness of production saved-session restore.
+    #[must_use]
+    pub fn restore_readiness(&self) -> AccountRestoreReadiness {
+        match self.restore_readiness.load(Ordering::Acquire) {
+            0 => AccountRestoreReadiness::Pending,
+            1 => AccountRestoreReadiness::Ready,
+            _ => AccountRestoreReadiness::Failed,
+        }
+    }
+
+    fn set_restore_readiness(&self, readiness: AccountRestoreReadiness) {
+        self.restore_readiness
+            .store(readiness as u8, Ordering::Release);
+    }
+
     fn restore_online_session(&self) {
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
+            self.set_restore_readiness(AccountRestoreReadiness::Failed);
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
                 "credential storage is unavailable; retry sign-in",
             );
             return;
         };
-        let cached_expiry = self.restore_cached_lease(&vault);
-        let cached_session = cached_expiry.is_some();
-        let refresh_token = match vault.load(REFRESH_VAULT_KEY) {
-            Ok(Some(bytes)) => String::from_utf8(bytes)
-                .ok()
-                .filter(|token| !token.is_empty())
-                .map(Zeroizing::new),
-            Ok(None) => {
-                if !cached_session {
-                    self.complete_restore_without_session(
-                        AccountSessionState::SignedOut,
-                        "signed out",
-                    );
-                } else if let Some(expires_at) = cached_expiry {
-                    self.spawn_cached_lease_expiry_worker(expires_at);
-                }
-                return;
-            }
-            Err(_) => {
-                self.complete_restore_without_session(
-                    AccountSessionState::TerminalError,
-                    "credential storage is unavailable; retry sign-in",
-                );
-                if let Some(expires_at) = cached_expiry {
-                    self.spawn_cached_lease_expiry_worker(expires_at);
-                }
-                return;
-            }
-        };
-        let Some(refresh_token) = refresh_token else {
-            self.complete_restore_without_session(
-                AccountSessionState::ReauthenticationRequired,
-                "saved sign-in expired; sign in again",
-            );
+        let LocalRestore::ContinueOnline {
+            refresh_token,
+            cached_expiry,
+        } = self.restore_local_session(&vault)
+        else {
             return;
         };
+        // Candidate readiness ends at the local-vault boundary above. Everything
+        // below may perform bounded remote work and must not make activation
+        // depend on current control-plane reachability.
         let agent = oidc_agent();
         let endpoints = self.retry_restore_lookup(|| self.oidc_endpoints());
         let outcome = endpoints
@@ -244,44 +270,129 @@ impl AccountService {
             .ok();
     }
 
-    fn restore_cached_lease<V>(&self, vault: &V) -> Option<u64>
+    fn restore_local_session<V>(&self, vault: &V) -> LocalRestore
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
     {
-        let compact = lease::load_cached(vault, LEASE_VAULT_KEY)?;
+        let (cached_expiry, cached_lease_read_failed) =
+            if let Ok(expiry) = self.restore_cached_lease(vault) {
+                (expiry, false)
+            } else {
+                // Candidate activation must fail closed when native cached-session
+                // storage is not fully readable. Normal production restore keeps
+                // the pre-existing behavior: a separately readable refresh token
+                // may still recover the session online.
+                self.set_restore_readiness(AccountRestoreReadiness::Failed);
+                (None, true)
+            };
+        let cached_session = cached_expiry.is_some();
+        let refresh_token = match vault.load(REFRESH_VAULT_KEY) {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .ok()
+                .filter(|token| !token.is_empty())
+                .map(Zeroizing::new),
+            Ok(None) => {
+                if !cached_session {
+                    if !self.complete_restore_without_session(
+                        AccountSessionState::SignedOut,
+                        "signed out",
+                    ) {
+                        self.set_restore_readiness(AccountRestoreReadiness::Failed);
+                        return LocalRestore::Settled;
+                    }
+                } else if let Some(expires_at) = cached_expiry {
+                    self.spawn_cached_lease_expiry_worker(expires_at);
+                }
+                if !cached_lease_read_failed {
+                    self.set_restore_readiness(AccountRestoreReadiness::Ready);
+                }
+                return LocalRestore::Settled;
+            }
+            Err(_) => {
+                self.set_restore_readiness(AccountRestoreReadiness::Failed);
+                self.complete_restore_without_session(
+                    AccountSessionState::TerminalError,
+                    "credential storage is unavailable; retry sign-in",
+                );
+                if let Some(expires_at) = cached_expiry {
+                    self.spawn_cached_lease_expiry_worker(expires_at);
+                }
+                return LocalRestore::Settled;
+            }
+        };
+        let Some(refresh_token) = refresh_token else {
+            if !self.complete_restore_without_session(
+                AccountSessionState::ReauthenticationRequired,
+                "saved sign-in expired; sign in again",
+            ) {
+                self.set_restore_readiness(AccountRestoreReadiness::Failed);
+                return LocalRestore::Settled;
+            }
+            if !cached_lease_read_failed {
+                self.set_restore_readiness(AccountRestoreReadiness::Ready);
+            }
+            return LocalRestore::Settled;
+        };
+        if !cached_lease_read_failed {
+            self.set_restore_readiness(AccountRestoreReadiness::Ready);
+        }
+        LocalRestore::ContinueOnline {
+            refresh_token,
+            cached_expiry,
+        }
+    }
+
+    fn restore_cached_lease<V>(&self, vault: &V) -> Result<Option<u64>, ()>
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let compact = match vault.load(LEASE_VAULT_KEY).map_err(|_| ())? {
+            Some(bytes) => String::from_utf8(bytes)
+                .ok()
+                .filter(|lease| !lease.is_empty() && lease.len() <= lease::MAXIMUM_LEASE_BYTES),
+            None => None,
+        };
+        let Some(compact) = compact else {
+            return Ok(None);
+        };
         let directory = vault
             .load(LEASE_DIRECTORY_VAULT_KEY)
-            .ok()
-            .flatten()
+            .map_err(|_| ())?
             .and_then(|encoded| serde_json::from_slice::<Vec<LeaseKey>>(&encoded).ok())
-            .filter(|keys| !keys.is_empty())?;
+            .filter(|keys| !keys.is_empty());
+        let Some(directory) = directory else {
+            return Ok(None);
+        };
         let device_id = vault
             .load(DEVICE_VAULT_KEY)
-            .ok()
-            .flatten()
+            .map_err(|_| ())?
             .filter(|key| !key.is_empty())
-            .map(|key| device_id_for_key(&key))?;
+            .map(|key| device_id_for_key(&key));
+        let Some(device_id) = device_id else {
+            return Ok(None);
+        };
         let Ok(account_id) = lease::untrusted_account_id(&compact) else {
-            return None;
+            return Ok(None);
         };
         let now = unix_now();
         let Ok(claims) =
             lease::validate_compact(&compact, &directory, &account_id, &device_id, now)
         else {
-            return None;
+            return Ok(None);
         };
         if claims.expires_at().saturating_sub(now) > LEASE_OFFLINE_VALIDITY_SECONDS {
-            return None;
+            return Ok(None);
         }
         let Ok(mut state) = self.state.lock() else {
-            return None;
+            return Err(());
         };
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
-            return None;
+            return Ok(None);
         }
         let Ok(mut cached_keys) = self.lease_keys.lock() else {
-            return None;
+            return Err(());
         };
         cached_keys.clone_from(&directory);
         drop(cached_keys);
@@ -295,7 +406,7 @@ impl AccountService {
             email: String::new(),
             photo_url: String::new(),
         };
-        Some(claims.expires_at())
+        Ok(Some(claims.expires_at()))
     }
 
     fn spawn_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
@@ -410,9 +521,9 @@ impl AccountService {
         Some((account_id, tokens))
     }
 
-    fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) {
+    fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) -> bool {
         let Ok(mut state) = self.state.lock() else {
-            return;
+            return false;
         };
         if state.last_generation == 0 && state.pending.is_none() && state.restore_allowed {
             if state.view.state == AccountSessionState::OfflineLease
@@ -420,11 +531,13 @@ impl AccountService {
             {
                 state.restore_allowed = false;
                 state.view.detail = detail.to_string();
-                return;
+                return true;
             }
             state.restore_allowed = false;
             state.view = cleared_view(target, 0, detail);
+            return true;
         }
+        false
     }
 
     // Retry only repeatable discovery/link lookups. Replaying an ambiguous
@@ -1504,13 +1617,16 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountService, AccountServiceConfig, LOGIN_TIMEOUT, REFRESH_VAULT_KEY, UnavailableVault,
-        claim_profile_refresh,
+        AccountRestoreReadiness, AccountService, AccountServiceConfig, DEVICE_VAULT_KEY,
+        LEASE_DIRECTORY_VAULT_KEY, LEASE_VAULT_KEY, LOGIN_TIMEOUT, LocalRestore, REFRESH_VAULT_KEY,
+        UnavailableVault, claim_profile_refresh,
         oidc::{self, AccountProfile, VerifiedTokens},
     };
     use axiusflow_account::{AccountId, PlanId};
     use axiusflow_contracts::{AccountSessionState, AccountView};
     use axiusflow_platform_runtime::CredentialVault;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer as _, SigningKey};
     use std::{
         collections::HashMap,
         sync::{
@@ -1553,6 +1669,30 @@ mod tests {
         }
     }
 
+    struct SelectiveLoadFailureVault<'a> {
+        inner: &'a MemoryVault,
+        failing_key: &'static str,
+    }
+
+    impl CredentialVault for SelectiveLoadFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            if key == self.failing_key {
+                return Err("selected load failure".to_string());
+            }
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            self.inner.delete(key)
+        }
+    }
+
     fn service() -> AccountService {
         use super::oidc::OidcEndpoints;
 
@@ -1580,6 +1720,207 @@ mod tests {
                 lease_endpoint: "https://auth.axiusflow.com/api/axiusflow/lease".to_string(),
             });
         service
+    }
+
+    fn restoring_service() -> AccountService {
+        let service = service();
+        service.set_restore_readiness(AccountRestoreReadiness::Pending);
+        service.state.lock().expect("account state locks").view = super::cleared_view(
+            AccountSessionState::Authorizing,
+            0,
+            "restoring saved sign-in",
+        );
+        service
+    }
+
+    fn seed_current_cached_lease(vault: &MemoryVault, expires_at: u64) {
+        let seed = [9_u8; 32];
+        let signing_key = SigningKey::from_bytes(&seed);
+        let key_id = "ent1";
+        let device_key = b"cached-lease-device-key";
+        let device_id = super::lease::device_id_for_key(device_key);
+        let now = super::unix_now();
+        let header = serde_json::json!({ "alg": "EdDSA", "kid": key_id, "typ": "JWT" });
+        let payload = serde_json::json!({
+            "ver": 1,
+            "aid": "acct_cached",
+            "did": device_id,
+            "plan": "pro",
+            "feat": 7,
+            "rev": 1,
+            "iat": now.saturating_sub(1),
+            "nbf": now.saturating_sub(1),
+            "exp": expires_at,
+            "aud": "axiusflow-engine",
+            "kid": key_id,
+        });
+        let encode = |value: &serde_json::Value| {
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).expect("lease fixture encodes"))
+        };
+        let input = format!("{}.{}", encode(&header), encode(&payload));
+        let signature = signing_key.sign(input.as_bytes());
+        let compact = format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+        let directory = vec![(key_id.to_string(), signing_key.verifying_key().to_bytes())];
+
+        vault
+            .store(DEVICE_VAULT_KEY, device_key)
+            .expect("device fixture stores");
+        vault
+            .store(LEASE_VAULT_KEY, compact.as_bytes())
+            .expect("lease fixture stores");
+        vault
+            .store(
+                LEASE_DIRECTORY_VAULT_KEY,
+                &serde_json::to_vec(&directory).expect("directory fixture encodes"),
+            )
+            .expect("directory fixture stores");
+    }
+
+    #[test]
+    fn empty_local_restore_settles_signed_out_and_ready_without_network() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::SignedOut
+        );
+    }
+
+    #[test]
+    fn valid_cached_local_restore_preserves_offline_access_and_is_ready() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(2));
+
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::OfflineLease
+        );
+        assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn unavailable_local_vault_fails_restore_readiness() {
+        let service = restoring_service();
+
+        assert!(matches!(
+            service.restore_local_session(&UnavailableVault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+    }
+
+    #[test]
+    fn cached_lease_read_failures_fail_readiness_but_allow_valid_refresh_to_continue() {
+        for failing_key in [LEASE_VAULT_KEY, LEASE_DIRECTORY_VAULT_KEY, DEVICE_VAULT_KEY] {
+            let service = restoring_service();
+            let vault = MemoryVault::default();
+            seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+            vault
+                .store(REFRESH_VAULT_KEY, b"cached-refresh")
+                .expect("refresh fixture stores");
+            let failing = SelectiveLoadFailureVault {
+                inner: &vault,
+                failing_key,
+            };
+
+            let LocalRestore::ContinueOnline {
+                refresh_token,
+                cached_expiry,
+            } = service.restore_local_session(&failing)
+            else {
+                panic!("a readable refresh token must preserve online recovery");
+            };
+            assert_eq!(refresh_token.as_str(), "cached-refresh");
+            assert_eq!(cached_expiry, None);
+            assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
+            assert_eq!(
+                service.account_status().state,
+                AccountSessionState::Authorizing
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_vault_failure_is_not_hidden_by_a_valid_cached_lease() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(2));
+        let failing = SelectiveLoadFailureVault {
+            inner: &vault,
+            failing_key: REFRESH_VAULT_KEY,
+        };
+
+        assert!(matches!(
+            service.restore_local_session(&failing),
+            LocalRestore::Settled
+        ));
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::OfflineLease
+        );
+        assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn malformed_or_empty_refresh_material_requires_reauthentication_but_is_locally_ready() {
+        for refresh in [Vec::new(), vec![0xff]] {
+            let service = restoring_service();
+            let vault = MemoryVault::default();
+            vault
+                .store(REFRESH_VAULT_KEY, &refresh)
+                .expect("refresh fixture stores");
+
+            assert!(matches!(
+                service.restore_local_session(&vault),
+                LocalRestore::Settled
+            ));
+            assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
+            assert_eq!(
+                service.account_status().state,
+                AccountSessionState::ReauthenticationRequired
+            );
+        }
+    }
+
+    #[test]
+    fn valid_refresh_material_marks_local_readiness_before_online_restore() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+
+        let LocalRestore::ContinueOnline {
+            refresh_token,
+            cached_expiry,
+        } = service.restore_local_session(&vault)
+        else {
+            panic!("valid refresh material continues to the online phase");
+        };
+        assert_eq!(refresh_token.as_str(), "cached-refresh");
+        assert_eq!(cached_expiry, None);
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::Authorizing
+        );
     }
 
     #[test]
@@ -1933,6 +2274,19 @@ mod tests {
             client_id: "axiusflow-desktop".to_string(),
         });
         assert!(service.begin_login(1).is_err());
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+    }
+
+    #[test]
+    fn unconfigured_restore_fails_local_readiness_without_network() {
+        let service = AccountService::new_restoring(AccountServiceConfig {
+            issuer: String::new(),
+            client_id: "axiusflow-desktop".to_string(),
+        });
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
         assert_eq!(
             service.account_status().state,
             AccountSessionState::TerminalError
