@@ -261,12 +261,20 @@ fn drawing_toolbar_actions(
 
 const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
 
+fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
+    // Nucleus reserves the complete time strip inside the chart. The desktop pane then
+    // adds its bottom layout inset outside that canvas, so the adjacent control must span
+    // both regions to match the visible X-axis row from top border to workspace edge.
+    time_axis_height + WORKSPACE_PANE_BOTTOM_INSET
+}
+
 fn drawing_toolbar_collapse(
     terminal: Entity<TerminalApp>,
     time_axis_height: f32,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
+    let height = drawing_toolbar_toggle_height(time_axis_height);
     drawing_toolbar_toggle_hit(
         "drawing_toolbar_collapse",
         HugeIcon::LayoutAlignLeftIcon,
@@ -276,8 +284,7 @@ fn drawing_toolbar_collapse(
     )
     .flex_none()
     .w_full()
-    .h(px(time_axis_height))
-    .mb(px(WORKSPACE_PANE_BOTTOM_INSET))
+    .h(px(height))
     .border_t_1()
     .border_color(gpui_color(colors.border))
 }
@@ -341,6 +348,7 @@ pub(super) fn drawing_toolbar_expander(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    let height = drawing_toolbar_toggle_height(time_axis_height);
     drawing_toolbar_toggle_hit(
         "drawing_toolbar_expand",
         HugeIcon::LayoutAlignLeftIcon,
@@ -350,9 +358,9 @@ pub(super) fn drawing_toolbar_expander(
     )
     .absolute()
     .left_0()
-    .bottom(px(WORKSPACE_PANE_BOTTOM_INSET))
+    .bottom_0()
     .w(px(chart_chrome::CHART_CHROME_HEIGHT))
-    .h(px(time_axis_height))
+    .h(px(height))
     .border_t_1()
     .border_r_1()
     .border_color(gpui_color(colors.border))
@@ -418,4 +426,15 @@ fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
         .disabled(!enabled)
         .when(enabled, Button::cursor_pointer)
         .when(!enabled, Button::cursor_not_allowed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drawing_toggle_spans_the_engine_axis_and_host_bottom_inset() {
+        let height = drawing_toolbar_toggle_height(22.0);
+        assert!((height - 24.0).abs() < f32::EPSILON);
+    }
 }
