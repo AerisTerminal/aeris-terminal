@@ -18,10 +18,11 @@ const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 11.0;
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
-// Match the reference ladder's default server-side Hyperliquid aggregation.
-// The previous 50x bucket collapsed five adjacent provider rows into one and
-// left the visible ladder looking sparse even when the feed was healthy.
-const HYPERLIQUID_DISPLAY_TICK_MULTIPLIER: i64 = 10;
+// Match the reference ladder's four-significant-figure Hyperliquid grouping.
+// Derive this from price magnitude rather than the current top-20 snapshot's
+// sparse level gaps, which can otherwise make BTC jump between $10 and $100
+// rows as liquidity changes.
+const HYPERLIQUID_DISPLAY_SIGNIFICANT_FIGURES: u32 = 4;
 /// A continuous presentation grid extends at least this many authoritative
 /// ticks above and below the spread when a provider supplied a real increment.
 /// This is UI runway only; canonical depth remains untouched and real levels
@@ -598,18 +599,21 @@ impl PriceGridLayout {
 }
 
 fn price_grid_layout(frame: &OrderBookFrame) -> Option<PriceGridLayout> {
-    let base_tick = frame
-        .price_increment
-        .filter(|increment| *increment > 0)
-        .or_else(|| observed_price_increment(frame))?;
-    let tick = base_tick.checked_mul(display_tick_multiplier(frame))?;
+    let tick = if frame.provider_id == "hyperliquid" {
+        hyperliquid_display_tick(frame)?
+    } else {
+        frame
+            .price_increment
+            .filter(|increment| *increment > 0)
+            .or_else(|| observed_price_increment(frame))?
+    };
     let best_bid = price_grid_anchor_best_bid(frame, tick)?;
     let ask_start = best_bid.checked_add(tick)?;
 
     let mut bid_rows = 1usize;
     let mut ask_rows = 1usize;
 
-    if let Some(best_ask) = frame.best_ask.as_ref().map(|level| level.price) {
+    if let Some(best_ask) = display_best_ask(frame).map(|level| level.price) {
         let best_ask = ceil_price_to_tick(best_ask, tick)?;
         if best_ask < ask_start {
             return None;
@@ -665,12 +669,21 @@ fn price_grid_layout(frame: &OrderBookFrame) -> Option<PriceGridLayout> {
     })
 }
 
-fn display_tick_multiplier(frame: &OrderBookFrame) -> i64 {
-    if frame.provider_id == "hyperliquid" {
-        HYPERLIQUID_DISPLAY_TICK_MULTIPLIER
-    } else {
-        1
+fn hyperliquid_display_tick(frame: &OrderBookFrame) -> Option<i64> {
+    let price = display_best_bid(frame)
+        .or_else(|| display_best_ask(frame))
+        .map(|level| level.price)
+        .or_else(|| {
+            frame
+                .traded_volumes
+                .last_key_value()
+                .map(|(price, _)| *price)
+        })?;
+    if price <= 0 {
+        return None;
     }
+    let digits = price.ilog10().saturating_add(1);
+    10_i64.checked_pow(digits.saturating_sub(HYPERLIQUID_DISPLAY_SIGNIFICANT_FIGURES))
 }
 
 fn floor_price_to_tick(price: i64, tick: i64) -> Option<i64> {
@@ -760,10 +773,10 @@ const fn greatest_common_divisor(mut left: i64, mut right: i64) -> i64 {
 /// that presentation behavior without promoting quotes/trades into canonical
 /// depth. Every generated row still uses the provider-declared increment.
 fn price_grid_anchor_best_bid(frame: &OrderBookFrame, tick: i64) -> Option<i64> {
-    if let Some(best_bid) = frame.best_bid.as_ref().map(|level| level.price) {
+    if let Some(best_bid) = display_best_bid(frame).map(|level| level.price) {
         return floor_price_to_tick(best_bid, tick).filter(|price| *price > 0);
     }
-    if let Some(best_ask) = frame.best_ask.as_ref().map(|level| level.price) {
+    if let Some(best_ask) = display_best_ask(frame).map(|level| level.price) {
         return ceil_price_to_tick(best_ask, tick)?
             .checked_sub(tick)
             .filter(|price| *price > 0);
@@ -782,6 +795,22 @@ fn price_grid_anchor_best_bid(frame: &OrderBookFrame, tick: i64) -> Option<i64> 
             .filter(|price| *price > 0)?,
         tick,
     )
+}
+
+fn display_best_bid(frame: &OrderBookFrame) -> Option<&OrderBookColumnLevel> {
+    frame
+        .rows
+        .iter()
+        .find_map(|row| row.bid.as_ref())
+        .or(frame.best_bid.as_ref())
+}
+
+fn display_best_ask(frame: &OrderBookFrame) -> Option<&OrderBookColumnLevel> {
+    frame
+        .rows
+        .iter()
+        .find_map(|row| row.ask.as_ref())
+        .or(frame.best_ask.as_ref())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1065,7 +1094,7 @@ fn ladder_layout(frame: &OrderBookFrame) -> LadderLayout {
     LadderLayout {
         ask_count: frame.rows.iter().filter(|row| row.ask.is_some()).count(),
         bid_count: frame.rows.iter().filter(|row| row.bid.is_some()).count(),
-        spread: frame.best_bid.is_some() && frame.best_ask.is_some(),
+        spread: display_best_bid(frame).is_some() && display_best_ask(frame).is_some(),
     }
 }
 
@@ -1347,7 +1376,7 @@ fn render_empty_price_tick(
 }
 
 fn price_grid_center_row(frame: &OrderBookFrame, theme: &AxiusflowTheme) -> AnyElement {
-    if let Some(row) = spread_row(frame.best_bid.as_ref(), frame.best_ask.as_ref(), theme) {
+    if let Some(row) = spread_row(display_best_bid(frame), display_best_ask(frame), theme) {
         return row.into_any_element();
     }
     div()
@@ -1904,6 +1933,33 @@ mod tests {
     }
 
     #[test]
+    fn divergent_independent_bbo_does_not_collapse_the_canonical_depth_grid() {
+        let mut frame = price_grid_frame();
+        frame.best_bid = Some(grid_level(19_000, 8));
+        frame.best_ask = Some(grid_level(19_025, 9));
+
+        let grid = price_grid_layout(&frame).expect("canonical depth keeps a continuous grid");
+
+        assert_eq!(grid.best_bid, 20_000);
+        assert_eq!(
+            display_best_bid(&frame).map(|level| level.price),
+            Some(20_000)
+        );
+        assert_eq!(
+            display_best_ask(&frame).map(|level| level.price),
+            Some(20_100)
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() - 1),
+            Some(PriceGridItem::Ask(20_025))
+        );
+        assert_eq!(
+            price_grid_item(grid, grid.recenter_index() + 1),
+            Some(PriceGridItem::Bid(20_000))
+        );
+    }
+
+    #[test]
     fn btc_like_grid_places_the_spread_at_the_center_not_the_top_ask_runway() {
         let mut frame = price_grid_frame();
         frame.price_increment = Some(1);
@@ -1999,36 +2055,36 @@ mod tests {
     }
 
     #[test]
-    fn hyperliquid_full_precision_bbo_preserves_base_tick_with_aggregated_depth() {
+    fn hyperliquid_display_tick_stays_stable_when_snapshot_level_gaps_widen() {
         let mut frame = price_grid_frame();
         frame.provider_id = "hyperliquid".into();
         frame.price_scale = 0;
         frame.price_increment = None;
         frame.best_bid = Some(grid_level(77_110, 5));
-        frame.best_ask = Some(grid_level(77_111, 7));
+        frame.best_ask = Some(grid_level(77_120, 7));
         frame.rows = vec![
             OrderBookRow {
                 bid: Some(grid_level(77_100, 5)),
-                ask: Some(grid_level(77_120, 7)),
+                ask: Some(grid_level(77_200, 7)),
             },
             OrderBookRow {
-                bid: Some(grid_level(77_090, 3)),
-                ask: Some(grid_level(77_130, 2)),
+                bid: Some(grid_level(77_000, 3)),
+                ask: Some(grid_level(77_300, 2)),
             },
         ];
         frame.traded_volumes.clear();
 
-        assert_eq!(observed_price_increment(&frame), Some(1));
+        assert_eq!(observed_price_increment(&frame), Some(10));
         let grid = price_grid_layout(&frame).expect("aggregated provider book keeps display grid");
         assert_eq!(grid.tick, 10);
         let center = grid.recenter_index();
         assert_eq!(
             price_grid_item(grid, center - 1),
-            Some(PriceGridItem::Ask(77_120))
+            Some(PriceGridItem::Ask(77_110))
         );
         assert_eq!(
             price_grid_item(grid, center + 1),
-            Some(PriceGridItem::Bid(77_110))
+            Some(PriceGridItem::Bid(77_100))
         );
     }
 

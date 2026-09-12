@@ -45,13 +45,6 @@ pub fn project_order_book(
         .max()
         .unwrap_or(0);
     let row_count = publication.bids.len().max(publication.asks.len());
-    // Complete canonical depth and the provider's independent BBO stream are
-    // not one atomic image. Prefer each real depth edge when it exists so a
-    // later-arriving but older quote cannot put the spread behind its own book
-    // and force the continuous ladder into its real-level fallback. The BBO
-    // remains the only valid fallback while that depth side is unavailable.
-    let best_bid = publication.bids.first().copied().or(publication.best_bid);
-    let best_ask = publication.asks.first().copied().or(publication.best_ask);
     let mut rows = Vec::with_capacity(row_count);
     for index in 0..row_count {
         rows.push(OrderBookRow {
@@ -86,7 +79,7 @@ pub fn project_order_book(
         price_scale: selection.precision.price_scale(),
         quantity_scale: selection.precision.quantity_scale(),
         price_increment: selection.price_increment.filter(|increment| *increment > 0),
-        best_bid: best_bid.map(|level| {
+        best_bid: publication.best_bid.map(|level| {
             project_level(
                 level,
                 selection.precision.price_scale(),
@@ -94,7 +87,7 @@ pub fn project_order_book(
                 maximum_quantity,
             )
         }),
-        best_ask: best_ask.map(|level| {
+        best_ask: publication.best_ask.map(|level| {
             project_level(
                 level,
                 selection.precision.price_scale(),
@@ -319,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_depth_edges_override_a_divergent_independent_bbo() {
+    fn projection_preserves_independent_bbo_beside_canonical_depth() {
         let mut publication = publication("mnq");
         publication.best_bid = Some(DepthLevel {
             price: 19_960,
@@ -338,19 +331,19 @@ mod tests {
 
         assert_eq!(
             frame.best_bid.as_ref().map(|level| level.price),
-            Some(20_025)
+            Some(19_960)
         );
         assert_eq!(
             frame.best_ask.as_ref().map(|level| level.price),
-            Some(20_050)
+            Some(19_970)
         );
         assert_eq!(
             frame.rows[0].bid.as_ref().map(|level| level.price),
-            frame.best_bid.as_ref().map(|level| level.price)
+            Some(20_025)
         );
         assert_eq!(
             frame.rows[0].ask.as_ref().map(|level| level.price),
-            frame.best_ask.as_ref().map(|level| level.price)
+            Some(20_050)
         );
     }
 
