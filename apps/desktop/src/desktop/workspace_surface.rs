@@ -184,7 +184,10 @@ fn runtime_study_count(studies: &RuntimeStudiesState) -> usize {
     studies
         .active
         .iter()
-        .filter(|state| !studies.removing.contains(&state.study_id))
+        .filter(|state| {
+            !studies.removing.contains(&state.study_id)
+                && !studies.automatic_removals.contains(&state.study_id)
+        })
         .count()
         + studies
             .pending
@@ -192,6 +195,65 @@ fn runtime_study_count(studies: &RuntimeStudiesState) -> usize {
             .filter(|state| !state.remove_on_registration)
             .count()
         + studies.deferred.len()
+}
+
+fn persisted_runtime_study_states(
+    studies: &RuntimeStudiesState,
+    mut visible: impl FnMut(StudyInstanceId) -> Option<bool>,
+) -> Vec<WorkspaceChartStudyState> {
+    let mut persisted = studies
+        .active
+        .iter()
+        .filter(|state| !studies.automatic_removals.contains(&state.study_id))
+        .map(|state| {
+            let mut persisted = state.persisted.clone();
+            persisted.visible = visible(state.study_id).unwrap_or(persisted.visible);
+            persisted
+        })
+        .chain(
+            studies
+                .pending
+                .values()
+                .filter(|state| !state.remove_on_registration)
+                .map(|state| state.persisted.clone()),
+        )
+        .chain(
+            studies
+                .deferred
+                .iter()
+                .filter(|state| !state.remove_on_registration)
+                .map(|state| state.persisted.clone()),
+        )
+        .collect::<Vec<_>>();
+    persisted.sort_by_key(|state| state.local_id);
+    persisted
+}
+
+fn dispatch_automatic_study_removals(
+    studies: &mut RuntimeStudiesState,
+    mut try_remove: impl FnMut(StudyInstanceId) -> Result<(), TrySendError<StudyInstanceId>>,
+) -> bool {
+    let mut retry = studies
+        .automatic_removals
+        .iter()
+        .filter(|study_id| !studies.removing.contains(study_id))
+        .copied()
+        .collect::<Vec<_>>();
+    retry.sort_unstable();
+    for study_id in retry {
+        match try_remove(study_id) {
+            Ok(()) => {
+                studies.removing.insert(study_id);
+            }
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => return false,
+        }
+    }
+    true
+}
+
+fn study_removal_failed(studies: &mut RuntimeStudiesState, study_id: StudyInstanceId) -> bool {
+    studies.removing.remove(&study_id);
+    studies.automatic_removals.contains(&study_id)
 }
 
 fn discard_unregistered_runtime_studies(studies: &mut RuntimeStudiesState) -> bool {
@@ -892,34 +954,9 @@ impl WorkspaceSurface {
                 precision: state.precision.map(u32::from),
             });
         let indicators = persisted_legacy_indicator_states(chart.indicator_states());
-        let mut studies = self
-            .studies
-            .active
-            .iter()
-            .filter(|state| !self.studies.removing.contains(&state.study_id))
-            .map(|state| {
-                let mut persisted = state.persisted.clone();
-                persisted.visible = chart
-                    .study_visible(state.study_id.get())
-                    .unwrap_or(persisted.visible);
-                persisted
-            })
-            .chain(
-                self.studies
-                    .pending
-                    .values()
-                    .filter(|state| !state.remove_on_registration)
-                    .map(|state| state.persisted.clone()),
-            )
-            .chain(
-                self.studies
-                    .deferred
-                    .iter()
-                    .filter(|state| !state.remove_on_registration)
-                    .map(|state| state.persisted.clone()),
-            )
-            .collect::<Vec<_>>();
-        studies.sort_by_key(|state| state.local_id);
+        let studies = persisted_runtime_study_states(&self.studies, |study_id| {
+            chart.study_visible(study_id.get())
+        });
         Some(WorkspaceChartState {
             chart_type: chart.chart_type().identifier().to_string(),
             nucleus_state_json,
@@ -1089,6 +1126,7 @@ impl WorkspaceSurface {
             pending_chart_context_menu: None,
             pending_pane_activate: PaneActivationRequest::None,
             pending_study_settings_request: None,
+            pending_study_remove_request: None,
             resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
             retained_chart_presentation: RetainedChartPresentation::default(),
@@ -2138,7 +2176,7 @@ impl WorkspaceSurface {
                 message,
             } => self.apply_study_registration_failed(request_sequence, message, cx),
             MarketWorkerMessage::StudyReinitializationFailed { study_id, message } => {
-                self.studies.reinitializing.remove(&study_id);
+                self.studies.cancel_reinitialization(study_id);
                 if let Some(dialog) = &mut self.study_settings_dialog
                     && dialog.study_id == study_id
                 {
@@ -2148,9 +2186,11 @@ impl WorkspaceSurface {
                 cx.notify();
             }
             MarketWorkerMessage::StudyRemovalFailed { study_id, message } => {
-                self.studies.removing.remove(&study_id);
-                self.indicator_message = Some(message);
-                self.chart_persistence_dirty = true;
+                if study_removal_failed(&mut self.studies, study_id) {
+                    self.indicator_message = None;
+                } else {
+                    self.indicator_message = Some(message);
+                }
                 cx.notify();
             }
             MarketWorkerMessage::PriceAlertTriggered(trigger) => {
@@ -2187,10 +2227,23 @@ impl WorkspaceSurface {
         engine_market_worker::series_key(product, self.interval)
     }
 
+    fn retry_automatic_study_removals(&mut self) -> bool {
+        let market_worker = &self.market_worker;
+        dispatch_automatic_study_removals(&mut self.studies, |study_id| {
+            market_worker.try_remove_study(study_id)
+        })
+    }
+
     fn enqueue_runtime_study(
         &mut self,
         mut state: PendingRuntimeStudyState,
     ) -> Result<u64, Box<(PendingRuntimeStudyState, String)>> {
+        if !self.retry_automatic_study_removals() {
+            return Err(Box::new((
+                state,
+                "Study cancellation is waiting for runtime capacity".to_string(),
+            )));
+        }
         let current_series = match self.current_runtime_series() {
             Ok(series) => series,
             Err(error) => return Err(Box::new((state, error))),
@@ -2247,6 +2300,9 @@ impl WorkspaceSurface {
         study_id: StudyInstanceId,
         series: BarSeriesKey,
     ) -> Result<(), String> {
+        if !self.retry_automatic_study_removals() {
+            return Err("Study cancellation is waiting for runtime capacity".to_string());
+        }
         let persisted = self
             .studies
             .active
@@ -2260,7 +2316,7 @@ impl WorkspaceSurface {
             .try_reinitialize_study(study_id, registration)
         {
             Ok(()) => {
-                self.studies.reinitializing.insert(
+                self.studies.begin_reinitialization(
                     study_id,
                     PendingStudyReinitialization {
                         series,
@@ -2277,6 +2333,9 @@ impl WorkspaceSurface {
     }
 
     fn synchronize_runtime_studies(&mut self, cx: &mut Context<Self>) {
+        if !self.retry_automatic_study_removals() {
+            return;
+        }
         self.dispatch_deferred_runtime_studies(cx);
         let Ok(series) = self.current_runtime_series() else {
             return;
@@ -2289,6 +2348,7 @@ impl WorkspaceSurface {
                 runtime_study_uses_current_chart(&state.persisted)
                     && state.resolved_chart_series.as_ref() != Some(&series)
                     && !self.studies.removing.contains(&state.study_id)
+                    && !self.studies.automatic_removals.contains(&state.study_id)
                     && !self.studies.reinitializing.contains_key(&state.study_id)
             })
             .map(|state| state.study_id)
@@ -2319,15 +2379,8 @@ impl WorkspaceSurface {
         };
         if state.remove_on_registration {
             self.studies.active.push(runtime_state);
-            match self.market_worker.try_remove_study(study_id) {
-                Ok(()) => {
-                    self.studies.removing.insert(study_id);
-                }
-                Err(_) => {
-                    self.indicator_message =
-                        Some("Study removal queue is busy or unavailable".to_string());
-                }
-            }
+            self.studies.automatic_removals.insert(study_id);
+            let _ = self.retry_automatic_study_removals();
             self.chart_persistence_dirty = true;
             cx.notify();
             return;
@@ -2375,20 +2428,11 @@ impl WorkspaceSurface {
     }
 
     fn apply_study_reinitialized(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
-        let Some(pending) = self.studies.reinitializing.get(&study_id).cloned() else {
+        let Some(persisted_changed) = self.studies.complete_reinitialization(study_id) else {
             return;
         };
-        if let Some(state) = self
-            .studies
-            .active
-            .iter_mut()
-            .find(|state| state.study_id == study_id)
-        {
-            state.resolved_chart_series = Some(pending.series);
-            if let Some(replacement) = pending.replacement_persisted {
-                state.persisted = replacement;
-                self.chart_persistence_dirty = true;
-            }
+        if persisted_changed {
+            self.chart_persistence_dirty = true;
         }
         if self
             .study_settings_dialog
@@ -2406,7 +2450,7 @@ impl WorkspaceSurface {
         snapshot: &axiusflow_market_runtime::MarketStudyOutputSnapshot,
         cx: &mut Context<Self>,
     ) {
-        if self.studies.reinitializing.contains_key(&snapshot.study_id) {
+        if self.studies.suppresses_output(snapshot.study_id) {
             return;
         }
         let Some(chart) = &self.chart else {
@@ -2470,21 +2514,16 @@ impl WorkspaceSurface {
             .iter()
             .map(|study_id| study_id.get())
             .collect::<Vec<_>>();
-        let removed_runtime = removed.study_ids.iter().any(|study_id| {
-            self.studies
-                .active
-                .iter()
-                .any(|state| state.study_id == *study_id)
-        });
-        self.studies
-            .active
-            .retain(|state| !removed.study_ids.contains(&state.study_id));
-        for study_id in &removed.study_ids {
-            self.studies.reinitializing.remove(study_id);
-            self.studies.removing.remove(study_id);
-        }
+        let removed_runtime = self.studies.remove_runtime_subtree(&removed.study_ids);
         if removed_runtime {
             self.chart_persistence_dirty = true;
+        }
+        if self
+            .study_settings_dialog
+            .as_ref()
+            .is_some_and(|dialog| removed.study_ids.contains(&dialog.study_id))
+        {
+            self.study_settings_dialog = None;
         }
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -2500,9 +2539,8 @@ impl WorkspaceSurface {
         invalidated: &axiusflow_market_runtime::MarketStudyOutputsInvalidated,
         cx: &mut Context<Self>,
     ) {
-        for study_id in &invalidated.study_ids {
-            self.studies.reinitializing.remove(study_id);
-        }
+        self.studies
+            .invalidate_study_outputs(&invalidated.study_ids);
         let Some(chart) = &self.chart else {
             return;
         };
@@ -3517,6 +3555,44 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn remove_runtime_study(
+        &mut self,
+        study_id: StudyInstanceId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.studies.removing.contains(&study_id) {
+            return;
+        }
+        if !self
+            .studies
+            .active
+            .iter()
+            .any(|state| state.study_id == study_id)
+        {
+            self.indicator_message = Some("Study is no longer active".to_string());
+            cx.notify();
+            return;
+        }
+        match self.market_worker.try_remove_study(study_id) {
+            Ok(()) => {
+                self.studies.removing.insert(study_id);
+                if self
+                    .study_settings_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.study_id == study_id)
+                {
+                    self.study_settings_dialog = None;
+                }
+                self.indicator_message = None;
+            }
+            Err(_) => {
+                self.indicator_message =
+                    Some("Study removal queue is busy or unavailable".to_string());
+            }
+        }
+        cx.notify();
+    }
+
     pub(super) fn set_study_setting_boolean(
         &mut self,
         identifier: &str,
@@ -3635,12 +3711,20 @@ impl WorkspaceSurface {
                     return;
                 }
             };
+        if !self.retry_automatic_study_removals() {
+            if let Some(dialog) = &mut self.study_settings_dialog {
+                dialog.message =
+                    Some("Study cancellation is waiting for runtime capacity".to_string());
+            }
+            cx.notify();
+            return;
+        }
         match self
             .market_worker
             .try_reinitialize_study(study_id, registration)
         {
             Ok(()) => {
-                self.studies.reinitializing.insert(
+                self.studies.begin_reinitialization(
                     study_id,
                     PendingStudyReinitialization {
                         series,
@@ -3666,7 +3750,6 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn clear_indicators(&mut self, cx: &mut Context<Self>) {
-        let mut runtime_removal_queued = false;
         let study_ids = self
             .studies
             .active
@@ -3678,7 +3761,6 @@ impl WorkspaceSurface {
             match self.market_worker.try_remove_study(study_id) {
                 Ok(()) => {
                     self.studies.removing.insert(study_id);
-                    runtime_removal_queued = true;
                 }
                 Err(_) => {
                     self.indicator_message =
@@ -3694,7 +3776,7 @@ impl WorkspaceSurface {
                 }
             });
         }
-        if runtime_removal_queued || unregistered_removed {
+        if unregistered_removed {
             self.chart_persistence_dirty = true;
         }
         self.retain_chart_presentation(cx);
@@ -4013,7 +4095,7 @@ mod tests {
             }],
             ..RuntimeStudiesState::default()
         };
-        studies.reinitializing.insert(
+        studies.begin_reinitialization(
             study_id,
             PendingStudyReinitialization {
                 series,
@@ -4023,8 +4105,286 @@ mod tests {
 
         // Runtime failure retires only the pending candidate. The active
         // durable configuration is not replaced until success is acknowledged.
-        studies.reinitializing.remove(&study_id);
+        studies.cancel_reinitialization(study_id);
         assert_eq!(studies.active[0].persisted, original);
+        assert!(!studies.suppressing_outputs.contains(&study_id));
+    }
+
+    fn reinitializing_dependency_chain() -> (
+        RuntimeStudiesState,
+        StudyInstanceId,
+        StudyInstanceId,
+        BarSeriesKey,
+    ) {
+        let root_id = StudyInstanceId::try_from_u64(1).expect("root study id");
+        let downstream_id = StudyInstanceId::try_from_u64(2).expect("downstream study id");
+        let old_series = custom_package_series("instrument:rithmic:CME:MNQ");
+        let new_series = custom_package_series("instrument:rithmic:CME:MES");
+        let root = legacy_runtime_study(1, ChartIndicator::Sma, true).expect("root study");
+        let mut downstream =
+            legacy_runtime_study(2, ChartIndicator::Sma, true).expect("downstream study");
+        downstream.dependencies.push(WorkspaceStudyDependencyState {
+            kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
+            study_local_id: 1,
+            output_identifier: axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            ..WorkspaceStudyDependencyState::default()
+        });
+        let mut studies = RuntimeStudiesState {
+            active: vec![
+                RuntimeStudyState {
+                    study_id: root_id,
+                    persisted: root,
+                    resolved_chart_series: Some(old_series.clone()),
+                },
+                RuntimeStudyState {
+                    study_id: downstream_id,
+                    persisted: downstream,
+                    resolved_chart_series: Some(old_series),
+                },
+            ],
+            ..RuntimeStudiesState::default()
+        };
+        studies.begin_reinitialization(
+            root_id,
+            PendingStudyReinitialization {
+                series: new_series.clone(),
+                replacement_persisted: None,
+            },
+        );
+        studies.begin_reinitialization(
+            downstream_id,
+            PendingStudyReinitialization {
+                series: new_series.clone(),
+                replacement_persisted: None,
+            },
+        );
+        (studies, root_id, downstream_id, new_series)
+    }
+
+    fn dependent_output_descriptor() -> ChartStudyOutputDescriptor<'static> {
+        ChartStudyOutputDescriptor {
+            title: "Dependent",
+            legend_label: None,
+            plot: ChartStudyPlotKind::Line,
+            pane: ChartStudyPaneTarget::Price,
+            scale: ChartStudyScaleTarget::Primary,
+            settings_available: false,
+            threshold_region: None,
+            point_style: ChartStudyPointStyle::Uniform,
+        }
+    }
+
+    fn install_dependent_output(
+        chart: &mut NucleusChartView,
+        study_id: StudyInstanceId,
+        generation: u64,
+        value: f64,
+    ) {
+        chart
+            .install_study_output(
+                study_id.get(),
+                0,
+                dependent_output_descriptor(),
+                generation,
+                &[60_i64 * 1_000_000_000],
+                &[Some(value)],
+            )
+            .expect("dependent presentation installs");
+    }
+
+    #[test]
+    fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_until_own_invalidation()
+     {
+        let (mut studies, root_id, downstream_id, new_series) = reinitializing_dependency_chain();
+        let mut chart = NucleusChartView::empty();
+        install_dependent_output(&mut chart, downstream_id, 1, 1.0);
+        assert_eq!(chart.study_visible(downstream_id.get()), Some(true));
+
+        assert_eq!(studies.complete_reinitialization(root_id), Some(false));
+        assert!(!studies.reinitializing.contains_key(&root_id));
+        assert!(studies.reinitializing.contains_key(&downstream_id));
+        assert!(studies.suppresses_output(root_id));
+        assert!(studies.suppresses_output(downstream_id));
+
+        studies.invalidate_study_outputs(&[root_id, downstream_id]);
+        chart.remove_study_outputs(&[root_id.get(), downstream_id.get()]);
+        assert!(!studies.suppresses_output(root_id));
+        assert!(studies.suppresses_output(downstream_id));
+        assert!(studies.reinitializing.contains_key(&downstream_id));
+        assert_eq!(chart.study_visible(downstream_id.get()), None);
+
+        if !studies.suppresses_output(downstream_id) {
+            install_dependent_output(&mut chart, downstream_id, 2, 2.0);
+        }
+        assert_eq!(
+            chart.study_visible(downstream_id.get()),
+            None,
+            "upstream subtree output must stay hidden while downstream reinit is pending"
+        );
+
+        assert_eq!(
+            studies.complete_reinitialization(downstream_id),
+            Some(false)
+        );
+        assert!(studies.reinitializing.is_empty());
+        assert!(studies.suppresses_output(downstream_id));
+        studies.invalidate_study_outputs(&[downstream_id]);
+        assert!(!studies.suppresses_output(downstream_id));
+        install_dependent_output(&mut chart, downstream_id, 3, 3.0);
+        assert_eq!(chart.study_visible(downstream_id.get()), Some(true));
+        assert!(
+            studies
+                .active
+                .iter()
+                .all(|state| state.resolved_chart_series.as_ref() == Some(&new_series))
+        );
+    }
+
+    fn dependent_legacy_study(local_id: u64, upstream_local_id: u64) -> WorkspaceChartStudyState {
+        let mut study =
+            legacy_runtime_study(local_id, ChartIndicator::Sma, true).expect("dependent study");
+        study.dependencies = vec![WorkspaceStudyDependencyState {
+            kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
+            study_local_id: upstream_local_id,
+            output_identifier: axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            ..WorkspaceStudyDependencyState::default()
+        }];
+        study
+    }
+
+    fn pending_runtime_study(
+        persisted: WorkspaceChartStudyState,
+        blocked: bool,
+    ) -> PendingRuntimeStudyState {
+        PendingRuntimeStudyState {
+            persisted,
+            resolved_chart_series: None,
+            remove_on_registration: false,
+            persist_on_registration: false,
+            blocked,
+        }
+    }
+
+    fn runtime_subtree_removal_fixture() -> (RuntimeStudiesState, StudyInstanceId, StudyInstanceId)
+    {
+        let root_id = StudyInstanceId::try_from_u64(1).expect("root study id");
+        let downstream_id = StudyInstanceId::try_from_u64(2).expect("downstream study id");
+        let unrelated_id = StudyInstanceId::try_from_u64(3).expect("unrelated study id");
+        let mut studies = RuntimeStudiesState {
+            active: vec![
+                RuntimeStudyState {
+                    study_id: root_id,
+                    persisted: legacy_runtime_study(1, ChartIndicator::Sma, true)
+                        .expect("root study"),
+                    resolved_chart_series: None,
+                },
+                RuntimeStudyState {
+                    study_id: downstream_id,
+                    persisted: dependent_legacy_study(2, 1),
+                    resolved_chart_series: None,
+                },
+                RuntimeStudyState {
+                    study_id: unrelated_id,
+                    persisted: legacy_runtime_study(3, ChartIndicator::Wma, true)
+                        .expect("unrelated study"),
+                    resolved_chart_series: None,
+                },
+            ],
+            pending: HashMap::from([(
+                7,
+                pending_runtime_study(dependent_legacy_study(4, 2), false),
+            )]),
+            deferred: vec![
+                pending_runtime_study(dependent_legacy_study(5, 4), true),
+                pending_runtime_study(
+                    legacy_runtime_study(6, ChartIndicator::Wma, true)
+                        .expect("unrelated deferred study"),
+                    false,
+                ),
+            ],
+            ..RuntimeStudiesState::default()
+        };
+        studies.removing.insert(root_id);
+        studies.begin_reinitialization(
+            downstream_id,
+            PendingStudyReinitialization {
+                series: custom_package_series("instrument:rithmic:CME:MES"),
+                replacement_persisted: None,
+            },
+        );
+        (studies, root_id, downstream_id)
+    }
+
+    #[test]
+    fn manual_runtime_subtree_removal_waits_for_authoritative_ack_before_durable_cleanup() {
+        let (mut studies, root_id, downstream_id) = runtime_subtree_removal_fixture();
+
+        let persisted_before_ack = persisted_runtime_study_states(&studies, |_| None)
+            .into_iter()
+            .map(|state| state.local_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            persisted_before_ack,
+            vec![1, 2, 3, 4, 5, 6],
+            "queuing manual runtime removal must retain the durable root and every descendant until runtime ACK"
+        );
+
+        assert!(!study_removal_failed(&mut studies, root_id));
+        assert!(!studies.removing.contains(&root_id));
+        assert_eq!(
+            persisted_runtime_study_states(&studies, |_| None)
+                .into_iter()
+                .map(|state| state.local_id)
+                .collect::<Vec<_>>(),
+            persisted_before_ack,
+            "manual removal failure leaves the ordinary durable graph unchanged"
+        );
+
+        studies.removing.insert(root_id);
+        assert_eq!(
+            persisted_runtime_study_states(&studies, |_| None)
+                .into_iter()
+                .map(|state| state.local_id)
+                .collect::<Vec<_>>(),
+            persisted_before_ack,
+            "retrying manual removal still cannot advance durable cleanup ahead of runtime authority"
+        );
+
+        assert!(studies.remove_runtime_subtree(&[root_id, downstream_id]));
+        assert_eq!(
+            studies
+                .active
+                .iter()
+                .map(|state| state.persisted.local_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(
+            studies
+                .pending
+                .get(&7)
+                .is_some_and(|state| state.remove_on_registration)
+        );
+        assert_eq!(
+            studies
+                .deferred
+                .iter()
+                .map(|state| state.persisted.local_id)
+                .collect::<Vec<_>>(),
+            vec![6]
+        );
+        assert_eq!(runtime_study_count(&studies), 2);
+        assert_eq!(
+            persisted_runtime_study_states(&studies, |_| None)
+                .into_iter()
+                .map(|state| state.local_id)
+                .collect::<Vec<_>>(),
+            vec![3, 6],
+            "persisted graph excludes the removed runtime subtree and every pending/deferred durable descendant"
+        );
+        assert!(!studies.removing.contains(&root_id));
+        assert!(!studies.reinitializing.contains_key(&downstream_id));
+        assert!(!studies.suppressing_outputs.contains(&downstream_id));
     }
 
     #[test]
@@ -4288,6 +4648,87 @@ mod tests {
         });
 
         assert_eq!(runtime_study_count(&studies), 3);
+    }
+
+    #[test]
+    fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_or_persistence()
+    {
+        let study_id = StudyInstanceId::try_from_u64(9).expect("study id");
+        let mut studies = RuntimeStudiesState {
+            active: vec![RuntimeStudyState {
+                study_id,
+                persisted: legacy_runtime_study(9, ChartIndicator::Sma, true).expect("SMA study"),
+                resolved_chart_series: None,
+            }],
+            ..RuntimeStudiesState::default()
+        };
+        studies.automatic_removals.insert(study_id);
+
+        let mut attempts = 0;
+        assert!(!dispatch_automatic_study_removals(
+            &mut studies,
+            |received| {
+                attempts += 1;
+                Err(TrySendError::Full(received))
+            }
+        ));
+        assert_eq!(attempts, 1);
+        assert!(studies.automatic_removals.contains(&study_id));
+        assert!(!studies.removing.contains(&study_id));
+        assert!(studies.suppresses_output(study_id));
+        assert_eq!(runtime_study_count(&studies), 0);
+        assert!(persisted_runtime_study_states(&studies, |_| None).is_empty());
+
+        assert!(dispatch_automatic_study_removals(
+            &mut studies,
+            |received| {
+                attempts += 1;
+                assert_eq!(received, study_id);
+                Ok(())
+            }
+        ));
+        assert_eq!(attempts, 2);
+        assert!(studies.removing.contains(&study_id));
+        assert!(dispatch_automatic_study_removals(&mut studies, |_| panic!(
+            "an in-flight automatic removal must not be queued twice"
+        )));
+
+        assert!(studies.remove_runtime_subtree(&[study_id]));
+        assert!(studies.active.is_empty());
+        assert!(!studies.automatic_removals.contains(&study_id));
+        assert!(!studies.removing.contains(&study_id));
+    }
+
+    #[test]
+    fn automatic_study_removal_retries_after_runtime_failure() {
+        let study_id = StudyInstanceId::try_from_u64(10).expect("study id");
+        let mut studies = RuntimeStudiesState::default();
+        studies.automatic_removals.insert(study_id);
+
+        assert!(dispatch_automatic_study_removals(
+            &mut studies,
+            |received| {
+                assert_eq!(received, study_id);
+                Ok(())
+            }
+        ));
+        assert!(studies.removing.contains(&study_id));
+        assert!(study_removal_failed(&mut studies, study_id));
+        assert!(!studies.removing.contains(&study_id));
+        assert!(studies.automatic_removals.contains(&study_id));
+
+        let mut retries = 0;
+        assert!(dispatch_automatic_study_removals(
+            &mut studies,
+            |received| {
+                retries += 1;
+                assert_eq!(received, study_id);
+                Ok(())
+            }
+        ));
+        assert_eq!(retries, 1);
+        assert!(studies.removing.contains(&study_id));
+        assert!(studies.automatic_removals.contains(&study_id));
     }
 
     #[test]

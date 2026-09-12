@@ -78,6 +78,13 @@ execution cannot partially advance recursive state or output generations. State 
 provide exact runtime byte accounting, including owned heap capacity; runtime configuration also
 bounds study count, dependencies, outputs, points, and total state/output memory.
 
+`NativeStudyState::new` is intentionally limited to `Copy` state, where creating an execution
+candidate cannot preserve shared mutable aliases to the committed value. State that owns heap data
+or uses shared containers must use `NativeStudyState::new_transactional` and provide an explicit
+candidate-clone function. That function must make all mutable state independent of the committed
+instance; a shallow `Arc<Mutex<_>>`/interior-mutable clone is not a valid transactional clone.
+This remains a reviewed trusted-native contract rather than a sandbox boundary.
+
 Market dependencies are declarations, not provider handles. `MarketEngine` remains the only owner
 of provider sessions and canonical market state. Requesting Quotes/Trades/Depth extends the
 engine-owned stream demand and exposes borrowed canonical views during execution. Current non-bar
@@ -95,7 +102,7 @@ interpolated silently.
 The examples compile against the SDK facade only:
 
 - `examples/stateless.rs` — dirty-range stateless scalar output from canonical fixed-point bars.
-- `examples/stateful.rs` — runtime-owned cloneable state with explicit byte accounting.
+- `examples/stateful.rs` — runtime-owned transactional state with explicit clone and byte accounting.
 - `examples/multi_output.rs` — two stable outputs grouped under one study presentation.
 - `examples/multi_timeframe.rs` — two market dependencies with explicit timestamp alignment.
 - `examples/market_microstructure.rs` — bar-aligned use of borrowed quote/trade/depth state.

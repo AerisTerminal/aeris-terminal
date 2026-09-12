@@ -14,13 +14,18 @@ fn state_bytes(_state: &ExecutionState) -> usize {
     std::mem::size_of::<ExecutionState>()
 }
 
+fn clone_state(state: &ExecutionState) -> ExecutionState {
+    state.clone()
+}
+
 fn create_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
     if settings.get("unexpected").is_some() {
         return Err("unexpected state setting".to_string());
     }
-    Ok(NativeStudyState::new(
+    Ok(NativeStudyState::new_transactional(
         ExecutionState::default(),
         state_bytes,
+        clone_state,
     ))
 }
 

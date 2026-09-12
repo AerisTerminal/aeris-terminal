@@ -31,7 +31,7 @@ The planned runtime/SDK foundation through Phase E is implemented and qualified.
 
 ### Completed: transactional native execution and per-instance state
 
-- Trusted Rust studies support runtime-owned, cloneable typed per-instance state.
+- Trusted Rust studies support runtime-owned typed per-instance state: trivially copyable state uses the safe default constructor, while heap/shared state must provide an explicit mutation-isolated transactional clone contract.
 - State construction is factory-owned and deterministic from validated settings.
 - Native execution is transactional: candidate state/output is committed only after successful calculation and memory validation.
 - Calculation errors, panics, clone failures, and state-memory-accounting failures leave the last committed state/output intact.
@@ -46,14 +46,16 @@ The planned runtime/SDK foundation through Phase E is implemented and qualified.
 - Live bar append/revision maps by exact exchange timestamp rather than assuming row identity across timeframes.
 - Multi-timeframe secondary-input changes invalidate the correct primary timeline conservatively.
 - Dirty ranges propagate through dependent outputs in registration/dependency order.
-- Historical hydration and live execution share the same runtime rather than using duplicate calculation paths.
+- Initial historical hydration and ranged historical repair share the same runtime; ranged repairs execute from the actual provider-returned timestamp span so committed checkpoints/state are reused instead of forcing a covering rebuild.
+- Incremental output preparation structurally shares unchanged timeline/value storage, so one-row tail work is bounded by dirty rows and outputs rather than retained history length.
 
 ### Completed: quote, trade, and depth SDK inputs
 
 - Native studies can declare Quotes, Trades, and Depth through the same `StudyMarketInput` stream requirements.
 - Calculations receive borrowed current quote state, bounded retained aggressor trades, and direct canonical depth iteration.
 - Depth is not cloned merely to execute a study.
-- Non-bar market events invalidate the containing live bar row by event time and propagate through the DAG.
+- Non-bar market events invalidate the exact containing live bar row by event time, ignore timestamps outside retained bar coverage, and propagate through the DAG according to the study invalidation policy.
+- Borrowed quote/trade/depth state is fenced by the authoritative provider generation and provider health; recovery/session replacement clears or hides stale non-bar state before study execution resumes.
 - Provider demand remains stream-exact; Hyperliquid quote/BBO demand is separated from L2 depth demand so a quote-only study does not cause unnecessary depth subscriptions.
 
 ### Completed: durability and desktop lifecycle
@@ -63,6 +65,7 @@ The planned runtime/SDK foundation through Phase E is implemented and qualified.
 - Legacy WMA/Bollinger/SMA persistence migrates to the runtime-managed durable study model without duplicate Nucleus execution.
 - Desktop registers, reinitializes, removes, restores, and generation-fences runtime study work through the existing market worker command lane.
 - Changing the chart's selected series reinitializes current-chart study dependencies instead of registering a parallel study.
+- Study-legend removal is a host request that removes the authoritative runtime subtree before durable desktop cleanup, including pending/deferred durable descendants that reference removed local study outputs; dependency-chain rebind keeps presentation suppressed until each study's own reinitialization invalidation completes.
 
 ### Completed: rendering boundary
 
@@ -163,11 +166,11 @@ This should be added only after a concrete product study requires it; do not cre
 
 ### 5. Deferred — richer output semantics
 
-Current outputs cover scalar line/histogram/area series. Remaining product requirements may include:
+Current outputs cover scalar line/histogram/area series plus fixed oscillator threshold regions. Remaining product requirements may include:
 
 - Bands/fills between two outputs.
 - Marker/shape events.
-- Threshold/background regions.
+- Richer background/band regions beyond the shipped fixed oscillator threshold-region contract.
 - Semantic price levels.
 - Table/diagnostic values.
 
@@ -187,9 +190,11 @@ The approved static-native product surface now defines:
 ### 7. Completed — performance and soak coverage
 
 - Real Nucleus-backed EMA tail work is measured under an explicit optimized release soak.
+- Runtime-level large-history qualification proves append/revision preparation work stays proportional to dirty rows and output count while prior immutable output snapshots remain stable.
 - Sixteen concurrent stateful studies run under sustained revisions while holding one shared `MarketEngine` lease.
 - Repeated reinitialization and historical repair keep state/output accounting bounded.
 - Quote/trade/depth study execution is burst-qualified, and provider-generation replacement preserves the exact non-bar stream union without duplicate leases.
+- One native-study failure cannot starve unrelated ready studies; its dependent subtree is fenced while already successful independent outputs remain publishable in deterministic order.
 - Workspace close/reopen preserves durable custom-study graphs; unavailable packages do not block unrelated restore, and runtime/chart ownership remains singular.
 
 ## Execution status
@@ -275,7 +280,7 @@ The approved static-native product surface now defines:
 
 The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
-Phase E is now implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; release qualification measures the real recursive EMA path and verifies bounded concurrent/shared-lease, reinitialization/repair, and quote/trade/depth burst workloads; shipping provider capabilities expose their implemented quote paths; and composed workspace persistence/rebind plus provider-session recovery coverage verifies that runtime study/lease ownership is not duplicated.
+Phase E is now implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; transactional state candidates require mutation-isolated cloning; runtime tail output preparation structurally shares unchanged history; ranged provider repairs reuse dirty-range execution; independent calculation failures remain isolated; release qualification measures the real recursive EMA path and verifies bounded concurrent/shared-lease, reinitialization/repair, and quote/trade/depth burst workloads; shipping provider capabilities expose their implemented quote paths; stale non-bar views are provider-generation/recovery fenced; and composed workspace persistence/rebind/removal coverage verifies that runtime study/lease ownership is not duplicated.
 
 The remaining roadmap items are intentionally demand-driven rather than incomplete productization:
 

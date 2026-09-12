@@ -888,6 +888,7 @@ pub struct NucleusChartView {
     pending_context_menu: Option<ChartContextRequest>,
     pending_activate: ActivationRequest,
     pending_study_settings: Option<u64>,
+    pending_study_remove: Option<u64>,
     instrument_price_precision: u8,
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
@@ -962,6 +963,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
             pending_study_settings: None,
+            pending_study_remove: None,
             instrument_price_precision: 2,
             instrument_price_scale: 2,
             price_precision_override: None,
@@ -1060,6 +1062,7 @@ impl NucleusChartView {
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
             pending_study_settings: None,
+            pending_study_remove: None,
             instrument_price_precision: replay_display_precision(replay),
             instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
@@ -1186,6 +1189,11 @@ impl NucleusChartView {
     /// Takes a pending host request to edit one runtime-managed study.
     pub fn take_study_settings_request(&mut self) -> Option<u64> {
         self.pending_study_settings.take()
+    }
+
+    /// Takes a pending host request to remove one runtime-managed study.
+    pub fn take_study_remove_request(&mut self) -> Option<u64> {
+        self.pending_study_remove.take()
     }
 
     /// Reads Nucleus-owned Y-axis chrome for the hit-tested price scale.
@@ -2720,6 +2728,11 @@ fn legend_control(
                         chart.pending_study_settings = Some(study_id);
                         chart_cx.notify();
                     }
+                    return;
+                }
+                if remove && let LegendItem::Study { study_id, .. } = item {
+                    chart.pending_study_remove = Some(study_id);
+                    chart_cx.notify();
                     return;
                 }
                 let changed = if remove {

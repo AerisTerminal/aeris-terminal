@@ -908,6 +908,18 @@ impl Coordinator<'_> {
             }
             return;
         }
+        let repaired_timestamp_span = range.and_then(|_| {
+            snapshot
+                .bars
+                .first()
+                .zip(snapshot.bars.last())
+                .map(|(first, last)| {
+                    (
+                        first.exchange_timestamp_unix_nanos,
+                        last.exchange_timestamp_unix_nanos,
+                    )
+                })
+        });
         let replacing_existing = self.engine.series_snapshot(series).is_some();
         let Some(prepared) = self.prepare_history_repair(series, generation, range, snapshot)
         else {
@@ -958,12 +970,7 @@ impl Coordinator<'_> {
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
-        match self.execute_studies_ready_for_market(series) {
-            Ok(executed) => self.publish_study_outputs(&executed),
-            Err(error) => {
-                eprintln!("Axiusflow study execution after history install failed: {error}");
-            }
-        }
+        self.execute_studies_after_history_install(series, repaired_timestamp_span);
         self.history_confirmed_empty
             .remove(&(series.clone(), generation));
         // Re-check visible coverage after every successful non-empty install.
@@ -974,6 +981,33 @@ impl Coordinator<'_> {
             let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
         }
         self.dispatch_deferred_history(series, generation);
+    }
+
+    fn execute_studies_after_history_install(
+        &mut self,
+        series: &BarSeriesKey,
+        repaired_timestamp_span: Option<(i64, i64)>,
+    ) {
+        let study_execution = match repaired_timestamp_span {
+            Some((first_changed_unix_nanos, last_changed_unix_nanos)) => self
+                .execute_study_history_range_change(
+                    series,
+                    first_changed_unix_nanos,
+                    last_changed_unix_nanos,
+                ),
+            None => self.execute_studies_ready_for_market(series),
+        };
+        match study_execution {
+            Ok(batch) => {
+                self.publish_study_outputs(&batch.executed);
+                for error in batch.errors {
+                    eprintln!("Axiusflow study execution after history install failed: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("Axiusflow study execution after history install failed: {error}");
+            }
+        }
     }
 
     fn dispatch_deferred_history(&mut self, series: &BarSeriesKey, generation: ProviderGeneration) {

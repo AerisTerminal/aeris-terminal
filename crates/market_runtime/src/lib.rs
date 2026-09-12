@@ -99,10 +99,11 @@ pub struct MarketDemandError {
 
 /// Latest committed scalar output for one runtime-owned study output.
 ///
-/// The output arrays remain immutable `Arc`-backed study-runtime state. Delivery
-/// therefore does not copy a whole indicator on every forming-bar revision, and
-/// a newer snapshot for the same output completely supersedes an older queued
-/// one.
+/// Output state is immutable and structurally shared across study generations.
+/// Delivery therefore does not copy a whole indicator on every forming-bar
+/// revision, while consumers can still materialize stable full timestamp/value
+/// slices when required. A newer snapshot for the same output completely
+/// supersedes an older queued one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketStudyOutputSnapshot {
     pub consumer_id: axiusflow_market_engine::ConsumerId,

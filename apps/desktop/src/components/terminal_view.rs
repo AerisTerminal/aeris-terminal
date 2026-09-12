@@ -102,6 +102,7 @@ impl Render for TerminalApp {
         self.absorb_pane_activate_requests(cx);
         self.absorb_chart_context_menu_requests(cx);
         self.absorb_study_settings_requests(window, cx);
+        self.absorb_study_remove_requests(cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();

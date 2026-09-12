@@ -2,20 +2,23 @@ use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
     ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
     DemandWaiter, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
-    InstallProviderInstrument, Instant, MAXIMUM_STUDIES, MAXIMUM_STUDY_DEPENDENCIES,
-    MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT, MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
-    MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS, MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine,
-    MarketServiceStatus, MarketStream, NonZeroUsize, Ordering, PriceAlertRegistry,
-    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
-    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState,
-    REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
+    InstallProviderInstrument, Instant, LiveHistoryState, MAXIMUM_STUDIES,
+    MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT,
+    MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE, MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS,
+    MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine, MarketServiceStatus, MarketStream, NonZeroUsize,
+    Ordering, PriceAlertRegistry, ProviderConnectionState, ProviderDispatch, ProviderGeneration,
+    ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry,
+    ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
     RithmicLiveHandoff, RithmicRealtimeDemand, SeriesLoadState, StreamRequirements,
     StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
     publish_state, thread,
 };
 use crate::{
     MarketRuntimeEvent, MarketStudyOutputSnapshot,
-    study::{StudyLiveMarketData, StudyMarketInput, StudyNonBarChange, StudyRuntimeError},
+    study::{
+        StudyExecutionBatch, StudyLiveMarketData, StudyMarketInput, StudyNonBarChange,
+        StudyRuntimeError,
+    },
 };
 
 pub(super) struct OwnedCoordinatorChannels {
@@ -170,13 +173,54 @@ pub(super) fn drain_shutdown_provider_events(coordinator: &mut Coordinator<'_>) 
     }
 }
 
+fn study_market_series_live_ready(
+    engine: &MarketEngine,
+    rithmic_live: &BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
+    hyperliquid_live: &BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
+    input: &StudyMarketInput,
+) -> bool {
+    let Some(provider) = engine.provider_status(&input.series.provider_id) else {
+        return false;
+    };
+    if provider.health != ProviderHealth::Online {
+        return false;
+    }
+    let Some(provider_generation) = provider.generation else {
+        return false;
+    };
+    if input.series.provider_id == "rithmic" {
+        return rithmic_live.get(&input.series).is_some_and(|live| {
+            live.generation == provider_generation
+                && live.connected
+                && live.history_state == LiveHistoryState::Ready
+        });
+    }
+    if input.series.provider_id == "hyperliquid" {
+        return hyperliquid_live.get(&input.series).is_some_and(|live| {
+            live.generation == provider_generation
+                && live.connected
+                && live.history_state == LiveHistoryState::Ready
+        });
+    }
+    false
+}
+
 fn study_live_market_data<'a>(
+    engine: &MarketEngine,
     order_books: &'a BTreeMap<(String, String), ProviderOrderBook>,
+    rithmic_live: &BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
+    hyperliquid_live: &BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
     input: &StudyMarketInput,
 ) -> Option<StudyLiveMarketData<'a>> {
+    if !study_market_series_live_ready(engine, rithmic_live, hyperliquid_live, input) {
+        return None;
+    }
+    let provider = engine.provider_status(&input.series.provider_id)?;
+    let provider_generation = provider.generation?;
+    let generation = provider_generation.0.get();
     order_books
         .values()
-        .find_map(|book| book.study_live_market_data(input))
+        .find_map(|book| book.study_live_market_data(input, generation))
 }
 
 pub(super) struct Coordinator<'a> {
@@ -703,8 +747,12 @@ impl Coordinator<'_> {
     ) -> Result<bool, StudyRuntimeError> {
         let engine = &self.engine;
         let order_books = &self.order_books;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
         let studies = &mut self.studies;
-        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        let mut live_market = |input: &StudyMarketInput| {
+            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+        };
         studies.execute_ready_with_live(engine, study_id, &mut live_market)
     }
 
@@ -714,19 +762,27 @@ impl Coordinator<'_> {
     ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
         let engine = &self.engine;
         let order_books = &self.order_books;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
         let studies = &mut self.studies;
-        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        let mut live_market = |input: &StudyMarketInput| {
+            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+        };
         studies.execute_ready_subtree_with_live(engine, study_id, &mut live_market)
     }
 
     pub(super) fn execute_studies_ready_for_market(
         &mut self,
         series: &BarSeriesKey,
-    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError> {
         let engine = &self.engine;
         let order_books = &self.order_books;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
         let studies = &mut self.studies;
-        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        let mut live_market = |input: &StudyMarketInput| {
+            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+        };
         studies.execute_ready_for_market_with_live(engine, series, &mut live_market)
     }
 
@@ -734,15 +790,42 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         exchange_timestamp_unix_nanos: i64,
-    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError> {
         let engine = &self.engine;
         let order_books = &self.order_books;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
         let studies = &mut self.studies;
-        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        let mut live_market = |input: &StudyMarketInput| {
+            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+        };
         studies.execute_live_market_change_with_live(
             engine,
             series,
             exchange_timestamp_unix_nanos,
+            &mut live_market,
+        )
+    }
+
+    pub(super) fn execute_study_history_range_change(
+        &mut self,
+        series: &BarSeriesKey,
+        first_changed_unix_nanos: i64,
+        last_changed_unix_nanos: i64,
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError> {
+        let engine = &self.engine;
+        let order_books = &self.order_books;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
+        let studies = &mut self.studies;
+        let mut live_market = |input: &StudyMarketInput| {
+            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+        };
+        studies.execute_history_range_change_with_live(
+            engine,
+            series,
+            first_changed_unix_nanos,
+            last_changed_unix_nanos,
             &mut live_market,
         )
     }
@@ -754,11 +837,18 @@ impl Coordinator<'_> {
         entitlement_id: &str,
         stream: MarketStream,
         observed_unix_nanos: i64,
-    ) -> Result<Vec<super::StudyInstanceId>, StudyRuntimeError> {
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError> {
         let engine = &self.engine;
         let order_books = &self.order_books;
+        let rithmic_live = &self.rithmic_live;
+        let hyperliquid_live = &self.hyperliquid_live;
         let studies = &mut self.studies;
-        let mut live_market = |input: &StudyMarketInput| study_live_market_data(order_books, input);
+        let mut live_market = |input: &StudyMarketInput| {
+            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+        };
+        let mut market_ready = |input: &StudyMarketInput| {
+            study_market_series_live_ready(engine, rithmic_live, hyperliquid_live, input)
+        };
         studies.execute_live_non_bar_change_with_live(
             engine,
             StudyNonBarChange {
@@ -769,6 +859,7 @@ impl Coordinator<'_> {
                 observed_unix_nanos,
             },
             &mut live_market,
+            &mut market_ready,
         )
     }
 
@@ -1011,15 +1102,17 @@ mod tests {
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
-        StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
-        StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettings,
+        StudyExecutionContext, StudyInstanceId, StudyInvalidationPolicy, StudyMarketInput,
+        StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget,
+        StudySettings,
     };
     use crate::{
         hyperliquid_realtime::HyperliquidRealtimeEvent, rithmic_realtime::RithmicRealtimeEvent,
     };
     use axiusflow_contracts::ProviderInstrumentSearchResult;
     use axiusflow_market_data::{
-        AggressorSide, BarPeriod, EventMetadata, MarketBar, MarketTrade, QualifiedTimestamp,
+        AggressorSide, BarPeriod, DepthLevel, DepthSnapshot, EventMetadata, MarketBar, MarketTrade,
+        OrderBookState, QualifiedTimestamp, TopOfBookQuote,
     };
     use axiusflow_market_engine::{ConsumerResourceClass, GenerationId, Viewport, WorkspaceId};
     use std::num::NonZeroU64;
@@ -1159,7 +1252,10 @@ mod tests {
         series: BarSeriesKey,
         streams: StreamRequirements,
     ) -> NativeStudyRegistration {
-        let definition = study_definition_with_streams(series, streams);
+        native_study_registration(study_definition_with_streams(series, streams))
+    }
+
+    fn native_study_registration(definition: StudyDefinition) -> NativeStudyRegistration {
         NativeStudyRegistration {
             settings: StudySettings::defaults(&definition.settings).expect("valid defaults"),
             definition,
@@ -1284,6 +1380,262 @@ mod tests {
             quantity: 1,
             aggressor: AggressorSide::Buy,
         }
+    }
+
+    fn seeded_study_order_book(
+        selected: &InstallProviderInstrument,
+        selected_series: &BarSeriesKey,
+    ) -> ProviderOrderBook {
+        let mut order_book = ProviderOrderBook::new(selected.clone());
+        let quote = TopOfBookQuote {
+            metadata: EventMetadata {
+                provider_id: selected.provider.clone(),
+                instrument_id: selected.instrument_id.clone(),
+                entitlement_id: selected.entitlement_id.clone(),
+                source_sequence: 1,
+                session_generation: 1,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(1),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: 1,
+                },
+            },
+            bid: Some(DepthLevel {
+                price: 100,
+                quantity: 2,
+                order_count: None,
+            }),
+            ask: Some(DepthLevel {
+                price: 101,
+                quantity: 2,
+                order_count: None,
+            }),
+        };
+        assert!(order_book.install_top_of_book(&quote));
+        assert!(order_book.accept_recent_trade(&rithmic_trade_for_series(selected_series, 2, 2)));
+        order_book
+            .book
+            .install_snapshot(&DepthSnapshot {
+                metadata: EventMetadata {
+                    source_sequence: 3,
+                    timestamps: QualifiedTimestamp {
+                        exchange_unix_nanos: Some(3),
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 3,
+                    },
+                    ..quote.metadata
+                },
+                bids: vec![DepthLevel {
+                    price: 100,
+                    quantity: 4,
+                    order_count: Some(1),
+                }],
+                asks: vec![DepthLevel {
+                    price: 101,
+                    quantity: 5,
+                    order_count: Some(1),
+                }],
+            })
+            .expect("depth snapshot installs");
+        order_book
+    }
+
+    fn ready_non_bar_study_fixture() -> (
+        Coordinator<'static>,
+        InstallProviderInstrument,
+        StudyMarketInput,
+    ) {
+        let mut coordinator = coordinator();
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        coordinator
+            .engine
+            .set_provider_health(
+                "rithmic",
+                ProviderGeneration(nonzero(1)),
+                ProviderHealth::Online,
+            )
+            .expect("provider is online");
+        let selected_series = series();
+        let order_book = seeded_study_order_book(&selected, &selected_series);
+        coordinator.order_books.insert(
+            (selected.provider.clone(), selected.instrument_id.clone()),
+            order_book,
+        );
+        let mut live_handoff = RithmicLiveHandoff::new(
+            &selected_series,
+            ProviderGeneration(nonzero(1)),
+            &selected.venue_id,
+        )
+        .expect("live handoff");
+        live_handoff.connected = true;
+        live_handoff.history_state = LiveHistoryState::Ready;
+        coordinator
+            .rithmic_live
+            .insert(selected_series.clone(), live_handoff);
+        let input = StudyMarketInput {
+            series: selected_series,
+            streams: StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes)
+                .with(MarketStream::Depth),
+        };
+        (coordinator, selected, input)
+    }
+
+    fn trade_recovery_study_fixture() -> (
+        Coordinator<'static>,
+        InstallProviderInstrument,
+        BarSeriesKey,
+        StudyInstanceId,
+    ) {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        let provider_generation = ProviderGeneration(nonzero(selected.session_generation));
+        coordinator
+            .engine
+            .set_provider_health("rithmic", provider_generation, ProviderHealth::Online)
+            .expect("provider is online");
+        let selected_series = series();
+        coordinator
+            .engine
+            .install_history(
+                provider_generation,
+                &selected_series,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("canonical history installs");
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                study_registration_with_streams(
+                    selected_series.clone(),
+                    StreamRequirements::BARS.with(MarketStream::Trades),
+                ),
+            )
+            .expect("trade study registers");
+        (coordinator, selected, selected_series, study_id)
+    }
+
+    struct OutputAncestryRecoveryFixture {
+        coordinator: Coordinator<'static>,
+        selected: InstallProviderInstrument,
+        primary: BarSeriesKey,
+        secondary: BarSeriesKey,
+        consumer_study: StudyInstanceId,
+    }
+
+    fn output_ancestry_recovery_fixture() -> OutputAncestryRecoveryFixture {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        let provider_generation = ProviderGeneration(nonzero(selected.session_generation));
+        coordinator
+            .engine
+            .set_provider_health("rithmic", provider_generation, ProviderHealth::Online)
+            .expect("provider is online");
+
+        let secondary = series();
+        let mut primary = secondary.clone();
+        primary.period = BarPeriod::time(300).expect("five-minute period");
+        coordinator
+            .engine
+            .install_history(provider_generation, &primary, 2, 0, minute_bars(0, 1))
+            .expect("producer history installs");
+
+        let producer = coordinator
+            .handle_register_study(client(1), owner, study_registration(primary.clone()))
+            .expect("producer study registers");
+        coordinator
+            .engine
+            .install_history(provider_generation, &secondary, 2, 0, minute_bars(0, 3))
+            .expect("quote history installs");
+        let mut consumer_definition = study_definition(secondary.clone());
+        consumer_definition.identifier = "test.output-ancestry.recovery-fence".to_string();
+        consumer_definition.dependencies = vec![
+            StudyDependency::Output(producer.output(0)),
+            StudyDependency::Market(StudyMarketInput {
+                series: secondary.clone(),
+                streams: StreamRequirements::BARS.with(MarketStream::Quotes),
+            }),
+        ];
+        let consumer_study = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                native_study_registration(consumer_definition),
+            )
+            .expect("output consumer study registers");
+
+        OutputAncestryRecoveryFixture {
+            coordinator,
+            selected,
+            primary,
+            secondary,
+            consumer_study,
+        }
+    }
+
+    fn quote_for_instrument(
+        instrument: &InstallProviderInstrument,
+        source_sequence: u64,
+        timestamp: i64,
+        price: i64,
+    ) -> TopOfBookQuote {
+        TopOfBookQuote {
+            metadata: EventMetadata {
+                provider_id: instrument.provider.clone(),
+                instrument_id: instrument.instrument_id.clone(),
+                entitlement_id: instrument.entitlement_id.clone(),
+                source_sequence,
+                session_generation: instrument.session_generation,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(timestamp),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: timestamp,
+                },
+            },
+            bid: Some(DepthLevel {
+                price,
+                quantity: 1,
+                order_count: None,
+            }),
+            ask: Some(DepthLevel {
+                price: price + 1,
+                quantity: 1,
+                order_count: None,
+            }),
+        }
+    }
+
+    fn assert_rithmic_history_state(
+        coordinator: &Coordinator<'_>,
+        series: &BarSeriesKey,
+        expected: LiveHistoryState,
+    ) {
+        assert_eq!(
+            coordinator
+                .rithmic_live
+                .get(series)
+                .map(|live| live.history_state),
+            Some(expected)
+        );
     }
 
     struct DetachedRithmicFixture {
@@ -1972,6 +2324,322 @@ mod tests {
                 .subscription_status(&selected_series)
                 .map(|status| (status.consumer_count, status.streams)),
             Some((0, streams))
+        );
+    }
+
+    #[test]
+    fn provider_recovery_fences_and_clears_non_bar_study_views() {
+        let (mut coordinator, selected, input) = ready_non_bar_study_fixture();
+        let live = study_live_market_data(
+            &coordinator.engine,
+            &coordinator.order_books,
+            &coordinator.rithmic_live,
+            &coordinator.hyperliquid_live,
+            &input,
+        )
+        .expect("online ready series exposes current live market state");
+        assert!(live.quote().is_some());
+        assert!(live.trades().is_some_and(|trades| !trades.is_empty()));
+        assert!(live.depth().is_some());
+
+        for recovery_state in [
+            LiveHistoryState::Reseeding,
+            LiveHistoryState::AwaitingHistory,
+        ] {
+            coordinator
+                .rithmic_live
+                .get_mut(&input.series)
+                .expect("series handoff")
+                .history_state = recovery_state;
+            assert_eq!(
+                coordinator
+                    .engine
+                    .provider_status("rithmic")
+                    .map(|status| status.health),
+                Some(ProviderHealth::Online),
+                "series recovery must not require taking the provider session offline"
+            );
+            assert!(
+                study_live_market_data(
+                    &coordinator.engine,
+                    &coordinator.order_books,
+                    &coordinator.rithmic_live,
+                    &coordinator.hyperliquid_live,
+                    &input,
+                )
+                .is_none(),
+                "bar-aligned non-bar views must be fenced until this series is history-ready"
+            );
+        }
+        coordinator
+            .rithmic_live
+            .get_mut(&input.series)
+            .expect("series handoff")
+            .history_state = LiveHistoryState::Ready;
+        assert!(
+            study_live_market_data(
+                &coordinator.engine,
+                &coordinator.order_books,
+                &coordinator.rithmic_live,
+                &coordinator.hyperliquid_live,
+                &input,
+            )
+            .is_some(),
+            "series live views resume after the history seam is ready"
+        );
+
+        coordinator.rithmic_recovering(1, "test recovery");
+        assert!(
+            study_live_market_data(
+                &coordinator.engine,
+                &coordinator.order_books,
+                &coordinator.rithmic_live,
+                &coordinator.hyperliquid_live,
+                &input,
+            )
+            .is_none(),
+            "recovering provider must not expose point-in-time live state to studies"
+        );
+        let order_book = coordinator
+            .order_books
+            .get(&(selected.provider, selected.instrument_id))
+            .expect("canonical order book remains retained");
+        assert!(order_book.top_of_book.is_none());
+        assert!(order_book.recent_trades.is_empty());
+        assert_eq!(order_book.book.state(), OrderBookState::Stale);
+    }
+
+    #[test]
+    fn rithmic_trade_recovery_is_fenced_before_non_bar_study_execution() {
+        let (mut coordinator, selected, selected_series, study_id) = trade_recovery_study_fixture();
+        let live = coordinator
+            .rithmic_live
+            .get(&selected_series)
+            .expect("series live handoff exists");
+        assert!(live.connected);
+        assert_eq!(live.history_state, LiveHistoryState::Ready);
+
+        // Start a new forming minute with the maximum representable volume, then
+        // publish it so the study's canonical primary timeline includes that row.
+        let mut first =
+            rithmic_trade_for_series(&selected_series, 1, 180_i64.saturating_mul(1_000_000_000));
+        first.quantity = i64::MAX;
+        coordinator.rithmic_trade(1, &first);
+        coordinator.publish_rithmic_live();
+        let generation_before_failure = coordinator
+            .studies
+            .output_series(study_id.output(0))
+            .expect("study output after first live bar")
+            .generation();
+        assert_eq!(
+            coordinator
+                .engine
+                .series_snapshot(&selected_series)
+                .and_then(|snapshot| snapshot.bars.last().copied())
+                .map(|bar| bar.exchange_timestamp_unix_nanos),
+            Some(180_i64.saturating_mul(1_000_000_000))
+        );
+
+        // This trade overflows the live bar volume. It also lands inside the
+        // canonical 180-second row, so publishing its non-bar change before
+        // classifying aggregation recovery would incorrectly execute the study
+        // once against a bar the handoff has just declared stale.
+        let second =
+            rithmic_trade_for_series(&selected_series, 2, 181_i64.saturating_mul(1_000_000_000));
+        coordinator.rithmic_trade(1, &second);
+
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("rithmic")
+                .map(|status| status.health),
+            Some(ProviderHealth::Online),
+            "one-series aggregation recovery must not replace provider-session ownership"
+        );
+        assert_eq!(
+            coordinator
+                .rithmic_live
+                .get(&selected_series)
+                .expect("series handoff remains retained")
+                .history_state,
+            LiveHistoryState::AwaitingHistory
+        );
+        assert_eq!(
+            coordinator
+                .studies
+                .output_series(study_id.output(0))
+                .expect("last committed study output remains available")
+                .generation(),
+            generation_before_failure,
+            "the recovery-triggering trade must be fenced before non-bar study execution"
+        );
+        assert!(
+            coordinator
+                .order_books
+                .get(&(selected.provider, selected.instrument_id))
+                .is_some_and(|book| book.recent_trades.len() >= 2),
+            "canonical point-in-time trade state still accepts the provider event"
+        );
+    }
+
+    #[test]
+    fn mtf_non_bar_wave_waits_for_every_market_dependency_to_be_history_ready() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        let provider_generation = ProviderGeneration(nonzero(selected.session_generation));
+        coordinator
+            .engine
+            .set_provider_health("rithmic", provider_generation, ProviderHealth::Online)
+            .expect("provider is online");
+
+        let secondary = series();
+        let mut primary = secondary.clone();
+        primary.period = BarPeriod::time(300).expect("five-minute period");
+        coordinator
+            .engine
+            .install_history(provider_generation, &primary, 2, 0, minute_bars(0, 1))
+            .expect("primary history installs");
+        coordinator
+            .engine
+            .install_history(provider_generation, &secondary, 2, 0, minute_bars(0, 3))
+            .expect("secondary history installs");
+
+        let mut definition = study_definition(primary.clone());
+        definition.identifier = "test.mtf.recovery-fence".to_string();
+        definition
+            .dependencies
+            .push(StudyDependency::Market(StudyMarketInput {
+                series: secondary.clone(),
+                streams: StreamRequirements::BARS.with(MarketStream::Quotes),
+            }));
+        let study_id = coordinator
+            .handle_register_study(
+                client(1),
+                owner,
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&definition.settings)
+                        .expect("valid defaults"),
+                    definition,
+                    program: NativeStudyProgram {
+                        calculate: calculate_test_study,
+                        state_factory: None,
+                    },
+                },
+            )
+            .expect("MTF study registers");
+        assert_rithmic_history_state(&coordinator, &primary, LiveHistoryState::Ready);
+        assert_rithmic_history_state(&coordinator, &secondary, LiveHistoryState::Ready);
+        let generation_before_recovery = coordinator
+            .studies
+            .output_series(study_id.output(0))
+            .expect("initial MTF output")
+            .generation();
+
+        coordinator
+            .rithmic_live
+            .get_mut(&primary)
+            .expect("primary handoff remains installed")
+            .history_state = LiveHistoryState::AwaitingHistory;
+        let quote_timestamp = 30_i64.saturating_mul(1_000_000_000);
+        coordinator.provider_quote(
+            "rithmic",
+            selected.session_generation,
+            &quote_for_instrument(&selected, 1, quote_timestamp, 100),
+        );
+        assert_eq!(
+            coordinator
+                .studies
+                .output_series(study_id.output(0))
+                .expect("last committed MTF output remains available")
+                .generation(),
+            generation_before_recovery,
+            "a quote-driven MTF wave must not execute against a recovering BARS-only primary"
+        );
+
+        coordinator
+            .rithmic_live
+            .get_mut(&primary)
+            .expect("primary handoff remains installed")
+            .history_state = LiveHistoryState::Ready;
+        coordinator.provider_quote(
+            "rithmic",
+            selected.session_generation,
+            &quote_for_instrument(&selected, 2, quote_timestamp, 101),
+        );
+        assert!(
+            coordinator
+                .studies
+                .output_series(study_id.output(0))
+                .expect("MTF output resumes")
+                .generation()
+                > generation_before_recovery,
+            "the same quote-driven wave resumes once every market dependency is ready"
+        );
+    }
+
+    #[test]
+    fn non_bar_wave_waits_for_transitive_output_market_ancestry_to_be_ready() {
+        let OutputAncestryRecoveryFixture {
+            mut coordinator,
+            selected,
+            primary,
+            secondary,
+            consumer_study,
+        } = output_ancestry_recovery_fixture();
+        assert_rithmic_history_state(&coordinator, &primary, LiveHistoryState::Ready);
+        assert_rithmic_history_state(&coordinator, &secondary, LiveHistoryState::Ready);
+        let generation_before_recovery = coordinator
+            .studies
+            .output_series(consumer_study.output(0))
+            .expect("initial output-backed MTF output")
+            .generation();
+
+        coordinator
+            .rithmic_live
+            .get_mut(&primary)
+            .expect("producer handoff remains installed")
+            .history_state = LiveHistoryState::AwaitingHistory;
+        let quote_timestamp = 30_i64.saturating_mul(1_000_000_000);
+        coordinator.provider_quote(
+            "rithmic",
+            selected.session_generation,
+            &quote_for_instrument(&selected, 1, quote_timestamp, 100),
+        );
+        assert_eq!(
+            coordinator
+                .studies
+                .output_series(consumer_study.output(0))
+                .expect("last committed output-backed MTF output remains")
+                .generation(),
+            generation_before_recovery,
+            "a ready quote dependency must not bypass recovering producer market ancestry"
+        );
+
+        coordinator
+            .rithmic_live
+            .get_mut(&primary)
+            .expect("producer handoff remains installed")
+            .history_state = LiveHistoryState::Ready;
+        coordinator.provider_quote(
+            "rithmic",
+            selected.session_generation,
+            &quote_for_instrument(&selected, 2, quote_timestamp, 101),
+        );
+        assert!(
+            coordinator
+                .studies
+                .output_series(consumer_study.output(0))
+                .expect("output-backed MTF output resumes")
+                .generation()
+                > generation_before_recovery,
+            "the next non-bar event executes after transitive market ancestry is ready"
         );
     }
 

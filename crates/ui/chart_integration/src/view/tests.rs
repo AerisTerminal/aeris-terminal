@@ -1786,6 +1786,15 @@ fn study_settings_requests_are_bounded_to_one_latest_study_identity() {
 }
 
 #[test]
+fn study_remove_request_targets_one_runtime_study() {
+    let mut chart = NucleusChartView::empty();
+    assert_eq!(chart.take_study_remove_request(), None);
+    chart.pending_study_remove = Some(7);
+    assert_eq!(chart.take_study_remove_request(), Some(7));
+    assert_eq!(chart.take_study_remove_request(), None);
+}
+
+#[test]
 fn multi_output_study_legend_visibility_toggles_the_whole_study() {
     let mut chart = NucleusChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000];

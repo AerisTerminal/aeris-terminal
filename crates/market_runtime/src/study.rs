@@ -15,12 +15,13 @@ use axiusflow_market_engine::{
 };
 use std::{
     any::Any,
+    array,
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     num::{NonZeroU64, NonZeroUsize},
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 /// Maximum UTF-8 bytes accepted in one stable study identifier.
@@ -1057,29 +1058,283 @@ pub struct StudyRuntimeConfig {
     pub maximum_total_state_bytes: NonZeroUsize,
 }
 
+const STUDY_OUTPUT_VALUE_LEAF_LEN: usize = 64;
+const STUDY_OUTPUT_VALUE_BRANCH_FACTOR: usize = 32;
+
+#[derive(Clone)]
+struct StudyOutputTimeline(Arc<StudyOutputTimelineInner>);
+
+struct StudyOutputTimelineInner {
+    snapshot: Arc<SeriesSnapshot>,
+    materialized: OnceLock<Arc<[i64]>>,
+}
+
+impl StudyOutputTimeline {
+    fn market(snapshot: Arc<SeriesSnapshot>) -> Self {
+        Self(Arc::new(StudyOutputTimelineInner {
+            snapshot,
+            materialized: OnceLock::new(),
+        }))
+    }
+
+    fn len(&self) -> usize {
+        self.0.snapshot.bars.len()
+    }
+
+    fn timestamp(&self, index: usize) -> Option<i64> {
+        self.0
+            .snapshot
+            .bars
+            .get(index)
+            .map(|bar| bar.exchange_timestamp_unix_nanos)
+    }
+
+    fn lower_bound(&self, timestamp_unix_nanos: i64) -> usize {
+        self.0
+            .snapshot
+            .bars
+            .partition_point(|bar| bar.exchange_timestamp_unix_nanos < timestamp_unix_nanos)
+    }
+
+    fn upper_bound(&self, timestamp_unix_nanos: i64) -> usize {
+        self.0
+            .snapshot
+            .bars
+            .partition_point(|bar| bar.exchange_timestamp_unix_nanos <= timestamp_unix_nanos)
+    }
+
+    fn timestamps(&self) -> &[i64] {
+        self.0
+            .materialized
+            .get_or_init(|| {
+                self.0
+                    .snapshot
+                    .bars
+                    .iter()
+                    .map(|bar| bar.exchange_timestamp_unix_nanos)
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+            .as_ref()
+    }
+}
+
+enum StudyOutputValueNode {
+    Branch(Box<[Option<Arc<StudyOutputValueNode>>; STUDY_OUTPUT_VALUE_BRANCH_FACTOR]>),
+    Leaf(Box<[Option<f64>; STUDY_OUTPUT_VALUE_LEAF_LEN]>),
+}
+
+#[derive(Clone)]
+struct StudyOutputValues {
+    root: Option<Arc<StudyOutputValueNode>>,
+    depth: u8,
+    len: usize,
+}
+
+impl StudyOutputValues {
+    fn empty(len: usize) -> Self {
+        Self {
+            root: None,
+            depth: 0,
+            len,
+        }
+    }
+
+    fn from_dense(values: &[Option<f64>]) -> Self {
+        let len = values.len();
+        let mut output = Self::empty(len);
+        for (chunk_index, chunk) in values.chunks(STUDY_OUTPUT_VALUE_LEAF_LEN).enumerate() {
+            if chunk.iter().all(Option::is_none) {
+                continue;
+            }
+            let mut leaf = [None; STUDY_OUTPUT_VALUE_LEAF_LEN];
+            leaf[..chunk.len()].copy_from_slice(chunk);
+            output.insert_leaf(chunk_index, Box::new(leaf));
+        }
+        output
+    }
+
+    fn value_at(&self, index: usize) -> Option<f64> {
+        debug_assert!(index < self.len);
+        let chunk_index = index / STUDY_OUTPUT_VALUE_LEAF_LEN;
+        let offset = index % STUDY_OUTPUT_VALUE_LEAF_LEN;
+        let mut node = self.root.as_ref()?;
+        let mut depth = self.depth;
+        let mut remaining = chunk_index;
+        while depth > 0 {
+            let StudyOutputValueNode::Branch(children) = node.as_ref() else {
+                return None;
+            };
+            let child_capacity = Self::chunk_capacity(depth - 1);
+            let child_index = remaining / child_capacity;
+            remaining %= child_capacity;
+            node = children.get(child_index).and_then(Option::as_ref)?;
+            depth -= 1;
+        }
+        let StudyOutputValueNode::Leaf(values) = node.as_ref() else {
+            return None;
+        };
+        values[offset]
+    }
+
+    fn set(&mut self, index: usize, value: Option<f64>) -> Result<(), String> {
+        if index >= self.len {
+            return Err("study output row is outside the calculation range".to_string());
+        }
+        let chunk_index = index / STUDY_OUTPUT_VALUE_LEAF_LEN;
+        self.ensure_depth(chunk_index);
+        self.root = Some(Self::updated_value(
+            self.root.as_ref(),
+            self.depth,
+            chunk_index,
+            index % STUDY_OUTPUT_VALUE_LEAF_LEN,
+            value,
+        ));
+        Ok(())
+    }
+
+    fn resized(mut self, len: usize) -> Self {
+        self.len = len;
+        self
+    }
+
+    fn to_vec(&self) -> Vec<Option<f64>> {
+        (0..self.len).map(|index| self.value_at(index)).collect()
+    }
+
+    fn chunk_capacity(depth: u8) -> usize {
+        let mut capacity = 1usize;
+        for _ in 0..depth {
+            capacity = capacity.saturating_mul(STUDY_OUTPUT_VALUE_BRANCH_FACTOR);
+        }
+        capacity
+    }
+
+    fn ensure_depth(&mut self, chunk_index: usize) {
+        while chunk_index >= Self::chunk_capacity(self.depth) {
+            let mut children = array::from_fn(|_| None);
+            children[0] = self.root.take();
+            self.root = Some(Arc::new(StudyOutputValueNode::Branch(Box::new(children))));
+            self.depth = self.depth.saturating_add(1);
+        }
+    }
+
+    fn insert_leaf(
+        &mut self,
+        chunk_index: usize,
+        values: Box<[Option<f64>; STUDY_OUTPUT_VALUE_LEAF_LEN]>,
+    ) {
+        self.ensure_depth(chunk_index);
+        self.root = Some(Self::updated_leaf(
+            self.root.as_ref(),
+            self.depth,
+            chunk_index,
+            Arc::new(StudyOutputValueNode::Leaf(values)),
+        ));
+    }
+
+    fn updated_leaf(
+        node: Option<&Arc<StudyOutputValueNode>>,
+        depth: u8,
+        chunk_index: usize,
+        leaf: Arc<StudyOutputValueNode>,
+    ) -> Arc<StudyOutputValueNode> {
+        if depth == 0 {
+            return leaf;
+        }
+        let child_capacity = Self::chunk_capacity(depth - 1);
+        let child_index = chunk_index / child_capacity;
+        let remainder = chunk_index % child_capacity;
+        let mut children = match node.map(Arc::as_ref) {
+            Some(StudyOutputValueNode::Branch(children)) => (**children).clone(),
+            _ => array::from_fn(|_| None),
+        };
+        children[child_index] = Some(Self::updated_leaf(
+            children[child_index].as_ref(),
+            depth - 1,
+            remainder,
+            leaf,
+        ));
+        Arc::new(StudyOutputValueNode::Branch(Box::new(children)))
+    }
+
+    fn updated_value(
+        node: Option<&Arc<StudyOutputValueNode>>,
+        depth: u8,
+        chunk_index: usize,
+        offset: usize,
+        value: Option<f64>,
+    ) -> Arc<StudyOutputValueNode> {
+        if depth == 0 {
+            let mut values = match node.map(Arc::as_ref) {
+                Some(StudyOutputValueNode::Leaf(values)) => **values,
+                _ => [None; STUDY_OUTPUT_VALUE_LEAF_LEN],
+            };
+            values[offset] = value;
+            return Arc::new(StudyOutputValueNode::Leaf(Box::new(values)));
+        }
+        let child_capacity = Self::chunk_capacity(depth - 1);
+        let child_index = chunk_index / child_capacity;
+        let remainder = chunk_index % child_capacity;
+        let mut children = match node.map(Arc::as_ref) {
+            Some(StudyOutputValueNode::Branch(children)) => (**children).clone(),
+            _ => array::from_fn(|_| None),
+        };
+        children[child_index] = Some(Self::updated_value(
+            children[child_index].as_ref(),
+            depth - 1,
+            remainder,
+            offset,
+            value,
+        ));
+        Arc::new(StudyOutputValueNode::Branch(Box::new(children)))
+    }
+}
+
 /// Immutable scalar output series produced by one native study output.
 ///
 /// Timestamps are inherited from the study's first dependency and shared by all
 /// outputs from the same calculation. `None` represents a deliberate gap such
-/// as an indicator warm-up period.
-#[derive(Clone, Debug, PartialEq)]
+/// as an indicator warm-up period. Incremental generations structurally share
+/// unchanged value blocks; full contiguous slices are materialized only when a
+/// publication consumer explicitly requests them.
+#[derive(Clone)]
 pub struct StudyOutputSeries {
-    timestamps: Arc<[i64]>,
-    values: Arc<[Option<f64>]>,
+    timeline: StudyOutputTimeline,
+    values: StudyOutputValues,
+    materialized_values: Arc<OnceLock<Arc<[Option<f64>]>>>,
     generation: u64,
+}
+
+impl fmt::Debug for StudyOutputSeries {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StudyOutputSeries")
+            .field("len", &self.len())
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for StudyOutputSeries {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.timestamps() == other.timestamps()
+            && self.values() == other.values()
+    }
 }
 
 impl StudyOutputSeries {
     /// Returns the number of output rows.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.values.len()
+        self.values.len
     }
 
     /// Returns whether no output rows are available.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values.len == 0
     }
 
     /// Returns the output generation committed by the runtime.
@@ -1091,25 +1346,27 @@ impl StudyOutputSeries {
     /// Returns the exact row timestamp.
     #[must_use]
     pub fn timestamp_unix_nanos(&self, index: usize) -> Option<i64> {
-        self.timestamps.get(index).copied()
+        self.timeline.timestamp(index)
     }
 
     /// Returns one finite scalar value or a deliberate gap.
     #[must_use]
     pub fn value(&self, index: usize) -> Option<Option<f64>> {
-        self.values.get(index).copied()
+        (index < self.len()).then(|| self.values.value_at(index))
     }
 
     /// Returns all timestamps for binary-search alignment by secondary inputs.
     #[must_use]
     pub fn timestamps(&self) -> &[i64] {
-        &self.timestamps
+        self.timeline.timestamps()
     }
 
     /// Returns all output values.
     #[must_use]
     pub fn values(&self) -> &[Option<f64>] {
-        &self.values
+        self.materialized_values
+            .get_or_init(|| self.values.to_vec().into())
+            .as_ref()
     }
 }
 
@@ -1128,57 +1385,124 @@ pub enum StudyInputSeries<'a> {
 
 /// One bounded output buffer for the current native calculation.
 pub struct StudyOutputBuffer {
-    values: Vec<Option<f64>>,
+    values: StudyOutputBufferValues,
+}
+
+enum StudyOutputBufferValues {
+    Dense(Vec<Option<f64>>),
+    Persistent(StudyOutputValues),
 }
 
 impl StudyOutputBuffer {
     fn new(len: usize) -> Self {
         Self {
-            values: vec![None; len],
+            values: StudyOutputBufferValues::Dense(vec![None; len]),
         }
     }
 
-    fn from_previous(timestamps: &[i64], previous: Option<&StudyOutputSeries>) -> Self {
-        let mut output = Self::new(timestamps.len());
+    fn from_previous(
+        timeline: &StudyOutputTimeline,
+        previous: Option<&StudyOutputSeries>,
+        dirty: StudyDirtyRange,
+    ) -> (Self, usize) {
         let Some(previous) = previous else {
-            return output;
+            return (Self::new(timeline.len()), timeline.len());
         };
+        if Self::can_reuse_previous(timeline, previous, dirty) {
+            let mut output = Self {
+                values: StudyOutputBufferValues::Persistent(
+                    previous.values.clone().resized(timeline.len()),
+                ),
+            };
+            let cleared = output.clear(dirty);
+            return (output, cleared);
+        }
+
+        let mut output = Self::new(timeline.len());
         let mut previous_index = 0;
         let mut current_index = 0;
-        while previous_index < previous.timestamps.len() && current_index < timestamps.len() {
-            match previous.timestamps[previous_index].cmp(&timestamps[current_index]) {
+        while previous_index < previous.len() && current_index < timeline.len() {
+            let previous_timestamp = previous
+                .timestamp_unix_nanos(previous_index)
+                .expect("bounded previous output timestamp");
+            let current_timestamp = timeline
+                .timestamp(current_index)
+                .expect("bounded current output timestamp");
+            match previous_timestamp.cmp(&current_timestamp) {
                 std::cmp::Ordering::Less => previous_index += 1,
                 std::cmp::Ordering::Greater => current_index += 1,
                 std::cmp::Ordering::Equal => {
-                    output.values[current_index] = previous.values[previous_index];
+                    if let StudyOutputBufferValues::Dense(values) = &mut output.values {
+                        values[current_index] = previous.value(previous_index).flatten();
+                    }
                     previous_index += 1;
                     current_index += 1;
                 }
             }
         }
-        output
+        let scanned = previous_index.saturating_add(current_index);
+        output.clear(dirty);
+        (output, scanned)
     }
 
-    fn clear(&mut self, range: StudyDirtyRange) {
-        let end = range
-            .end_exclusive
-            .unwrap_or(self.values.len())
-            .min(self.values.len());
-        if range.start < end {
-            self.values[range.start..end].fill(None);
+    fn can_reuse_previous(
+        timeline: &StudyOutputTimeline,
+        previous: &StudyOutputSeries,
+        dirty: StudyDirtyRange,
+    ) -> bool {
+        let previous_len = previous.len();
+        let current_len = timeline.len();
+        if dirty.start == 0
+            || previous_len == 0
+            || current_len < previous_len
+            || dirty.start > previous_len
+        {
+            return false;
         }
+        if timeline.timestamp(0) != previous.timestamp_unix_nanos(0)
+            || timeline.timestamp(dirty.start - 1) != previous.timestamp_unix_nanos(dirty.start - 1)
+        {
+            return false;
+        }
+        if dirty.start < previous_len
+            && timeline.timestamp(dirty.start) != previous.timestamp_unix_nanos(dirty.start)
+        {
+            return false;
+        }
+        current_len == previous_len
+            || timeline.timestamp(previous_len - 1)
+                == previous.timestamp_unix_nanos(previous_len - 1)
+    }
+
+    fn clear(&mut self, range: StudyDirtyRange) -> usize {
+        let end = range.end_exclusive.unwrap_or(self.len()).min(self.len());
+        if range.start >= end {
+            return 0;
+        }
+        match &mut self.values {
+            StudyOutputBufferValues::Dense(values) => values[range.start..end].fill(None),
+            StudyOutputBufferValues::Persistent(values) => {
+                for index in range.start..end {
+                    values.set(index, None).expect("bounded output clear range");
+                }
+            }
+        }
+        end - range.start
     }
 
     /// Returns the output row count inherited from the first dependency.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.values.len()
+        match &self.values {
+            StudyOutputBufferValues::Dense(values) => values.len(),
+            StudyOutputBufferValues::Persistent(values) => values.len,
+        }
     }
 
     /// Returns whether this output has no rows.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.len() == 0
     }
 
     /// Writes one finite scalar value or an explicit gap.
@@ -1189,12 +1513,23 @@ impl StudyOutputBuffer {
         if value.is_some_and(|value| !value.is_finite()) {
             return Err("study output must be finite".to_string());
         }
-        let slot = self
-            .values
-            .get_mut(index)
-            .ok_or_else(|| "study output row is outside the calculation range".to_string())?;
-        *slot = value;
-        Ok(())
+        match &mut self.values {
+            StudyOutputBufferValues::Dense(values) => {
+                let slot = values.get_mut(index).ok_or_else(|| {
+                    "study output row is outside the calculation range".to_string()
+                })?;
+                *slot = value;
+                Ok(())
+            }
+            StudyOutputBufferValues::Persistent(values) => values.set(index, value),
+        }
+    }
+
+    fn into_values(self) -> StudyOutputValues {
+        match self.values {
+            StudyOutputBufferValues::Dense(values) => StudyOutputValues::from_dense(&values),
+            StudyOutputBufferValues::Persistent(values) => values,
+        }
     }
 }
 
@@ -1207,7 +1542,7 @@ pub struct StudyExecutionContext<'a> {
     settings: &'a StudySettings,
     inputs: &'a [ResolvedStudyInput],
     live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
-    timestamps: &'a [i64],
+    timeline: &'a StudyOutputTimeline,
     dirty: StudyDirtyRange,
     outputs: &'a mut [StudyOutputBuffer],
     state: Option<&'a mut NativeStudyState>,
@@ -1219,7 +1554,7 @@ pub struct StudyExecutionInputs<'a> {
     settings: &'a StudySettings,
     inputs: &'a [ResolvedStudyInput],
     live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
-    timestamps: &'a [i64],
+    timeline: &'a StudyOutputTimeline,
     dirty: StudyDirtyRange,
 }
 
@@ -1232,8 +1567,8 @@ impl<'a> StudyExecutionInputs<'a> {
 
     /// Returns the primary output timeline inherited from dependency zero.
     #[must_use]
-    pub const fn timestamps(self) -> &'a [i64] {
-        self.timestamps
+    pub fn timestamps(self) -> &'a [i64] {
+        self.timeline.timestamps()
     }
 
     /// Returns the output rows that must be recomputed for this invocation.
@@ -1271,8 +1606,8 @@ impl StudyExecutionContext<'_> {
 
     /// Returns the primary output timeline inherited from dependency zero.
     #[must_use]
-    pub const fn timestamps(&self) -> &[i64] {
-        self.timestamps
+    pub fn timestamps(&self) -> &[i64] {
+        self.timeline.timestamps()
     }
 
     /// Returns the output rows that must be recomputed for this invocation.
@@ -1323,7 +1658,7 @@ impl StudyExecutionContext<'_> {
                 settings: self.settings,
                 inputs: self.inputs,
                 live_inputs: self.live_inputs,
-                timestamps: self.timestamps,
+                timeline: self.timeline,
                 dirty: self.dirty,
             },
             self.outputs,
@@ -1345,7 +1680,7 @@ impl StudyExecutionContext<'_> {
                 settings: self.settings,
                 inputs: self.inputs,
                 live_inputs: self.live_inputs,
-                timestamps: self.timestamps,
+                timeline: self.timeline,
                 dirty: self.dirty,
             },
             state,
@@ -1354,10 +1689,10 @@ impl StudyExecutionContext<'_> {
     }
 }
 
-#[derive(Clone)]
 struct NativeStudyStateValue<T> {
     value: T,
     runtime_bytes: fn(&T) -> usize,
+    clone_for_transaction: fn(&T) -> T,
 }
 
 type ErasedNativeStudyStateValue = dyn Any + Send;
@@ -1365,24 +1700,28 @@ type CloneNativeStudyStateValue =
     fn(&ErasedNativeStudyStateValue) -> Box<ErasedNativeStudyStateValue>;
 type NativeStudyStateBytes = fn(&ErasedNativeStudyStateValue) -> usize;
 
-fn clone_native_study_state_value<T: Clone + Send + 'static>(
+fn clone_native_study_state_value<T: Send + 'static>(
     value: &ErasedNativeStudyStateValue,
 ) -> Box<ErasedNativeStudyStateValue> {
-    Box::new(
-        value
-            .downcast_ref::<NativeStudyStateValue<T>>()
-            .expect("native study state clone type")
-            .clone(),
-    )
+    let state = value
+        .downcast_ref::<NativeStudyStateValue<T>>()
+        .expect("native study state clone type");
+    Box::new(NativeStudyStateValue {
+        value: (state.clone_for_transaction)(&state.value),
+        runtime_bytes: state.runtime_bytes,
+        clone_for_transaction: state.clone_for_transaction,
+    })
 }
 
-fn native_study_state_value_bytes<T: Clone + Send + 'static>(
-    value: &ErasedNativeStudyStateValue,
-) -> usize {
+fn native_study_state_value_bytes<T: Send + 'static>(value: &ErasedNativeStudyStateValue) -> usize {
     let state = value
         .downcast_ref::<NativeStudyStateValue<T>>()
         .expect("native study state accounting type");
     (state.runtime_bytes)(&state.value)
+}
+
+fn copy_native_study_state_value<T: Copy>(value: &T) -> T {
+    *value
 }
 
 /// One opaque, cloneable native-study state value owned by [`StudyRuntime`].
@@ -1407,14 +1746,39 @@ impl Clone for NativeStudyState {
 }
 
 impl NativeStudyState {
-    /// Wraps one cloneable runtime state value and its exact memory-accounting
-    /// callback.
+    /// Wraps one trivially copyable runtime state value and its exact
+    /// memory-accounting callback.
+    ///
+    /// `Copy` is deliberately required here: a shallow `Clone` of shared
+    /// interior-mutable storage can let a rejected calculation mutate the
+    /// previously committed state. Stateful implementations that own heap data
+    /// must use [`Self::new_transactional`] and provide an explicit
+    /// mutation-isolated candidate clone.
     #[must_use]
-    pub fn new<T: Clone + Send + 'static>(value: T, runtime_bytes: fn(&T) -> usize) -> Self {
+    pub fn new<T: Copy + Send + 'static>(value: T, runtime_bytes: fn(&T) -> usize) -> Self {
+        Self::new_transactional(value, runtime_bytes, copy_native_study_state_value::<T>)
+    }
+
+    /// Wraps one runtime state value whose candidate clone is explicitly
+    /// isolated from the committed value.
+    ///
+    /// The supplied clone callback is part of the trusted static-native study
+    /// contract. It must return state that can be mutated independently: no
+    /// `Arc<Mutex<_>>`, `Rc<RefCell<_>>`, or similar mutable storage may remain
+    /// shared with the source state after the callback returns. This explicit
+    /// boundary prevents the runtime from treating ordinary shallow `Clone`
+    /// semantics as transactional rollback semantics.
+    #[must_use]
+    pub fn new_transactional<T: Send + 'static>(
+        value: T,
+        runtime_bytes: fn(&T) -> usize,
+        clone_for_transaction: fn(&T) -> T,
+    ) -> Self {
         Self {
             value: Box::new(NativeStudyStateValue {
                 value,
                 runtime_bytes,
+                clone_for_transaction,
             }),
             clone_value: clone_native_study_state_value::<T>,
             runtime_bytes: native_study_state_value_bytes::<T>,
@@ -1425,6 +1789,13 @@ impl NativeStudyState {
         self.value
             .downcast_mut::<NativeStudyStateValue<T>>()
             .map(|state| &mut state.value)
+    }
+
+    #[cfg(test)]
+    fn value<T: 'static>(&self) -> Option<&T> {
+        self.value
+            .downcast_ref::<NativeStudyStateValue<T>>()
+            .map(|state| &state.value)
     }
 
     fn runtime_bytes(&self) -> usize {
@@ -1549,6 +1920,18 @@ impl StudyDirtyRange {
 pub struct StudyCalculation {
     pub study_id: StudyInstanceId,
     pub range: StudyDirtyRange,
+}
+
+/// Result of one dependency-ordered execution wave.
+///
+/// Successful independent studies remain publishable even when another study
+/// rejects execution. Failures are retained in deterministic study order;
+/// dependents of a failed study are skipped for the wave so they cannot consume
+/// stale upstream output as though it belonged to the new market mutation.
+#[derive(Default)]
+pub(crate) struct StudyExecutionBatch {
+    pub(crate) executed: Vec<StudyInstanceId>,
+    pub(crate) errors: Vec<StudyRuntimeError>,
 }
 
 /// Exact change made while reconciling study market dependencies into
@@ -1879,8 +2262,14 @@ struct NativeStudyCalculation<'a> {
     output_count: usize,
     inputs: &'a [ResolvedStudyInput],
     live_inputs: &'a [Option<StudyLiveMarketData<'a>>],
-    timestamps: &'a [i64],
+    timeline: &'a StudyOutputTimeline,
     dirty: StudyDirtyRange,
+}
+
+struct CalculatedStudyOutputs {
+    outputs: Vec<StudyOutputBuffer>,
+    #[cfg(test)]
+    preparation_work_rows: usize,
 }
 
 struct PreparedStudyStates {
@@ -1909,6 +2298,8 @@ pub struct StudyRuntime {
     state_bytes: usize,
     next_id: u64,
     next_output_generation: u64,
+    #[cfg(test)]
+    last_output_preparation_work_rows: usize,
 }
 
 fn validate_study_outputs(outputs: &[StudyOutputSpec]) -> Result<(), StudyRuntimeError> {
@@ -1981,6 +2372,8 @@ impl StudyRuntime {
             state_bytes: 0,
             next_id: 1,
             next_output_generation: 1,
+            #[cfg(test)]
+            last_output_preparation_work_rows: 0,
         }
     }
 
@@ -2503,37 +2896,37 @@ impl StudyRuntime {
         let Some(live_inputs) = Self::resolve_live_inputs(&definition, live_market) else {
             return Ok(false);
         };
-        let timestamps =
-            primary_timestamps(inputs.first().ok_or(StudyRuntimeError::MissingDependency)?);
-        if timestamps.is_empty() {
+        let timeline =
+            primary_timeline(inputs.first().ok_or(StudyRuntimeError::MissingDependency)?);
+        if timeline.len() == 0 {
             return Ok(false);
         }
-        if timestamps.len() > self.config.maximum_points_per_output.get() {
+        if timeline.len() > self.config.maximum_points_per_output.get() {
             return Err(StudyRuntimeError::OutputPointLimitExceeded {
                 maximum: self.config.maximum_points_per_output.get(),
-                requested: timestamps.len(),
+                requested: timeline.len(),
             });
         }
         let output_count = definition.outputs.len();
         let total_points =
-            self.output_points_after_replacement(study_id, timestamps.len(), output_count)?;
+            self.output_points_after_replacement(study_id, timeline.len(), output_count)?;
         let next_generation = self
             .next_output_generation
             .checked_add(1)
             .ok_or(StudyRuntimeError::OutputGenerationExhausted)?;
         let generation = self.next_output_generation;
         let dirty = if let Some(requested) = requested_dirty {
-            let Some(clamped) = clamp_dirty_range(requested, timestamps.len()) else {
+            let Some(clamped) = clamp_dirty_range(requested, timeline.len()) else {
                 return Ok(false);
             };
             clamped
         } else {
             StudyDirtyRange {
                 start: 0,
-                end_exclusive: Some(timestamps.len()),
+                end_exclusive: Some(timeline.len()),
             }
         };
-        let covering_execution = dirty.start == 0 && dirty.end_exclusive == Some(timestamps.len());
+        let covering_execution = dirty.start == 0 && dirty.end_exclusive == Some(timeline.len());
         let mut candidate_state = if covering_execution {
             Self::fresh_state(Some(program), &settings)?
         } else {
@@ -2547,7 +2940,7 @@ impl StudyRuntime {
                 detail: "native study state clone panicked".to_string(),
             })?
         };
-        let outputs = self.calculate_outputs(
+        let calculated = self.calculate_outputs(
             &NativeStudyCalculation {
                 study_id,
                 settings: &settings,
@@ -2555,7 +2948,7 @@ impl StudyRuntime {
                 output_count,
                 inputs: &inputs,
                 live_inputs: &live_inputs,
-                timestamps: &timestamps,
+                timeline: &timeline,
                 dirty,
             },
             &mut candidate_state,
@@ -2568,7 +2961,17 @@ impl StudyRuntime {
             live.state_bytes = candidate_state_bytes;
         }
         self.state_bytes = next_state_bytes;
-        self.commit_outputs(study_id, &timestamps, outputs, generation, total_points);
+        self.commit_outputs(
+            study_id,
+            &timeline,
+            calculated.outputs,
+            generation,
+            total_points,
+        );
+        #[cfg(test)]
+        {
+            self.last_output_preparation_work_rows = calculated.preparation_work_rows;
+        }
         self.next_output_generation = next_generation;
         Ok(true)
     }
@@ -2713,26 +3116,34 @@ impl StudyRuntime {
         &self,
         calculation: &NativeStudyCalculation<'_>,
         state: &mut Option<NativeStudyState>,
-    ) -> Result<Vec<StudyOutputBuffer>, StudyRuntimeError> {
-        let mut outputs = (0..calculation.output_count)
+    ) -> Result<CalculatedStudyOutputs, StudyRuntimeError> {
+        let prepared = (0..calculation.output_count)
             .map(|output_index| {
                 let output = StudyOutputId {
                     study_id: calculation.study_id,
                     output_index,
                 };
-                let mut buffer = StudyOutputBuffer::from_previous(
-                    calculation.timestamps,
+                StudyOutputBuffer::from_previous(
+                    calculation.timeline,
                     self.outputs.get(&output),
-                );
-                buffer.clear(calculation.dirty);
-                buffer
+                    calculation.dirty,
+                )
             })
+            .collect::<Vec<_>>();
+        #[cfg(test)]
+        let preparation_work_rows = prepared
+            .iter()
+            .map(|(_, work_rows)| *work_rows)
+            .sum::<usize>();
+        let mut outputs = prepared
+            .into_iter()
+            .map(|(output, _)| output)
             .collect::<Vec<_>>();
         let mut context = StudyExecutionContext {
             settings: calculation.settings,
             inputs: calculation.inputs,
             live_inputs: calculation.live_inputs,
-            timestamps: calculation.timestamps,
+            timeline: calculation.timeline,
             dirty: calculation.dirty,
             outputs: &mut outputs,
             state: state.as_mut(),
@@ -2754,13 +3165,17 @@ impl StudyRuntime {
                 });
             }
         }
-        Ok(outputs)
+        Ok(CalculatedStudyOutputs {
+            outputs,
+            #[cfg(test)]
+            preparation_work_rows,
+        })
     }
 
     fn commit_outputs(
         &mut self,
         study_id: StudyInstanceId,
-        timestamps: &Arc<[i64]>,
+        timeline: &StudyOutputTimeline,
         outputs: Vec<StudyOutputBuffer>,
         generation: u64,
         total_points: usize,
@@ -2773,8 +3188,9 @@ impl StudyRuntime {
                     output_index,
                 },
                 StudyOutputSeries {
-                    timestamps: Arc::clone(timestamps),
-                    values: output.values.into(),
+                    timeline: timeline.clone(),
+                    values: output.into_values(),
+                    materialized_values: Arc::new(OnceLock::new()),
                     generation,
                 },
             );
@@ -2794,12 +3210,17 @@ impl StudyRuntime {
         exchange_timestamp_unix_nanos: i64,
     ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError> {
         let mut no_live_market = |_input: &StudyMarketInput| None;
-        self.execute_live_market_change_with_live(
+        let batch = self.execute_live_market_change_with_live(
             engine,
             series,
             exchange_timestamp_unix_nanos,
             &mut no_live_market,
-        )
+        )?;
+        if let Some(error) = batch.errors.into_iter().next() {
+            Err(error)
+        } else {
+            Ok(batch.executed)
+        }
     }
 
     pub(crate) fn execute_live_market_change_with_live<'a, F>(
@@ -2808,7 +3229,7 @@ impl StudyRuntime {
         series: &BarSeriesKey,
         exchange_timestamp_unix_nanos: i64,
         live_market: &mut F,
-    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError>
     where
         F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
     {
@@ -2835,17 +3256,19 @@ impl StudyRuntime {
                 .or_insert(range);
         }
 
-        self.execute_pending_ranges_with_live(engine, pending, live_market)
+        self.execute_pending_ranges_with_live(engine, pending, live_market, None)
     }
 
-    pub(crate) fn execute_live_non_bar_change_with_live<'a, F>(
+    pub(crate) fn execute_live_non_bar_change_with_live<'a, F, R>(
         &mut self,
         engine: &MarketEngine,
         change: StudyNonBarChange<'_>,
         live_market: &mut F,
-    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+        market_ready: &mut R,
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError>
     where
         F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+        R: FnMut(&StudyMarketInput) -> bool,
     {
         debug_assert!(!matches!(change.stream, MarketStream::Bars));
         let matching_series = self
@@ -2882,7 +3305,50 @@ impl StudyRuntime {
                     .or_insert(range);
             }
         }
-        self.execute_pending_ranges_with_live(engine, pending, live_market)
+        self.execute_pending_ranges_with_live(engine, pending, live_market, Some(market_ready))
+    }
+
+    /// Incrementally executes studies affected by one successful ranged
+    /// historical repair. The supplied bounds are the actual provider-returned
+    /// bar timestamps, not merely the requested viewport, so unchanged retained
+    /// history stays outside the dirty range.
+    pub(crate) fn execute_history_range_change_with_live<'a, F>(
+        &mut self,
+        engine: &MarketEngine,
+        series: &BarSeriesKey,
+        first_changed_unix_nanos: i64,
+        last_changed_unix_nanos: i64,
+        live_market: &mut F,
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError>
+    where
+        F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
+    {
+        if first_changed_unix_nanos > last_changed_unix_nanos {
+            return Ok(StudyExecutionBatch::default());
+        }
+        let direct = self
+            .market_dependents
+            .get(series)
+            .cloned()
+            .unwrap_or_default();
+        let mut pending = BTreeMap::<StudyInstanceId, StudyDirtyRange>::new();
+        for study_id in direct {
+            let Some(range) = self.market_history_change_range(
+                engine,
+                study_id,
+                series,
+                first_changed_unix_nanos,
+                last_changed_unix_nanos,
+            )?
+            else {
+                continue;
+            };
+            pending
+                .entry(study_id)
+                .and_modify(|current| *current = current.merge(range))
+                .or_insert(range);
+        }
+        self.execute_pending_ranges_with_live(engine, pending, live_market, None)
     }
 
     fn execute_pending_ranges_with_live<'a, F>(
@@ -2890,26 +3356,77 @@ impl StudyRuntime {
         engine: &MarketEngine,
         mut pending: BTreeMap<StudyInstanceId, StudyDirtyRange>,
         live_market: &mut F,
-    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+        mut market_ready: Option<&mut dyn FnMut(&StudyMarketInput) -> bool>,
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError>
     where
         F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
     {
         let ordered = self.studies.keys().copied().collect::<Vec<_>>();
-        let mut executed = Vec::new();
+        let mut batch = StudyExecutionBatch::default();
+        let mut blocked = BTreeSet::new();
         for study_id in ordered {
             let Some(range) = pending.remove(&study_id) else {
                 continue;
             };
+            if blocked.contains(&study_id) {
+                continue;
+            }
+            if let Some(readiness) = market_ready.as_deref_mut() {
+                let ready = self.study_market_ancestry_ready(study_id, readiness)?;
+                if !ready {
+                    blocked.extend(self.dependent_subtree(study_id)?);
+                    continue;
+                }
+            }
             match self.execute_ready_range_with_live(engine, study_id, Some(range), live_market) {
                 Ok(true) => {
-                    executed.push(study_id);
-                    self.propagate_output_change(engine, study_id, range, &mut pending)?;
+                    batch.executed.push(study_id);
+                    if let Err(error) =
+                        self.propagate_output_change(engine, study_id, range, &mut pending)
+                    {
+                        batch.errors.push(error);
+                        blocked.extend(self.dependent_subtree(study_id)?);
+                    }
                 }
-                Ok(false) | Err(StudyRuntimeError::StudyNotExecutable(_)) => {}
-                Err(error) => return Err(error),
+                Ok(false) | Err(StudyRuntimeError::StudyNotExecutable(_)) => {
+                    blocked.extend(self.dependent_subtree(study_id)?);
+                }
+                Err(error) => {
+                    batch.errors.push(error);
+                    blocked.extend(self.dependent_subtree(study_id)?);
+                }
             }
         }
-        Ok(executed)
+        Ok(batch)
+    }
+
+    fn study_market_ancestry_ready(
+        &self,
+        study_id: StudyInstanceId,
+        readiness: &mut dyn FnMut(&StudyMarketInput) -> bool,
+    ) -> Result<bool, StudyRuntimeError> {
+        let mut pending = vec![study_id];
+        let mut visited = BTreeSet::new();
+        while let Some(candidate) = pending.pop() {
+            if !visited.insert(candidate) {
+                continue;
+            }
+            let node = self
+                .studies
+                .get(&candidate)
+                .ok_or(StudyRuntimeError::UnknownStudy(candidate))?;
+            for dependency in &node.definition.dependencies {
+                match dependency {
+                    StudyDependency::Market(input) => {
+                        if !readiness(input) {
+                            return Ok(false);
+                        }
+                    }
+                    StudyDependency::Output(output) => pending.push(output.study_id),
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn market_change_range(
@@ -2944,7 +3461,7 @@ impl StudyRuntime {
                 start
             } else {
                 let Some(start) =
-                    self.primary_row_at_or_before(engine, &node.definition, observed_unix_nanos)
+                    self.primary_row_containing(engine, &node.definition, observed_unix_nanos)
                 else {
                     continue;
                 };
@@ -2953,14 +3470,69 @@ impl StudyRuntime {
             if start >= length {
                 continue;
             }
-            let candidate = if matches!(changed_stream, MarketStream::Bars) && dependency_index == 0
-            {
-                StudyDirtyRange::bounded(start, start + 1)?
+            let candidate =
+                if !matches!(changed_stream, MarketStream::Bars) || dependency_index == 0 {
+                    StudyDirtyRange::bounded(start, start + 1)?
+                        .invalidated_by(node.definition.invalidation)?
+                } else {
+                    // A secondary input may affect every later primary row through
+                    // as-of/event-time alignment. Without assuming two series share
+                    // row indexes, tail invalidation is the smallest safe default.
+                    StudyDirtyRange::to_tail(start)
+                };
+            dirty = Some(dirty.map_or(candidate, |current: StudyDirtyRange| {
+                current.merge(candidate)
+            }));
+        }
+        Ok(dirty)
+    }
+
+    fn market_history_change_range(
+        &self,
+        engine: &MarketEngine,
+        study_id: StudyInstanceId,
+        changed_series: &BarSeriesKey,
+        first_changed_unix_nanos: i64,
+        last_changed_unix_nanos: i64,
+    ) -> Result<Option<StudyDirtyRange>, StudyRuntimeError> {
+        let node = self
+            .studies
+            .get(&study_id)
+            .ok_or(StudyRuntimeError::UnknownStudy(study_id))?;
+        let mut dirty = None;
+        for (dependency_index, dependency) in node.definition.dependencies.iter().enumerate() {
+            let StudyDependency::Market(input) = dependency else {
+                continue;
+            };
+            if input.series != *changed_series || !input.streams.contains(MarketStream::Bars) {
+                continue;
+            }
+            let Some(length) = self.primary_timeline_len(engine, &node.definition) else {
+                continue;
+            };
+            let Some(start) =
+                self.primary_lower_bound(engine, &node.definition, first_changed_unix_nanos)
+            else {
+                continue;
+            };
+            if start >= length {
+                continue;
+            }
+            let candidate = if dependency_index == 0 {
+                let Some(end_exclusive) =
+                    self.primary_upper_bound(engine, &node.definition, last_changed_unix_nanos)
+                else {
+                    continue;
+                };
+                let end_exclusive = end_exclusive.min(length);
+                if start >= end_exclusive {
+                    continue;
+                }
+                StudyDirtyRange::bounded(start, end_exclusive)?
                     .invalidated_by(node.definition.invalidation)?
             } else {
-                // A secondary input may affect every later primary row through
-                // as-of/event-time alignment. Without assuming two series share
-                // row indexes, tail invalidation is the smallest safe default.
+                // Historical changes in a secondary time-aligned input can alter
+                // every later primary row that resolves that input as-of time.
                 StudyDirtyRange::to_tail(start)
             };
             dirty = Some(dirty.map_or(candidate, |current: StudyDirtyRange| {
@@ -2970,30 +3542,42 @@ impl StudyRuntime {
         Ok(dirty)
     }
 
-    fn primary_row_at_or_before(
+    fn primary_row_containing(
         &self,
         engine: &MarketEngine,
         definition: &StudyDefinition,
         observed_unix_nanos: i64,
     ) -> Option<usize> {
-        let timestamps: &[i64] = match definition.dependencies.first()? {
-            StudyDependency::Market(input) => {
-                let snapshot = engine.series_snapshot(&input.series)?;
-                if snapshot.bars.is_empty() {
-                    return None;
-                }
-                let upper = snapshot.bars.partition_point(|bar| {
-                    bar.exchange_timestamp_unix_nanos <= observed_unix_nanos
-                });
-                return Some(upper.saturating_sub(1));
+        let snapshot = match definition.dependencies.first()? {
+            StudyDependency::Market(input) => engine.series_snapshot(&input.series)?,
+            StudyDependency::Output(output) => {
+                Arc::clone(&self.outputs.get(output)?.timeline.0.snapshot)
             }
-            StudyDependency::Output(output) => self.outputs.get(output)?.timestamps(),
         };
-        if timestamps.is_empty() {
+        let upper = snapshot
+            .bars
+            .partition_point(|bar| bar.exchange_timestamp_unix_nanos <= observed_unix_nanos);
+        if upper == 0 {
             return None;
         }
-        let upper = timestamps.partition_point(|timestamp| *timestamp <= observed_unix_nanos);
-        Some(upper.saturating_sub(1))
+        let index = upper - 1;
+        let bar = snapshot.bars.get(index)?;
+        if let Some(duration) = snapshot.series.period.duration_nanos() {
+            return bar
+                .exchange_timestamp_unix_nanos
+                .checked_add(duration)
+                .is_some_and(|end_exclusive| observed_unix_nanos < end_exclusive)
+                .then_some(index);
+        }
+        if let Some(next) = snapshot.bars.get(index + 1) {
+            return (observed_unix_nanos < next.exchange_timestamp_unix_nanos).then_some(index);
+        }
+        // Tick/calendar periods do not expose a fixed nanosecond duration. The
+        // newest row can own later live non-bar events only while it is explicitly
+        // the forming canonical tail; a completed last row must not absorb an
+        // arbitrary future event.
+        (snapshot.forming || observed_unix_nanos == bar.exchange_timestamp_unix_nanos)
+            .then_some(index)
     }
 
     fn propagate_output_change(
@@ -3102,8 +3686,30 @@ impl StudyRuntime {
             StudyDependency::Output(output) => Some(
                 self.outputs
                     .get(output)?
-                    .timestamps
-                    .partition_point(|timestamp| *timestamp < exchange_timestamp_unix_nanos),
+                    .timeline
+                    .lower_bound(exchange_timestamp_unix_nanos),
+            ),
+        }
+    }
+
+    fn primary_upper_bound(
+        &self,
+        engine: &MarketEngine,
+        definition: &StudyDefinition,
+        exchange_timestamp_unix_nanos: i64,
+    ) -> Option<usize> {
+        match definition.dependencies.first()? {
+            StudyDependency::Market(input) => {
+                let snapshot = engine.series_snapshot(&input.series)?;
+                Some(snapshot.bars.partition_point(|bar| {
+                    bar.exchange_timestamp_unix_nanos <= exchange_timestamp_unix_nanos
+                }))
+            }
+            StudyDependency::Output(output) => Some(
+                self.outputs
+                    .get(output)?
+                    .timeline
+                    .upper_bound(exchange_timestamp_unix_nanos),
             ),
         }
     }
@@ -3121,7 +3727,12 @@ impl StudyRuntime {
         series: &BarSeriesKey,
     ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError> {
         let mut no_live_market = |_input: &StudyMarketInput| None;
-        self.execute_ready_for_market_with_live(engine, series, &mut no_live_market)
+        let batch = self.execute_ready_for_market_with_live(engine, series, &mut no_live_market)?;
+        if let Some(error) = batch.errors.into_iter().next() {
+            Err(error)
+        } else {
+            Ok(batch.executed)
+        }
     }
 
     pub(crate) fn execute_ready_for_market_with_live<'a, F>(
@@ -3129,7 +3740,7 @@ impl StudyRuntime {
         engine: &MarketEngine,
         series: &BarSeriesKey,
         live_market: &mut F,
-    ) -> Result<Vec<StudyInstanceId>, StudyRuntimeError>
+    ) -> Result<StudyExecutionBatch, StudyRuntimeError>
     where
         F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
     {
@@ -3152,15 +3763,24 @@ impl StudyRuntime {
             }
         }
 
-        let mut executed = Vec::new();
+        let mut batch = StudyExecutionBatch::default();
+        let mut blocked = BTreeSet::new();
         for study_id in affected {
+            if blocked.contains(&study_id) {
+                continue;
+            }
             match self.execute_ready_with_live(engine, study_id, live_market) {
-                Ok(true) => executed.push(study_id),
-                Ok(false) | Err(StudyRuntimeError::StudyNotExecutable(_)) => {}
-                Err(error) => return Err(error),
+                Ok(true) => batch.executed.push(study_id),
+                Ok(false) | Err(StudyRuntimeError::StudyNotExecutable(_)) => {
+                    blocked.extend(self.dependent_subtree(study_id)?);
+                }
+                Err(error) => {
+                    batch.errors.push(error);
+                    blocked.extend(self.dependent_subtree(study_id)?);
+                }
             }
         }
-        Ok(executed)
+        Ok(batch)
     }
 
     fn resolve_inputs(
@@ -3527,15 +4147,12 @@ impl StudyRuntime {
     }
 }
 
-fn primary_timestamps(input: &ResolvedStudyInput) -> Arc<[i64]> {
+fn primary_timeline(input: &ResolvedStudyInput) -> StudyOutputTimeline {
     match input {
-        ResolvedStudyInput::Market(series) => series
-            .bars()
-            .iter()
-            .map(|bar| bar.exchange_timestamp_unix_nanos)
-            .collect::<Vec<_>>()
-            .into(),
-        ResolvedStudyInput::Output(series) => Arc::clone(&series.timestamps),
+        ResolvedStudyInput::Market(series) => {
+            StudyOutputTimeline::market(Arc::clone(&series.snapshot))
+        }
+        ResolvedStudyInput::Output(series) => series.timeline.clone(),
     }
 }
 
@@ -3569,7 +4186,7 @@ mod tests {
     use axiusflow_market_engine::{
         MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
     };
-    use std::time::Duration;
+    use std::{sync::Mutex, time::Duration};
 
     fn bound(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test bounds are non-zero")
@@ -3785,7 +4402,22 @@ mod tests {
         Err("intentional calculation rejection".to_string())
     }
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
+    fn calculate_scaled_close_then_fail_incremental(
+        context: &mut StudyExecutionContext<'_>,
+    ) -> Result<(), String> {
+        if context.dirty_range().start == 0 {
+            return calculate_scaled_close(context);
+        }
+        let dirty = context.dirty_range();
+        if let Some(output) = context.output(0)
+            && dirty.start < output.len()
+        {
+            output.set(dirty.start, Some(999.0))?;
+        }
+        Err("intentional incremental calculation rejection".to_string())
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct TestNativeState {
         executions: u32,
         accounted_bytes: usize,
@@ -3797,6 +4429,66 @@ mod tests {
 
     fn panicking_test_native_state_bytes(_state: &TestNativeState) -> usize {
         panic!("intentional state accounting panic");
+    }
+
+    struct SharedTransactionalState {
+        executions: Arc<Mutex<u32>>,
+    }
+
+    fn shared_transactional_state_bytes(_state: &SharedTransactionalState) -> usize {
+        std::mem::size_of::<SharedTransactionalState>() + std::mem::size_of::<u32>()
+    }
+
+    fn clone_shared_transactional_state(
+        state: &SharedTransactionalState,
+    ) -> SharedTransactionalState {
+        let executions = *state
+            .executions
+            .lock()
+            .expect("shared transactional state lock");
+        SharedTransactionalState {
+            executions: Arc::new(Mutex::new(executions)),
+        }
+    }
+
+    fn create_shared_transactional_state(
+        settings: &StudySettings,
+    ) -> Result<NativeStudyState, String> {
+        if !settings.is_empty() {
+            return Err("shared transactional state declares no settings".to_string());
+        }
+        Ok(NativeStudyState::new_transactional(
+            SharedTransactionalState {
+                executions: Arc::new(Mutex::new(0)),
+            },
+            shared_transactional_state_bytes,
+            clone_shared_transactional_state,
+        ))
+    }
+
+    fn calculate_shared_transactional_state(
+        context: &mut StudyExecutionContext<'_>,
+    ) -> Result<(), String> {
+        let dirty = context.dirty_range();
+        let state = context
+            .state_mut::<SharedTransactionalState>()
+            .ok_or_else(|| "shared transactional state is unavailable".to_string())?;
+        let mut executions = state
+            .executions
+            .lock()
+            .map_err(|_| "shared transactional state lock is poisoned".to_string())?;
+        *executions = executions.saturating_add(if dirty.start == 0 { 1 } else { 100 });
+        let value = f64::from(*executions);
+        drop(executions);
+        if let Some(output) = context.output(0)
+            && dirty.start < output.len()
+        {
+            output.set(dirty.start, Some(value))?;
+        }
+        if dirty.start > 0 {
+            return Err("intentional shared-state candidate rejection".to_string());
+        }
+        Ok(())
     }
 
     fn create_test_native_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
@@ -3938,8 +4630,20 @@ mod tests {
             .get_mut(&study_id)
             .and_then(|node| node.state.as_mut())
             .and_then(NativeStudyState::value_mut::<TestNativeState>)
-            .cloned()
+            .copied()
             .expect("test native state is committed")
+    }
+
+    fn committed_shared_state_executions(runtime: &StudyRuntime, study_id: StudyInstanceId) -> u32 {
+        *runtime
+            .studies
+            .get(&study_id)
+            .and_then(|node| node.state.as_ref())
+            .and_then(NativeStudyState::value::<SharedTransactionalState>)
+            .expect("committed shared transactional state")
+            .executions
+            .lock()
+            .expect("committed shared transactional state lock")
     }
 
     #[test]
@@ -4141,25 +4845,25 @@ mod tests {
                 1 => MarketStream::Trades,
                 _ => MarketStream::Depth,
             };
-            assert_eq!(
-                runtime
-                    .execute_live_non_bar_change_with_live(
-                        &engine,
-                        StudyNonBarChange {
-                            provider_id: "provider",
-                            instrument_id: "ES",
-                            entitlement_id: "entitlement",
-                            stream,
-                            observed_unix_nanos: event_metadata(u64::from(index) + 10, 90)
-                                .timestamps
-                                .exchange_unix_nanos
-                                .expect("exchange timestamp"),
-                        },
-                        &mut lookup,
-                    )
-                    .expect("non-bar burst event recalculates"),
-                vec![study]
-            );
+            let batch = runtime
+                .execute_live_non_bar_change_with_live(
+                    &engine,
+                    StudyNonBarChange {
+                        provider_id: "provider",
+                        instrument_id: "ES",
+                        entitlement_id: "entitlement",
+                        stream,
+                        observed_unix_nanos: event_metadata(u64::from(index) + 10, 90)
+                            .timestamps
+                            .exchange_unix_nanos
+                            .expect("exchange timestamp"),
+                    },
+                    &mut lookup,
+                    &mut |_| true,
+                )
+                .expect("non-bar burst event recalculates");
+            assert_eq!(batch.executed, vec![study]);
+            assert!(batch.errors.is_empty());
         }
 
         assert_eq!(runtime.output_points, bars().len());
@@ -4406,6 +5110,147 @@ mod tests {
             provider_generation,
             producer,
             consumer,
+        }
+    }
+
+    fn output_generation(runtime: &StudyRuntime, study_id: StudyInstanceId) -> u64 {
+        runtime
+            .output_series(study_id.output(0))
+            .expect("study output is committed")
+            .generation()
+    }
+
+    struct FailureIsolationFixture {
+        runtime: StudyRuntime,
+        engine: MarketEngine,
+        source: BarSeriesKey,
+        generation: ProviderGeneration,
+        first_failing: StudyInstanceId,
+        dependent: StudyInstanceId,
+        second_failing: StudyInstanceId,
+        independent: StudyInstanceId,
+        generations: [u64; 4],
+    }
+
+    fn failure_isolation_fixture() -> FailureIsolationFixture {
+        let mut runtime = StudyRuntime::new(config(8));
+        let mut engine = engine(2);
+        let source = series("ES");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        engine
+            .install_history(generation, &source, 2, 3, bars())
+            .expect("canonical history installs");
+        let owner = ConsumerId(NonZeroU64::MIN);
+
+        let mut first_registration = scaled_close_registration(source.clone(), 2);
+        first_registration.program.calculate = calculate_scaled_close_then_fail_incremental;
+        let first_failing = runtime
+            .register_native_for_consumer(owner, first_registration)
+            .expect("first failing study registers");
+        let dependent_definition = StudyDefinition {
+            identifier: "blocked_dependent".to_string(),
+            dependencies: vec![
+                StudyDependency::Output(first_failing.output(0)),
+                market(source.clone(), StreamRequirements::BARS),
+            ],
+            settings: Vec::new(),
+            outputs: outputs(1),
+            invalidation: StudyInvalidationPolicy::SameRange,
+        };
+        let dependent = runtime
+            .register_native_for_consumer(
+                owner,
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&dependent_definition.settings)
+                        .expect("dependent settings"),
+                    definition: dependent_definition,
+                    program: NativeStudyProgram::stateless(calculate_double_output),
+                },
+            )
+            .expect("dependent study registers");
+        let mut second_registration = scaled_close_registration(source.clone(), 3);
+        second_registration.program.calculate = calculate_scaled_close_then_fail_incremental;
+        let second_failing = runtime
+            .register_native_for_consumer(owner, second_registration)
+            .expect("second failing study registers");
+        let independent = runtime
+            .register_native_for_consumer(owner, scaled_close_registration(source.clone(), 4))
+            .expect("independent study registers");
+        runtime
+            .execute_ready_for_market(&engine, &source)
+            .expect("covering execution succeeds");
+        let generations = [
+            output_generation(&runtime, first_failing),
+            output_generation(&runtime, dependent),
+            output_generation(&runtime, second_failing),
+            output_generation(&runtime, independent),
+        ];
+        FailureIsolationFixture {
+            runtime,
+            engine,
+            source,
+            generation,
+            first_failing,
+            dependent,
+            second_failing,
+            independent,
+            generations,
+        }
+    }
+
+    const LARGE_HISTORY_ROWS: usize = 16_384;
+    const LARGE_OUTPUT_COUNT: usize = 4;
+
+    struct LargeHistoryFixture {
+        runtime: StudyRuntime,
+        engine: MarketEngine,
+        source: BarSeriesKey,
+        generation: ProviderGeneration,
+        study: StudyInstanceId,
+        last_history_bar: MarketBar,
+    }
+
+    fn large_history_fixture() -> LargeHistoryFixture {
+        let mut runtime = StudyRuntime::new(StudyRuntimeConfig {
+            maximum_studies: bound(2),
+            maximum_dependencies_per_study: bound(2),
+            maximum_outputs_per_study: bound(LARGE_OUTPUT_COUNT),
+            maximum_points_per_output: bound(LARGE_HISTORY_ROWS + 1),
+            maximum_total_output_points: bound((LARGE_HISTORY_ROWS + 1) * (LARGE_OUTPUT_COUNT + 1)),
+            maximum_state_bytes_per_study: bound(1_024),
+            maximum_total_state_bytes: bound(2_048),
+        });
+        let mut engine = engine((LARGE_HISTORY_ROWS + 64) / 64);
+        let source = series("ES-LARGE");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        let history = (0..LARGE_HISTORY_ROWS)
+            .map(|index| {
+                bar(
+                    u64::try_from(index + 1).expect("history sequence"),
+                    i64::try_from(index).expect("history offset") * 60,
+                    10_000 + i64::try_from(index).expect("history close"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let last_history_bar = *history.last().expect("large history has a tail");
+        engine
+            .install_history(generation, &source, 2, 0, history)
+            .expect("large canonical history installs");
+        let mut registration = scaled_close_registration(source.clone(), 2);
+        registration.definition.outputs = outputs(LARGE_OUTPUT_COUNT);
+        let study = runtime
+            .register_native_for_consumer(ConsumerId(NonZeroU64::MIN), registration)
+            .expect("large-history study registers");
+        runtime
+            .execute_ready(&engine, study)
+            .expect("large-history covering execution succeeds");
+        LargeHistoryFixture {
+            runtime,
+            engine,
+            source,
+            generation,
+            study,
+            last_history_bar,
         }
     }
 
@@ -4687,8 +5532,109 @@ mod tests {
             Some(StudyDepthView::new(&live.book, 2, 0)),
         );
         let mut second_lookup = |_input: &StudyMarketInput| Some(second_live);
+        let batch = runtime
+            .execute_live_non_bar_change_with_live(
+                &engine,
+                StudyNonBarChange {
+                    provider_id: "provider",
+                    instrument_id: "ES",
+                    entitlement_id: "entitlement",
+                    stream: MarketStream::Quotes,
+                    observed_unix_nanos: event_metadata(4, 90)
+                        .timestamps
+                        .exchange_unix_nanos
+                        .expect("exchange timestamp"),
+                },
+                &mut second_lookup,
+                &mut |_| true,
+            )
+            .expect("quote change recalculates");
+        assert_eq!(batch.executed, vec![study]);
+        assert!(batch.errors.is_empty());
         assert_eq!(
             runtime
+                .output_series(study.output(0))
+                .expect("updated output")
+                .values(),
+            &[Some(108.0), Some(128.0)]
+        );
+    }
+
+    #[test]
+    fn non_bar_change_updates_only_its_containing_row_and_ignores_outside_coverage() {
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES");
+        engine
+            .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 0, bars())
+            .expect("canonical history installs");
+        let streams = StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth);
+        let definition = definition(
+            "live_microstructure_exact_row",
+            vec![market(source, streams)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        let study = runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&definition.settings).expect("defaults"),
+                    definition,
+                    program: NativeStudyProgram::stateless(calculate_live_microstructure),
+                },
+            )
+            .expect("study registers");
+        let live = live_microstructure_fixture();
+        let first_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_one, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut initial_lookup = |_input: &StudyMarketInput| Some(first_live);
+        runtime
+            .execute_ready_with_live(&engine, study, &mut initial_lookup)
+            .expect("initial execution succeeds");
+
+        let second_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_two, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut changed_lookup = |_input: &StudyMarketInput| Some(second_live);
+        let changed = runtime
+            .execute_live_non_bar_change_with_live(
+                &engine,
+                StudyNonBarChange {
+                    provider_id: "provider",
+                    instrument_id: "ES",
+                    entitlement_id: "entitlement",
+                    stream: MarketStream::Quotes,
+                    observed_unix_nanos: event_metadata(4, 30)
+                        .timestamps
+                        .exchange_unix_nanos
+                        .expect("exchange timestamp"),
+                },
+                &mut changed_lookup,
+                &mut |_| true,
+            )
+            .expect("late first-bar quote recalculates");
+        assert_eq!(changed.executed, vec![study]);
+        assert!(changed.errors.is_empty());
+        assert_eq!(
+            runtime
+                .output_series(study.output(0))
+                .expect("updated output")
+                .values(),
+            &[Some(128.0), Some(108.0)]
+        );
+
+        for offset_seconds in [-1, 121] {
+            let mut lookup = |_input: &StudyMarketInput| Some(second_live);
+            let ignored = runtime
                 .execute_live_non_bar_change_with_live(
                     &engine,
                     StudyNonBarChange {
@@ -4696,22 +5642,185 @@ mod tests {
                         instrument_id: "ES",
                         entitlement_id: "entitlement",
                         stream: MarketStream::Quotes,
-                        observed_unix_nanos: event_metadata(4, 90)
+                        observed_unix_nanos: event_metadata(5, offset_seconds)
                             .timestamps
                             .exchange_unix_nanos
                             .expect("exchange timestamp"),
                     },
-                    &mut second_lookup,
+                    &mut lookup,
+                    &mut |_| true,
                 )
-                .expect("quote change recalculates"),
-            vec![study]
-        );
+                .expect("out-of-coverage quote is ignored");
+            assert!(ignored.executed.is_empty());
+            assert!(ignored.errors.is_empty());
+        }
         assert_eq!(
             runtime
                 .output_series(study.output(0))
-                .expect("updated output")
+                .expect("unchanged output")
                 .values(),
-            &[Some(108.0), Some(128.0)]
+            &[Some(128.0), Some(108.0)]
+        );
+    }
+
+    #[test]
+    fn non_bar_change_inside_fixed_time_history_gap_is_ignored() {
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES-GAP");
+        engine
+            .install_history(
+                ProviderGeneration(NonZeroU64::MIN),
+                &source,
+                2,
+                0,
+                vec![bar(1, 0, 10_500), bar(2, 180, 12_000)],
+            )
+            .expect("gapped canonical history installs");
+        let streams = StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth);
+        let definition = definition(
+            "live_microstructure_internal_gap",
+            vec![market(source, streams)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        let study = runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&definition.settings).expect("defaults"),
+                    definition,
+                    program: NativeStudyProgram::stateless(calculate_live_microstructure),
+                },
+            )
+            .expect("study registers");
+        let live = live_microstructure_fixture();
+        let first_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_one, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut initial_lookup = |_input: &StudyMarketInput| Some(first_live);
+        runtime
+            .execute_ready_with_live(&engine, study, &mut initial_lookup)
+            .expect("initial execution succeeds");
+        let committed = runtime
+            .output_series(study.output(0))
+            .expect("initial output")
+            .clone();
+
+        let second_live = StudyLiveMarketData::new(
+            Some(StudyQuoteView::new(&live.quote_two, 2, 0)),
+            Some(StudyTradeWindow::new(&live.trades, 1, 2, 2, 0)),
+            Some(StudyDepthView::new(&live.book, 2, 0)),
+        );
+        let mut gap_lookup = |_input: &StudyMarketInput| Some(second_live);
+        let gap_change = runtime
+            .execute_live_non_bar_change_with_live(
+                &engine,
+                StudyNonBarChange {
+                    provider_id: "provider",
+                    instrument_id: "ES-GAP",
+                    entitlement_id: "entitlement",
+                    stream: MarketStream::Quotes,
+                    observed_unix_nanos: event_metadata(20, 120)
+                        .timestamps
+                        .exchange_unix_nanos
+                        .expect("exchange timestamp"),
+                },
+                &mut gap_lookup,
+                &mut |_| true,
+            )
+            .expect("internal-gap quote is ignored");
+        assert!(gap_change.executed.is_empty());
+        assert!(gap_change.errors.is_empty());
+        assert_eq!(runtime.output_series(study.output(0)), Some(&committed));
+
+        let mut contained_lookup = |_input: &StudyMarketInput| Some(second_live);
+        let contained = runtime
+            .execute_live_non_bar_change_with_live(
+                &engine,
+                StudyNonBarChange {
+                    provider_id: "provider",
+                    instrument_id: "ES-GAP",
+                    entitlement_id: "entitlement",
+                    stream: MarketStream::Quotes,
+                    observed_unix_nanos: event_metadata(21, 210)
+                        .timestamps
+                        .exchange_unix_nanos
+                        .expect("exchange timestamp"),
+                },
+                &mut contained_lookup,
+                &mut |_| true,
+            )
+            .expect("event inside the later bar recalculates");
+        assert_eq!(contained.executed, vec![study]);
+        assert!(contained.errors.is_empty());
+        assert_eq!(
+            runtime
+                .output_series(study.output(0))
+                .expect("later bar output")
+                .value(1),
+            Some(Some(128.0))
+        );
+    }
+
+    #[test]
+    fn ranged_history_change_reuses_state_and_recomputes_only_repaired_rows() {
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES");
+        let generation = ProviderGeneration(NonZeroU64::MIN);
+        engine
+            .install_history(generation, &source, 2, 0, bars())
+            .expect("canonical history installs");
+        let study = runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                stateful_registration(source.clone(), 8),
+            )
+            .expect("stateful study registers");
+        runtime
+            .execute_ready(&engine, study)
+            .expect("covering execution succeeds");
+        assert_eq!(committed_test_state(&mut runtime, study).executions, 1);
+        assert_eq!(
+            runtime
+                .output_series(study.output(0))
+                .expect("initial output")
+                .values(),
+            &[Some(1.0), Some(1.0)]
+        );
+
+        let mut repaired = bars();
+        repaired[1].close = 11_250;
+        repaired[1].high = 11_750;
+        let changed_timestamp = repaired[1].exchange_timestamp_unix_nanos;
+        engine
+            .replace_covering_history(generation, &source, 2, 0, repaired, true)
+            .expect("history repair installs");
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        let batch = runtime
+            .execute_history_range_change_with_live(
+                &engine,
+                &source,
+                changed_timestamp,
+                changed_timestamp,
+                &mut no_live_market,
+            )
+            .expect("ranged repair executes incrementally");
+        assert_eq!(batch.executed, vec![study]);
+        assert!(batch.errors.is_empty());
+        assert_eq!(committed_test_state(&mut runtime, study).executions, 2);
+        assert_eq!(
+            runtime
+                .output_series(study.output(0))
+                .expect("repaired output")
+                .values(),
+            &[Some(1.0), Some(2.0)]
         );
     }
 
@@ -4925,6 +6034,265 @@ mod tests {
                 .values(),
             &[Some(63_000.0), Some(66_000.0), Some(72_000.0)]
         );
+    }
+
+    #[test]
+    fn failing_studies_do_not_starve_independent_work_or_advance_dependents() {
+        let mut fixture = failure_isolation_fixture();
+        let revised = bar(3, 120, 12_000);
+        fixture
+            .engine
+            .install_realtime_tail(fixture.generation, &fixture.source, 2, 3, revised, true)
+            .expect("canonical append installs");
+        let mut no_live_market = |_input: &StudyMarketInput| None;
+        let batch = fixture
+            .runtime
+            .execute_live_market_change_with_live(
+                &fixture.engine,
+                &fixture.source,
+                revised.exchange_timestamp_unix_nanos,
+                &mut no_live_market,
+            )
+            .expect("execution wave remains structurally valid");
+
+        assert_eq!(batch.executed, vec![fixture.independent]);
+        assert_eq!(batch.errors.len(), 2);
+        assert!(matches!(
+            &batch.errors[0],
+            StudyRuntimeError::ExecutionRejected { study_id, .. }
+                if *study_id == fixture.first_failing
+        ));
+        assert!(matches!(
+            &batch.errors[1],
+            StudyRuntimeError::ExecutionRejected { study_id, .. }
+                if *study_id == fixture.second_failing
+        ));
+        assert_eq!(
+            output_generation(&fixture.runtime, fixture.first_failing),
+            fixture.generations[0]
+        );
+        assert_eq!(
+            output_generation(&fixture.runtime, fixture.dependent),
+            fixture.generations[1]
+        );
+        assert_eq!(
+            output_generation(&fixture.runtime, fixture.second_failing),
+            fixture.generations[2]
+        );
+        let independent_output = fixture
+            .runtime
+            .output_series(fixture.independent.output(0))
+            .expect("independent output advances");
+        assert!(independent_output.generation() > fixture.generations[3]);
+        assert_eq!(independent_output.value(2), Some(Some(48_000.0)));
+    }
+
+    #[test]
+    fn large_history_tail_execution_preparation_is_bounded_by_dirty_rows_and_outputs() {
+        let mut fixture = large_history_fixture();
+        assert_eq!(
+            fixture.runtime.last_output_preparation_work_rows,
+            LARGE_HISTORY_ROWS * LARGE_OUTPUT_COUNT
+        );
+
+        let before_append = fixture
+            .runtime
+            .output_series(fixture.study.output(0))
+            .expect("pre-append output")
+            .clone();
+        let old_tail = before_append
+            .value(LARGE_HISTORY_ROWS - 1)
+            .expect("pre-append tail row");
+        let appended = bar(
+            u64::try_from(LARGE_HISTORY_ROWS + 1).expect("append sequence"),
+            i64::try_from(LARGE_HISTORY_ROWS).expect("append offset") * 60,
+            fixture.last_history_bar.close + 250,
+        );
+        fixture
+            .engine
+            .install_realtime_tail(fixture.generation, &fixture.source, 2, 0, appended, true)
+            .expect("large-history append installs");
+        assert_eq!(
+            fixture
+                .runtime
+                .execute_live_market_change(
+                    &fixture.engine,
+                    &fixture.source,
+                    appended.exchange_timestamp_unix_nanos,
+                )
+                .expect("large-history append executes"),
+            vec![fixture.study]
+        );
+        assert_eq!(
+            fixture.runtime.last_output_preparation_work_rows,
+            LARGE_OUTPUT_COUNT
+        );
+        assert_eq!(
+            before_append.value(LARGE_HISTORY_ROWS - 1),
+            Some(old_tail),
+            "the previously published full snapshot stays stable"
+        );
+        let appended_output = fixture
+            .runtime
+            .output_series(fixture.study.output(0))
+            .expect("appended full output snapshot");
+        assert_eq!(appended_output.len(), LARGE_HISTORY_ROWS + 1);
+        assert_eq!(
+            appended_output.value(LARGE_HISTORY_ROWS),
+            Some(Some(f64::from(
+                i32::try_from(appended.close * 2).expect("bounded appended close")
+            )))
+        );
+
+        let before_revision = appended_output.clone();
+        let revised = MarketBar {
+            close: appended.close + 500,
+            high: appended.high + 500,
+            ..appended
+        };
+        fixture
+            .engine
+            .install_realtime_tail(fixture.generation, &fixture.source, 2, 0, revised, true)
+            .expect("large-history tail revision installs");
+        assert_eq!(
+            fixture
+                .runtime
+                .execute_live_market_change(
+                    &fixture.engine,
+                    &fixture.source,
+                    revised.exchange_timestamp_unix_nanos,
+                )
+                .expect("large-history tail revision executes"),
+            vec![fixture.study]
+        );
+        assert_eq!(
+            fixture.runtime.last_output_preparation_work_rows,
+            LARGE_OUTPUT_COUNT
+        );
+        assert_eq!(before_revision.len(), LARGE_HISTORY_ROWS + 1);
+        assert_eq!(
+            before_revision.value(LARGE_HISTORY_ROWS),
+            Some(Some(f64::from(
+                i32::try_from(appended.close * 2).expect("bounded appended close")
+            )))
+        );
+        let revised_output = fixture
+            .runtime
+            .output_series(fixture.study.output(0))
+            .expect("revised full output snapshot");
+        assert_eq!(revised_output.len(), LARGE_HISTORY_ROWS + 1);
+        assert_eq!(
+            revised_output.value(LARGE_HISTORY_ROWS),
+            Some(Some(f64::from(
+                i32::try_from(revised.close * 2).expect("bounded revised close")
+            )))
+        );
+    }
+
+    #[test]
+    fn output_primary_mtf_incremental_mapping_does_not_materialize_large_timestamps() {
+        let mut fixture = large_history_fixture();
+        let secondary = series_period("ES-LARGE-5M", 300);
+        let secondary_start = i64::try_from(LARGE_HISTORY_ROWS - 6).expect("secondary start") * 60;
+        fixture
+            .engine
+            .install_history(
+                fixture.generation,
+                &secondary,
+                2,
+                0,
+                vec![bar(1, secondary_start, 20_000)],
+            )
+            .expect("secondary large-history series installs");
+
+        let consumer_definition = definition(
+            "output_primary_large_mtf",
+            vec![
+                StudyDependency::Output(fixture.study.output(0)),
+                market(secondary.clone(), StreamRequirements::BARS),
+            ],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        let consumer = fixture
+            .runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&consumer_definition.settings)
+                        .expect("consumer defaults"),
+                    definition: consumer_definition,
+                    program: NativeStudyProgram::stateless(calculate_double_output),
+                },
+            )
+            .expect("output-primary consumer registers");
+        fixture
+            .runtime
+            .execute_ready(&fixture.engine, consumer)
+            .expect("output-primary consumer covering execution succeeds");
+
+        let producer_output = fixture
+            .runtime
+            .output_series(fixture.study.output(0))
+            .expect("producer output exists");
+        assert!(
+            producer_output.timeline.0.materialized.get().is_none(),
+            "covering execution does not require the public contiguous timestamp view"
+        );
+        let committed_consumer = fixture
+            .runtime
+            .output_series(consumer.output(0))
+            .expect("consumer output exists")
+            .clone();
+        assert_eq!(committed_consumer.len(), LARGE_HISTORY_ROWS);
+
+        let secondary_tail = bar(
+            2,
+            i64::try_from(LARGE_HISTORY_ROWS - 1).expect("secondary tail offset") * 60,
+            21_000,
+        );
+        fixture
+            .engine
+            .install_realtime_tail(fixture.generation, &secondary, 2, 0, secondary_tail, true)
+            .expect("secondary tail installs");
+        assert_eq!(
+            fixture
+                .runtime
+                .execute_live_market_change(
+                    &fixture.engine,
+                    &secondary,
+                    secondary_tail.exchange_timestamp_unix_nanos,
+                )
+                .expect("secondary output-primary change executes"),
+            vec![consumer]
+        );
+        assert_eq!(
+            fixture.runtime.last_output_preparation_work_rows, 1,
+            "only the mapped primary tail row is prepared"
+        );
+        assert!(
+            fixture
+                .runtime
+                .output_series(fixture.study.output(0))
+                .expect("producer output remains installed")
+                .timeline
+                .0
+                .materialized
+                .get()
+                .is_none(),
+            "incremental output-primary timestamp mapping must stay on the canonical bar index"
+        );
+        assert_eq!(
+            committed_consumer.len(),
+            LARGE_HISTORY_ROWS,
+            "the previously published full snapshot remains stable"
+        );
+        let current_consumer = fixture
+            .runtime
+            .output_series(consumer.output(0))
+            .expect("current consumer output");
+        assert_eq!(current_consumer.len(), LARGE_HISTORY_ROWS);
+        assert!(current_consumer.generation() > committed_consumer.generation());
     }
 
     #[test]
@@ -5197,6 +6565,59 @@ mod tests {
             Err(StudyRuntimeError::ExecutionRejected { study_id, .. }) if study_id == study
         ));
         assert_eq!(committed_test_state(&mut runtime, study).executions, 1);
+        assert_eq!(
+            runtime.output_series(study.output(0)),
+            Some(&committed_output)
+        );
+    }
+
+    #[test]
+    fn shared_interior_state_candidate_failure_cannot_mutate_committed_state() {
+        let mut runtime = StudyRuntime::new(config(4));
+        let mut engine = engine(1);
+        let source = series("ES");
+        engine
+            .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 3, bars())
+            .expect("canonical history installs");
+        let definition = definition(
+            "shared_transactional_state",
+            vec![market(source, StreamRequirements::BARS)],
+            1,
+            StudyInvalidationPolicy::SameRange,
+        );
+        let study = runtime
+            .register_native_for_consumer(
+                ConsumerId(NonZeroU64::MIN),
+                NativeStudyRegistration {
+                    settings: StudySettings::defaults(&definition.settings)
+                        .expect("shared-state defaults"),
+                    definition,
+                    program: NativeStudyProgram::stateful(
+                        calculate_shared_transactional_state,
+                        create_shared_transactional_state,
+                    ),
+                },
+            )
+            .expect("shared-state study registers");
+
+        runtime
+            .execute_ready(&engine, study)
+            .expect("covering shared-state execution succeeds");
+        let committed_output = runtime
+            .output_series(study.output(0))
+            .expect("committed shared-state output")
+            .clone();
+        assert_eq!(committed_shared_state_executions(&runtime, study), 1);
+
+        assert!(matches!(
+            runtime.execute_ready_range(
+                &engine,
+                study,
+                Some(StudyDirtyRange::bounded(1, 2).expect("incremental dirty row")),
+            ),
+            Err(StudyRuntimeError::ExecutionRejected { study_id, .. }) if study_id == study
+        ));
+        assert_eq!(committed_shared_state_executions(&runtime, study), 1);
         assert_eq!(
             runtime.output_series(study.output(0)),
             Some(&committed_output)

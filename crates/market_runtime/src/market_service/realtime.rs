@@ -111,10 +111,18 @@ impl ProviderOrderBook {
         if instrument.session_generation != self.instrument.session_generation
             || instrument.entitlement_id != self.instrument.entitlement_id
         {
-            self.reset_recent_trades_for_session(instrument.session_generation);
-            self.top_of_book = None;
+            self.invalidate_live_market(instrument.session_generation);
         }
         self.instrument = instrument;
+    }
+
+    fn invalidate_live_market(&mut self, session_generation: u64) -> bool {
+        let quote_changed = self.top_of_book.take().is_some();
+        let trades_changed = !self.recent_trades.is_empty() || !self.traded_volumes.is_empty();
+        let previous_revision = self.book.revision();
+        self.reset_recent_trades_for_session(session_generation);
+        self.book.mark_stale();
+        quote_changed || trades_changed || self.book.revision() != previous_revision
     }
 
     fn reset_recent_trades_for_session(&mut self, session_generation: u64) {
@@ -123,13 +131,6 @@ impl ProviderOrderBook {
         self.trade_session_generation = session_generation;
         self.last_trade_source_sequence = 0;
         self.retention_clock_unix_nanos = 0;
-    }
-
-    pub(super) fn clear_recent_trades(&mut self) -> bool {
-        let changed = !self.recent_trades.is_empty() || !self.traded_volumes.is_empty();
-        self.recent_trades.clear();
-        self.traded_volumes.clear();
-        changed
     }
 
     fn remove_recent_trade(&mut self, trade: StudyTradeSample) {
@@ -237,6 +238,7 @@ impl ProviderOrderBook {
     pub(super) fn study_live_market_data<'a>(
         &'a self,
         input: &StudyMarketInput,
+        provider_generation: u64,
     ) -> Option<StudyLiveMarketData<'a>> {
         if self.instrument.provider != input.series.provider_id
             || self.instrument.instrument_id != input.series.instrument_id
@@ -252,22 +254,30 @@ impl ProviderOrderBook {
             .then(|| {
                 self.top_of_book
                     .as_ref()
+                    .filter(|quote| quote.metadata.session_generation == provider_generation)
                     .map(|quote| StudyQuoteView::new(quote, price_scale, quantity_scale))
             })
             .flatten();
-        let trades = input.streams.contains(MarketStream::Trades).then(|| {
-            StudyTradeWindow::new(
-                &self.recent_trades,
-                self.trade_session_generation,
-                self.last_trade_source_sequence,
-                price_scale,
-                quantity_scale,
-            )
-        });
+        let trades = (input.streams.contains(MarketStream::Trades)
+            && self.trade_session_generation == provider_generation)
+            .then(|| {
+                StudyTradeWindow::new(
+                    &self.recent_trades,
+                    self.trade_session_generation,
+                    self.last_trade_source_sequence,
+                    price_scale,
+                    quantity_scale,
+                )
+            });
         let depth = input
             .streams
             .contains(MarketStream::Depth)
-            .then(|| StudyDepthView::new(&self.book, price_scale, quantity_scale));
+            .then(|| {
+                (self.book.state() == CanonicalOrderBookState::Ready
+                    && self.book.session_generation() == Some(provider_generation))
+                .then(|| StudyDepthView::new(&self.book, price_scale, quantity_scale))
+            })
+            .flatten();
         Some(StudyLiveMarketData::new(quote, trades, depth))
     }
 }
@@ -827,7 +837,12 @@ impl Coordinator<'_> {
             stream,
             observed_unix_nanos,
         ) {
-            Ok(executed) => self.publish_study_outputs(&executed),
+            Ok(batch) => {
+                self.publish_study_outputs(&batch.executed);
+                for error in batch.errors {
+                    eprintln!("Axiusflow live non-bar study execution failed: {error}");
+                }
+            }
             Err(error) => {
                 // Native study failure must not change acceptance/recovery of
                 // authoritative provider state.
@@ -845,6 +860,22 @@ impl Coordinator<'_> {
         self.hyperliquid_display_depth.clear();
         for instrument_id in affected {
             self.broadcast_order_book("hyperliquid", &instrument_id);
+        }
+    }
+
+    fn invalidate_provider_live_market(&mut self, provider: &str, generation: ProviderGeneration) {
+        let affected = self
+            .order_books
+            .iter_mut()
+            .filter(|((candidate, _), _)| candidate == provider)
+            .filter_map(|(identity, order_book)| {
+                order_book
+                    .invalidate_live_market(generation.0.get())
+                    .then(|| identity.clone())
+            })
+            .collect::<Vec<_>>();
+        for (provider, instrument_id) in affected {
+            self.broadcast_order_book(&provider, &instrument_id);
         }
     }
 
@@ -940,7 +971,12 @@ impl Coordinator<'_> {
                 }
             }
             match self.execute_study_bar_change(series, exchange_timestamp_unix_nanos) {
-                Ok(executed) => self.publish_study_outputs(&executed),
+                Ok(batch) => {
+                    self.publish_study_outputs(&batch.executed);
+                    for error in batch.errors {
+                        eprintln!("Axiusflow live study execution failed: {error}");
+                    }
+                }
                 Err(error) => {
                     // Study failure is isolated from canonical market publication.
                     // A user calculation must never force provider recovery or make
@@ -1279,6 +1315,7 @@ impl Coordinator<'_> {
         }
         if current.is_some_and(|current| generation > current) {
             self.clear_hyperliquid_display_depth();
+            self.invalidate_provider_live_market("hyperliquid", generation);
             self.hyperliquid_demand_dirty = true;
             for ((series, _), stop) in &self.history_cancellations {
                 if series.provider_id == "hyperliquid" {
@@ -1507,21 +1544,7 @@ impl Coordinator<'_> {
         for live in self.hyperliquid_live.values_mut() {
             live.connected = false;
         }
-        let stale_books = self
-            .order_books
-            .iter_mut()
-            .filter(|((provider, _), _)| provider == "hyperliquid")
-            .filter_map(|(identity, order_book)| {
-                let trades_changed = order_book.clear_recent_trades();
-                order_book.book.mark_stale();
-                (trades_changed
-                    || matches!(order_book.book.state(), CanonicalOrderBookState::Stale))
-                .then(|| identity.clone())
-            })
-            .collect::<Vec<_>>();
-        for (provider, instrument_id) in stale_books {
-            self.broadcast_order_book(&provider, &instrument_id);
-        }
+        self.invalidate_provider_live_market("hyperliquid", generation);
     }
 
     pub(super) fn rithmic_connecting(&mut self, generation: u64) {
@@ -1544,6 +1567,7 @@ impl Coordinator<'_> {
             return;
         }
         if current.is_some_and(|current| generation > current) {
+            self.invalidate_provider_live_market("rithmic", generation);
             for ((series, _), stop) in &self.history_cancellations {
                 if series.provider_id == "rithmic" {
                     stop.store(true, Ordering::Release);
@@ -1659,20 +1683,11 @@ impl Coordinator<'_> {
             .exchange_unix_nanos
             .or(trade.metadata.timestamps.provider_unix_nanos)
             .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
-        let trade_changed = self
-            .order_books
-            .get_mut(&("rithmic".to_string(), instrument_id.clone()))
-            .is_some_and(|order_book| order_book.accept_recent_trade(trade));
-        if trade_changed {
-            self.broadcast_order_book("rithmic", &instrument_id);
-            self.publish_non_bar_study_change(
-                "rithmic",
-                &instrument_id,
-                &entitlement_id,
-                MarketStream::Trades,
-                observed_unix_nanos,
-            );
-        }
+        // Classify this trade against every bar-aligned series before exposing
+        // its point-in-time trade state to studies. A trade can itself reveal
+        // that one timeframe's live aggregator needs covering recovery; that
+        // series must enter AwaitingHistory before the non-bar study wave runs,
+        // while unaffected timeframes remain eligible.
         let failed = self
             .rithmic_live
             .iter_mut()
@@ -1690,6 +1705,20 @@ impl Coordinator<'_> {
                 generation,
                 FailureStage::Aggregation,
                 "Rithmic instrument aggregation requires covering history",
+            );
+        }
+        let trade_changed = self
+            .order_books
+            .get_mut(&("rithmic".to_string(), instrument_id.clone()))
+            .is_some_and(|order_book| order_book.accept_recent_trade(trade));
+        if trade_changed {
+            self.broadcast_order_book("rithmic", &instrument_id);
+            self.publish_non_bar_study_change(
+                "rithmic",
+                &instrument_id,
+                &entitlement_id,
+                MarketStream::Trades,
+                observed_unix_nanos,
             );
         }
     }
@@ -1905,21 +1934,7 @@ impl Coordinator<'_> {
         for live in self.rithmic_live.values_mut() {
             live.connected = false;
         }
-        let stale_books = self
-            .order_books
-            .iter_mut()
-            .filter(|((provider, _), _)| provider == "rithmic")
-            .filter_map(|(identity, order_book)| {
-                let trades_changed = order_book.clear_recent_trades();
-                order_book.book.mark_stale();
-                (trades_changed
-                    || matches!(order_book.book.state(), CanonicalOrderBookState::Stale))
-                .then(|| identity.clone())
-            })
-            .collect::<Vec<_>>();
-        for (provider, instrument_id) in stale_books {
-            self.broadcast_order_book(&provider, &instrument_id);
-        }
+        self.invalidate_provider_live_market("rithmic", generation);
     }
 
     fn rithmic_failed(&mut self, generation: u64, detail: &'static str) {
@@ -1946,21 +1961,7 @@ impl Coordinator<'_> {
         for live in self.rithmic_live.values_mut() {
             live.connected = false;
         }
-        let stale_books = self
-            .order_books
-            .iter_mut()
-            .filter(|((provider, _), _)| provider == "rithmic")
-            .filter_map(|(identity, order_book)| {
-                let trades_changed = order_book.clear_recent_trades();
-                order_book.book.mark_stale();
-                (trades_changed
-                    || matches!(order_book.book.state(), CanonicalOrderBookState::Stale))
-                .then(|| identity.clone())
-            })
-            .collect::<Vec<_>>();
-        for (provider, instrument_id) in stale_books {
-            self.broadcast_order_book(&provider, &instrument_id);
-        }
+        self.invalidate_provider_live_market("rithmic", generation);
     }
 
     pub(super) fn publish_rithmic_live(&mut self) {
@@ -2357,7 +2358,10 @@ impl Coordinator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::AggressorTradeVolumes;
+    use axiusflow_market_data::{
+        AggressorTradeVolumes, DepthLevel, EventMetadata, QualifiedTimestamp,
+    };
+    use axiusflow_market_engine::StreamRequirements;
     use std::num::NonZeroU64;
 
     fn generation() -> ProviderGeneration {
@@ -2452,6 +2456,127 @@ mod tests {
         }
     }
 
+    fn ladder_metadata(session_generation: u64, source_sequence: u64) -> EventMetadata {
+        EventMetadata {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+            entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+            source_sequence,
+            session_generation,
+            timestamps: QualifiedTimestamp {
+                exchange_unix_nanos: Some(i64::try_from(source_sequence).expect("small sequence")),
+                provider_unix_nanos: None,
+                received_unix_nanos: i64::try_from(source_sequence).expect("small sequence"),
+            },
+        }
+    }
+
+    fn ladder_quote(session_generation: u64, source_sequence: u64) -> TopOfBookQuote {
+        TopOfBookQuote {
+            metadata: ladder_metadata(session_generation, source_sequence),
+            bid: Some(DepthLevel {
+                price: 20_000,
+                quantity: 2,
+                order_count: None,
+            }),
+            ask: Some(DepthLevel {
+                price: 20_025,
+                quantity: 3,
+                order_count: None,
+            }),
+        }
+    }
+
+    fn ladder_depth(session_generation: u64, source_sequence: u64) -> DepthSnapshot {
+        DepthSnapshot {
+            metadata: ladder_metadata(session_generation, source_sequence),
+            bids: vec![DepthLevel {
+                price: 20_000,
+                quantity: 4,
+                order_count: Some(1),
+            }],
+            asks: vec![DepthLevel {
+                price: 20_025,
+                quantity: 5,
+                order_count: Some(1),
+            }],
+        }
+    }
+
+    fn ladder_study_input() -> StudyMarketInput {
+        StudyMarketInput {
+            series: BarSeriesKey {
+                provider_id: "rithmic".to_string(),
+                instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+                entitlement_id: "rithmic-test:CME:MNQ".to_string(),
+                period: BarPeriod::time(60).expect("minute period"),
+                definition_version: 1,
+            },
+            streams: StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes)
+                .with(MarketStream::Depth),
+        }
+    }
+
+    #[test]
+    fn study_live_market_views_are_generation_fenced_and_invalidated_for_recovery() {
+        let mut book = ProviderOrderBook::new(ladder_instrument(1));
+        assert!(book.install_top_of_book(&ladder_quote(1, 1)));
+        assert!(book.accept_recent_trade(&ladder_trade(1, 2, 2, 20_000, 3, AggressorSide::Buy,)));
+        assert!(matches!(
+            book.book.install_snapshot(&ladder_depth(1, 3)),
+            Ok(OrderBookApplyOutcome::Published)
+        ));
+        let input = ladder_study_input();
+        let current = book
+            .study_live_market_data(&input, 1)
+            .expect("matching instrument exposes current live state");
+        assert!(current.quote().is_some());
+        assert!(current.trades().is_some_and(|trades| !trades.is_empty()));
+        assert!(current.depth().is_some());
+
+        let newer_generation = book
+            .study_live_market_data(&input, 2)
+            .expect("instrument identity still matches");
+        assert!(newer_generation.quote().is_none());
+        assert!(newer_generation.trades().is_none());
+        assert!(newer_generation.depth().is_none());
+
+        book.update_instrument(ladder_instrument(2));
+        let replaced_session = book
+            .study_live_market_data(&input, 2)
+            .expect("replacement session keeps the canonical instrument identity");
+        assert!(replaced_session.quote().is_none());
+        assert!(
+            replaced_session
+                .trades()
+                .is_some_and(StudyTradeWindow::is_empty)
+        );
+        assert!(replaced_session.depth().is_none());
+
+        assert!(book.install_top_of_book(&ladder_quote(2, 1)));
+        assert!(book.accept_recent_trade(&ladder_trade(2, 2, 4, 20_025, 7, AggressorSide::Sell,)));
+        assert!(matches!(
+            book.book.install_snapshot(&ladder_depth(2, 3)),
+            Ok(OrderBookApplyOutcome::Published)
+        ));
+        let restored = book
+            .study_live_market_data(&input, 2)
+            .expect("new generation exposes fresh live state");
+        assert!(restored.quote().is_some());
+        assert!(restored.trades().is_some_and(|trades| !trades.is_empty()));
+        assert!(restored.depth().is_some());
+
+        assert!(book.invalidate_live_market(2));
+        let recovering = book
+            .study_live_market_data(&input, 2)
+            .expect("recovery keeps the canonical instrument identity");
+        assert!(recovering.quote().is_none());
+        assert!(recovering.trades().is_some_and(StudyTradeWindow::is_empty));
+        assert!(recovering.depth().is_none());
+    }
+
     #[test]
     fn recent_ladder_trades_are_side_aware_deduped_retained_and_session_fenced() {
         let mut book = ProviderOrderBook::new(ladder_instrument(1));
@@ -2538,8 +2663,6 @@ mod tests {
             Some(AggressorTradeVolumes { buy: 7, sell: 0 })
         );
 
-        assert!(book.clear_recent_trades());
-        assert!(book.traded_volumes.is_empty());
         assert!(
             !book.accept_recent_trade(&ladder_trade(
                 2,

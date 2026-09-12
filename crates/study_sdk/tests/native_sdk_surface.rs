@@ -14,13 +14,18 @@ fn counter_state_bytes(_state: &CounterState) -> usize {
     size_of::<CounterState>()
 }
 
+fn clone_counter_state(state: &CounterState) -> CounterState {
+    state.clone()
+}
+
 fn counter_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
     if !settings.is_empty() {
         return Err("counter study declares no settings".to_string());
     }
-    Ok(NativeStudyState::new(
+    Ok(NativeStudyState::new_transactional(
         CounterState { executions: 0 },
         counter_state_bytes,
+        clone_counter_state,
     ))
 }
 

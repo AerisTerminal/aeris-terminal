@@ -1627,10 +1627,17 @@ pub mod builtins {
     fn create_ema_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
         let period = positive_period(settings, BUILTIN_EMA_PERIOD_SETTING)
             .map_err(|_| "EMA period is unavailable".to_string())?;
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             nucleuscharts_indicators::IncrementalEmaState::new(period),
             ema_state_runtime_bytes,
+            transactional_clone,
         ))
+    }
+
+    fn transactional_clone<T: Clone>(state: &T) -> T {
+        // The pinned Nucleus incremental states used below provide mutation-isolated
+        // clone/COW semantics for their private checkpoint storage.
+        state.clone()
     }
 
     #[derive(Clone)]
@@ -1641,11 +1648,12 @@ pub mod builtins {
     fn create_ema_ribbon_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
         let periods =
             ema_ribbon_periods(settings).map_err(|_| "EMA Ribbon periods are unavailable")?;
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             EmaRibbonState {
                 states: periods.map(nucleuscharts_indicators::IncrementalEmaState::new),
             },
             ema_ribbon_state_runtime_bytes,
+            transactional_clone,
         ))
     }
 
@@ -1662,9 +1670,10 @@ pub mod builtins {
     fn create_atr_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
         let period = positive_period(settings, BUILTIN_ATR_PERIOD_SETTING)
             .map_err(|_| "ATR period is unavailable".to_string())?;
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             nucleuscharts_indicators::IncrementalAtrState::new(period),
             atr_state_runtime_bytes,
+            transactional_clone,
         ))
     }
 
@@ -1677,9 +1686,10 @@ pub mod builtins {
         if !settings.is_empty() {
             return Err("VWAP does not accept settings".to_string());
         }
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             nucleuscharts_indicators::IncrementalVwapState::new(),
             vwap_state_runtime_bytes,
+            transactional_clone,
         ))
     }
 
@@ -1691,9 +1701,10 @@ pub mod builtins {
     fn create_rsi_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
         let period = positive_period(settings, BUILTIN_RSI_PERIOD_SETTING)
             .map_err(|_| "RSI period is unavailable".to_string())?;
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             nucleuscharts_indicators::IncrementalRsiState::new(period),
             rsi_state_runtime_bytes,
+            transactional_clone,
         ))
     }
 
@@ -1705,9 +1716,10 @@ pub mod builtins {
     fn create_macd_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
         let (fast, slow, signal) =
             macd_periods(settings).map_err(|_| "MACD periods are unavailable".to_string())?;
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             nucleuscharts_indicators::IncrementalMacdState::new(fast, slow, signal),
             macd_state_runtime_bytes,
+            transactional_clone,
         ))
     }
 
@@ -1719,9 +1731,10 @@ pub mod builtins {
     fn create_stochastic_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
         let (k_period, d_period) = stochastic_periods(settings)
             .map_err(|_| "Stochastic periods are unavailable".to_string())?;
-        Ok(NativeStudyState::new(
+        Ok(NativeStudyState::new_transactional(
             nucleuscharts_indicators::IncrementalStochasticState::new(k_period, d_period),
             stochastic_state_runtime_bytes,
+            transactional_clone,
         ))
     }
 

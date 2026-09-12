@@ -697,6 +697,7 @@ struct WorkspaceSurface {
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
     pending_study_settings_request: Option<StudyInstanceId>,
+    pending_study_remove_request: Option<StudyInstanceId>,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
     retained_chart_presentation: RetainedChartPresentation,
@@ -758,6 +759,8 @@ struct RuntimeStudiesState {
     active: Vec<RuntimeStudyState>,
     pending: HashMap<u64, PendingRuntimeStudyState>,
     reinitializing: HashMap<StudyInstanceId, PendingStudyReinitialization>,
+    suppressing_outputs: HashSet<StudyInstanceId>,
+    automatic_removals: HashSet<StudyInstanceId>,
     removing: HashSet<StudyInstanceId>,
     deferred: Vec<PendingRuntimeStudyState>,
     next_local_id: u64,
@@ -769,6 +772,8 @@ impl Default for RuntimeStudiesState {
             active: Vec::new(),
             pending: HashMap::new(),
             reinitializing: HashMap::new(),
+            suppressing_outputs: HashSet::new(),
+            automatic_removals: HashSet::new(),
             removing: HashSet::new(),
             deferred: Vec::new(),
             next_local_id: 1,
@@ -784,6 +789,100 @@ impl RuntimeStudiesState {
         }
         self.next_local_id = self.next_local_id.checked_add(1).unwrap_or(0);
         Some(local_id)
+    }
+
+    fn begin_reinitialization(
+        &mut self,
+        study_id: StudyInstanceId,
+        pending: PendingStudyReinitialization,
+    ) {
+        self.reinitializing.insert(study_id, pending);
+        self.suppressing_outputs.insert(study_id);
+    }
+
+    fn complete_reinitialization(&mut self, study_id: StudyInstanceId) -> Option<bool> {
+        let pending = self.reinitializing.remove(&study_id)?;
+        let mut persisted_changed = false;
+        if let Some(state) = self
+            .active
+            .iter_mut()
+            .find(|state| state.study_id == study_id)
+        {
+            state.resolved_chart_series = Some(pending.series);
+            if let Some(replacement) = pending.replacement_persisted {
+                state.persisted = replacement;
+                persisted_changed = true;
+            }
+        }
+        Some(persisted_changed)
+    }
+
+    fn cancel_reinitialization(&mut self, study_id: StudyInstanceId) {
+        self.reinitializing.remove(&study_id);
+        self.suppressing_outputs.remove(&study_id);
+    }
+
+    fn invalidate_study_outputs(&mut self, study_ids: &[StudyInstanceId]) {
+        for study_id in study_ids {
+            if !self.reinitializing.contains_key(study_id) {
+                self.suppressing_outputs.remove(study_id);
+            }
+        }
+    }
+
+    fn suppresses_output(&self, study_id: StudyInstanceId) -> bool {
+        self.suppressing_outputs.contains(&study_id) || self.automatic_removals.contains(&study_id)
+    }
+
+    fn remove_runtime_subtree(&mut self, study_ids: &[StudyInstanceId]) -> bool {
+        let removed_runtime_ids = study_ids.iter().copied().collect::<HashSet<_>>();
+        let mut removed_local_ids = self
+            .active
+            .iter()
+            .filter(|state| removed_runtime_ids.contains(&state.study_id))
+            .map(|state| state.persisted.local_id)
+            .collect::<HashSet<_>>();
+
+        loop {
+            let previous_len = removed_local_ids.len();
+            for state in self.pending.values().chain(self.deferred.iter()) {
+                if state.persisted.dependencies.iter().any(|dependency| {
+                    WorkspaceStudyDependencyKind::try_from(dependency.kind).is_ok_and(|kind| {
+                        kind == WorkspaceStudyDependencyKind::StudyOutput
+                            && removed_local_ids.contains(&dependency.study_local_id)
+                    })
+                }) {
+                    removed_local_ids.insert(state.persisted.local_id);
+                }
+            }
+            if removed_local_ids.len() == previous_len {
+                break;
+            }
+        }
+
+        let previous_len = self.active.len();
+        self.active
+            .retain(|state| !removed_runtime_ids.contains(&state.study_id));
+        let mut changed = self.active.len() != previous_len;
+        for state in self.pending.values_mut() {
+            if removed_local_ids.contains(&state.persisted.local_id)
+                && !state.remove_on_registration
+            {
+                state.remove_on_registration = true;
+                changed = true;
+            }
+        }
+        let previous_deferred_len = self.deferred.len();
+        self.deferred
+            .retain(|state| !removed_local_ids.contains(&state.persisted.local_id));
+        changed |= self.deferred.len() != previous_deferred_len;
+        for study_id in study_ids {
+            self.reinitializing.remove(study_id);
+            self.suppressing_outputs.remove(study_id);
+            self.automatic_removals.remove(study_id);
+            self.removing.remove(study_id);
+        }
+        changed
     }
 }
 
@@ -1033,13 +1132,15 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                 app.chart_persistence_dirty = true;
                 cx.notify();
             }
-            let (activate, request, study_settings_request) = chart.update(cx, |chart, _| {
-                (
-                    chart.take_activate_request(),
-                    chart.take_context_menu_request(),
-                    chart.take_study_settings_request(),
-                )
-            });
+            let (activate, request, study_settings_request, study_remove_request) =
+                chart.update(cx, |chart, _| {
+                    (
+                        chart.take_activate_request(),
+                        chart.take_context_menu_request(),
+                        chart.take_study_settings_request(),
+                        chart.take_study_remove_request(),
+                    )
+                });
             let alert_request = chart
                 .update(cx, |chart, _| chart.take_alert_create_requests())
                 .into_iter()
@@ -1056,10 +1157,19 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
             if let Some(study_id) = study_settings_request.and_then(StudyInstanceId::try_from_u64) {
                 app.pending_study_settings_request = Some(study_id);
             }
+            let had_study_remove_request = study_remove_request.is_some();
+            if let Some(study_id) = study_remove_request.and_then(StudyInstanceId::try_from_u64) {
+                app.pending_study_remove_request = Some(study_id);
+            }
             if let Some(request) = alert_request {
                 app.open_price_alert_dialog(request);
             }
-            if activate || had_menu || had_alert_request || had_study_settings_request {
+            if activate
+                || had_menu
+                || had_alert_request
+                || had_study_settings_request
+                || had_study_remove_request
+            {
                 cx.notify();
             }
             if chart.read(cx).has_market_data() {
