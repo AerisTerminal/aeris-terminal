@@ -415,6 +415,18 @@ impl MarketWorkerSender {
                 )
             });
         }
+        if let MarketWorkerMessage::OrderBook(next) = &message
+            && let Some(index) = queue.iter().position(|queued| {
+                matches!(
+                    queued,
+                    MarketWorkerMessage::OrderBook(current)
+                        if order_book_frame_can_be_superseded(current, next)
+                )
+            })
+        {
+            queue[index] = message;
+            return Ok(());
+        }
         if matches!(message, MarketWorkerMessage::Diagnostics(_)) {
             if let Some(index) = queue
                 .iter()
@@ -465,6 +477,17 @@ impl MarketWorkerSender {
             .len();
         (current, self.mailbox.capacity)
     }
+}
+
+fn order_book_frame_can_be_superseded(current: &OrderBookFrame, next: &OrderBookFrame) -> bool {
+    current.provider_id == next.provider_id
+        && current.instrument_id == next.instrument_id
+        && current.entitlement_id == next.entitlement_id
+        && current.session_generation == next.session_generation
+        && current.selection_generation == next.selection_generation
+        && (next.revision > current.revision
+            || (next.revision == current.revision
+                && next.trade_source_watermark >= current.trade_source_watermark))
 }
 
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
@@ -2825,7 +2848,7 @@ mod tests {
     }
 
     #[test]
-    fn order_book_mailbox_preserves_runtime_order() {
+    fn order_book_mailbox_preserves_regressing_runtime_order() {
         let (sender, receiver) =
             market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
         let frame = |revision, state| OrderBookFrame {
@@ -2873,6 +2896,43 @@ mod tests {
                 && first.state == OrderBookState::Ready
                 && second.revision == 2
                 && second.state == OrderBookState::Recovering(OrderBookRecoveryReason::SequenceGap)
+        ));
+    }
+
+    #[test]
+    fn order_book_mailbox_coalesces_newer_frames_for_the_same_selection() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+        let frame = |revision| OrderBookFrame {
+            provider_id: "rithmic".to_string(),
+            instrument_id: "rithmic:CME:MNQ".to_string(),
+            entitlement_id: "test".to_string(),
+            session_generation: 1,
+            selection_generation: 2,
+            revision,
+            source_watermark: revision,
+            bbo_source_watermark: revision,
+            state: OrderBookState::Ready,
+            price_scale: 2,
+            quantity_scale: 0,
+            price_increment: Some(25),
+            best_bid: None,
+            best_ask: None,
+            traded_volumes: std::collections::BTreeMap::default(),
+            trade_source_watermark: revision,
+            rows: Vec::new(),
+        };
+        sender
+            .send(MarketWorkerMessage::OrderBook(frame(2)))
+            .expect("first frame queues");
+        sender
+            .send(MarketWorkerMessage::OrderBook(frame(3)))
+            .expect("newer frame replaces it");
+
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::OrderBook(frame)] if frame.revision == 3
         ));
     }
 

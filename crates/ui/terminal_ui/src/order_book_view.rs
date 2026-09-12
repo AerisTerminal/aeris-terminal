@@ -20,13 +20,16 @@ use std::{
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 11.0;
-// Ingest every provider update, but present the conflated DOM at the same
-// cadence used by the reference ladder. This keeps provider correctness
-// independent from repaint frequency and avoids rebuilding GPUI rows for every
-// wire update.
-const PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
+// Ingest every provider update, but present only the newest conflated DOM once
+// per display frame. GPUI rebuilds a retained element tree rather than an iced
+// canvas cache, so copying the reference ladder's 100 ms invalidation interval
+// makes best-price movement visibly step at 10 Hz.
+const PRESENTATION_INTERVAL: Duration = Duration::from_millis(16);
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
-const DEFAULT_HYPERLIQUID_DISPLAY_TICK_MULTIPLIER: i64 = 50;
+// Match the reference ladder's default server-side Hyperliquid aggregation.
+// The previous 50x bucket collapsed five adjacent provider rows into one and
+// left the visible ladder looking sparse even when the feed was healthy.
+const HYPERLIQUID_DISPLAY_TICK_MULTIPLIER: i64 = 10;
 /// A continuous presentation grid extends at least this many authoritative
 /// ticks above and below the spread when a provider supplied a real increment.
 /// This is UI runway only; canonical depth remains untouched and real levels
@@ -714,7 +717,7 @@ fn price_grid_layout(frame: &OrderBookFrame) -> Option<PriceGridLayout> {
 
 fn display_tick_multiplier(frame: &OrderBookFrame) -> i64 {
     if frame.provider_id == "hyperliquid" {
-        DEFAULT_HYPERLIQUID_DISPLAY_TICK_MULTIPLIER
+        HYPERLIQUID_DISPLAY_TICK_MULTIPLIER
     } else {
         1
     }
@@ -2018,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn hyperliquid_display_groups_raw_depth_and_trades_into_fifty_tick_rows() {
+    fn hyperliquid_display_uses_reference_ten_tick_rows() {
         let mut frame = price_grid_frame();
         frame.provider_id = "hyperliquid".into();
         frame.price_scale = 0;
@@ -2043,32 +2046,32 @@ mod tests {
 
         let grid = price_grid_layout(&frame).expect("Hyperliquid display grid");
         let center = grid.recenter_index();
-        assert_eq!(grid.tick, 50);
+        assert_eq!(grid.tick, 10);
         assert_eq!(
             price_grid_item(grid, center - 1),
-            Some(PriceGridItem::Ask(77_150))
+            Some(PriceGridItem::Ask(77_120))
         );
         assert_eq!(
             price_grid_item(grid, center + 1),
-            Some(PriceGridItem::Bid(77_100))
+            Some(PriceGridItem::Bid(77_110))
         );
         assert_eq!(
-            grouped_level_at_price(&frame, BookColumnSide::Ask, 77_150, grid.tick)
+            grouped_level_at_price(&frame, BookColumnSide::Ask, 77_120, grid.tick)
                 .map(|level| level.quantity),
-            Some(9)
+            Some(7)
         );
         assert_eq!(
-            grouped_level_at_price(&frame, BookColumnSide::Bid, 77_100, grid.tick)
+            grouped_level_at_price(&frame, BookColumnSide::Bid, 77_110, grid.tick)
                 .map(|level| level.quantity),
             Some(5)
         );
         assert_eq!(
             grouped_trade_volumes_at_price(&frame, 77_150, grid.tick),
-            AggressorTradeVolumes { buy: 7, sell: 0 }
+            AggressorTradeVolumes { buy: 4, sell: 0 }
         );
         assert_eq!(
-            grouped_trade_volumes_at_price(&frame, 77_100, grid.tick),
-            AggressorTradeVolumes { buy: 0, sell: 11 }
+            grouped_trade_volumes_at_price(&frame, 77_110, grid.tick),
+            AggressorTradeVolumes { buy: 3, sell: 5 }
         );
         assert_eq!(
             frame.rows.len(),
@@ -2078,7 +2081,7 @@ mod tests {
     }
 
     #[test]
-    fn hyperliquid_full_precision_bbo_recovers_base_tick_from_aggregated_depth() {
+    fn hyperliquid_full_precision_bbo_preserves_base_tick_with_aggregated_depth() {
         let mut frame = price_grid_frame();
         frame.provider_id = "hyperliquid".into();
         frame.price_scale = 0;
@@ -2099,15 +2102,15 @@ mod tests {
 
         assert_eq!(observed_price_increment(&frame), Some(1));
         let grid = price_grid_layout(&frame).expect("aggregated provider book keeps display grid");
-        assert_eq!(grid.tick, 50);
+        assert_eq!(grid.tick, 10);
         let center = grid.recenter_index();
         assert_eq!(
             price_grid_item(grid, center - 1),
-            Some(PriceGridItem::Ask(77_150))
+            Some(PriceGridItem::Ask(77_120))
         );
         assert_eq!(
             price_grid_item(grid, center + 1),
-            Some(PriceGridItem::Bid(77_100))
+            Some(PriceGridItem::Bid(77_110))
         );
     }
 
