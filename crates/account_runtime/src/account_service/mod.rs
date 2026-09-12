@@ -826,10 +826,19 @@ impl AccountService {
             "waiting for browser authorization",
         );
         let service = self.clone();
-        std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("axiusflow-account-login".to_string())
             .spawn(move || service.run_login_transaction(request_generation, &listener))
-            .map_err(|_| "sign-in worker could not start; retry sign-in".to_string())?;
+            .is_err()
+        {
+            state.pending = None;
+            state.view = cleared_view(
+                AccountSessionState::SignedOut,
+                request_generation,
+                "sign-in worker could not start; retry sign-in",
+            );
+            return Err("sign-in worker could not start; retry sign-in".to_string());
+        }
         Ok(LoginAuthorization {
             request_generation,
             authorization_url: url,
@@ -1004,7 +1013,9 @@ impl AccountService {
             self.fail_generation(generation, "sign-in timed out; retry sign-in");
             return;
         }
-        let callback = match listener.accept_one(remaining) {
+        let callback = match listener
+            .accept_one_while(remaining, || self.login_generation_is_pending(generation))
+        {
             Ok(callback) => callback,
             Err(detail) => {
                 self.fail_generation(generation, &detail);
@@ -1032,6 +1043,15 @@ impl AccountService {
                 self.fail_generation(generation, &detail);
             }
         }
+    }
+
+    fn login_generation_is_pending(&self, generation: u64) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.generation == generation)
+        })
     }
 
     fn pending_remaining(&self, generation: u64) -> Duration {
@@ -1818,6 +1838,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
+        net::TcpListener,
         path::PathBuf,
         sync::{
             Mutex,
@@ -3139,6 +3160,47 @@ mod tests {
             service
                 .apply_callback_query("code=abc&state=xyz", 4)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn cancelling_login_releases_the_loopback_listener_promptly() {
+        let service = service();
+        service.begin_login(5).expect("login starts");
+        let redirect_uri = service
+            .state
+            .lock()
+            .expect("state locks")
+            .pending
+            .as_ref()
+            .expect("pending login exists")
+            .redirect_uri
+            .clone();
+        let port = redirect_uri
+            .strip_prefix("http://127.0.0.1:")
+            .and_then(|value| value.strip_suffix("/callback"))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("loopback redirect carries its bound port");
+
+        service.cancel_login(5).expect("cancel succeeds");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    break;
+                }
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => {
+                    panic!("cancelled login retained its loopback listener past the bound: {error}")
+                }
+            }
+        }
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::SignedOut
         );
     }
 

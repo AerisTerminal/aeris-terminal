@@ -70,7 +70,20 @@ impl LoopbackListener {
     /// Returns an error on timeout, oversized requests, or transport
     /// failure. Transport failures answer the browser immediately; a
     /// timeout means no browser ever connected, so nothing is answered.
+    #[cfg(test)]
     pub fn accept_one(&self, timeout: Duration) -> Result<PendingCallback, String> {
+        self.accept_one_while(timeout, || true)
+    }
+
+    /// Accepts one callback while the owning login transaction remains
+    /// current. The predicate is checked between nonblocking accept attempts,
+    /// so cancellation retires the listener promptly instead of retaining a
+    /// socket and worker until the full login timeout.
+    pub fn accept_one_while(
+        &self,
+        timeout: Duration,
+        mut keep_waiting: impl FnMut() -> bool,
+    ) -> Result<PendingCallback, String> {
         self.listener
             .set_nonblocking(false)
             .map_err(|_| "loopback callback listener failed".to_string())?;
@@ -79,6 +92,9 @@ impl LoopbackListener {
         let _ = self.listener.set_nonblocking(true);
         let deadline = std::time::Instant::now() + timeout;
         loop {
+            if !keep_waiting() {
+                return Err("sign-in transaction is no longer active; retry sign-in".to_string());
+            }
             match self.listener.accept() {
                 Ok((stream, _)) => return read_callback_query(stream),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

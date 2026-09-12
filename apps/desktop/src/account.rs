@@ -38,10 +38,10 @@ pub fn open_manage_profile() -> Result<(), String> {
 }
 
 /// Starts one runtime-owned login transaction and opens the returned
-/// authorization URL in the system browser on a background thread.
+/// authorization URL in the system browser from the account-client worker.
 ///
 /// Returns the runtime authorization reply for expiry display. The browser
-/// launch runs bounded off-thread: a missing launcher, a nonzero launcher
+/// launch runs bounded off the GPUI thread: a missing launcher, a nonzero launcher
 /// exit, or a hung launcher is reported, and a hung launcher is killed.
 ///
 /// # Errors
@@ -53,19 +53,24 @@ pub fn start_login(
     request_generation: u64,
 ) -> Result<LoginAuthorization, String> {
     let authorization = service.begin_login(request_generation)?;
-    let url = authorization.authorization_url.clone();
+    if let Err(error) = open_login_browser_with(
+        &authorization.authorization_url,
+        axiusflow_platform_runtime::open_system_browser,
+    ) {
+        let _ = service.cancel_login(authorization.request_generation);
+        return Err(error);
+    }
+    Ok(authorization)
+}
+
+fn open_login_browser_with(
+    url: &str,
+    open_browser: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
     if url.is_empty() || url.len() > axiusflow_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES {
         return Err("account service returned an invalid authorization URL".to_string());
     }
-    std::thread::Builder::new()
-        .name("axiusflow-open-browser".to_string())
-        .spawn(move || {
-            if let Err(error) = axiusflow_platform_runtime::open_system_browser(&url) {
-                eprintln!("Axiusflow browser open degraded: {error}");
-            }
-        })
-        .map_err(|_| "system browser could not be opened".to_string())?;
-    Ok(authorization)
+    open_browser(url).map_err(|_| "system browser could not be opened".to_string())
 }
 
 /// Returns the current sanitized runtime-owned account view.
@@ -234,10 +239,11 @@ pub fn sanitized_plan_label(plan_id: &str) -> &'static str {
 }
 
 /// Bounded account worker command.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum AccountRequest {
     BeginLogin { generation: u64 },
     CancelLogin { generation: u64 },
+    ReopenBrowser { authorization_url: String },
     RefreshStatus { seq: u64, epoch: u64 },
     RefreshProfile { epoch: u64 },
     SignOut,
@@ -249,6 +255,8 @@ enum AccountRequest {
 #[derive(Debug)]
 enum AccountResponse {
     Authorized(LoginAuthorization),
+    BrowserReopened,
+    LoginActionFailed(String),
     Status {
         view: AccountView,
         seq: u64,
@@ -275,13 +283,16 @@ enum AccountResponse {
 #[derive(Clone, Debug)]
 enum AccountError {
     Transient(String),
+    LoginAction(String),
     SignOutCleanup(String),
 }
 
 impl AccountError {
     fn message(&self) -> &str {
         match self {
-            Self::Transient(message) | Self::SignOutCleanup(message) => message,
+            Self::Transient(message)
+            | Self::LoginAction(message)
+            | Self::SignOutCleanup(message) => message,
         }
     }
 
@@ -628,9 +639,9 @@ impl DesktopAccount {
 
     /// Cancels the pending engine-owned login transaction.
     ///
-    /// The worker thread stays blocked on the loopback socket until the
-    /// browser completes or the engine transaction times out; engine state
-    /// clears immediately, so retired callbacks cannot sign the user in.
+    /// Engine state clears immediately and the generation-aware loopback wait
+    /// observes that retirement promptly, so retired callbacks cannot sign
+    /// the user in and cancelled listeners are not retained until timeout.
     ///
     /// # Errors
     ///
@@ -651,26 +662,31 @@ impl DesktopAccount {
     ///
     /// # Errors
     ///
-    /// Returns an error when no authorization URL is retained or no system
-    /// browser can be launched.
+    /// Returns an error when no bounded authorization URL is retained or the
+    /// account-client queue is unavailable. The bounded browser launch runs on
+    /// that worker; launcher failure is published through the account error
+    /// presentation instead of blocking the GPUI thread.
     pub fn reopen_browser(&self) -> Result<(), String> {
+        if self.shared.pending.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let url = self
             .shared
             .authorization_url
             .lock()
             .ok()
             .and_then(|url| url.clone())
-            .filter(|url| !url.is_empty())
-            .ok_or_else(|| "no sign-in page to reopen; start sign-in again".to_string())?;
-        std::thread::Builder::new()
-            .name("axiusflow-open-browser".to_string())
-            .spawn(move || {
-                if let Err(error) = axiusflow_platform_runtime::open_system_browser(&url) {
-                    eprintln!("Axiusflow browser open degraded: {error}");
-                }
+            .filter(|url| {
+                !url.is_empty()
+                    && url.len() <= axiusflow_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES
             })
-            .map_err(|_| "system browser could not be opened".to_string())?;
-        Ok(())
+            .ok_or_else(|| "no sign-in page to reopen; start sign-in again".to_string())?;
+        self.begin_request(
+            AccountRequest::ReopenBrowser {
+                authorization_url: url,
+            },
+            "sign-in browser reopen is already pending",
+        )
     }
 
     /// Signs out the shared runtime-owned account session.
@@ -806,7 +822,19 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
             shared.login_open.store(true, Ordering::Release);
             shared.pending.store(false, Ordering::Release);
             clear_transient_account_error(shared);
+            clear_login_action_error(shared);
             rewind_status_poll(shared);
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::BrowserReopened => {
+            shared.pending.store(false, Ordering::Release);
+            clear_transient_account_error(shared);
+            clear_login_action_error(shared);
+            shared.version.fetch_add(1, Ordering::AcqRel);
+        }
+        AccountResponse::LoginActionFailed(error) => {
+            shared.pending.store(false, Ordering::Release);
+            set_login_action_error(shared, error);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
         AccountResponse::Status { view, seq, epoch } => {
@@ -872,6 +900,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
         AccountResponse::Cancelled(view) => {
             apply_retired_account_view(shared, view);
             clear_transient_account_error(shared);
+            clear_login_action_error(shared);
             shared.version.fetch_add(1, Ordering::AcqRel);
         }
         AccountResponse::SignedOut(view) => {
@@ -923,24 +952,39 @@ fn clear_account_error(shared: &AccountShared) {
 }
 
 fn clear_transient_account_error(shared: &AccountShared) {
-    if let Ok(mut error) = shared.error.lock() {
-        if error
-            .as_ref()
-            .is_some_and(AccountError::is_sign_out_cleanup)
-        {
-            return;
-        }
+    if let Ok(mut error) = shared.error.lock()
+        && matches!(error.as_ref(), Some(AccountError::Transient(_)))
+    {
+        error.take();
+    }
+}
+
+fn clear_login_action_error(shared: &AccountShared) {
+    if let Ok(mut error) = shared.error.lock()
+        && matches!(error.as_ref(), Some(AccountError::LoginAction(_)))
+    {
         error.take();
     }
 }
 
 fn set_transient_account_error(shared: &AccountShared, message: String) {
     if let Ok(mut error) = shared.error.lock()
+        && !matches!(
+            error.as_ref(),
+            Some(AccountError::LoginAction(_) | AccountError::SignOutCleanup(_))
+        )
+    {
+        *error = Some(AccountError::Transient(message));
+    }
+}
+
+fn set_login_action_error(shared: &AccountShared, message: String) {
+    if let Ok(mut error) = shared.error.lock()
         && !error
             .as_ref()
             .is_some_and(AccountError::is_sign_out_cleanup)
     {
-        *error = Some(AccountError::Transient(message));
+        *error = Some(AccountError::LoginAction(message));
     }
 }
 
@@ -981,8 +1025,17 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
     match request {
         AccountRequest::BeginLogin { generation } => match start_login(service, generation) {
             Ok(authorization) => AccountResponse::Authorized(authorization),
-            Err(error) => AccountResponse::Failed(error),
+            Err(error) => AccountResponse::LoginActionFailed(error),
         },
+        AccountRequest::ReopenBrowser { authorization_url } => {
+            match open_login_browser_with(
+                &authorization_url,
+                axiusflow_platform_runtime::open_system_browser,
+            ) {
+                Ok(()) => AccountResponse::BrowserReopened,
+                Err(error) => AccountResponse::LoginActionFailed(error),
+            }
+        }
         AccountRequest::CancelLogin { generation } => match cancel_login(service, generation) {
             Ok(view) => AccountResponse::Cancelled(view),
             Err(error) => AccountResponse::Failed(error),
@@ -1023,10 +1076,10 @@ pub fn sign_out(service: &AccountService) -> Result<AccountView, String> {
 mod tests {
     use super::{
         AccountRequest, AccountResponse, DesktopAccount, MANAGE_PROFILE_URL, account_action_label,
-        account_state_label, sanitized_plan_label, unavailable_menu_state,
+        account_state_label, open_login_browser_with, sanitized_plan_label, unavailable_menu_state,
     };
     use axiusflow_contracts::{AccountSessionState, AccountView};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, atomic::Ordering};
     use std::time::{Duration, Instant};
 
     /// Scripted fake runtime behind an isolated desktop session. The worker
@@ -1042,8 +1095,20 @@ mod tests {
                 epoch,
                 error: "inert test engine".to_string(),
             },
+            AccountRequest::ReopenBrowser { authorization_url } => {
+                drop(authorization_url);
+                AccountResponse::Failed("inert test engine".to_string())
+            }
             _ => AccountResponse::Failed("inert test engine".to_string()),
         }
+    }
+
+    #[derive(Clone, Copy, Default)]
+    enum FakeReopen {
+        #[default]
+        Success,
+        Fail,
+        Delay,
     }
 
     #[derive(Default)]
@@ -1051,6 +1116,8 @@ mod tests {
         view: AccountView,
         begins: usize,
         begin_fails: bool,
+        reopens: usize,
+        reopen: FakeReopen,
         fail_status: bool,
         signed_out: AccountView,
     }
@@ -1067,7 +1134,9 @@ mod tests {
                 AccountRequest::BeginLogin { generation } => {
                     self.begins += 1;
                     if self.begin_fails {
-                        return AccountResponse::Failed("fake engine is unreachable".to_string());
+                        return AccountResponse::LoginActionFailed(
+                            "fake engine is unreachable".to_string(),
+                        );
                     }
                     self.view = Self::authorizing();
                     self.view.request_generation = generation;
@@ -1078,6 +1147,20 @@ mod tests {
                         ),
                         expires_unix_seconds: 1_800_000_003,
                     })
+                }
+                AccountRequest::ReopenBrowser { authorization_url } => {
+                    drop(authorization_url);
+                    self.reopens += 1;
+                    match self.reopen {
+                        FakeReopen::Success => AccountResponse::BrowserReopened,
+                        FakeReopen::Fail => AccountResponse::LoginActionFailed(
+                            "system browser could not be opened".to_string(),
+                        ),
+                        FakeReopen::Delay => {
+                            std::thread::sleep(Duration::from_millis(100));
+                            AccountResponse::BrowserReopened
+                        }
+                    }
                 }
                 AccountRequest::RefreshStatus { seq, epoch } => {
                     if self.fail_status {
@@ -1342,6 +1425,17 @@ mod tests {
             MANAGE_PROFILE_URL,
             "https://auth.axiusflow.com/account?section=profile"
         );
+    }
+
+    #[test]
+    fn initial_browser_launch_failure_is_actionable_and_redacted() {
+        let error = open_login_browser_with(
+            "https://auth.axiusflow.com/api/auth/oauth2/authorize?request=1",
+            |_| Err("raw launcher failure detail".to_string()),
+        )
+        .expect_err("launcher failure must reach the account worker");
+        assert_eq!(error, "system browser could not be opened");
+        assert!(!error.contains("raw launcher"));
     }
 
     #[test]
@@ -1619,6 +1713,47 @@ mod tests {
             stored.as_deref(),
             Some("https://auth.axiusflow.com/authorize?request=3")
         );
+    }
+
+    #[test]
+    fn browser_reopen_failure_surfaces_and_retry_clears_it() {
+        let (session, engine) = scripted_session();
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "transaction open", || {
+            session.shared.login_open.load(Ordering::Acquire)
+        });
+        engine.lock().expect("engine locks").reopen = FakeReopen::Fail;
+
+        session.reopen_browser().expect("reopen queues");
+        wait_for(&session, "reopen failure", || session.error().is_some());
+        assert_eq!(
+            session.error().as_deref(),
+            Some("system browser could not be opened")
+        );
+        assert!(session.shared.login_open.load(Ordering::Acquire));
+        assert!(!session.shared.pending.load(Ordering::Acquire));
+
+        engine.lock().expect("engine locks").reopen = FakeReopen::Success;
+        session.reopen_browser().expect("retry queues");
+        wait_for(&session, "reopen recovery", || session.error().is_none());
+        assert_eq!(engine.lock().expect("engine locks").reopens, 2);
+    }
+
+    #[test]
+    fn repeated_browser_reopen_clicks_collapse_to_one_bounded_worker_request() {
+        let (session, engine) = scripted_session();
+        session.request_sign_in().expect("sign-in queues");
+        wait_for(&session, "transaction open", || {
+            session.shared.login_open.load(Ordering::Acquire)
+        });
+        engine.lock().expect("engine locks").reopen = FakeReopen::Delay;
+
+        session.reopen_browser().expect("first reopen queues");
+        session
+            .reopen_browser()
+            .expect("second reopen collapses while the first is pending");
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(engine.lock().expect("engine locks").reopens, 1);
     }
 
     #[test]
