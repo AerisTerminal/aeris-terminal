@@ -672,7 +672,7 @@ pub(super) fn chart_settings_menu_layer(
 pub(super) struct ChartSettingsView<'a> {
     pub(super) section: ChartSettingsSection,
     pub(super) snapshot: &'a ChartSettingsSnapshot,
-    pub(super) color_picker: Option<ChartColorSetting>,
+    pub(super) color_picker: Option<&'a ChartColorPickerState>,
     pub(super) templates: ChartSettingsTemplateView<'a>,
 }
 
@@ -1062,7 +1062,7 @@ fn chart_series_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let body = match snapshot.chart_type {
@@ -1100,7 +1100,7 @@ fn candle_series_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     div()
@@ -1190,7 +1190,7 @@ fn bar_series_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     div()
@@ -1238,7 +1238,7 @@ fn line_series_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     brushable: bool,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
@@ -1273,7 +1273,7 @@ fn area_series_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     div()
@@ -1319,7 +1319,7 @@ fn baseline_series_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     div()
@@ -1357,7 +1357,7 @@ fn chart_canvas_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     settings_content_header(
@@ -1386,7 +1386,7 @@ fn canvas_grid_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     div()
@@ -1436,7 +1436,7 @@ fn canvas_crosshair_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<ChartColorSetting>,
+    color_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let appearance = &snapshot.appearance;
@@ -1642,14 +1642,16 @@ fn settings_color_row(
     menu: &ChartContextMenu,
     setting: ChartColorSetting,
     value: &str,
-    open_picker: Option<ChartColorSetting>,
+    open_picker: Option<&ChartColorPickerState>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let terminal_for_toggle = terminal.clone();
+    let current_for_toggle = value.to_string();
     let color = chart_css_color(value, colors.text_secondary);
-    let open = open_picker == Some(setting);
-    div()
+    let open = open_picker.is_some_and(|picker| picker.setting == setting);
+    let mut row = div()
+        .relative()
         .w_full()
         .flex()
         .flex_col()
@@ -1674,9 +1676,14 @@ fn settings_color_row(
                         .items_center()
                         .gap_2()
                         .cursor_pointer()
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             terminal_for_toggle.update(cx, |terminal, terminal_cx| {
-                                terminal.toggle_chart_color_picker(setting, terminal_cx);
+                                terminal.toggle_chart_color_picker(
+                                    setting,
+                                    &current_for_toggle,
+                                    window,
+                                    terminal_cx,
+                                );
                             });
                             cx.stop_propagation();
                         })
@@ -1697,68 +1704,26 @@ fn settings_color_row(
                                 .child(value.to_ascii_uppercase()),
                         ),
                 ),
-        )
-        .when(open, |row| {
-            row.child(settings_color_palette(
-                terminal, menu, setting, value, theme,
-            ))
-        })
-}
-
-fn settings_color_palette(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    setting: ChartColorSetting,
-    current: &str,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement {
-    const COLORS: [&str; 18] = [
-        "#089981", "#F7525F", "#2962FF", "#2196F3", "#00BCD4", "#26A69A", "#AB47BC", "#FF9800",
-        "#FDD835", "#FFFFFF", "#CBD5E1", "#94A3B8", "#64748B", "#475569", "#334155", "#1E293B",
-        "#172554", "#101722",
-    ];
-    let colors = theme.colors;
-    let mut palette = div()
-        .w_full()
-        .flex()
-        .flex_wrap()
-        .gap_2()
-        .px_2()
-        .pt_1()
-        .pb_3();
-    for (index, value) in COLORS.into_iter().enumerate() {
-        let terminal = terminal.clone();
-        let menu = menu.clone();
-        let selected = current.eq_ignore_ascii_case(value);
-        palette = palette.child(
-            div()
-                .id(("chart_palette_color", index))
-                .size(px(24.0))
-                .p(px(if selected { 2.0 } else { 1.0 }))
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(if selected {
-                    colors.primary
-                } else {
-                    colors.input_border
-                }))
-                .cursor_pointer()
-                .hover(|item| item.border_color(gpui_color(colors.ring)))
-                .on_click(move |_, _, cx| {
-                    terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.apply_chart_color(&menu, setting, value, terminal_cx);
-                    });
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .size_full()
-                        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                        .bg(chart_css_color(value, colors.text_secondary)),
-                ),
         );
+    if open && let Some(picker) = open_picker {
+        let apply = terminal.clone();
+        let apply_menu = menu.clone();
+        row = row.child(gpui::deferred(
+            ColorPicker::new(
+                ("chart_color_popover", setting as usize),
+                value,
+                &picker.input,
+                theme,
+            )
+            .error(picker.error.as_deref())
+            .on_select(move |value, _, cx| {
+                apply.update(cx, |terminal, terminal_cx| {
+                    terminal.apply_chart_color(&apply_menu, setting, &value, terminal_cx);
+                });
+            }),
+        ));
     }
-    palette
+    row
 }
 
 fn settings_line_controls(

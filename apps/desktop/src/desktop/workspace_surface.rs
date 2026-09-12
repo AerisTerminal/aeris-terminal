@@ -3009,6 +3009,12 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).crosshair_mode())
     }
 
+    pub(super) fn suspend_chart_pointer(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, _| chart.suspend_pointer_interaction());
+        }
+    }
+
     pub(super) fn set_chart_appearance(
         &mut self,
         appearance: &ChartAppearanceSettings,

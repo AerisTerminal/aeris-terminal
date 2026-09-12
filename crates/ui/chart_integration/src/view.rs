@@ -113,13 +113,17 @@ fn gpui_theme_color(color: ThemeColor) -> Rgba {
     }
 }
 
-fn apply_platform_font_contract(engine: &mut ChartEngine) {
+fn apply_platform_chrome_contract(engine: &mut ChartEngine) {
     let options = serde_json::json!({
         "layout": {
             "fontFamily": platform_font_stack(),
         },
         "watermark": {
             "fontFamily": platform_font_stack(),
+        },
+        "timeScale": {
+            "timeVisible": true,
+            "secondsVisible": false,
         },
     })
     .to_string();
@@ -1058,7 +1062,7 @@ impl NucleusChartView {
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        apply_platform_font_contract(&mut engine);
+        apply_platform_chrome_contract(&mut engine);
         let volume_series = install_volume_series(&mut engine);
         Self {
             engine,
@@ -1147,7 +1151,7 @@ impl NucleusChartView {
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        apply_platform_font_contract(&mut engine);
+        apply_platform_chrome_contract(&mut engine);
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
@@ -1535,7 +1539,7 @@ impl NucleusChartView {
         let crosshair_tracks_nucleus_theme = is_nucleus_crosshair_default(&current_crosshair_color);
         self.theme = theme;
         self.engine.set_theme(theme);
-        apply_platform_font_contract(&mut self.engine);
+        apply_platform_chrome_contract(&mut self.engine);
         if !grid_tracks_nucleus_theme {
             let patch = serde_json::json!({
                 "grid": {

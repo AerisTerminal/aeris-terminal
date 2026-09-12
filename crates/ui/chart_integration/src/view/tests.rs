@@ -2,6 +2,7 @@
 
 use super::*;
 use axiusflow_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
+use nucleuscharts_engine::AxisTextMidpoint;
 
 fn interactive_chart() -> NucleusChartView {
     let mut chart = NucleusChartView::new();
@@ -2669,6 +2670,48 @@ fn native_pointer_state_ends_a_drag_when_mouse_up_was_lost() {
     assert!(chart.drag.is_none());
     assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
     assert_eq!(chart.engine.crosshair, Some((340.0, 200.0)));
+}
+
+#[test]
+fn host_modal_suspension_clears_crosshair_and_active_pointer_gestures() {
+    let mut chart = interactive_chart();
+    chart.begin_drag(300.0, 200.0, 1, false);
+    assert!(chart.engine.crosshair.is_some());
+    assert!(chart.drag.is_some());
+
+    chart.suspend_pointer_interaction();
+
+    assert!(chart.engine.crosshair.is_none());
+    assert!(chart.drag.is_none());
+    assert!(chart.engine.separator_hover.is_none());
+}
+
+#[test]
+fn platform_crosshair_time_label_keeps_time_of_day_visible() {
+    let mut chart = interactive_chart();
+    let time = chart
+        .engine
+        .series_data(0)
+        .last()
+        .and_then(|bar| bar.time.to_f64())
+        .expect("replay has a representable timestamp");
+    let x = chart
+        .engine
+        .time_to_coordinate(time)
+        .expect("replay timestamp is visible");
+    chart.engine.crosshair = Some((x, 100.0));
+    let measure =
+        |text: &str, _bold: bool| f64::from(u32::try_from(text.len()).unwrap_or(u32::MAX)) * 7.0;
+
+    let label = chart
+        .engine
+        .build_axis_frame(80.0, measure, measure)
+        .labels
+        .into_iter()
+        .find(|label| label.midpoint == AxisTextMidpoint::StableTime)
+        .expect("crosshair time label is present");
+
+    assert!(label.text.contains(':'), "time missing from {}", label.text);
 }
 
 #[test]

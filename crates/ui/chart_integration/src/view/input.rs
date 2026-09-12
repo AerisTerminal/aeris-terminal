@@ -8,6 +8,11 @@ use super::{
 };
 
 impl NucleusChartView {
+    /// Cancels transient pointer state before a host-owned modal occludes the chart.
+    pub fn suspend_pointer_interaction(&mut self) {
+        self.cancel_pointer_gesture();
+    }
+
     pub(super) fn local_position(&self, position: gpui::Point<gpui::Pixels>) -> (f64, f64) {
         let window_x: f32 = position.x.into();
         let window_y: f32 = position.y.into();

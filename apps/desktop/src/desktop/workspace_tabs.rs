@@ -323,10 +323,27 @@ impl TerminalApp {
     pub(super) fn toggle_chart_color_picker(
         &mut self,
         color: ChartColorSetting,
+        current: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chart_settings_color_picker =
-            (self.chart_settings_color_picker != Some(color)).then_some(color);
+        if self
+            .chart_settings_color_picker
+            .as_ref()
+            .is_some_and(|picker| picker.setting == color)
+        {
+            self.chart_settings_color_picker = None;
+        } else {
+            let input = cx.new(|input_cx| InputState::new(window, input_cx));
+            input.update(cx, |input, input_cx| {
+                input.set_value(current.to_ascii_uppercase(), window, input_cx);
+            });
+            self.chart_settings_color_picker = Some(ChartColorPickerState {
+                setting: color,
+                input,
+                error: None,
+            });
+        }
         cx.notify();
     }
 
@@ -337,6 +354,15 @@ impl TerminalApp {
         color: &str,
         cx: &mut Context<Self>,
     ) {
+        let Some(color) = normalize_hex_color(color) else {
+            if let Some(picker) = &mut self.chart_settings_color_picker
+                && picker.setting == setting
+            {
+                picker.error = Some("Enter a hex color such as #2962FF.".to_string());
+            }
+            cx.notify();
+            return;
+        };
         let Some(surface) = self.chart_settings_surface(menu) else {
             return;
         };
@@ -344,21 +370,23 @@ impl TerminalApp {
             return;
         };
         match setting {
-            ChartColorSetting::Up => appearance.up_color = color.to_string(),
-            ChartColorSetting::Down => appearance.down_color = color.to_string(),
-            ChartColorSetting::WickUp => appearance.wick_up_color = color.to_string(),
-            ChartColorSetting::WickDown => appearance.wick_down_color = color.to_string(),
-            ChartColorSetting::BorderUp => appearance.border_up_color = color.to_string(),
-            ChartColorSetting::BorderDown => appearance.border_down_color = color.to_string(),
-            ChartColorSetting::Line => appearance.line_color = color.to_string(),
-            ChartColorSetting::AreaTop => appearance.area_top_color = color.to_string(),
-            ChartColorSetting::AreaBottom => appearance.area_bottom_color = color.to_string(),
-            ChartColorSetting::BaselineTop => appearance.baseline_top_color = color.to_string(),
-            ChartColorSetting::BaselineBottom => {
-                appearance.baseline_bottom_color = color.to_string();
+            ChartColorSetting::Up => appearance.up_color.clone_from(&color),
+            ChartColorSetting::Down => appearance.down_color.clone_from(&color),
+            ChartColorSetting::WickUp => appearance.wick_up_color.clone_from(&color),
+            ChartColorSetting::WickDown => appearance.wick_down_color.clone_from(&color),
+            ChartColorSetting::BorderUp => appearance.border_up_color.clone_from(&color),
+            ChartColorSetting::BorderDown => appearance.border_down_color.clone_from(&color),
+            ChartColorSetting::Line => appearance.line_color.clone_from(&color),
+            ChartColorSetting::AreaTop => appearance.area_top_color.clone_from(&color),
+            ChartColorSetting::AreaBottom => appearance.area_bottom_color.clone_from(&color),
+            ChartColorSetting::BaselineTop => {
+                appearance.baseline_top_color.clone_from(&color);
             }
-            ChartColorSetting::Grid => appearance.grid_color = color.to_string(),
-            ChartColorSetting::Crosshair => appearance.crosshair_color = color.to_string(),
+            ChartColorSetting::BaselineBottom => {
+                appearance.baseline_bottom_color.clone_from(&color);
+            }
+            ChartColorSetting::Grid => appearance.grid_color.clone_from(&color),
+            ChartColorSetting::Crosshair => appearance.crosshair_color = color,
         }
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_appearance(&appearance, surface_cx);
@@ -848,6 +876,7 @@ impl TerminalApp {
                 self.close_active_pane(&ClosePane, window, cx);
             }
             ChartContextAction::Settings => {
+                self.update_context_menu_pane(&menu, WorkspaceSurface::suspend_chart_pointer, cx);
                 self.chart_settings_section = ChartSettingsSection::Series;
                 self.chart_settings_color_picker = None;
                 self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
@@ -1956,7 +1985,7 @@ impl TerminalApp {
                     ChartSettingsView {
                         section: self.chart_settings_section,
                         snapshot: &snapshot,
-                        color_picker: self.chart_settings_color_picker,
+                        color_picker: self.chart_settings_color_picker.as_ref(),
                         templates: ChartSettingsTemplateView {
                             overlay: self.chart_settings_template_overlay,
                             name_input: self.chart_settings_template_name.as_ref(),

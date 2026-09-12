@@ -136,6 +136,7 @@ use indicator_menu::{
     IndicatorDialogState, indicator_dialog_content, indicator_selector, native_indicator,
 };
 use native_ui::{
+    color_picker::{ColorPicker, normalize_hex_color},
     control::Button,
     icon::Icon,
     input::{Input, InputEvent, InputState},
@@ -2276,6 +2277,12 @@ enum ChartColorSetting {
     Crosshair,
 }
 
+struct ChartColorPickerState {
+    setting: ChartColorSetting,
+    input: Entity<InputState>,
+    error: Option<String>,
+}
+
 impl ChartColorSetting {
     const fn label(self) -> &'static str {
         match self {
@@ -2355,7 +2362,7 @@ struct TerminalApp {
     chart_context_menu: Option<ChartContextMenu>,
     chart_settings_menu: Option<ChartContextMenu>,
     chart_settings_section: ChartSettingsSection,
-    chart_settings_color_picker: Option<ChartColorSetting>,
+    chart_settings_color_picker: Option<ChartColorPickerState>,
     chart_settings_template_overlay: ChartSettingsTemplateOverlay,
     chart_settings_template_name: Option<Entity<InputState>>,
     chart_settings_template_error: Option<String>,
