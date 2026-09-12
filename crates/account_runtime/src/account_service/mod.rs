@@ -124,6 +124,7 @@ struct ServiceState {
     pending: Option<PendingLogin>,
     last_generation: u64,
     restore_allowed: bool,
+    lease_expires_at: Option<u64>,
 }
 
 type LeaseKey = (String, [u8; 32]);
@@ -180,6 +181,7 @@ impl AccountService {
                 pending: None,
                 last_generation: 0,
                 restore_allowed: true,
+                lease_expires_at: None,
             })),
             endpoints: Arc::new(Mutex::new(None)),
             lease_keys: Arc::new(Mutex::new(Vec::new())),
@@ -351,11 +353,9 @@ impl AccountService {
             return;
         };
         self.refresh_lease_once(0, &tokens, &account_id, &agent, &vault);
-        let service = self.clone();
-        std::thread::Builder::new()
-            .name("axiusflow-account-lease".to_string())
-            .spawn(move || service.run_lease_worker(0))
-            .ok();
+        if !self.spawn_lease_worker(0) {
+            self.fail_lease_worker_start(0);
+        }
     }
 
     fn restore_local_session<V>(&self, vault: &V) -> LocalRestore
@@ -503,6 +503,7 @@ impl AccountService {
             email: String::new(),
             photo_url: String::new(),
         };
+        state.lease_expires_at = Some(claims.expires_at());
         Ok(Some(claims.expires_at()))
     }
 
@@ -533,12 +534,7 @@ impl AccountService {
             && state.pending.is_none()
             && state.view.state == AccountSessionState::OfflineLease
         {
-            let generation = state.last_generation;
-            state.view = cleared_view(
-                AccountSessionState::ReauthenticationRequired,
-                generation,
-                "cached sign-in expired; reconnect and sign in again",
-            );
+            expire_lease_if_needed(&mut state, unix_now());
         }
     }
 
@@ -582,6 +578,7 @@ impl AccountService {
             let secret = Zeroizing::new(rotated.as_bytes().to_vec());
             if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
                 state.restore_allowed = false;
+                state.lease_expires_at = None;
                 state.view = cleared_view(
                     AccountSessionState::TerminalError,
                     0,
@@ -605,6 +602,7 @@ impl AccountService {
             return None;
         }
         state.restore_allowed = false;
+        state.lease_expires_at = None;
         state.view = AccountView {
             state: AccountSessionState::Active,
             account_id: account_id.as_str().to_string(),
@@ -694,6 +692,7 @@ impl AccountService {
         };
         // Unlike transient restore failures, an authoritative rejected grant
         // must never retain cached offline access in memory.
+        state.lease_expires_at = None;
         state.view = cleared_view(target, 0, detail);
     }
 
@@ -710,6 +709,7 @@ impl AccountService {
                 return true;
             }
             state.restore_allowed = false;
+            state.lease_expires_at = None;
             state.view = cleared_view(target, 0, detail);
             return true;
         }
@@ -741,7 +741,8 @@ impl AccountService {
     /// Returns whether a verified online or cached-offline session is installed.
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.state.lock().is_ok_and(|state| {
+        self.state.lock().is_ok_and(|mut state| {
+            expire_lease_if_needed(&mut state, unix_now());
             matches!(
                 state.view.state,
                 AccountSessionState::Active | AccountSessionState::OfflineLease
@@ -811,6 +812,7 @@ impl AccountService {
         let expires_at = Instant::now() + LOGIN_TIMEOUT;
         state.last_generation = request_generation;
         state.restore_allowed = false;
+        state.lease_expires_at = None;
         state.pending = Some(PendingLogin {
             generation: request_generation,
             oauth_state,
@@ -832,6 +834,7 @@ impl AccountService {
             .is_err()
         {
             state.pending = None;
+            state.lease_expires_at = None;
             state.view = cleared_view(
                 AccountSessionState::SignedOut,
                 request_generation,
@@ -858,6 +861,7 @@ impl AccountService {
             Some(pending) if pending.generation == request_generation => {
                 let generation = state.last_generation;
                 state.pending = None;
+                state.lease_expires_at = None;
                 state.view = cleared_view(
                     AccountSessionState::SignedOut,
                     generation,
@@ -879,6 +883,7 @@ impl AccountService {
                 "account state is unavailable",
             );
         };
+        expire_lease_if_needed(&mut state, unix_now());
         if state
             .pending
             .as_ref()
@@ -955,6 +960,7 @@ impl AccountService {
             let generation = state.last_generation;
             state.restore_allowed = false;
             state.pending = None;
+            state.lease_expires_at = None;
             state.view = cleared_view(AccountSessionState::SignedOut, generation, "signed out");
         }
         let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
@@ -983,6 +989,7 @@ impl AccountService {
                     "signed out; credential cleanup needs attention"
                 },
             );
+            state.lease_expires_at = None;
             state.view.clone()
         };
         if let Some((endpoints, token)) = revocation {
@@ -1203,6 +1210,7 @@ impl AccountService {
         if !marker_cleared {
             let generation = state.last_generation;
             state.pending = None;
+            state.lease_expires_at = None;
             state.view = cleared_view(
                 AccountSessionState::TerminalError,
                 generation,
@@ -1216,6 +1224,7 @@ impl AccountService {
         }
         let generation = state.last_generation;
         state.pending = None;
+        state.lease_expires_at = None;
         state.view = AccountView {
             state: AccountSessionState::Active,
             account_id: account_id.as_str().to_string(),
@@ -1227,10 +1236,19 @@ impl AccountService {
             photo_url: profile.photo_url.clone(),
         };
         let service = self.clone();
-        std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("axiusflow-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
-            .ok();
+            .is_err()
+        {
+            state.lease_expires_at = None;
+            state.view = cleared_view(
+                AccountSessionState::TerminalError,
+                generation,
+                "account entitlement worker could not start; retry sign-in",
+            );
+            return false;
+        }
         true
     }
 
@@ -1253,6 +1271,34 @@ impl AccountService {
             }
             self.lease_round(generation);
         }
+    }
+
+    fn spawn_lease_worker(&self, generation: u64) -> bool {
+        let service = self.clone();
+        std::thread::Builder::new()
+            .name("axiusflow-account-lease".to_string())
+            .spawn(move || service.run_lease_worker(generation))
+            .is_ok()
+    }
+
+    fn fail_lease_worker_start(&self, generation: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation != generation
+            || !matches!(
+                state.view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            )
+        {
+            return;
+        }
+        state.lease_expires_at = None;
+        state.view = cleared_view(
+            AccountSessionState::TerminalError,
+            generation,
+            "account entitlement worker could not start; retry sign-in",
+        );
     }
 
     fn lease_round(&self, generation: u64) {
@@ -1370,11 +1416,28 @@ impl AccountService {
                 note_lease("offline-covered");
             }
             lease::RefreshOutcome::Unavailable => {
+                state.lease_expires_at = None;
                 state.view.state = AccountSessionState::ReauthenticationRequired;
                 state.view.detail = "sign-in expired; sign in again".to_string();
                 note_lease("unavailable");
             }
         }
+    }
+
+    fn record_lease_expiry(&self, generation: u64, expires_at: u64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.last_generation != generation
+            || !matches!(
+                state.view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            )
+        {
+            return false;
+        }
+        state.lease_expires_at = Some(expires_at);
+        true
     }
 
     fn fail_generation(&self, generation: u64, detail: &str) {
@@ -1390,6 +1453,7 @@ impl AccountService {
         }
         state.pending = None;
         let generation = state.last_generation;
+        state.lease_expires_at = None;
         if detail.contains("timed out") || detail.contains("cancelled") {
             state.view = cleared_view(AccountSessionState::SignedOut, generation, detail);
         } else {
@@ -1413,6 +1477,7 @@ impl AccountService {
             .unwrap_or_default()
             .to_string();
         view.plan_id = plan.map(PlanId::as_str).unwrap_or_default().to_string();
+        state.lease_expires_at = None;
         state.view = view;
     }
 }
@@ -1446,6 +1511,29 @@ fn cleared_view(state: AccountSessionState, generation: u64, detail: &str) -> Ac
     }
 }
 
+fn expire_lease_if_needed(state: &mut ServiceState, now_unix_seconds: u64) {
+    let missing_offline_deadline =
+        state.view.state == AccountSessionState::OfflineLease && state.lease_expires_at.is_none();
+    let expired_deadline = state
+        .lease_expires_at
+        .is_some_and(|expires_at| now_unix_seconds >= expires_at);
+    if missing_offline_deadline
+        || (expired_deadline
+            && matches!(
+                state.view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            ))
+    {
+        let generation = state.last_generation;
+        state.lease_expires_at = None;
+        state.view = cleared_view(
+            AccountSessionState::ReauthenticationRequired,
+            generation,
+            "sign-in expired; sign in again",
+        );
+    }
+}
+
 fn lock_state(
     state: &Arc<Mutex<ServiceState>>,
 ) -> Result<std::sync::MutexGuard<'_, ServiceState>, String> {
@@ -1463,11 +1551,12 @@ fn note_lease(outcome: &str) {
 /// when the generation retired while waiting.
 fn sleep_until_lease_round(service: &AccountService, generation: u64) -> bool {
     let mut jitter = [0_u8; 8];
-    if getrandom::fill(&mut jitter).is_err() {
-        return false;
-    }
-    let wait =
-        Duration::from_secs(LEASE_REFRESH_INTERVAL_SECONDS + u64::from_le_bytes(jitter) % 1800);
+    let jitter = if getrandom::fill(&mut jitter).is_ok() {
+        Some(jitter)
+    } else {
+        None
+    };
+    let wait = Duration::from_secs(lease_refresh_wait_seconds(jitter));
     let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
         if !service.is_current(generation) {
@@ -1476,6 +1565,10 @@ fn sleep_until_lease_round(service: &AccountService, generation: u64) -> bool {
         std::thread::sleep(Duration::from_secs(60).min(deadline - Instant::now()));
     }
     service.is_current(generation)
+}
+
+fn lease_refresh_wait_seconds(jitter: Option<[u8; 8]>) -> u64 {
+    LEASE_REFRESH_INTERVAL_SECONDS + jitter.map_or(0, |bytes| u64::from_le_bytes(bytes) % 1800)
 }
 
 struct LeaseSession {
@@ -1580,6 +1673,7 @@ where
     }
     match cached_claims {
         Some(cached) if cached.revision() >= claims.revision() => {
+            let _ = service.record_lease_expiry(generation, cached.expires_at());
             lease::RefreshOutcome::Current(Some(cached.plan()))
         }
         _ => {
@@ -1591,6 +1685,7 @@ where
                     && vault.store(LEASE_VAULT_KEY, secret.as_slice()).is_ok()
             });
             if current {
+                let _ = service.record_lease_expiry(generation, claims.expires_at());
                 lease::RefreshOutcome::Refreshed(claims.plan())
             } else {
                 lease::RefreshOutcome::Unavailable
@@ -1601,6 +1696,7 @@ where
 
 fn cached_lease_covers<V>(
     service: &AccountService,
+    generation: u64,
     session: &LeaseSession,
     vault: &V,
     now_unix_seconds: u64,
@@ -1616,7 +1712,7 @@ where
         .lease_keys
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    lease::load_cached(vault, LEASE_VAULT_KEY)
+    let claims = lease::load_cached(vault, LEASE_VAULT_KEY)
         .and_then(|cached| {
             lease::validate_compact(
                 &cached,
@@ -1629,8 +1725,9 @@ where
         })
         .filter(|claims| {
             claims.expires_at().saturating_sub(now_unix_seconds) <= LEASE_OFFLINE_VALIDITY_SECONDS
-        })
-        .map(|claims| claims.plan())
+        })?;
+    let _ = service.record_lease_expiry(generation, claims.expires_at());
+    Some(claims.plan())
 }
 
 /// One background lease round: refresh grant, lease fetch, monotonic cache.
@@ -1656,7 +1753,7 @@ where
         &service.config.client_id,
         &session.refresh_token,
     ) else {
-        return cached_outcome(service, &session, vault, now);
+        return cached_outcome(service, generation, &session, vault, now);
     };
     if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
         let secret = Zeroizing::new(rotated.as_bytes().to_vec());
@@ -1690,13 +1787,14 @@ where
         &tokens.subject,
         &session.device_id,
     ) else {
-        return cached_outcome(service, &session, vault, now);
+        return cached_outcome(service, generation, &session, vault, now);
     };
     validate_and_cache(service, generation, &session, &agent, &compact, vault, now)
 }
 
 fn cached_outcome<V>(
     service: &AccountService,
+    generation: u64,
     session: &LeaseSession,
     vault: &V,
     now_unix_seconds: u64,
@@ -1705,7 +1803,7 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    if let Some(plan) = cached_lease_covers(service, session, vault, now_unix_seconds) {
+    if let Some(plan) = cached_lease_covers(service, generation, session, vault, now_unix_seconds) {
         lease::RefreshOutcome::OfflineCovered(plan)
     } else {
         lease::RefreshOutcome::Unavailable
@@ -2318,6 +2416,7 @@ mod tests {
         {
             let mut state = service.state.lock().expect("account state locks");
             state.view.state = AccountSessionState::OfflineLease;
+            state.lease_expires_at = Some(super::unix_now().saturating_add(60));
         }
         assert!(service.is_authenticated());
 
@@ -2328,6 +2427,92 @@ mod tests {
             .view
             .state = AccountSessionState::Active;
         assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn offline_lease_without_a_deadline_fails_closed() {
+        let service = service();
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.view = AccountView {
+                state: AccountSessionState::OfflineLease,
+                account_id: "acct_01".to_string(),
+                plan_id: "pro".to_string(),
+                detail: "cached access".to_string(),
+                request_generation: 0,
+                display_name: String::new(),
+                email: String::new(),
+                photo_url: String::new(),
+            };
+            state.lease_expires_at = None;
+        }
+
+        assert!(!service.is_authenticated());
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::ReauthenticationRequired
+        );
+    }
+
+    #[test]
+    fn expired_lease_state_fails_closed_without_an_expiry_worker() {
+        for session_state in [
+            AccountSessionState::OfflineLease,
+            AccountSessionState::Active,
+        ] {
+            let service = service();
+            {
+                let mut state = service.state.lock().expect("account state locks");
+                state.view = AccountView {
+                    state: session_state,
+                    account_id: "acct_01".to_string(),
+                    plan_id: "pro".to_string(),
+                    detail: "verified access".to_string(),
+                    request_generation: 7,
+                    display_name: String::new(),
+                    email: String::new(),
+                    photo_url: String::new(),
+                };
+                state.last_generation = 7;
+                state.lease_expires_at = Some(super::unix_now());
+            }
+
+            assert!(
+                !service.is_authenticated(),
+                "expired {session_state:?} must not depend on a background worker to retire access"
+            );
+            let view = service.account_status();
+            assert_eq!(view.state, AccountSessionState::ReauthenticationRequired);
+            assert!(view.account_id.is_empty());
+            assert!(view.plan_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn lease_worker_start_failure_retires_current_access() {
+        let service = service();
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.last_generation = 9;
+            state.view = AccountView {
+                state: AccountSessionState::Active,
+                account_id: "acct_01".to_string(),
+                plan_id: "elite".to_string(),
+                detail: "signed in".to_string(),
+                request_generation: 9,
+                display_name: "Ada".to_string(),
+                email: "ada@example.test".to_string(),
+                photo_url: String::new(),
+            };
+            state.lease_expires_at = Some(super::unix_now().saturating_add(60));
+        }
+
+        service.fail_lease_worker_start(9);
+        let view = service.account_status();
+        assert_eq!(view.state, AccountSessionState::TerminalError);
+        assert!(view.account_id.is_empty());
+        assert!(view.plan_id.is_empty());
+        assert!(!service.is_authenticated());
     }
 
     #[test]
@@ -2345,6 +2530,7 @@ mod tests {
                 email: String::new(),
                 photo_url: String::new(),
             };
+            state.lease_expires_at = Some(super::unix_now().saturating_add(60));
         }
 
         service.complete_restore_without_session(
@@ -2355,6 +2541,18 @@ mod tests {
         assert_eq!(
             service.account_status().state,
             AccountSessionState::OfflineLease
+        );
+    }
+
+    #[test]
+    fn lease_refresh_wait_uses_zero_jitter_when_rng_is_unavailable() {
+        assert_eq!(
+            super::lease_refresh_wait_seconds(None),
+            super::LEASE_REFRESH_INTERVAL_SECONDS
+        );
+        assert_eq!(
+            super::lease_refresh_wait_seconds(Some([0_u8; 8])),
+            super::LEASE_REFRESH_INTERVAL_SECONDS
         );
     }
 
@@ -2699,7 +2897,7 @@ mod tests {
                 let session = super::lease_session(&service, 61, &vault)
                     .expect("fresh active session builds");
                 assert!(matches!(
-                    super::cached_outcome(&service, &session, &vault, super::unix_now()),
+                    super::cached_outcome(&service, 61, &session, &vault, super::unix_now()),
                     super::lease::RefreshOutcome::Unavailable
                 ));
                 assert_eq!(
