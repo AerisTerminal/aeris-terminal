@@ -87,7 +87,7 @@ impl CaptionCommand {
                     terminal.close_window(&CloseWindow, window, terminal_cx);
                 });
             }
-            Self::Close => cx.quit(),
+            Self::Close => window.remove_window(),
         }
     }
 }

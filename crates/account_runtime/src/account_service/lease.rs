@@ -29,6 +29,8 @@ pub enum RefreshOutcome {
     Refreshed(PlanId),
     /// The cached lease is unchanged and still valid.
     Current(Option<PlanId>),
+    /// Process lifecycle quiescing prevented a new refresh grant from starting.
+    Deferred,
     /// The network failed but a valid cached lease covers the outage.
     OfflineCovered(PlanId),
     /// No valid lease is available.

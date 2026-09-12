@@ -146,16 +146,103 @@ pub struct AccountService {
     endpoints: Arc<Mutex<Option<OidcEndpoints>>>,
     lease_keys: Arc<Mutex<Vec<LeaseKey>>>,
     refresh_gate: Arc<Mutex<()>>,
+    refresh_lifecycle: Arc<Mutex<RefreshLifecycleState>>,
     profile_refresh_in_flight: Arc<AtomicBool>,
+    restore_started: Arc<AtomicBool>,
     restore_readiness: Arc<AtomicU8>,
+}
+
+#[derive(Default)]
+struct RefreshLifecycleState {
+    quiesce_claims: usize,
+    grants_in_flight: usize,
+}
+
+/// One process-lifecycle claim that prevents new refresh grants and can wait
+/// for any already-running refresh round to finish its durable token commit.
+///
+/// Dropping a claim resumes refreshes when no other quiesce owner remains.
+/// Successful process shutdown can retain a claim permanently because the
+/// process exits immediately afterward.
+pub struct AccountRefreshQuiesce {
+    refresh_lifecycle: Arc<Mutex<RefreshLifecycleState>>,
+    release_on_drop: bool,
+}
+
+impl AccountRefreshQuiesce {
+    const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+    /// Waits for the refresh owner to become idle after this quiesce claim was
+    /// installed. The bound exceeds the account HTTP agent's global timeout so
+    /// an in-flight grant can reach its mandatory rotated-token vault commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable redacted error when the refresh owner does not
+    /// drain within the bounded shutdown interval.
+    pub fn wait(&self) -> Result<(), String> {
+        self.wait_for(Self::WAIT_TIMEOUT)
+    }
+
+    fn wait_for(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let grants_in_flight = self
+                .refresh_lifecycle
+                .lock()
+                .map_err(|_| "account refresh lifecycle state is unavailable".to_string())?
+                .grants_in_flight;
+            if grants_in_flight == 0 {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(
+                    "account refresh did not finish durable credential rotation before shutdown"
+                        .to_string(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10).min(deadline - now));
+        }
+    }
+
+    /// Keeps this quiesce claim installed until process exit instead of
+    /// resuming refresh work when the waiter is dropped.
+    pub fn retain_until_process_exit(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for AccountRefreshQuiesce {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        let mut lifecycle = self
+            .refresh_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lifecycle.quiesce_claims = lifecycle.quiesce_claims.saturating_sub(1);
+    }
+}
+
+struct RefreshGrantPermit {
+    refresh_lifecycle: Arc<Mutex<RefreshLifecycleState>>,
+}
+
+impl Drop for RefreshGrantPermit {
+    fn drop(&mut self) {
+        let mut lifecycle = self
+            .refresh_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lifecycle.grants_in_flight = lifecycle.grants_in_flight.saturating_sub(1);
+    }
 }
 
 enum LocalRestore {
     Settled,
-    ContinueOnline {
-        refresh_token: Zeroizing<String>,
-        cached_expiry: Option<u64>,
-    },
+    ContinueOnline { cached_expiry: Option<u64> },
 }
 
 impl AccountService {
@@ -186,7 +273,9 @@ impl AccountService {
             endpoints: Arc::new(Mutex::new(None)),
             lease_keys: Arc::new(Mutex::new(Vec::new())),
             refresh_gate: Arc::new(Mutex::new(())),
+            refresh_lifecycle: Arc::new(Mutex::new(RefreshLifecycleState::default())),
             profile_refresh_in_flight: Arc::new(AtomicBool::new(false)),
+            restore_started: Arc::new(AtomicBool::new(false)),
             restore_readiness: Arc::new(AtomicU8::new(AccountRestoreReadiness::Ready as u8)),
         }
     }
@@ -263,35 +352,45 @@ impl AccountService {
     #[must_use]
     pub fn new_restoring(config: AccountServiceConfig) -> Self {
         let service = Self::new(config);
-        service.set_restore_readiness(AccountRestoreReadiness::Pending);
-        if let Ok(mut state) = service.state.lock() {
+        service.start_restore();
+        service
+    }
+
+    /// Starts production saved-session restoration once for this shared
+    /// service. This can be called after process-lifecycle guards are installed
+    /// so no refresh grant exists before native shutdown fencing is ready.
+    pub fn start_restore(&self) {
+        if self.restore_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.set_restore_readiness(AccountRestoreReadiness::Pending);
+        if let Ok(mut state) = self.state.lock() {
             state.view = cleared_view(
                 AccountSessionState::Authorizing,
                 0,
                 "restoring saved sign-in",
             );
         }
-        if !service.config.is_configured() {
-            service.set_restore_readiness(AccountRestoreReadiness::Failed);
-            service.complete_restore_without_session(
+        if !self.config.is_configured() {
+            self.set_restore_readiness(AccountRestoreReadiness::Failed);
+            self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
                 "sign-in is unavailable; the account service is not configured",
             );
-            return service;
+            return;
         }
-        let restoring = service.clone();
+        let restoring = self.clone();
         if std::thread::Builder::new()
             .name("axiusflow-account-restore".to_string())
             .spawn(move || restoring.restore_online_session())
             .is_err()
         {
-            service.set_restore_readiness(AccountRestoreReadiness::Failed);
-            service.complete_restore_without_session(
+            self.set_restore_readiness(AccountRestoreReadiness::Failed);
+            self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
                 "saved sign-in restore could not start; retry sign-in",
             );
         }
-        service
     }
 
     /// Returns the bounded local readiness of production saved-session restore.
@@ -309,6 +408,66 @@ impl AccountService {
             .store(readiness as u8, Ordering::Release);
     }
 
+    /// Prevents new refresh grants from starting and returns a bounded waiter
+    /// for any grant that already reached the control plane. The waiter covers
+    /// the grant through its mandatory rotated-refresh-token vault commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error only if the bounded quiesce-claim counter is
+    /// exhausted.
+    pub fn begin_refresh_quiesce(&self) -> Result<AccountRefreshQuiesce, String> {
+        let mut lifecycle = self
+            .refresh_lifecycle
+            .lock()
+            .map_err(|_| "account refresh lifecycle state is unavailable".to_string())?;
+        lifecycle.quiesce_claims = lifecycle
+            .quiesce_claims
+            .checked_add(1)
+            .ok_or_else(|| "account refresh shutdown capacity is exhausted".to_string())?;
+        drop(lifecycle);
+        Ok(AccountRefreshQuiesce {
+            refresh_lifecycle: Arc::clone(&self.refresh_lifecycle),
+            release_on_drop: true,
+        })
+    }
+
+    fn claim_refresh_grant(&self) -> Result<Option<RefreshGrantPermit>, String> {
+        let mut lifecycle = self
+            .refresh_lifecycle
+            .lock()
+            .map_err(|_| "account refresh lifecycle state is unavailable".to_string())?;
+        if lifecycle.quiesce_claims != 0 {
+            return Ok(None);
+        }
+        lifecycle.grants_in_flight = lifecycle
+            .grants_in_flight
+            .checked_add(1)
+            .ok_or_else(|| "account refresh grant capacity is exhausted".to_string())?;
+        drop(lifecycle);
+        Ok(Some(RefreshGrantPermit {
+            refresh_lifecycle: Arc::clone(&self.refresh_lifecycle),
+        }))
+    }
+
+    fn wait_for_refresh_resume(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let Ok(lifecycle) = self.refresh_lifecycle.lock() else {
+                return false;
+            };
+            if lifecycle.quiesce_claims == 0 {
+                return true;
+            }
+            drop(lifecycle);
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10).min(deadline - now));
+        }
+    }
+
     fn restore_online_session(&self) {
         let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) else {
             self.set_restore_readiness(AccountRestoreReadiness::Failed);
@@ -318,10 +477,7 @@ impl AccountService {
             );
             return;
         };
-        let LocalRestore::ContinueOnline {
-            refresh_token,
-            cached_expiry,
-        } = self.restore_local_session(&vault)
+        let LocalRestore::ContinueOnline { cached_expiry, .. } = self.restore_local_session(&vault)
         else {
             return;
         };
@@ -330,13 +486,63 @@ impl AccountService {
         // depend on current control-plane reachability.
         let agent = oidc_agent();
         let endpoints = self.retry_restore_lookup(|| self.oidc_endpoints());
-        let outcome = endpoints
-            .as_ref()
-            .map_err(|_| oidc::RefreshGrantError::Unavailable)
-            .and_then(|endpoints| {
-                refresh_grant(endpoints, &agent, &self.config.client_id, &refresh_token)
-            });
-        let Some((account_id, tokens)) = self.apply_online_restore(&vault, outcome, |tokens| {
+        let tokens = loop {
+            let Ok(refresh_guard) = self.refresh_gate.lock() else {
+                break None;
+            };
+            let permit = match self.claim_refresh_grant() {
+                Ok(Some(permit)) => permit,
+                Ok(None) => {
+                    drop(refresh_guard);
+                    if self.wait_for_refresh_resume(AccountRefreshQuiesce::WAIT_TIMEOUT) {
+                        continue;
+                    }
+                    break None;
+                }
+                Err(_) => break None,
+            };
+            let refresh_token = match self.current_restore_refresh_token(&vault) {
+                Ok(Some(refresh_token)) => refresh_token,
+                Ok(None) => break None,
+                Err(()) => {
+                    self.set_restore_readiness(AccountRestoreReadiness::Failed);
+                    self.complete_restore_without_session(
+                        AccountSessionState::TerminalError,
+                        "credential storage is unavailable; retry sign-in",
+                    );
+                    if let Some(expires_at) = cached_expiry {
+                        self.spawn_cached_lease_expiry_worker(expires_at);
+                    }
+                    break None;
+                }
+            };
+            let outcome = endpoints
+                .as_ref()
+                .map_err(|_| oidc::RefreshGrantError::Unavailable)
+                .and_then(|endpoints| {
+                    refresh_grant(endpoints, &agent, &self.config.client_id, &refresh_token)
+                });
+            // Serialize startup restoration with scheduled/profile refreshes,
+            // and keep the lifecycle permit through the mandatory rotated-token
+            // vault commit. Both guards release before unrelated profile/lease
+            // network work continues. A cancelled update quiesce lets this
+            // generation-zero restore resume instead of abandoning its cadence.
+            let tokens = self.accept_online_restore_refresh(&vault, outcome);
+            drop(permit);
+            break tokens;
+        };
+        let Some(tokens) = tokens else {
+            if self
+                .state
+                .lock()
+                .is_ok_and(|state| state.view.state == AccountSessionState::OfflineLease)
+                && let Some(expires_at) = cached_expiry
+            {
+                self.spawn_cached_lease_expiry_worker(expires_at);
+            }
+            return;
+        };
+        let Some((account_id, tokens)) = self.apply_online_restore_tokens(tokens, |tokens| {
             let endpoints = endpoints.as_ref().map_err(Clone::clone)?;
             self.retry_restore_lookup(|| {
                 link_subject(endpoints, &agent, &tokens.id_token, &tokens.subject)
@@ -418,7 +624,7 @@ impl AccountService {
                 return LocalRestore::Settled;
             }
         };
-        let Some(refresh_token) = refresh_token else {
+        let Some(_refresh_token) = refresh_token else {
             if !self.complete_restore_without_session(
                 AccountSessionState::ReauthenticationRequired,
                 "saved sign-in expired; sign in again",
@@ -434,10 +640,27 @@ impl AccountService {
         if !cached_lease_read_failed {
             self.set_restore_readiness(AccountRestoreReadiness::Ready);
         }
-        LocalRestore::ContinueOnline {
-            refresh_token,
-            cached_expiry,
+        LocalRestore::ContinueOnline { cached_expiry }
+    }
+
+    fn current_restore_refresh_token<V>(&self, vault: &V) -> Result<Option<Zeroizing<String>>, ()>
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let state = self.state.lock().map_err(|_| ())?;
+        if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return Ok(None);
         }
+        vault
+            .load(REFRESH_VAULT_KEY)
+            .map_err(|_| ())
+            .map(|material| {
+                material
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .filter(|token| !token.is_empty())
+                    .map(Zeroizing::new)
+            })
     }
 
     fn restore_cached_lease<V>(&self, vault: &V) -> Result<Option<u64>, ()>
@@ -538,12 +761,26 @@ impl AccountService {
         }
     }
 
+    #[cfg(test)]
     fn apply_online_restore<V>(
         &self,
         vault: &V,
         outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
         link: impl FnOnce(&oidc::VerifiedTokens) -> Result<(AccountId, PlanId, AccountProfile), String>,
     ) -> Option<(AccountId, oidc::VerifiedTokens)>
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let tokens = self.accept_online_restore_refresh(vault, outcome)?;
+        self.apply_online_restore_tokens(tokens, link)
+    }
+
+    fn accept_online_restore_refresh<V>(
+        &self,
+        vault: &V,
+        outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
+    ) -> Option<oidc::VerifiedTokens>
     where
         V: CredentialVault,
         V::Error: std::fmt::Display,
@@ -592,7 +829,14 @@ impl AccountService {
                 return None;
             }
         }
-        drop(state);
+        Some(tokens)
+    }
+
+    fn apply_online_restore_tokens(
+        &self,
+        tokens: oidc::VerifiedTokens,
+        link: impl FnOnce(&oidc::VerifiedTokens) -> Result<(AccountId, PlanId, AccountProfile), String>,
+    ) -> Option<(AccountId, oidc::VerifiedTokens)> {
         let Ok((account_id, plan, profile)) = link(&tokens) else {
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
@@ -1458,6 +1702,7 @@ impl AccountService {
                 note_lease("valid");
             }
             lease::RefreshOutcome::Current(None) => note_lease("valid"),
+            lease::RefreshOutcome::Deferred => note_lease("deferred"),
             lease::RefreshOutcome::OfflineCovered(plan) => {
                 state.view.plan_id = plan.as_str().to_string();
                 if current != offline {
@@ -2175,6 +2420,11 @@ where
     // One connection pool per background round: grant, link, lease, and
     // directory reuse it instead of paying a fresh handshake per stage.
     let agent = oidc_agent();
+    let grant_permit = match service.claim_refresh_grant() {
+        Ok(Some(permit)) => permit,
+        Ok(None) => return lease::RefreshOutcome::Deferred,
+        Err(_) => return lease::RefreshOutcome::Unavailable,
+    };
     let refresh = refresh_grant(
         &session.endpoints,
         &agent,
@@ -2185,6 +2435,7 @@ where
         Ok(tokens) => tokens,
         Err(outcome) => return outcome,
     };
+    drop(grant_permit);
     if let Ok((account_id, _plan, profile)) = link_subject(
         &session.endpoints,
         &agent,
@@ -2357,9 +2608,10 @@ mod tests {
         net::TcpListener,
         path::PathBuf,
         sync::{
-            Arc, Mutex,
+            Arc, Barrier, Mutex,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
+        time::Duration,
     };
 
     static MARKER_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -2823,14 +3075,19 @@ mod tests {
                 failing_key,
             };
 
-            let LocalRestore::ContinueOnline {
-                refresh_token,
-                cached_expiry,
-            } = service.restore_local_session(&failing)
+            let LocalRestore::ContinueOnline { cached_expiry } =
+                service.restore_local_session(&failing)
             else {
                 panic!("a readable refresh token must preserve online recovery");
             };
-            assert_eq!(refresh_token.as_str(), "cached-refresh");
+            assert_eq!(
+                service
+                    .current_restore_refresh_token(&failing)
+                    .expect("refresh read succeeds")
+                    .expect("refresh token remains available")
+                    .as_str(),
+                "cached-refresh"
+            );
             assert_eq!(cached_expiry, None);
             assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
             assert_eq!(
@@ -3648,14 +3905,18 @@ mod tests {
             .store(REFRESH_VAULT_KEY, b"cached-refresh")
             .expect("refresh fixture stores");
 
-        let LocalRestore::ContinueOnline {
-            refresh_token,
-            cached_expiry,
-        } = service.restore_local_session(&vault)
+        let LocalRestore::ContinueOnline { cached_expiry } = service.restore_local_session(&vault)
         else {
             panic!("valid refresh material continues to the online phase");
         };
-        assert_eq!(refresh_token.as_str(), "cached-refresh");
+        assert_eq!(
+            service
+                .current_restore_refresh_token(&vault)
+                .expect("refresh read succeeds")
+                .expect("refresh token remains available")
+                .as_str(),
+            "cached-refresh"
+        );
         assert_eq!(cached_expiry, None);
         assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
         assert_eq!(
@@ -3929,10 +4190,152 @@ mod tests {
         assert_eq!(unavailable.state, AccountSessionState::Active);
         assert_eq!(unavailable.plan_id, "pro");
 
+        service.apply_lease_outcome(9, RefreshOutcome::Deferred);
+        let deferred = service.account_status();
+        assert_eq!(deferred.state, AccountSessionState::Active);
+        assert_eq!(deferred.plan_id, "pro");
+
         service.apply_profile_refresh_outcome(9, RefreshOutcome::Current(Some(PlanId::Elite)));
         let current = service.account_status();
         assert_eq!(current.state, AccountSessionState::Active);
         assert_eq!(current.plan_id, "elite");
+    }
+
+    #[test]
+    fn refresh_quiesce_waits_for_inflight_grant_and_drop_reenables_refresh() {
+        let service = service();
+        let permit = service
+            .claim_refresh_grant()
+            .expect("refresh lifecycle state locks")
+            .expect("unquiesced runtime accepts one grant");
+        let quiesce = service
+            .begin_refresh_quiesce()
+            .expect("shutdown quiesce claim installs");
+
+        assert!(
+            service
+                .claim_refresh_grant()
+                .expect("refresh lifecycle state locks")
+                .is_none(),
+            "no new refresh grant may start after lifecycle quiescing begins"
+        );
+        assert!(
+            quiesce.wait_for(Duration::ZERO).is_err(),
+            "shutdown cannot complete while a grant is still inside its rotation-commit phase"
+        );
+
+        drop(permit);
+        assert_eq!(quiesce.wait_for(Duration::from_millis(50)), Ok(()));
+        drop(quiesce);
+
+        assert!(
+            service
+                .claim_refresh_grant()
+                .expect("refresh lifecycle state locks")
+                .is_some(),
+            "cancelling a prepared restart must release its quiesce claim"
+        );
+    }
+
+    #[test]
+    fn refresh_quiesce_claims_are_reference_counted() {
+        let service = service();
+        let shutdown = service
+            .begin_refresh_quiesce()
+            .expect("shutdown quiesce claim installs");
+        let update = service
+            .begin_refresh_quiesce()
+            .expect("update quiesce claim installs");
+
+        drop(update);
+        assert!(
+            service
+                .claim_refresh_grant()
+                .expect("refresh lifecycle state locks")
+                .is_none(),
+            "releasing an update claim must not release a simultaneous shutdown claim"
+        );
+
+        drop(shutdown);
+        assert!(
+            service
+                .claim_refresh_grant()
+                .expect("refresh lifecycle state locks")
+                .is_some(),
+            "refresh grants resume only after the final quiesce owner releases"
+        );
+    }
+
+    #[test]
+    fn refresh_quiesce_and_grant_admission_are_serialized() {
+        for _ in 0..32 {
+            let service = service();
+            let barrier = Arc::new(Barrier::new(3));
+            let grant_service = service.clone();
+            let grant_barrier = Arc::clone(&barrier);
+            let grant = std::thread::spawn(move || {
+                grant_barrier.wait();
+                grant_service
+                    .claim_refresh_grant()
+                    .expect("refresh lifecycle state locks")
+            });
+            let quiesce_service = service.clone();
+            let quiesce_barrier = Arc::clone(&barrier);
+            let quiesce = std::thread::spawn(move || {
+                quiesce_barrier.wait();
+                quiesce_service
+                    .begin_refresh_quiesce()
+                    .expect("quiesce claim installs")
+            });
+
+            barrier.wait();
+            let permit = grant.join().expect("grant admission thread completes");
+            let quiesce = quiesce.join().expect("quiesce thread completes");
+            if let Some(permit) = permit {
+                assert!(
+                    quiesce.wait_for(Duration::ZERO).is_err(),
+                    "a grant admitted before quiesce must remain visible to its waiter"
+                );
+                drop(permit);
+                assert_eq!(quiesce.wait_for(Duration::from_millis(50)), Ok(()));
+            } else {
+                assert_eq!(
+                    quiesce.wait_for(Duration::ZERO),
+                    Ok(()),
+                    "a quiesce admitted first must prevent the competing grant"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn online_restore_reloads_refresh_material_after_quiesce_release() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        vault
+            .store(REFRESH_VAULT_KEY, b"pre-quiesce-refresh")
+            .expect("initial refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let quiesce = service
+            .begin_refresh_quiesce()
+            .expect("update quiesce claim installs");
+        drop(quiesce);
+        vault
+            .store(REFRESH_VAULT_KEY, b"post-quiesce-refresh")
+            .expect("rotated refresh fixture stores");
+
+        assert_eq!(
+            service
+                .current_restore_refresh_token(&vault)
+                .expect("refresh read succeeds")
+                .expect("refresh token remains available")
+                .as_str(),
+            "post-quiesce-refresh",
+            "startup restore must not retain a refresh token captured before lifecycle quiescing"
+        );
     }
 
     #[test]
@@ -4078,12 +4481,17 @@ mod tests {
             .store(REFRESH_VAULT_KEY, b"rejected-refresh")
             .expect("refresh fixture stores");
 
-        let LocalRestore::ContinueOnline { refresh_token, .. } =
-            service.restore_local_session(&vault)
-        else {
+        let LocalRestore::ContinueOnline { .. } = service.restore_local_session(&vault) else {
             panic!("cached lease plus refresh must continue online restore");
         };
-        assert_eq!(refresh_token.as_str(), "rejected-refresh");
+        assert_eq!(
+            service
+                .current_restore_refresh_token(&vault)
+                .expect("refresh read succeeds")
+                .expect("refresh token remains available")
+                .as_str(),
+            "rejected-refresh"
+        );
         assert_eq!(
             service.account_status().state,
             AccountSessionState::OfflineLease
@@ -4701,6 +5109,31 @@ mod tests {
     }
 
     #[test]
+    fn restore_can_be_started_once_after_process_lifecycle_fencing() {
+        let service = AccountService::new(AccountServiceConfig {
+            issuer: String::new(),
+            client_id: "axiusflow-desktop".to_string(),
+        });
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::SignedOut
+        );
+
+        service.start_restore();
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        let first = service.account_status();
+
+        service.start_restore();
+        assert_eq!(service.account_status(), first);
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
+    }
+
+    #[test]
     fn duplicate_begin_and_retired_generations_fail_closed() {
         let service = service();
         service.begin_login(1).expect("first login starts");
@@ -5025,12 +5458,17 @@ mod tests {
         );
 
         let restarted = restoring_service();
-        let LocalRestore::ContinueOnline { refresh_token, .. } =
-            restarted.restore_local_session(&vault)
-        else {
+        let LocalRestore::ContinueOnline { .. } = restarted.restore_local_session(&vault) else {
             panic!("surviving refresh material remains restorable after restart");
         };
-        assert_eq!(refresh_token.as_str(), "refresh-survives");
+        assert_eq!(
+            restarted
+                .current_restore_refresh_token(&vault)
+                .expect("refresh read succeeds")
+                .expect("refresh token remains available")
+                .as_str(),
+            "refresh-survives"
+        );
     }
 
     #[test]

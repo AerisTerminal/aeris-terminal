@@ -62,6 +62,8 @@ pub use rollout::rollout_eligible;
 pub use session_shutdown::{
     NativeSessionShutdownCancellation, NativeSessionShutdownMonitor, SessionShutdownError,
 };
+#[cfg(target_os = "windows")]
+pub use session_shutdown::{NativeSessionShutdownGuard, NativeSessionShutdownPermit};
 pub use user_notifications::{
     NativeUserNotification, NativeUserNotificationError, try_send_user_notification,
 };

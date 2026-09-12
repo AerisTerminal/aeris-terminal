@@ -470,23 +470,37 @@ impl TerminalApp {
                 .spawn(async move { drop(cleanup) })
                 .detach();
         }
+        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() {
+            let _ = account.request_profile_refresh();
+        }
     }
 
-    fn commit_update_restart_after_persistence(&mut self, cx: &mut Context<Self>) {
+    fn commit_update_restart_after_persistence(
+        &mut self,
+        account_refresh: axiusflow_account_runtime::AccountRefreshQuiesce,
+        cx: &mut Context<Self>,
+    ) {
         self.update_restart_persistence_pending = false;
         let Some(updater) = self.updater.as_mut() else {
+            drop(account_refresh);
+            if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() {
+                let _ = account.request_profile_refresh();
+            }
             self.workspace_error = Some("update client is unavailable".to_string());
             cx.notify();
             return;
         };
         if let Err(error) = updater.commit_restart() {
-            self.workspace_error = Some(error);
-            cx.notify();
+            drop(account_refresh);
+            self.cancel_update_restart_after_persistence_failure(error, cx);
             return;
         }
         self.about_dialog_open = false;
         self.claim_close(cx);
         self.lifecycle.quit_after_shutdown(cx);
+        // `quit_after_shutdown` synchronously installs its own account quiesce
+        // claim before this update-specific claim is released.
+        drop(account_refresh);
     }
 
     fn prepare_update_restart_after_workspace_persistence(
@@ -503,20 +517,28 @@ impl TerminalApp {
             .as_ref()
             .map(WorkspaceLayoutPersistence::shutdown_wait);
         let chart_chrome_wait = chart_chrome::chart_chrome_shutdown_wait();
+        let account_refresh = axiusflow_desktop::account::begin_refresh_quiesce();
+
         self.update_restart_persistence_pending = true;
         let durability = cx.background_executor().spawn(async move {
+            let account_refresh = account_refresh?;
+            account_refresh.wait()?;
             let workspace_generation = match workspace_wait {
                 Some(wait) => Some(wait.wait(Duration::from_secs(2))?),
                 None => None,
             };
             let chart_chrome_generation = chart_chrome_wait.wait(Duration::from_secs(2))?;
-            Ok::<_, String>((workspace_generation, chart_chrome_generation))
+            Ok::<_, String>((
+                workspace_generation,
+                chart_chrome_generation,
+                account_refresh,
+            ))
         });
         cx.spawn_in(window, async move |terminal, cx| {
             let durable_generations = durability.await;
-            let _ = terminal.update_in(cx, |terminal, _, terminal_cx| {
+            let update = terminal.update_in(cx, |terminal, _, terminal_cx| {
                 match durable_generations {
-                    Ok((workspace_generation, chart_chrome_generation)) => {
+                    Ok((workspace_generation, chart_chrome_generation, account_refresh)) => {
                         let workspace_current = workspace_generation.is_none_or(|generation| {
                             terminal
                                 .workspace_persistence
@@ -530,8 +552,12 @@ impl TerminalApp {
                                 chart_chrome_generation,
                             );
                         if workspace_current && chart_chrome_current {
-                            terminal.commit_update_restart_after_persistence(terminal_cx);
+                            terminal.commit_update_restart_after_persistence(
+                                account_refresh,
+                                terminal_cx,
+                            );
                         } else {
+                            drop(account_refresh);
                             terminal.cancel_update_restart_after_persistence_failure(
                                 "desktop state changed while update restart was preparing; retry the update"
                                     .to_string(),
@@ -546,6 +572,11 @@ impl TerminalApp {
                 }
                 terminal_cx.notify();
             });
+            if update.is_err()
+                && let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+            {
+                let _ = account.request_profile_refresh();
+            }
         })
         .detach();
     }

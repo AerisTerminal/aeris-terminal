@@ -215,15 +215,8 @@ impl DesktopUpdater {
                     restart_prepared: false,
                 }
             }
-            UpdateResult::RestartPrepared(Ok(mut prepared)) => {
+            UpdateResult::RestartPrepared(Ok(prepared)) => {
                 self.request_pending = false;
-                if let Err(error) = prepared.require_running() {
-                    self.presentation.state = UpdateState::Error(error);
-                    return UpdatePoll {
-                        changed: true,
-                        restart_prepared: false,
-                    };
-                }
                 self.prepared_restart = Some(prepared);
                 UpdatePoll {
                     changed: true,
@@ -251,6 +244,10 @@ impl DesktopUpdater {
             .ok_or_else(|| "update restart is not prepared".to_string())?;
         if let Err(error) = prepared.require_running() {
             self.presentation.state = UpdateState::Error(error.clone());
+            // Keep cleanup ownership in the updater so the GPUI caller can
+            // transfer the uncommitted helper to a background owner. Dropping
+            // `PreparedRestart` here would synchronously kill/wait the child.
+            self.prepared_restart = Some(prepared);
             return Err(error);
         }
         prepared.commit();
@@ -998,6 +995,48 @@ mod tests {
         assert!(!SLOT.load(Ordering::Acquire));
         assert!(RestartSlot::claim(&SLOT).is_ok());
         SLOT.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn failed_restart_commit_preserves_cleanup_for_a_background_owner() {
+        static SLOT: AtomicBool = AtomicBool::new(false);
+        SLOT.store(false, Ordering::Release);
+        let (requests, _request_rx) = mpsc::sync_channel(1);
+        let (result_tx, results) = mpsc::sync_channel(1);
+        let mut updater = DesktopUpdater {
+            requests,
+            results,
+            presentation: UpdatePresentation {
+                system_version: "Windows".to_string(),
+                state: UpdateState::PreparingRestart,
+            },
+            request_pending: true,
+            prepared_restart: None,
+        };
+        result_tx
+            .send(UpdateResult::RestartPrepared(Ok(PreparedRestart {
+                child: None,
+                slot: RestartSlot::claim(&SLOT).expect("slot claims"),
+                committed: false,
+            })))
+            .expect("prepared restart result queues");
+
+        let poll = updater.poll();
+        assert!(poll.restart_prepared);
+        assert!(SLOT.load(Ordering::Acquire));
+        let error = updater
+            .commit_restart()
+            .expect_err("missing helper cannot commit restart");
+        assert!(
+            SLOT.load(Ordering::Acquire),
+            "commit failure must retain cleanup ownership instead of dropping it on GPUI"
+        );
+        let cleanup = updater
+            .cancel_prepared_restart(error)
+            .expect("failed commit returns helper to background cleanup owner");
+        assert!(SLOT.load(Ordering::Acquire));
+        drop(cleanup);
+        assert!(!SLOT.load(Ordering::Acquire));
     }
 
     #[test]

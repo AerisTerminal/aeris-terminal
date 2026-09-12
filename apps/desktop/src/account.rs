@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_account_runtime::{AccountService, AccountServiceConfig};
+use axiusflow_account_runtime::{AccountRefreshQuiesce, AccountService, AccountServiceConfig};
 use axiusflow_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
@@ -80,6 +80,24 @@ fn open_login_browser_with(
 /// Returns an error when the account runtime request fails or the reply is invalid.
 pub fn fetch_account_status(service: &AccountService) -> Result<AccountView, String> {
     Ok(service.account_status())
+}
+
+/// Prevents the process-global account runtime from starting another refresh
+/// grant while desktop shutdown or an update restart is being prepared.
+///
+/// # Errors
+///
+/// Returns a redacted error when the runtime cannot install the bounded
+/// lifecycle claim.
+pub fn begin_refresh_quiesce() -> Result<AccountRefreshQuiesce, String> {
+    account_service().begin_refresh_quiesce()
+}
+
+/// Initializes the process-global account owner without starting saved-session
+/// network restoration. Desktop startup uses this before installing native
+/// process/session shutdown fencing.
+pub fn prepare_for_process_lifecycle() {
+    let _ = account_service();
 }
 
 /// Cancels one pending engine-owned login transaction.
@@ -418,6 +436,7 @@ impl DesktopAccount {
         if let Some(installed) = INSTALLED_ACCOUNT.get() {
             return Ok(installed.clone());
         }
+        account_service().start_restore();
         let session = Self::spawn()?;
         let _ = INSTALLED_ACCOUNT.set(session);
         INSTALLED_ACCOUNT
@@ -1075,7 +1094,7 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
 
 fn account_service() -> &'static AccountService {
     static SERVICE: OnceLock<AccountService> = OnceLock::new();
-    SERVICE.get_or_init(|| AccountService::new_restoring(AccountServiceConfig::from_environment()))
+    SERVICE.get_or_init(|| AccountService::new(AccountServiceConfig::from_environment()))
 }
 
 /// Signs out the shared engine-owned session.

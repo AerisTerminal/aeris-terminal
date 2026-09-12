@@ -47,6 +47,76 @@ pub struct NativeSessionShutdownMonitor {
     workers: Vec<JoinHandle<()>>,
 }
 
+/// Opaque owner token held while Windows is deciding whether the current user
+/// session may end.
+///
+/// Dropping the token cancels the caller-owned shutdown claim. When Windows
+/// commits the session end the native guard intentionally leaks the token so
+/// its claim remains active until process termination.
+#[cfg(target_os = "windows")]
+pub struct NativeSessionShutdownPermit {
+    guard: Option<Box<dyn Send + 'static>>,
+}
+
+#[cfg(target_os = "windows")]
+impl NativeSessionShutdownPermit {
+    /// Wraps a caller-owned claim whose `Drop` cancels the pending shutdown
+    /// ownership.
+    #[must_use]
+    pub fn new<T>(guard: T) -> Self
+    where
+        T: Send + 'static,
+    {
+        Self {
+            guard: Some(Box::new(guard)),
+        }
+    }
+
+    fn commit(mut self) {
+        if let Some(guard) = self.guard.take() {
+            std::mem::forget(guard);
+        }
+    }
+}
+
+/// Windows session-end gate that can veto logout/shutdown until a caller-owned
+/// durability claim is safe to retain through process exit.
+#[cfg(target_os = "windows")]
+pub struct NativeSessionShutdownGuard {
+    cancellation: Arc<CancellationInner>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "windows")]
+impl NativeSessionShutdownGuard {
+    /// Installs a hidden native window that participates in
+    /// `WM_QUERYENDSESSION` before GUI shutdown begins.
+    ///
+    /// The callback runs on the guard's native worker thread, never the GPUI
+    /// thread. Returning `None` vetoes the current session-end attempt. A
+    /// returned permit stays alive until Windows either cancels the attempt or
+    /// commits `WM_ENDSESSION`.
+    ///
+    /// # Errors
+    /// Returns an error if the native guard window cannot be started and made
+    /// ready before this function returns.
+    pub fn connect(
+        gate: impl Fn() -> Option<NativeSessionShutdownPermit> + Send + Sync + 'static,
+    ) -> Result<Self, SessionShutdownError> {
+        windows_shutdown_guard(Arc::new(gate))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for NativeSessionShutdownGuard {
+    fn drop(&mut self) {
+        windows::cancel_wait(self.cancellation.windows_thread_id.load(Ordering::Acquire));
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// Handle that unblocks a matching [`NativeSessionShutdownMonitor`].
 #[derive(Clone)]
 pub struct NativeSessionShutdownCancellation {
@@ -263,13 +333,39 @@ fn windows_monitor() -> Result<NativeSessionShutdownMonitor, SessionShutdownErro
 }
 
 #[cfg(target_os = "windows")]
+fn windows_shutdown_guard(
+    gate: Arc<dyn Fn() -> Option<NativeSessionShutdownPermit> + Send + Sync + 'static>,
+) -> Result<NativeSessionShutdownGuard, SessionShutdownError> {
+    let cancelled = Arc::new(CancellationInner {
+        cancelled: AtomicBool::new(false),
+        windows_thread_id: std::sync::atomic::AtomicU32::new(0),
+    });
+    let worker_cancellation = Arc::clone(&cancelled);
+    let (ready_tx, ready_rx) = sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("axiusflow-session-shutdown-guard".to_string())
+        .spawn(move || windows::run_guard(gate, &worker_cancellation, &ready_tx))
+        .map_err(|_| SessionShutdownError::ThreadStart)?;
+    if ready_rx.recv().ok() != Some(true) {
+        windows::cancel_wait(cancelled.windows_thread_id.load(Ordering::Acquire));
+        let _ = worker.join();
+        return Err(SessionShutdownError::NativeRegistration);
+    }
+    Ok(NativeSessionShutdownGuard {
+        cancellation: cancelled,
+        worker: Some(worker),
+    })
+}
+
+#[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod windows {
-    use super::CancellationInner;
+    use super::{CancellationInner, NativeSessionShutdownPermit};
     use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
         ptr,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
             mpsc::SyncSender,
         },
@@ -373,11 +469,225 @@ mod windows {
         unsafe { DefWindowProcW(window, message, wparam, lparam) }
     }
 
+    struct GuardWindowState {
+        gate: Arc<dyn Fn() -> Option<NativeSessionShutdownPermit> + Send + Sync + 'static>,
+        permit: Mutex<Option<NativeSessionShutdownPermit>>,
+    }
+
+    impl GuardWindowState {
+        fn query_end_session(&self) -> bool {
+            let Ok(mut permit) = self.permit.lock() else {
+                return false;
+            };
+            if permit.is_some() {
+                return true;
+            }
+            let next = catch_unwind(AssertUnwindSafe(|| (self.gate)()))
+                .ok()
+                .flatten();
+            if let Some(next) = next {
+                *permit = Some(next);
+                true
+            } else {
+                false
+            }
+        }
+
+        fn end_session(&self, committed: bool) {
+            let Ok(mut permit) = self.permit.lock() else {
+                return;
+            };
+            if let Some(permit) = permit.take()
+                && committed
+            {
+                permit.commit();
+            }
+        }
+    }
+
+    pub(super) fn run_guard(
+        gate: Arc<dyn Fn() -> Option<NativeSessionShutdownPermit> + Send + Sync + 'static>,
+        cancellation: &Arc<CancellationInner>,
+        ready: &SyncSender<bool>,
+    ) {
+        let thread_id = unsafe { GetCurrentThreadId() };
+        cancellation
+            .windows_thread_id
+            .store(thread_id, Ordering::Release);
+        let mut message = MSG::default();
+        unsafe {
+            PeekMessageW(&raw mut message, ptr::null_mut(), 0, 0, PM_NOREMOVE);
+        }
+        if cancellation.cancelled.load(Ordering::Acquire) {
+            let _ = ready.try_send(false);
+            return;
+        }
+        let state = GuardWindowState {
+            gate,
+            permit: Mutex::new(None),
+        };
+        let Some(window) = create_guard_window(&state) else {
+            let _ = ready.try_send(false);
+            return;
+        };
+        let _ = ready.try_send(true);
+        while unsafe { GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) } > 0 {
+            unsafe {
+                TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+        }
+        unsafe {
+            DestroyWindow(window);
+        }
+    }
+
+    fn create_guard_window(state: &GuardWindowState) -> Option<HWND> {
+        let class_name = "AxiusflowSessionShutdownGuard\0"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let instance = unsafe { GetModuleHandleW(ptr::null()) };
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(guard_window_proc),
+            hInstance: instance,
+            lpszClassName: class_name.as_ptr(),
+            ..WNDCLASSW::default()
+        };
+        if unsafe { RegisterClassW(&raw const class) } == 0 {
+            return None;
+        }
+        let window = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                instance,
+                ptr::from_ref(state).cast(),
+            )
+        };
+        (!window.is_null()).then_some(window)
+    }
+
+    unsafe extern "system" fn guard_window_proc(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_NCCREATE {
+            let creation = unsafe { &*(lparam as *const CREATESTRUCTW) };
+            unsafe {
+                SetWindowLongPtrW(window, GWLP_USERDATA, creation.lpCreateParams as isize);
+            }
+            return 1;
+        }
+        let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const GuardWindowState;
+        if message == WM_QUERYENDSESSION {
+            if state.is_null() {
+                return 0;
+            }
+            return i32::from(unsafe { &*state }.query_end_session()) as LRESULT;
+        }
+        if message == WM_ENDSESSION {
+            if !state.is_null() {
+                unsafe { &*state }.end_session(wparam != 0);
+            }
+            if wparam != 0 {
+                unsafe { PostQuitMessage(0) };
+            }
+            return 0;
+        }
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    }
+
     pub(super) fn cancel_wait(thread_id: u32) {
         if thread_id != 0 {
             unsafe {
                 PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{GuardWindowState, NativeSessionShutdownPermit};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        #[test]
+        fn cancelled_session_end_releases_permit_and_allows_a_fresh_query() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let gate_calls = Arc::clone(&calls);
+            let gate_dropped = Arc::clone(&dropped);
+            let state = GuardWindowState {
+                gate: Arc::new(move || {
+                    gate_calls.fetch_add(1, Ordering::AcqRel);
+                    Some(NativeSessionShutdownPermit::new(DropFlag(Arc::clone(
+                        &gate_dropped,
+                    ))))
+                }),
+                permit: Mutex::new(None),
+            };
+
+            assert!(state.query_end_session());
+            assert!(state.query_end_session());
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            assert!(!dropped.load(Ordering::Acquire));
+
+            state.end_session(false);
+            assert!(dropped.load(Ordering::Acquire));
+            assert!(state.query_end_session());
+            assert_eq!(calls.load(Ordering::Acquire), 2);
+        }
+
+        #[test]
+        fn committed_session_end_retains_permit_through_process_exit() {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let gate_dropped = Arc::clone(&dropped);
+            let state = GuardWindowState {
+                gate: Arc::new(move || {
+                    Some(NativeSessionShutdownPermit::new(DropFlag(Arc::clone(
+                        &gate_dropped,
+                    ))))
+                }),
+                permit: Mutex::new(None),
+            };
+
+            assert!(state.query_end_session());
+            state.end_session(true);
+            assert!(
+                !dropped.load(Ordering::Acquire),
+                "committed session shutdown must keep the caller-owned quiesce claim alive"
+            );
+        }
+
+        #[test]
+        fn rejected_session_end_is_vetoed_without_retaining_a_permit() {
+            let state = GuardWindowState {
+                gate: Arc::new(|| None),
+                permit: Mutex::new(None),
+            };
+
+            assert!(!state.query_end_session());
+            assert!(state.permit.lock().expect("permit state locks").is_none());
         }
     }
 }

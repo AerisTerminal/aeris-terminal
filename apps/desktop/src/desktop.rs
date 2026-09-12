@@ -200,6 +200,110 @@ fn install_platform_http_client(cx: &mut App) {
     }
 }
 
+static ACCOUNT_ONLY_QUIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn quit_after_account_refresh_quiesce(cx: &mut App) {
+    if ACCOUNT_ONLY_QUIT_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let account_refresh = axiusflow_desktop::account::begin_refresh_quiesce();
+    let shutdown = cx.background_executor().spawn(async move {
+        let quiesce = account_refresh?;
+        if let Err(first_error) = quiesce.wait() {
+            eprintln!("Axiusflow account shutdown retrying after: {first_error}");
+            quiesce.wait()?;
+        }
+        quiesce.retain_until_process_exit();
+        Ok::<(), String>(())
+    });
+    cx.spawn(async move |cx| match shutdown.await {
+        Ok(()) => {
+            cx.update(|cx| cx.quit());
+        }
+        Err(error) => {
+            ACCOUNT_ONLY_QUIT_STARTED.store(false, Ordering::Release);
+            eprintln!("Axiusflow account shutdown failed: {error}");
+        }
+    })
+    .detach();
+}
+
+fn retain_account_refresh_quiesce_for_exit(
+    account_refresh: Result<axiusflow_account_runtime::AccountRefreshQuiesce, String>,
+    context: &str,
+) {
+    let quiesce = match account_refresh {
+        Ok(quiesce) => quiesce,
+        Err(error) => {
+            eprintln!(
+                "Axiusflow refused {context} because account refresh could not be quiesced: {error}"
+            );
+            loop {
+                std::thread::park();
+            }
+        }
+    };
+
+    let first_error = match quiesce.wait() {
+        Ok(()) => {
+            quiesce.retain_until_process_exit();
+            return;
+        }
+        Err(error) => error,
+    };
+    eprintln!("Axiusflow account shutdown retrying after: {first_error}");
+    let second_error = match quiesce.wait() {
+        Ok(()) => {
+            quiesce.retain_until_process_exit();
+            return;
+        }
+        Err(error) => error,
+    };
+    eprintln!(
+        "Axiusflow refused {context} because durable account refresh did not settle: {second_error}"
+    );
+    // This startup/background path has no GPUI lifecycle to return to. Keep the
+    // existing quiesce claim alive after the bounded retries so a forced exit
+    // cannot be followed by another rotating grant in this process.
+    loop {
+        std::thread::park();
+    }
+}
+
+fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
+    retain_account_refresh_quiesce_for_exit(
+        axiusflow_desktop::account::begin_refresh_quiesce(),
+        "process exit",
+    );
+    std::process::exit(exit_code);
+}
+
+#[cfg(target_os = "windows")]
+fn native_account_session_shutdown_guard(
+    begin_quiesce: impl Fn() -> Result<axiusflow_account_runtime::AccountRefreshQuiesce, String>
+    + Send
+    + Sync
+    + 'static,
+) -> Result<axiusflow_platform_runtime::NativeSessionShutdownGuard, String> {
+    axiusflow_platform_runtime::NativeSessionShutdownGuard::connect(move || {
+        let quiesce = match begin_quiesce() {
+            Ok(quiesce) => quiesce,
+            Err(error) => {
+                eprintln!("Axiusflow session shutdown was blocked: {error}");
+                return None;
+            }
+        };
+        match quiesce.wait() {
+            Ok(()) => Some(axiusflow_platform_runtime::NativeSessionShutdownPermit::new(quiesce)),
+            Err(error) => {
+                eprintln!("Axiusflow session shutdown was blocked: {error}");
+                None
+            }
+        }
+    })
+    .map_err(|error| format!("native account session shutdown guard is unavailable: {error}"))
+}
+
 #[derive(Default)]
 struct UiWakeState {
     pending: AtomicBool,
@@ -1579,35 +1683,58 @@ fn run_desktop_readiness_command(
     let workspace = local_state::load_workspace_for_readiness()
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
     validate_workspace_boot_for_readiness(&workspace)?;
-    let account_service = axiusflow_account_runtime::AccountService::new_restoring(
+    let account_service = axiusflow_account_runtime::AccountService::new(
         axiusflow_account_runtime::AccountServiceConfig::from_environment(),
     );
-    wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
-        account_service.restore_readiness()
-    })?;
-    let market = axiusflow_market_runtime::MarketService::start()?;
-    let status = market.status()?;
-    if status.providers.is_empty() {
-        return Err("candidate market service did not reach readiness".to_string());
-    }
-    let release = axiusflow_platform_runtime::current_release_identity();
-    let report = LifecycleReadinessReport {
-        schema_version: 2,
-        release_identity: release.release_identity,
-        install_generation: release.install_generation,
-        desktop_process_id: std::process::id(),
-        workspace_revision: workspace.workspace_revision,
-        provider_count: status.providers.len(),
-        workspace_restored: true,
-        market_service_ready: true,
-        account_runtime_ready: true,
+    #[cfg(target_os = "windows")]
+    let _session_shutdown_guard = {
+        let session_account = account_service.clone();
+        match native_account_session_shutdown_guard(move || session_account.begin_refresh_quiesce())
+        {
+            Ok(guard) => guard,
+            Err(error) => {
+                retain_account_refresh_quiesce_for_exit(
+                    account_service.begin_refresh_quiesce(),
+                    "candidate readiness exit",
+                );
+                return Err(error);
+            }
+        }
     };
-    market.shutdown(std::time::Duration::from_secs(2))?;
-    let mut encoded = serde_json::to_vec(&report)
-        .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
-    encoded.push(b'\n');
-    std::fs::write(std::path::Path::new(&report_path), encoded)
-        .map_err(|_| "candidate readiness report could not be written".to_string())
+    account_service.start_restore();
+    let result = (|| {
+        wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
+            account_service.restore_readiness()
+        })?;
+        let market = axiusflow_market_runtime::MarketService::start()?;
+        let status = market.status()?;
+        if status.providers.is_empty() {
+            return Err("candidate market service did not reach readiness".to_string());
+        }
+        let release = axiusflow_platform_runtime::current_release_identity();
+        let report = LifecycleReadinessReport {
+            schema_version: 2,
+            release_identity: release.release_identity,
+            install_generation: release.install_generation,
+            desktop_process_id: std::process::id(),
+            workspace_revision: workspace.workspace_revision,
+            provider_count: status.providers.len(),
+            workspace_restored: true,
+            market_service_ready: true,
+            account_runtime_ready: true,
+        };
+        market.shutdown(std::time::Duration::from_secs(2))?;
+        let mut encoded = serde_json::to_vec(&report)
+            .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
+        encoded.push(b'\n');
+        std::fs::write(std::path::Path::new(&report_path), encoded)
+            .map_err(|_| "candidate readiness report could not be written".to_string())
+    })();
+    retain_account_refresh_quiesce_for_exit(
+        account_service.begin_refresh_quiesce(),
+        "candidate readiness exit",
+    );
+    result
 }
 
 #[derive(serde::Serialize)]
@@ -2399,18 +2526,18 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-conformance" {
-            run_desktop_conformance_command(arguments).expect("desktop burst conformance passes");
+            run_desktop_conformance_command(arguments)?;
             return Ok(None);
         }
         #[cfg(feature = "diagnostics")]
         if argument == "--desktop-endurance" {
-            run_desktop_endurance_command(arguments).expect("desktop endurance conformance passes");
+            run_desktop_endurance_command(arguments)?;
             return Ok(None);
         }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --rithmic-test");
-                std::process::exit(2);
+                exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
             (
@@ -2421,7 +2548,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --multi-chart");
-                std::process::exit(2);
+                exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
             (
@@ -2432,7 +2559,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         } else if argument == "--workspace-tabs" {
             if arguments.next().is_some() {
                 eprintln!("usage: axiusflow_desktop --workspace-tabs");
-                std::process::exit(2);
+                exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
             layout = DesktopLayout::WorkspaceTabs;
@@ -2441,7 +2568,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             (Vec::new(), group.initial, lifecycle)
         } else {
             eprintln!("unsupported argument: {}", argument.to_string_lossy());
-            std::process::exit(2);
+            exit_after_account_refresh_quiesce(2);
         }
     } else {
         // The installed desktop is a persisted workspace, not the legacy
@@ -2478,6 +2605,17 @@ pub(super) fn run() {
     {
         eprintln!("Axiusflow launcher promotion deferred: {error}");
     }
+    axiusflow_desktop::account::prepare_for_process_lifecycle();
+    #[cfg(target_os = "windows")]
+    let _session_shutdown_guard = match native_account_session_shutdown_guard(
+        axiusflow_desktop::account::begin_refresh_quiesce,
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("Axiusflow account lifecycle could not start: {error}");
+            exit_after_account_refresh_quiesce(1);
+        }
+    };
     let account = match axiusflow_desktop::account::DesktopAccount::install() {
         Ok(account) => account,
         Err(error) => {
@@ -2492,10 +2630,10 @@ pub(super) fn run() {
     }
     let configured = match configured_market_workers() {
         Ok(Some(configured)) => configured,
-        Ok(None) => return,
+        Ok(None) => exit_after_account_refresh_quiesce(0),
         Err(error) => {
             eprintln!("Axiusflow market worker could not start: {error}");
-            std::process::exit(1);
+            exit_after_account_refresh_quiesce(1);
         }
     };
     let lifecycle = DesktopLifecycle::new();
@@ -2546,20 +2684,19 @@ fn run_onboarding() {
                 )
                 .expect("the bundled platform font is valid");
             let options = desktop_window_options(0, cx);
-            cx.open_window(options, |window, cx| {
+            cx.open_window(options, |_window, cx| {
                 let screen = cx.new(|_| onboarding::OnboardingApp::new());
-                let closing = screen.clone();
-                // Terminal mounting replaces this window's content in place.
-                // Only quit here while still onboarding; after the terminal
-                // mounts its own should-close owns the close and the
-                // app-level shutdown owns quit.
-                window.on_window_should_close(cx, move |_, cx| {
-                    if closing.read(cx).has_terminal() {
-                        return true;
+                let closed_screen = screen.clone();
+                cx.on_window_closed(move |cx, _| {
+                    if cx.windows().is_empty() && !closed_screen.read(cx).has_terminal() {
+                        // Saved-session restore starts before onboarding and can
+                        // still be in the refresh-token rotation window here.
+                        // Explicit quit mode keeps the process alive while the
+                        // background account owner reaches its durability fence.
+                        quit_after_account_refresh_quiesce(cx);
                     }
-                    cx.quit();
-                    true
-                });
+                })
+                .detach();
                 screen
             })
             .expect("the Axiusflow onboarding window opens");

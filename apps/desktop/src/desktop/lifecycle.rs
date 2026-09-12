@@ -2,6 +2,17 @@
 
 use super::*;
 
+pub(super) struct DesktopShutdownError {
+    detail: String,
+    blocks_exit: bool,
+}
+
+impl std::fmt::Display for DesktopShutdownError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct DesktopLifecycle {
     retirements: Rc<RefCell<Vec<Task<bool>>>>,
@@ -36,10 +47,14 @@ impl DesktopLifecycle {
         self.workspace_persistence.borrow_mut().push(wait);
     }
 
-    pub(super) fn begin_quit(&self, cx: &mut App) -> Option<Task<Result<(), String>>> {
+    pub(super) fn begin_quit(
+        &self,
+        cx: &mut App,
+    ) -> Option<Task<Result<(), DesktopShutdownError>>> {
         if self.shutdown_started.replace(true) {
             return None;
         }
+        let account_refresh = axiusflow_desktop::account::begin_refresh_quiesce();
         let terminals = self.terminals.borrow_mut().drain(..).collect::<Vec<_>>();
         for terminal in terminals {
             terminal
@@ -56,7 +71,15 @@ impl DesktopLifecycle {
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
         Some(cx.background_executor().spawn(async move {
+            let mut account_failure = None;
             let mut failure = None;
+            match account_refresh {
+                Ok(quiesce) => match quiesce.wait() {
+                    Ok(()) => quiesce.retain_until_process_exit(),
+                    Err(error) => account_failure = Some(error),
+                },
+                Err(error) => account_failure = Some(error),
+            }
             for persistence in workspace_persistence {
                 if let Err(error) = persistence.wait(Duration::from_secs(2)) {
                     failure = Some(error);
@@ -80,18 +103,44 @@ impl DesktopLifecycle {
                     );
                 }
             }
-            failure.map_or(Ok(()), Err)
+            if let Some(detail) = account_failure {
+                Err(DesktopShutdownError {
+                    detail,
+                    blocks_exit: true,
+                })
+            } else if let Some(detail) = failure {
+                Err(DesktopShutdownError {
+                    detail,
+                    blocks_exit: false,
+                })
+            } else {
+                Ok(())
+            }
         }))
     }
 
     pub(super) fn quit_after_shutdown(&self, cx: &mut App) {
+        self.quit_after_shutdown_attempt(cx, true);
+    }
+
+    fn quit_after_shutdown_attempt(&self, cx: &mut App, retry_account_failure: bool) {
         let Some(shutdown) = self.begin_quit(cx) else {
-            cx.quit();
+            // The first shutdown owner is still responsible for the eventual
+            // quit. A duplicate request must not bypass its durability fences.
             return;
         };
+        let lifecycle = self.clone();
         cx.spawn(async move |cx| {
             if let Err(error) = shutdown.await {
+                let blocks_exit = error.blocks_exit;
                 eprintln!("Axiusflow desktop shutdown failed: {error}");
+                if blocks_exit {
+                    lifecycle.shutdown_started.set(false);
+                    if retry_account_failure {
+                        cx.update(|cx| lifecycle.quit_after_shutdown_attempt(cx, false));
+                    }
+                    return;
+                }
             }
             cx.update(|cx| cx.quit());
         })

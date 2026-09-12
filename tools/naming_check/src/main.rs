@@ -1276,6 +1276,218 @@ mod tests {
         assert!(local.contains("WorkspaceState::decode") && local.contains("encode_to_vec"));
         assert!(local.contains("LEGACY_WORKSPACE_FILE"));
     }
+
+    #[test]
+    fn account_refresh_rotation_remains_runtime_fenced() {
+        let account = manifest("crates/account_runtime/src/account_service/mod.rs");
+        let restore_start = account
+            .find("fn restore_online_session")
+            .expect("saved-session restore path");
+        let restore_end = account[restore_start..]
+            .find("fn restore_local_session")
+            .map(|offset| restore_start + offset)
+            .expect("saved-session restore boundary");
+        let restore = &account[restore_start..restore_end];
+        assert!(
+            restore.contains("refresh_gate.lock()")
+                && restore.contains("claim_refresh_grant()")
+                && restore.contains("current_restore_refresh_token(&vault)")
+                && restore.contains("accept_online_restore_refresh"),
+            "startup restore must serialize refresh admission and reload durable token material after lifecycle quiescing"
+        );
+
+        let refresh_start = account
+            .find("fn refresh_lease_round")
+            .expect("scheduled/profile refresh path");
+        let refresh_end = account[refresh_start..]
+            .find("fn cached_outcome")
+            .map(|offset| refresh_start + offset)
+            .expect("refresh round boundary");
+        let refresh = &account[refresh_start..refresh_end];
+        let claim = refresh
+            .find("claim_refresh_grant()")
+            .expect("refresh grant lifecycle claim");
+        let durable = refresh
+            .find("accept_refresh_grant")
+            .expect("rotated refresh durability point");
+        let release = refresh
+            .find("drop(grant_permit)")
+            .expect("refresh grant lifecycle release");
+        let profile = refresh
+            .find("link_subject")
+            .expect("post-rotation profile refresh");
+        assert!(
+            claim < durable && durable < release && release < profile,
+            "refresh quiesce must cover only grant-through-durable-token rotation"
+        );
+    }
+
+    #[test]
+    fn account_refresh_rotation_remains_desktop_lifecycle_fenced() {
+        let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
+        let prepare_start = workspace_tabs
+            .find("fn prepare_update_restart_after_workspace_persistence")
+            .expect("update restart preparation");
+        let prepare_end = workspace_tabs[prepare_start..]
+            .find("pub(super) fn update_presentation")
+            .map(|offset| prepare_start + offset)
+            .expect("update restart preparation boundary");
+        let prepare = &workspace_tabs[prepare_start..prepare_end];
+        assert!(
+            prepare.contains("axiusflow_desktop::account::begin_refresh_quiesce()")
+                && prepare.contains("account_refresh.wait()?")
+                && prepare.contains("drop(account_refresh)"),
+            "update restart must quiesce account refresh and release its claim on cancellation"
+        );
+        let update = manifest("apps/desktop/src/update.rs");
+        let commit_start = update
+            .find("pub fn commit_restart")
+            .expect("update restart commit owner");
+        let commit_end = update[commit_start..]
+            .find("pub(super) fn cancel_prepared_restart")
+            .map(|offset| commit_start + offset)
+            .expect("update restart commit boundary");
+        assert!(
+            update[commit_start..commit_end].contains("self.prepared_restart = Some(prepared);")
+                && workspace_tabs
+                    .contains("self.cancel_update_restart_after_persistence_failure(error, cx)"),
+            "failed restart commit must transfer helper cleanup off GPUI instead of dropping it inline"
+        );
+
+        let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
+        assert!(
+            lifecycle.contains("axiusflow_desktop::account::begin_refresh_quiesce()")
+                && lifecycle.contains("quiesce.wait()")
+                && lifecycle.contains("quiesce.retain_until_process_exit()")
+                && lifecycle.contains("blocks_exit: true")
+                && lifecycle.contains("quit_after_shutdown_attempt(cx, false)")
+                && lifecycle.contains("duplicate request must not bypass its durability fences"),
+            "normal desktop shutdown must await account refresh durability off GPUI and block unsafe exit"
+        );
+
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        let account_quit_start = desktop
+            .find("fn quit_after_account_refresh_quiesce")
+            .expect("account-only quit path");
+        let account_quit_end = desktop[account_quit_start..]
+            .find("#[derive(Default)]")
+            .map(|offset| account_quit_start + offset)
+            .expect("account-only quit boundary");
+        let account_quit = &desktop[account_quit_start..account_quit_end];
+        assert!(
+            account_quit.contains("axiusflow_desktop::account::begin_refresh_quiesce()")
+                && account_quit.contains("cx.background_executor().spawn")
+                && account_quit.contains("if let Err(first_error) = quiesce.wait()")
+                && account_quit.contains("quiesce.wait()?;")
+                && account_quit.contains("quiesce.retain_until_process_exit()")
+                && account_quit.contains("cx.update(|cx| cx.quit())"),
+            "account-only quit must keep one quiesce claim across its bounded retry and reach refresh durability off GPUI before process exit"
+        );
+        let account_install = desktop
+            .find("let account = match axiusflow_desktop::account::DesktopAccount::install()")
+            .expect("production account installation");
+        let after_account_install = &desktop[account_install..];
+        assert!(
+            !after_account_install.contains("std::process::exit(")
+                && after_account_install.contains("exit_after_account_refresh_quiesce(0)")
+                && after_account_install.contains("exit_after_account_refresh_quiesce(1)"),
+            "post-account startup exits must pass through refresh-token durability fencing"
+        );
+        assert!(
+            account_quit.contains("fn exit_after_account_refresh_quiesce")
+                && account_quit.matches("quiesce.wait()").count() >= 3
+                && account_quit.contains("std::thread::park()"),
+            "non-GPUI process exit must use bounded quiesce waits and fail closed"
+        );
+
+        let onboarding_start = desktop
+            .find("fn run_onboarding()")
+            .expect("onboarding path");
+        let onboarding_end = desktop[onboarding_start..]
+            .find("fn run_desktop")
+            .map(|offset| onboarding_start + offset)
+            .expect("onboarding boundary");
+        let onboarding = &desktop[onboarding_start..onboarding_end];
+        assert!(
+            onboarding.contains("cx.on_window_closed")
+                && onboarding.contains("quit_after_account_refresh_quiesce(cx)"),
+            "closing onboarding must enter the account durability path before quit"
+        );
+        assert!(
+            manifest("apps/desktop/src/onboarding.rs")
+                .contains("quit_after_account_refresh_quiesce(screen_cx)"),
+            "onboarding diagnostic completion must use the account durability path"
+        );
+        assert!(
+            manifest("apps/desktop/src/components/terminal_chrome.rs")
+                .contains("Self::Close => window.remove_window()"),
+            "onboarding caption close must funnel through the window-closed durability owner"
+        );
+    }
+
+    #[test]
+    fn account_refresh_rotation_remains_native_session_fenced() {
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        let run_start = desktop
+            .find("pub(super) fn run()")
+            .expect("desktop process entrypoint");
+        let run_end = desktop[run_start..]
+            .find("fn schedule_versioned_launcher_promotion")
+            .map(|offset| run_start + offset)
+            .expect("desktop process entrypoint boundary");
+        let run = &desktop[run_start..run_end];
+        let prepare = run
+            .find("prepare_for_process_lifecycle()")
+            .expect("account process-lifecycle preparation");
+        let guard = run
+            .find("native_account_session_shutdown_guard(")
+            .expect("native account session shutdown guard");
+        let install = run
+            .find("DesktopAccount::install()")
+            .expect("desktop account installation");
+        assert!(
+            prepare < guard && guard < install,
+            "native session shutdown fencing must be ready before production saved-session restoration starts"
+        );
+
+        let readiness_start = desktop
+            .find("fn run_desktop_readiness_command")
+            .expect("candidate readiness path");
+        let readiness_end = desktop[readiness_start..]
+            .find("struct LifecycleReadinessReport")
+            .map(|offset| readiness_start + offset)
+            .expect("candidate readiness path boundary");
+        let readiness = &desktop[readiness_start..readiness_end];
+        let service = readiness
+            .find("AccountService::new(")
+            .expect("readiness account owner");
+        let readiness_guard = readiness
+            .find("native_account_session_shutdown_guard(")
+            .expect("readiness native session shutdown guard");
+        let restore = readiness
+            .find("account_service.start_restore()")
+            .expect("readiness restore start");
+        assert!(
+            service < readiness_guard && readiness_guard < restore,
+            "candidate account restoration must not start before native session shutdown fencing"
+        );
+        assert!(
+            readiness.contains("retain_account_refresh_quiesce_for_exit(")
+                && readiness.contains("account_service.begin_refresh_quiesce()"),
+            "every candidate-readiness exit after account creation must drain refresh-token rotation"
+        );
+
+        let platform = manifest("crates/platform_runtime/src/session_shutdown.rs");
+        assert!(
+            platform.contains("pub struct NativeSessionShutdownGuard")
+                && platform.contains("pub struct NativeSessionShutdownPermit")
+                && platform.contains("WM_QUERYENDSESSION")
+                && platform.contains("query_end_session()")
+                && platform.contains("end_session(wparam != 0)"),
+            "Windows session termination must be vetoable until account refresh durability settles"
+        );
+    }
+
     #[test]
     fn signed_transactional_lifecycle_remains_platform_owned() {
         let lifecycle = manifest("crates/platform_runtime/src/lifecycle.rs");
@@ -1489,12 +1701,13 @@ mod tests {
             .expect("desktop readiness command boundary");
         let readiness_fn = &desktop[readiness_fn_start..readiness_fn_end];
         assert!(
-            readiness_fn.contains("AccountService::new_restoring")
+            readiness_fn.contains("AccountService::new(")
+                && readiness_fn.contains("native_account_session_shutdown_guard")
+                && readiness_fn.contains("account_service.start_restore()")
                 && readiness_fn.contains("wait_for_account_restore_readiness")
                 && readiness_fn.contains("restore_readiness()")
-                && readiness_fn.contains("validate_workspace_boot_for_readiness")
-                && !readiness_fn.contains("AccountService::new("),
-            "release readiness must exercise production workspace bootstrap and saved-session restore with bounded local readiness"
+                && readiness_fn.contains("validate_workspace_boot_for_readiness"),
+            "release readiness must install process-lifecycle fencing before production saved-session restore and use bounded local readiness"
         );
 
         let update = manifest("apps/desktop/src/update.rs");

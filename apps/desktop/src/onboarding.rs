@@ -127,7 +127,7 @@ impl OnboardingApp {
                             Ok(None) => {
                                 // Diagnostic commands (readiness/conformance)
                                 // already ran on the background worker.
-                                screen_cx.quit();
+                                crate::desktop::quit_after_account_refresh_quiesce(screen_cx);
                             }
                             Err(error) => {
                                 screen.launch_error = Some(error);
