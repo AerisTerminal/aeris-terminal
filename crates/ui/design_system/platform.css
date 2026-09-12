@@ -1,8 +1,8 @@
 @font-face {
   font-family: "HK Grotesk";
-  src: url("./assets/fonts/HKGrotesk-Regular.ttf") format("truetype");
+  src: url("./assets/fonts/HKGrotesk-Medium.ttf") format("truetype");
   font-style: normal;
-  font-weight: 400;
+  font-weight: 500;
   font-display: swap;
 }
 
@@ -19,7 +19,7 @@
   color-scheme: light;
 
   --font-sans: "HK Grotesk", sans-serif;
-  --font-weight-normal: 400;
+  --font-weight-normal: 500;
   --font-weight-emphasis: 700;
   --font-weight-strong: 700;
   --font-feature-tabular-numerals: "tnum";

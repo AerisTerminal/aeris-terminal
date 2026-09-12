@@ -11,7 +11,7 @@ pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
 /// Bundled platform faces referenced by `platform.css`.
 pub static PLATFORM_FONT_BYTES: [&[u8]; 2] = [
-    include_bytes!("../assets/fonts/HKGrotesk-Regular.ttf"),
+    include_bytes!("../assets/fonts/HKGrotesk-Medium.ttf"),
     include_bytes!("../assets/fonts/HKGrotesk-Bold.ttf"),
 ];
 
@@ -801,13 +801,13 @@ mod tests {
         let css = include_str!("../platform.css");
         for required in [
             "--font-sans: \"HK Grotesk\", sans-serif;",
-            "--font-weight-normal: 400;",
+            "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 700;",
             "--font-feature-tabular-numerals: \"tnum\";",
-            "HKGrotesk-Regular.ttf",
+            "HKGrotesk-Medium.ttf",
             "HKGrotesk-Bold.ttf",
-            "font-weight: 400;",
+            "font-weight: 500;",
             "font-weight: 700;",
             "font-variant-numeric: tabular-nums;",
             "-webkit-font-smoothing: antialiased;",
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
 
         let typography = platform_typography();
-        assert_eq!(typography.weight(TypographyRole::Normal), 400);
+        assert_eq!(typography.weight(TypographyRole::Normal), 500);
         assert_eq!(typography.weight(TypographyRole::Emphasis), 700);
         assert_eq!(typography.weight(TypographyRole::Strong), 700);
         assert_eq!(typography.tabular_numerals_feature(), "tnum");
