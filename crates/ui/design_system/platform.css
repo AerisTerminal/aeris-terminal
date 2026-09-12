@@ -22,6 +22,11 @@
   --font-feature-tabular-numerals: "tnum";
 }
 
+/*
+ * Chart-related custom properties are intentionally absent from this stylesheet.
+ * Our charting library owns and applies those colors, so defining them here would
+ * duplicate its configuration and create a second source of truth.
+ */
 :root {
   /* Surfaces */
   --surface: #ffffff;
