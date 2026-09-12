@@ -91,6 +91,7 @@ impl NucleusChartView {
                 },
                 values_tone: LegendValueTone::Neutral,
                 visible: series.visible,
+                settings_available: state.settings_available,
             });
         }
     }
@@ -139,6 +140,7 @@ impl NucleusChartView {
             ChartStudySeriesState {
                 series_id,
                 generation,
+                settings_available: descriptor.settings_available,
             },
         );
         self.invalidate_series_layout();

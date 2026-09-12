@@ -233,6 +233,7 @@ impl NucleusChartView {
             values,
             values_tone,
             visible: asset.visible,
+            settings_available: false,
         })
     }
     pub(super) fn legend_rows(&self) -> Vec<LegendRow> {
@@ -263,6 +264,7 @@ impl NucleusChartView {
                     .find(|snapshot| snapshot.series_id == 0)
                     .map_or(LegendValueTone::Neutral, asset_legend_value_tone),
                 visible: volume.visible,
+                settings_available: false,
             });
         }
 
@@ -325,6 +327,7 @@ impl NucleusChartView {
                 values,
                 values_tone: LegendValueTone::Neutral,
                 visible,
+                settings_available: false,
             });
         }
         self.append_study_legend_rows(entries, &snapshots, &mut rows);

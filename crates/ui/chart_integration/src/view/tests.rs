@@ -1603,6 +1603,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,
         scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
     };
 
     assert_eq!(
@@ -1667,6 +1668,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
                 series_id: state.series_id,
             }
             && row.title == "Test Study"
+            && row.settings_available
     }));
 
     assert!(chart.remove_study_outputs(&[7]));
@@ -1722,6 +1724,7 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
         plot: ChartStudyPlotKind::Line,
         pane: ChartStudyPaneTarget::Price,
         scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
     };
     let lower = ChartStudyOutputDescriptor {
         title: "Bollinger Lower",
@@ -1770,6 +1773,7 @@ fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state()
                 plot: ChartStudyPlotKind::Line,
                 pane: ChartStudyPaneTarget::Price,
                 scale: ChartStudyScaleTarget::Primary,
+                settings_available: false,
             },
             1,
             &[1_000_000_001],
@@ -1796,6 +1800,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
                 plot: ChartStudyPlotKind::Line,
                 pane: ChartStudyPaneTarget::Dedicated { group: 3 },
                 scale: ChartStudyScaleTarget::Primary,
+                settings_available: true,
             },
             1,
             &timestamps,
@@ -1812,6 +1817,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
                 plot: ChartStudyPlotKind::Histogram,
                 pane: ChartStudyPaneTarget::Dedicated { group: 3 },
                 scale: ChartStudyScaleTarget::Left,
+                settings_available: true,
             },
             2,
             &timestamps,

@@ -44,6 +44,18 @@ pub const BUILTIN_EMA_PERIOD_SETTING: &str = "period";
 pub const BUILTIN_EMA_DEFAULT_PERIOD: i64 = 20;
 /// Stable output identifier exposed by the built-in EMA.
 pub const BUILTIN_EMA_OUTPUT_IDENTIFIER: &str = "ema";
+/// Stable implementation revision for the built-in EMA Ribbon.
+pub const BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in EMA Ribbon.
+pub const BUILTIN_EMA_RIBBON_IDENTIFIER: &str = "builtin.ema_ribbon";
+/// Stable durable setting identifiers for the five ribbon periods.
+pub const BUILTIN_EMA_RIBBON_PERIOD_SETTINGS: [&str; 5] =
+    ["period_1", "period_2", "period_3", "period_4", "period_5"];
+/// Default EMA Ribbon periods used by legacy workspace migration and product UI.
+pub const BUILTIN_EMA_RIBBON_DEFAULT_PERIODS: [i64; 5] = [5, 10, 20, 50, 200];
+/// Stable EMA Ribbon output identifiers. Output identity is independent of edited periods.
+pub const BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS: [&str; 5] =
+    ["ema_1", "ema_2", "ema_3", "ema_4", "ema_5"];
 /// Stable implementation revision for the built-in Weighted Moving Average.
 pub const BUILTIN_WMA_IMPLEMENTATION_REVISION: u32 = 1;
 /// Stable implementation identifier for the built-in Weighted Moving Average.
@@ -75,6 +87,22 @@ pub const BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER: &str = "upper";
 pub const BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER: &str = "middle";
 /// Stable lower-band output identifier.
 pub const BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER: &str = "lower";
+/// Stable implementation revision for the built-in Average True Range.
+pub const BUILTIN_ATR_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in Average True Range.
+pub const BUILTIN_ATR_IDENTIFIER: &str = "builtin.atr";
+/// Stable durable setting identifier for the ATR period.
+pub const BUILTIN_ATR_PERIOD_SETTING: &str = "period";
+/// Default built-in ATR period used by legacy workspace migration and product UI.
+pub const BUILTIN_ATR_DEFAULT_PERIOD: i64 = 14;
+/// Stable output identifier exposed by the built-in ATR.
+pub const BUILTIN_ATR_OUTPUT_IDENTIFIER: &str = "atr";
+/// Stable implementation revision for the built-in session VWAP.
+pub const BUILTIN_VWAP_IMPLEMENTATION_REVISION: u32 = 1;
+/// Stable implementation identifier for the built-in session VWAP.
+pub const BUILTIN_VWAP_IDENTIFIER: &str = "builtin.vwap";
+/// Stable output identifier exposed by the built-in session VWAP.
+pub const BUILTIN_VWAP_OUTPUT_IDENTIFIER: &str = "vwap";
 
 /// Failure while resolving durable study data to trusted native code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -163,6 +191,15 @@ pub fn restore_native_registration(
             }
             builtins::ema_registration(dependencies, settings)
         }
+        BUILTIN_EMA_RIBBON_IDENTIFIER => {
+            if implementation_revision != BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::ema_ribbon_registration(dependencies, settings)
+        }
         BUILTIN_WMA_IDENTIFIER => {
             if implementation_revision != BUILTIN_WMA_IMPLEMENTATION_REVISION {
                 return Err(StudySdkError::UnsupportedImplementationRevision {
@@ -181,6 +218,24 @@ pub fn restore_native_registration(
             }
             builtins::bollinger_registration(dependencies, settings)
         }
+        BUILTIN_ATR_IDENTIFIER => {
+            if implementation_revision != BUILTIN_ATR_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::atr_registration(dependencies, settings)
+        }
+        BUILTIN_VWAP_IDENTIFIER => {
+            if implementation_revision != BUILTIN_VWAP_IMPLEMENTATION_REVISION {
+                return Err(StudySdkError::UnsupportedImplementationRevision {
+                    identifier: identifier.to_string(),
+                    revision: implementation_revision,
+                });
+            }
+            builtins::vwap_registration(dependencies, settings)
+        }
         _ => Err(StudySdkError::UnknownStudyIdentifier(
             identifier.to_string(),
         )),
@@ -191,20 +246,25 @@ pub fn restore_native_registration(
 /// available to trusted SDK consumers.
 pub mod builtins {
     use super::{
-        BTreeMap, BUILTIN_BOLLINGER_DEFAULT_DEVIATION, BUILTIN_BOLLINGER_DEFAULT_PERIOD,
+        BTreeMap, BUILTIN_ATR_DEFAULT_PERIOD, BUILTIN_ATR_IDENTIFIER,
+        BUILTIN_ATR_OUTPUT_IDENTIFIER, BUILTIN_ATR_PERIOD_SETTING,
+        BUILTIN_BOLLINGER_DEFAULT_DEVIATION, BUILTIN_BOLLINGER_DEFAULT_PERIOD,
         BUILTIN_BOLLINGER_DEVIATION_SETTING, BUILTIN_BOLLINGER_IDENTIFIER,
         BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER, BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER,
         BUILTIN_BOLLINGER_PERIOD_SETTING, BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER,
         BUILTIN_EMA_DEFAULT_PERIOD, BUILTIN_EMA_IDENTIFIER, BUILTIN_EMA_OUTPUT_IDENTIFIER,
-        BUILTIN_EMA_PERIOD_SETTING, BUILTIN_SMA_DEFAULT_PERIOD, BUILTIN_SMA_IDENTIFIER,
-        BUILTIN_SMA_OUTPUT_IDENTIFIER, BUILTIN_SMA_PERIOD_SETTING, BUILTIN_WMA_DEFAULT_PERIOD,
-        BUILTIN_WMA_IDENTIFIER, BUILTIN_WMA_OUTPUT_IDENTIFIER, BUILTIN_WMA_PERIOD_SETTING,
-        BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, NativeStudyState, NonZeroUsize,
+        BUILTIN_EMA_PERIOD_SETTING, BUILTIN_EMA_RIBBON_DEFAULT_PERIODS,
+        BUILTIN_EMA_RIBBON_IDENTIFIER, BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS,
+        BUILTIN_EMA_RIBBON_PERIOD_SETTINGS, BUILTIN_SMA_DEFAULT_PERIOD, BUILTIN_SMA_IDENTIFIER,
+        BUILTIN_SMA_OUTPUT_IDENTIFIER, BUILTIN_SMA_PERIOD_SETTING, BUILTIN_VWAP_IDENTIFIER,
+        BUILTIN_VWAP_OUTPUT_IDENTIFIER, BUILTIN_WMA_DEFAULT_PERIOD, BUILTIN_WMA_IDENTIFIER,
+        BUILTIN_WMA_OUTPUT_IDENTIFIER, BUILTIN_WMA_PERIOD_SETTING, BarSeriesKey,
+        NativeStudyProgram, NativeStudyRegistration, NativeStudyState, NonZeroUsize,
         StreamRequirements, StudyBarField, StudyDecimal, StudyDefinition, StudyDependency,
         StudyExecutionContext, StudyInputSeries, StudyInvalidationPolicy, StudyMarketInput,
-        StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyRuntimeError, StudyScaleTarget,
-        StudySdkError, StudySettingControl, StudySettingPresentation, StudySettingSpec,
-        StudySettingValue, StudySettings, ToPrimitive,
+        StudyOutputBuffer, StudyOutputSpec, StudyPaneTarget, StudyPlotKind, StudyRuntimeError,
+        StudyScaleTarget, StudySdkError, StudySettingControl, StudySettingPresentation,
+        StudySettingSpec, StudySettingValue, StudySettings, ToPrimitive,
     };
 
     fn period_setting_spec(identifier: &str, default: i64) -> StudySettingSpec {
@@ -222,6 +282,25 @@ pub mod builtins {
                 enabled_when: None,
             },
         )
+    }
+
+    fn ribbon_period_setting_spec(index: usize) -> StudySettingSpec {
+        StudySettingSpec::new(
+            BUILTIN_EMA_RIBBON_PERIOD_SETTINGS[index],
+            StudySettingValue::Integer(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS[index]),
+        )
+        .with_presentation(StudySettingPresentation {
+            label: format!("EMA {} period", index + 1),
+            description: Some("Period for this ribbon line.".to_string()),
+            group: Some("Periods".to_string()),
+            control: StudySettingControl::Integer {
+                minimum: Some(1),
+                maximum: None,
+                step: Some(1),
+            },
+            visible_when: None,
+            enabled_when: None,
+        })
     }
 
     fn bollinger_deviation_setting_spec() -> StudySettingSpec {
@@ -301,6 +380,31 @@ pub mod builtins {
         .map_err(sdk_error_to_runtime)
     }
 
+    /// Builds a five-line EMA Ribbon registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when any requested period cannot be
+    /// represented by the durable integer setting contract.
+    pub fn ema_ribbon(
+        series: BarSeriesKey,
+        periods: [NonZeroUsize; 5],
+    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        let mut overrides = BTreeMap::new();
+        for (identifier, period) in BUILTIN_EMA_RIBBON_PERIOD_SETTINGS.iter().zip(periods) {
+            let value =
+                i64::try_from(period.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)?;
+            overrides.insert((*identifier).to_string(), StudySettingValue::Integer(value));
+        }
+        ema_ribbon_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            overrides,
+        )
+        .map_err(sdk_error_to_runtime)
+    }
+
     /// Builds a Weighted Moving Average registration over one canonical bar series.
     ///
     /// # Errors
@@ -352,6 +456,45 @@ pub mod builtins {
                     StudySettingValue::Decimal(deviation),
                 ),
             ]),
+        )
+        .map_err(sdk_error_to_runtime)
+    }
+
+    /// Builds an Average True Range registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when the requested period cannot be
+    /// represented by the durable integer setting contract.
+    pub fn atr(
+        series: BarSeriesKey,
+        period: NonZeroUsize,
+    ) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        let period_value =
+            i64::try_from(period.get()).map_err(|_| StudyRuntimeError::InvalidSettingValue)?;
+        atr_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::from([(
+                BUILTIN_ATR_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(period_value),
+            )]),
+        )
+        .map_err(sdk_error_to_runtime)
+    }
+
+    /// Builds a UTC-session VWAP registration over one canonical bar series.
+    ///
+    /// # Errors
+    /// Returns a study validation error when the market dependency contract is invalid.
+    pub fn vwap(series: BarSeriesKey) -> Result<NativeStudyRegistration, StudyRuntimeError> {
+        vwap_registration(
+            vec![StudyDependency::Market(StudyMarketInput {
+                series,
+                streams: StreamRequirements::BARS,
+            })],
+            BTreeMap::new(),
         )
         .map_err(sdk_error_to_runtime)
     }
@@ -473,6 +616,40 @@ pub mod builtins {
         })
     }
 
+    pub(super) fn ema_ribbon_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_numeric_dependency(BUILTIN_EMA_RIBBON_IDENTIFIER, &dependencies)?;
+        let settings_spec = (0..BUILTIN_EMA_RIBBON_PERIOD_SETTINGS.len())
+            .map(ribbon_period_setting_spec)
+            .collect::<Vec<_>>();
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        let periods = ema_ribbon_periods(&settings)?;
+        let outputs = BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
+            .iter()
+            .zip(periods)
+            .map(|(identifier, period)| StudyOutputSpec {
+                identifier: (*identifier).to_string(),
+                title: format!("EMA {}", period.get()),
+                plot: StudyPlotKind::Line,
+                pane: StudyPaneTarget::Price,
+                scale: StudyScaleTarget::Primary,
+            })
+            .collect();
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_EMA_RIBBON_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs,
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_ema_ribbon, create_ema_ribbon_state),
+        })
+    }
+
     pub(super) fn bollinger_registration(
         dependencies: Vec<StudyDependency>,
         overrides: BTreeMap<String, StudySettingValue>,
@@ -523,6 +700,62 @@ pub mod builtins {
         })
     }
 
+    pub(super) fn atr_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_bar_market_dependency(BUILTIN_ATR_IDENTIFIER, &dependencies)?;
+        let settings_spec = vec![period_setting_spec(
+            BUILTIN_ATR_PERIOD_SETTING,
+            BUILTIN_ATR_DEFAULT_PERIOD,
+        )];
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        let period = positive_period(&settings, BUILTIN_ATR_PERIOD_SETTING)?;
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_ATR_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs: vec![StudyOutputSpec {
+                    identifier: BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string(),
+                    title: format!("ATR {}", period.get()),
+                    plot: StudyPlotKind::Line,
+                    pane: StudyPaneTarget::Dedicated { group: 0 },
+                    scale: StudyScaleTarget::Primary,
+                }],
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_atr, create_atr_state),
+        })
+    }
+
+    pub(super) fn vwap_registration(
+        dependencies: Vec<StudyDependency>,
+        overrides: BTreeMap<String, StudySettingValue>,
+    ) -> Result<NativeStudyRegistration, StudySdkError> {
+        validate_one_bar_market_dependency(BUILTIN_VWAP_IDENTIFIER, &dependencies)?;
+        let settings_spec = Vec::new();
+        let settings = StudySettings::with_overrides(&settings_spec, overrides)?;
+        Ok(NativeStudyRegistration {
+            definition: StudyDefinition {
+                identifier: BUILTIN_VWAP_IDENTIFIER.to_string(),
+                dependencies,
+                settings: settings_spec,
+                outputs: vec![StudyOutputSpec {
+                    identifier: BUILTIN_VWAP_OUTPUT_IDENTIFIER.to_string(),
+                    title: "VWAP".to_string(),
+                    plot: StudyPlotKind::Line,
+                    pane: StudyPaneTarget::Price,
+                    scale: StudyScaleTarget::Primary,
+                }],
+                invalidation: StudyInvalidationPolicy::FromFirstChanged,
+            },
+            settings,
+            program: NativeStudyProgram::stateful(calculate_vwap, create_vwap_state),
+        })
+    }
+
     fn validate_one_numeric_dependency(
         identifier: &str,
         dependencies: &[StudyDependency],
@@ -541,6 +774,21 @@ pub mod builtins {
         Ok(())
     }
 
+    fn validate_one_bar_market_dependency(
+        identifier: &str,
+        dependencies: &[StudyDependency],
+    ) -> Result<(), StudySdkError> {
+        if !matches!(
+            dependencies,
+            [StudyDependency::Market(input)] if input.streams == StreamRequirements::BARS
+        ) {
+            return Err(StudySdkError::InvalidDependencyContract(
+                identifier.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn positive_period(
         settings: &StudySettings,
         identifier: &str,
@@ -552,6 +800,18 @@ pub mod builtins {
                 .ok_or(StudyRuntimeError::InvalidSettingValue),
             _ => Err(StudyRuntimeError::InvalidSettingValue),
         }
+    }
+
+    fn ema_ribbon_periods(
+        settings: &StudySettings,
+    ) -> Result<[NonZeroUsize; 5], StudyRuntimeError> {
+        let periods = BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
+            .iter()
+            .map(|identifier| positive_period(settings, identifier))
+            .collect::<Result<Vec<_>, _>>()?;
+        periods
+            .try_into()
+            .map_err(|_| StudyRuntimeError::InvalidSettingValue)
     }
 
     fn wma_period(settings: &StudySettings) -> Result<NonZeroUsize, StudyRuntimeError> {
@@ -619,6 +879,61 @@ pub mod builtins {
         ))
     }
 
+    #[derive(Clone)]
+    struct EmaRibbonState {
+        states: [nucleuscharts_indicators::IncrementalEmaState; 5],
+    }
+
+    fn create_ema_ribbon_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        let periods =
+            ema_ribbon_periods(settings).map_err(|_| "EMA Ribbon periods are unavailable")?;
+        Ok(NativeStudyState::new(
+            EmaRibbonState {
+                states: periods.map(nucleuscharts_indicators::IncrementalEmaState::new),
+            },
+            ema_ribbon_state_runtime_bytes,
+        ))
+    }
+
+    fn ema_ribbon_state_runtime_bytes(state: &EmaRibbonState) -> usize {
+        std::mem::size_of::<EmaRibbonState>().saturating_add(
+            state
+                .states
+                .iter()
+                .map(nucleuscharts_indicators::IncrementalEmaState::runtime_bytes)
+                .sum::<usize>(),
+        )
+    }
+
+    fn create_atr_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        let period = positive_period(settings, BUILTIN_ATR_PERIOD_SETTING)
+            .map_err(|_| "ATR period is unavailable".to_string())?;
+        Ok(NativeStudyState::new(
+            nucleuscharts_indicators::IncrementalAtrState::new(period),
+            atr_state_runtime_bytes,
+        ))
+    }
+
+    fn atr_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalAtrState) -> usize {
+        std::mem::size_of::<nucleuscharts_indicators::IncrementalAtrState>()
+            .saturating_add(state.runtime_bytes())
+    }
+
+    fn create_vwap_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
+        if !settings.is_empty() {
+            return Err("VWAP does not accept settings".to_string());
+        }
+        Ok(NativeStudyState::new(
+            nucleuscharts_indicators::IncrementalVwapState::new(),
+            vwap_state_runtime_bytes,
+        ))
+    }
+
+    fn vwap_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalVwapState) -> usize {
+        std::mem::size_of::<nucleuscharts_indicators::IncrementalVwapState>()
+            .saturating_add(state.runtime_bytes())
+    }
+
     fn ema_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalEmaState) -> usize {
         std::mem::size_of::<nucleuscharts_indicators::IncrementalEmaState>()
             .saturating_add(state.runtime_bytes())
@@ -663,6 +978,138 @@ pub mod builtins {
             }
         }
         Ok(())
+    }
+
+    fn calculate_ema_ribbon(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) = context.split_with_state::<EmaRibbonState>() else {
+            return Err("EMA Ribbon runtime state is unavailable".to_string());
+        };
+        if outputs.len() != state.states.len() {
+            return Err("EMA Ribbon outputs are unavailable".to_string());
+        }
+        let from = inputs
+            .dirty_range()
+            .start
+            .min(outputs.first().map_or(0, StudyOutputBuffer::len));
+        if outputs.first().is_none_or(|output| from >= output.len()) {
+            return Ok(());
+        }
+        let input = inputs
+            .input(0)
+            .ok_or_else(|| "EMA Ribbon requires one numeric study input".to_string())?;
+        match input {
+            StudyInputSeries::Market(series) => {
+                let close = series.field(StudyBarField::Close);
+                let divisor = 10_f64.powi(i32::from(close.scale()));
+                for (ema_state, output) in state.states.iter_mut().zip(outputs.iter_mut()) {
+                    rebuild_ema_output(
+                        ema_state,
+                        output.len(),
+                        from,
+                        |index| fixed_point_sample(close.value(index), divisor),
+                        |index, value| output.set(index, value),
+                    )?;
+                }
+            }
+            StudyInputSeries::Output(series) => {
+                for (ema_state, output) in state.states.iter_mut().zip(outputs.iter_mut()) {
+                    rebuild_ema_output(
+                        ema_state,
+                        output.len(),
+                        from,
+                        |index| series.value(index).flatten(),
+                        |index, value| output.set(index, value),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn calculate_atr(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) =
+            context.split_with_state::<nucleuscharts_indicators::IncrementalAtrState>()
+        else {
+            return Err("ATR runtime state is unavailable".to_string());
+        };
+        let output = outputs
+            .get_mut(0)
+            .ok_or_else(|| "ATR output is unavailable".to_string())?;
+        let from = inputs.dirty_range().start.min(output.len());
+        if from >= output.len() {
+            return Ok(());
+        }
+        let Some(StudyInputSeries::Market(series)) = inputs.input(0) else {
+            return Err("ATR requires one canonical bar input".to_string());
+        };
+        let high = series.field(StudyBarField::High);
+        let low = series.field(StudyBarField::Low);
+        let close = series.field(StudyBarField::Close);
+        let divisor = 10_f64.powi(i32::from(close.scale()));
+        let mut write_error = None;
+        state.rebuild_from_indexed(
+            output.len(),
+            from,
+            |index| {
+                Some(nucleuscharts_indicators::AtrSample {
+                    high: fixed_point_sample(high.value(index), divisor)?,
+                    low: fixed_point_sample(low.value(index), divisor)?,
+                    close: fixed_point_sample(close.value(index), divisor)?,
+                })
+            },
+            |index, value| {
+                if write_error.is_none() {
+                    write_error = output.set(index, value).err();
+                }
+            },
+        );
+        write_error.map_or(Ok(()), Err)
+    }
+
+    fn calculate_vwap(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+        let Some((inputs, state, outputs)) =
+            context.split_with_state::<nucleuscharts_indicators::IncrementalVwapState>()
+        else {
+            return Err("VWAP runtime state is unavailable".to_string());
+        };
+        let output = outputs
+            .get_mut(0)
+            .ok_or_else(|| "VWAP output is unavailable".to_string())?;
+        let from = inputs.dirty_range().start.min(output.len());
+        if from >= output.len() {
+            return Ok(());
+        }
+        let Some(StudyInputSeries::Market(series)) = inputs.input(0) else {
+            return Err("VWAP requires one canonical bar input".to_string());
+        };
+        let high = series.field(StudyBarField::High);
+        let low = series.field(StudyBarField::Low);
+        let close = series.field(StudyBarField::Close);
+        let volume = series.field(StudyBarField::Volume);
+        let price_divisor = 10_f64.powi(i32::from(close.scale()));
+        let volume_divisor = 10_f64.powi(i32::from(volume.scale()));
+        let mut write_error = None;
+        state.rebuild_from_indexed(
+            output.len(),
+            from,
+            |index| {
+                Some(nucleuscharts_indicators::VwapSample {
+                    time_unix_seconds: close
+                        .exchange_timestamp_unix_nanos(index)?
+                        .div_euclid(1_000_000_000),
+                    high: fixed_point_sample(high.value(index), price_divisor)?,
+                    low: fixed_point_sample(low.value(index), price_divisor)?,
+                    close: fixed_point_sample(close.value(index), price_divisor)?,
+                    volume: fixed_point_sample(volume.value(index), volume_divisor),
+                })
+            },
+            |index, value| {
+                if write_error.is_none() {
+                    write_error = output.set(index, value).err();
+                }
+            },
+        );
+        write_error.map_or(Ok(()), Err)
     }
 
     fn rebuild_ema_output<S, W>(
@@ -1358,6 +1805,174 @@ mod tests {
                 BTreeMap::new(),
             ),
             Err(StudySdkError::UnsupportedImplementationRevision { revision: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn priority_phase_c_builtins_preserve_recursive_state_panes_and_stable_outputs() {
+        let source = BarSeriesKey {
+            provider_id: "provider".to_string(),
+            instrument_id: "instrument".to_string(),
+            entitlement_id: "entitlement".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        };
+        let ribbon = builtins::ema_ribbon(
+            source.clone(),
+            [5, 10, 20, 50, 200].map(|period| NonZeroUsize::new(period).expect("period")),
+        )
+        .expect("EMA Ribbon registration");
+        let atr = builtins::atr(source.clone(), NonZeroUsize::new(14).expect("period"))
+            .expect("ATR registration");
+        let vwap = builtins::vwap(source).expect("VWAP registration");
+
+        assert_eq!(ribbon.definition.identifier, BUILTIN_EMA_RIBBON_IDENTIFIER);
+        assert_eq!(
+            ribbon
+                .definition
+                .outputs
+                .iter()
+                .map(|output| output.identifier.as_str())
+                .collect::<Vec<_>>(),
+            BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
+        );
+        assert!(
+            ribbon
+                .definition
+                .outputs
+                .iter()
+                .all(|output| output.pane == StudyPaneTarget::Price)
+        );
+        assert_eq!(
+            ribbon.definition.invalidation,
+            StudyInvalidationPolicy::FromFirstChanged
+        );
+        assert!(ribbon.program.state_factory.is_some());
+
+        assert_eq!(atr.definition.identifier, BUILTIN_ATR_IDENTIFIER);
+        assert_eq!(
+            atr.definition.outputs[0].identifier,
+            BUILTIN_ATR_OUTPUT_IDENTIFIER
+        );
+        assert_eq!(
+            atr.definition.outputs[0].pane,
+            StudyPaneTarget::Dedicated { group: 0 }
+        );
+        assert_eq!(atr.definition.outputs[0].scale, StudyScaleTarget::Primary);
+        assert!(atr.program.state_factory.is_some());
+
+        assert_eq!(vwap.definition.identifier, BUILTIN_VWAP_IDENTIFIER);
+        assert_eq!(
+            vwap.definition.outputs[0].identifier,
+            BUILTIN_VWAP_OUTPUT_IDENTIFIER
+        );
+        assert_eq!(vwap.definition.outputs[0].pane, StudyPaneTarget::Price);
+        assert!(vwap.program.state_factory.is_some());
+    }
+
+    #[test]
+    fn priority_phase_c_builtins_restore_exact_revisions_and_dependency_contracts() {
+        let source = BarSeriesKey {
+            provider_id: "provider".to_string(),
+            instrument_id: "instrument".to_string(),
+            entitlement_id: "entitlement".to_string(),
+            period: BarPeriod::time(60).expect("minute period"),
+            definition_version: 1,
+        };
+        let market = StudyDependency::Market(StudyMarketInput {
+            series: source,
+            streams: StreamRequirements::BARS,
+        });
+        let ribbon_settings = BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
+            .iter()
+            .zip(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
+            .map(|(identifier, period)| {
+                (
+                    (*identifier).to_string(),
+                    StudySettingValue::Integer(period),
+                )
+            })
+            .collect();
+        let ribbon = restore_native_registration(
+            BUILTIN_EMA_RIBBON_IDENTIFIER,
+            BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+            vec![market.clone()],
+            ribbon_settings,
+        )
+        .expect("durable EMA Ribbon resolves");
+        let atr = restore_native_registration(
+            BUILTIN_ATR_IDENTIFIER,
+            BUILTIN_ATR_IMPLEMENTATION_REVISION,
+            vec![market.clone()],
+            BTreeMap::from([(
+                BUILTIN_ATR_PERIOD_SETTING.to_string(),
+                StudySettingValue::Integer(BUILTIN_ATR_DEFAULT_PERIOD),
+            )]),
+        )
+        .expect("durable ATR resolves");
+        let vwap = restore_native_registration(
+            BUILTIN_VWAP_IDENTIFIER,
+            BUILTIN_VWAP_IMPLEMENTATION_REVISION,
+            vec![market.clone()],
+            BTreeMap::new(),
+        )
+        .expect("durable VWAP resolves");
+        assert_eq!(ribbon.definition.outputs.len(), 5);
+        assert_eq!(atr.definition.outputs.len(), 1);
+        assert_eq!(vwap.definition.outputs.len(), 1);
+
+        for (identifier, revision) in [
+            (
+                BUILTIN_EMA_RIBBON_IDENTIFIER,
+                BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+            ),
+            (BUILTIN_ATR_IDENTIFIER, BUILTIN_ATR_IMPLEMENTATION_REVISION),
+            (
+                BUILTIN_VWAP_IDENTIFIER,
+                BUILTIN_VWAP_IMPLEMENTATION_REVISION,
+            ),
+        ] {
+            assert!(matches!(
+                restore_native_registration(
+                    identifier,
+                    revision + 1,
+                    vec![market.clone()],
+                    BTreeMap::new(),
+                ),
+                Err(StudySdkError::UnsupportedImplementationRevision { .. })
+            ));
+        }
+
+        let upstream = StudyInstanceId::try_from_u64(9).expect("upstream study id");
+        assert!(
+            restore_native_registration(
+                BUILTIN_EMA_RIBBON_IDENTIFIER,
+                BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+                vec![StudyDependency::Output(upstream.output(0))],
+                BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
+                    .iter()
+                    .zip(BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
+                    .map(|(identifier, period)| {
+                        (
+                            (*identifier).to_string(),
+                            StudySettingValue::Integer(period),
+                        )
+                    })
+                    .collect(),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            restore_native_registration(
+                BUILTIN_ATR_IDENTIFIER,
+                BUILTIN_ATR_IMPLEMENTATION_REVISION,
+                vec![StudyDependency::Output(upstream.output(0))],
+                BTreeMap::from([(
+                    BUILTIN_ATR_PERIOD_SETTING.to_string(),
+                    StudySettingValue::Integer(BUILTIN_ATR_DEFAULT_PERIOD),
+                )]),
+            ),
+            Err(StudySdkError::InvalidDependencyContract(_))
         ));
     }
 

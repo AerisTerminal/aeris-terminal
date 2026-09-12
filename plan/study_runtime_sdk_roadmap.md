@@ -221,10 +221,19 @@ Before third-party native studies are treated as a supported product surface:
 
 ### Phase C — production indicator library
 
-- [ ] Prioritize indicators by product use rather than breadth alone.
+- [x] Prioritize indicators by product use rather than breadth alone.
+  - First production slice: EMA Ribbon, ATR, and session VWAP because the existing scalar output contract preserves their shipping presentation without introducing a second formula path.
+  - RSI/Stochastic/MACD follow only with their existing threshold-band / histogram semantics preserved through product-owned richer output metadata.
 - [ ] Reuse Nucleus/shared primitives for every formula that already exists.
+  - [x] EMA Ribbon uses five Nucleus `IncrementalEmaState` instances.
+  - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; Axius lazily converts only replayed fixed-point rows.
+  - [ ] Add equivalent owner-correct Nucleus state for the remaining recursive RSI/MACD/Stochastic migrations rather than copying recurrence into Axius.
 - [ ] Add durable implementation revisions and migration tests per built-in.
+  - [x] SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, and VWAP have exact revision binding plus legacy-picker migration coverage.
+  - [ ] Complete the same contract for RSI/MACD/Stochastic when their richer output metadata lands.
 - [ ] Add multi-output/pane/scale integration coverage where needed.
+  - [x] EMA Ribbon proves five stable price-pane outputs; Bollinger proves multi-output price-pane projection; ATR proves a dedicated primary-scale pane.
+  - [ ] Preserve oscillator threshold regions and MACD histogram semantics before those legacy paths are retired.
 
 ### Phase D — non-bar studies and richer outputs
 
@@ -258,9 +267,10 @@ Before third-party native studies are treated as a supported product surface:
 
 ## Current checkpoint
 
-The runtime foundation, generic settings declaration/editor contract, and recursive EMA proof are implemented and verified across both repositories at the pinned Nucleus revision. Nucleus retains the formula/checkpoint ownership; Axiusflow retains durable/runtime orchestration and performs no O(history) conversion on live EMA updates.
+The runtime foundation, generic settings declaration/editor contract, recursive EMA proof, and first Phase C production migration are implemented and verified across both repositories. EMA Ribbon, ATR, and session VWAP now use the same durable Study SDK/runtime path as SMA/EMA/WMA/Bollinger. Nucleus retains recursive formula/checkpoint ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays.
 
 The immediate next architecture milestones are:
 
-1. Begin Phase C indicator prioritization from the now-green pinned recursive-indicator boundary.
-2. Keep new built-ins on the shared formula/runtime surface rather than introducing alternate calculation paths.
+1. Preserve the shipping RSI/Stochastic threshold regions and MACD histogram semantics through serial product-owned richer-output metadata, then migrate those remaining picker studies through the SDK/runtime path.
+2. Keep pure trade/quote/depth timelines deferred until a concrete study requires one; the existing bar-aligned non-bar execution path remains the supported contract.
+3. Complete Phase E with a static trusted-native packaging policy, compatibility/revision rules, author examples, sustained bounded-load qualification, and restore/reconnect validation.

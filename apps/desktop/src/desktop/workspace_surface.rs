@@ -136,7 +136,13 @@ const fn chart_study_scale(scale: StudyScaleTarget) -> ChartStudyScaleTarget {
 const fn runtime_managed_indicator(indicator: ChartIndicator) -> bool {
     matches!(
         indicator,
-        ChartIndicator::Sma | ChartIndicator::Ema | ChartIndicator::Wma | ChartIndicator::Bollinger
+        ChartIndicator::Sma
+            | ChartIndicator::Ema
+            | ChartIndicator::EmaRibbon
+            | ChartIndicator::Wma
+            | ChartIndicator::Bollinger
+            | ChartIndicator::Vwap
+            | ChartIndicator::Atr
     )
 }
 
@@ -406,8 +412,11 @@ pub(super) fn study_display_name(identifier: &str) -> String {
     match identifier {
         axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER => "Simple Moving Average".to_string(),
         axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER => "Exponential Moving Average".to_string(),
+        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER => "EMA Ribbon".to_string(),
         axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
         axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
+        axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER => "Volume Weighted Average Price".to_string(),
+        axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER => "Average True Range".to_string(),
         _ => identifier.to_string(),
     }
 }
@@ -527,77 +536,133 @@ fn runtime_study_uses_current_chart(state: &WorkspaceChartStudyState) -> bool {
     })
 }
 
-fn legacy_runtime_study(
-    local_id: u64,
+fn legacy_integer_setting(identifier: &str, value: i64) -> WorkspaceStudySettingState {
+    WorkspaceStudySettingState {
+        identifier: identifier.to_string(),
+        value: Some(workspace_study_setting_state::Value::Integer(value)),
+    }
+}
+
+fn legacy_runtime_study_contract(
     indicator: ChartIndicator,
-    visible: bool,
-) -> Option<WorkspaceChartStudyState> {
-    let (identifier, implementation_revision, settings, output_identifiers) = match indicator {
+) -> Option<(
+    &'static str,
+    u32,
+    Vec<WorkspaceStudySettingState>,
+    Vec<String>,
+)> {
+    let contract = match indicator {
         ChartIndicator::Sma => (
             axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER,
             axiusflow_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
-            vec![WorkspaceStudySettingState {
-                identifier: axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
-                value: Some(workspace_study_setting_state::Value::Integer(
-                    axiusflow_study_sdk::BUILTIN_SMA_DEFAULT_PERIOD,
-                )),
-            }],
+            vec![legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_SMA_DEFAULT_PERIOD,
+            )],
             vec![axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Ema => (
             axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER,
             axiusflow_study_sdk::BUILTIN_EMA_IMPLEMENTATION_REVISION,
-            vec![WorkspaceStudySettingState {
-                identifier: axiusflow_study_sdk::BUILTIN_EMA_PERIOD_SETTING.to_string(),
-                value: Some(workspace_study_setting_state::Value::Integer(
-                    axiusflow_study_sdk::BUILTIN_EMA_DEFAULT_PERIOD,
-                )),
-            }],
+            vec![legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_EMA_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_EMA_DEFAULT_PERIOD,
+            )],
             vec![axiusflow_study_sdk::BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string()],
         ),
+        ChartIndicator::EmaRibbon => legacy_ema_ribbon_contract(),
         ChartIndicator::Wma => (
             axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER,
             axiusflow_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
-            vec![WorkspaceStudySettingState {
-                identifier: axiusflow_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
-                value: Some(workspace_study_setting_state::Value::Integer(
-                    axiusflow_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
-                )),
-            }],
+            vec![legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_WMA_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
+            )],
             vec![axiusflow_study_sdk::BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Bollinger => (
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
-            vec![
-                WorkspaceStudySettingState {
-                    identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING.to_string(),
-                    value: Some(workspace_study_setting_state::Value::Integer(
-                        axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_PERIOD,
-                    )),
-                },
-                WorkspaceStudySettingState {
-                    identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING
-                        .to_string(),
-                    value: Some(workspace_study_setting_state::Value::Decimal(
-                        WorkspaceStudyDecimalState {
-                            mantissa: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION
-                                .mantissa,
-                            scale: u32::from(
-                                axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.scale,
-                            ),
-                        },
-                    )),
-                },
-            ],
-            vec![
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
-            ],
+        ChartIndicator::Bollinger => legacy_bollinger_contract(),
+        ChartIndicator::Vwap => (
+            axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_VWAP_IMPLEMENTATION_REVISION,
+            Vec::new(),
+            vec![axiusflow_study_sdk::BUILTIN_VWAP_OUTPUT_IDENTIFIER.to_string()],
+        ),
+        ChartIndicator::Atr => (
+            axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER,
+            axiusflow_study_sdk::BUILTIN_ATR_IMPLEMENTATION_REVISION,
+            vec![legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_ATR_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_ATR_DEFAULT_PERIOD,
+            )],
+            vec![axiusflow_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
         ),
         _ => return None,
     };
+    Some(contract)
+}
+
+fn legacy_ema_ribbon_contract() -> (
+    &'static str,
+    u32,
+    Vec<WorkspaceStudySettingState>,
+    Vec<String>,
+) {
+    (
+        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER,
+        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
+            .iter()
+            .zip(axiusflow_study_sdk::BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
+            .map(|(identifier, period)| legacy_integer_setting(identifier, period))
+            .collect(),
+        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
+            .iter()
+            .map(|identifier| (*identifier).to_string())
+            .collect(),
+    )
+}
+
+fn legacy_bollinger_contract() -> (
+    &'static str,
+    u32,
+    Vec<WorkspaceStudySettingState>,
+    Vec<String>,
+) {
+    (
+        axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER,
+        axiusflow_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
+        vec![
+            legacy_integer_setting(
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING,
+                axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_PERIOD,
+            ),
+            WorkspaceStudySettingState {
+                identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING.to_string(),
+                value: Some(workspace_study_setting_state::Value::Decimal(
+                    WorkspaceStudyDecimalState {
+                        mantissa: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.mantissa,
+                        scale: u32::from(
+                            axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.scale,
+                        ),
+                    },
+                )),
+            },
+        ],
+        vec![
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+            axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+        ],
+    )
+}
+
+fn legacy_runtime_study(
+    local_id: u64,
+    indicator: ChartIndicator,
+    visible: bool,
+) -> Option<WorkspaceChartStudyState> {
+    let (identifier, implementation_revision, settings, output_identifiers) =
+        legacy_runtime_study_contract(indicator)?;
     Some(WorkspaceChartStudyState {
         local_id,
         identifier: identifier.to_string(),
@@ -2226,6 +2291,12 @@ impl WorkspaceSurface {
                     .find(|state| state.study_id == snapshot.study_id)
                     .map(|state| state.persisted.visible)
             });
+        let settings_available = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == snapshot.study_id)
+            .is_some_and(|state| !state.persisted.settings.is_empty());
         chart.update(cx, |chart, chart_cx| {
             match chart.install_study_output(
                 snapshot.study_id.get(),
@@ -2235,6 +2306,7 @@ impl WorkspaceSurface {
                     plot: chart_study_plot(snapshot.output.plot),
                     pane: chart_study_pane(snapshot.output.pane),
                     scale: chart_study_scale(snapshot.output.scale),
+                    settings_available,
                 },
                 snapshot.series.generation(),
                 snapshot.series.timestamps(),
@@ -3665,11 +3737,23 @@ mod tests {
                     visible: true,
                 },
                 WorkspaceChartIndicatorState {
+                    kind: "ema_ribbon".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
                     kind: "wma".to_string(),
                     visible: true,
                 },
                 WorkspaceChartIndicatorState {
                     kind: "bollinger".to_string(),
+                    visible: false,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "vwap".to_string(),
+                    visible: true,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "atr".to_string(),
                     visible: false,
                 },
                 WorkspaceChartIndicatorState {
@@ -3680,7 +3764,7 @@ mod tests {
             ..WorkspaceChartState::default()
         };
         let restored = persisted_runtime_studies(Some(&state));
-        assert_eq!(restored.len(), 4);
+        assert_eq!(restored.len(), 7);
         assert_eq!(
             restored[0].persisted.identifier,
             axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER
@@ -3693,22 +3777,44 @@ mod tests {
         assert!(restored[1].persisted.visible);
         assert_eq!(
             restored[2].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER
+            axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER
         );
-        assert!(restored[2].persisted.visible);
+        assert!(!restored[2].persisted.visible);
+        assert_eq!(
+            restored[2].persisted.output_identifiers,
+            axiusflow_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
+                .iter()
+                .map(|identifier| (*identifier).to_string())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             restored[3].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER
+        );
+        assert!(restored[3].persisted.visible);
+        assert_eq!(
+            restored[4].persisted.identifier,
             axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
         );
-        assert!(!restored[3].persisted.visible);
+        assert!(!restored[4].persisted.visible);
         assert_eq!(
-            restored[3].persisted.output_identifiers,
+            restored[4].persisted.output_identifiers,
             vec![
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
                 axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
             ]
         );
+        assert_eq!(
+            restored[5].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER
+        );
+        assert!(restored[5].persisted.visible);
+        assert_eq!(
+            restored[6].persisted.identifier,
+            axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER
+        );
+        assert!(!restored[6].persisted.visible);
         assert!(restored.iter().all(|state| {
             runtime_study_uses_current_chart(&state.persisted)
                 && state.resolved_chart_series.is_none()
@@ -3740,8 +3846,11 @@ mod tests {
     fn migrated_picker_indicators_are_runtime_managed() {
         assert!(runtime_managed_indicator(ChartIndicator::Sma));
         assert!(runtime_managed_indicator(ChartIndicator::Ema));
+        assert!(runtime_managed_indicator(ChartIndicator::EmaRibbon));
         assert!(runtime_managed_indicator(ChartIndicator::Wma));
         assert!(runtime_managed_indicator(ChartIndicator::Bollinger));
+        assert!(runtime_managed_indicator(ChartIndicator::Vwap));
+        assert!(runtime_managed_indicator(ChartIndicator::Atr));
         assert!(!runtime_managed_indicator(ChartIndicator::Rsi));
     }
 
@@ -3757,11 +3866,23 @@ mod tests {
                 visible: true,
             },
             ChartIndicatorState {
+                indicator: ChartIndicator::EmaRibbon,
+                visible: true,
+            },
+            ChartIndicatorState {
                 indicator: ChartIndicator::Wma,
                 visible: false,
             },
             ChartIndicatorState {
                 indicator: ChartIndicator::Bollinger,
+                visible: true,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Vwap,
+                visible: true,
+            },
+            ChartIndicatorState {
+                indicator: ChartIndicator::Atr,
                 visible: true,
             },
             ChartIndicatorState {

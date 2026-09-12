@@ -114,6 +114,7 @@ const TEXT_EDIT_PAD: f32 = 4.0;
 struct ChartStudySeriesState {
     series_id: u32,
     generation: u64,
+    settings_available: bool,
 }
 
 /// Scalar plot family requested by a runtime study output.
@@ -146,6 +147,7 @@ pub struct ChartStudyOutputDescriptor<'a> {
     pub plot: ChartStudyPlotKind,
     pub pane: ChartStudyPaneTarget,
     pub scale: ChartStudyScaleTarget,
+    pub settings_available: bool,
 }
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
@@ -728,6 +730,7 @@ struct LegendRow {
     values: Vec<LegendValue>,
     values_tone: LegendValueTone,
     visible: bool,
+    settings_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2550,7 +2553,7 @@ fn chart_legend_row(
         .items_center()
         .gap_1()
         .child(visibility);
-    if matches!(row.item, LegendItem::Study { .. }) {
+    if row.settings_available && matches!(row.item, LegendItem::Study { .. }) {
         controls = controls.child(
             legend_control(chart, row.item, LegendControl::Settings, palette)
                 .invisible()
