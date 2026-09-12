@@ -855,6 +855,13 @@ impl ReleaseInstaller {
                 self.remove_release_record_temporaries(&journal.candidate)?;
             }
             UpdateState::Activated => {
+                // Activation may have been interrupted after the candidate was
+                // audited but before its health result became durable. Re-run
+                // the exact signed inventory audit before recovery executes any
+                // candidate code. If the candidate changed, stop with the
+                // journal intact: it may already have executed before the crash,
+                // so automatically downgrading persisted state is not provably safe.
+                self.audit_release(&journal.candidate, &self.policy)?;
                 if hooks.health_check(&journal.candidate).is_err() {
                     let mut journal = journal;
                     journal.state = UpdateState::RollingBack;
@@ -2148,6 +2155,7 @@ mod tests {
     struct Hooks {
         fail_prepare: bool,
         fail_health: bool,
+        health_checks: Mutex<usize>,
         deleted: Mutex<Vec<String>>,
     }
 
@@ -2161,6 +2169,11 @@ mod tests {
         }
 
         fn health_check(&self, _candidate: &ActiveRelease) -> Result<(), String> {
+            let mut health_checks = self
+                .health_checks
+                .lock()
+                .map_err(|_| "health counter lock".to_string())?;
+            *health_checks = health_checks.saturating_add(1);
             if self.fail_health {
                 Err("fixture health failure".to_string())
             } else {
@@ -2826,6 +2839,80 @@ mod tests {
         );
         assert_eq!(count_entries(&root.join("install/versions")), Ok(1));
         assert!(!installer.update_journal_exists());
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn activated_recovery_reaudits_candidate_before_executing_health() {
+        let root = temporary_root("activated-recovery-audit");
+        let (first, key, first_bundle) = release(&root, 1);
+        let installer = ReleaseInstaller::new(
+            root.join("install"),
+            key.verifying_key(),
+            ReleasePolicy::native(0),
+        )
+        .expect("installer");
+        let previous = installer
+            .install(&first, &first_bundle, &Hooks::default())
+            .expect("first install")
+            .active;
+
+        let (second, _, second_bundle) = release(&root, 2);
+        let second = sign_release_manifest(second.manifest, &key).expect("same release key");
+        let candidate = ActiveRelease {
+            release_identity: second.manifest.release_identity.clone(),
+            install_generation: second.manifest.install_generation,
+            directory_name: format!(
+                "{:020}-{}",
+                second.manifest.install_generation, second.manifest.release_identity
+            ),
+        };
+        let candidate_root = installer.version_path(&candidate).expect("candidate path");
+        ReleaseInstaller::stage(&second, &second_bundle, &candidate_root).expect("stage candidate");
+        installer
+            .commit_manifest(&second, &candidate)
+            .expect("commit candidate manifest");
+        installer
+            .commit_pointer(&candidate)
+            .expect("commit candidate pointer");
+        installer
+            .write_update_journal(&UpdateJournal {
+                state: UpdateState::Activated,
+                candidate: candidate.clone(),
+                previous: Some(previous),
+                previous_retained: None,
+            })
+            .expect("write activated journal");
+
+        fs::write(
+            candidate_root.join("axiusflow_desktop"),
+            b"post-activation mutation",
+        )
+        .expect("mutate candidate desktop");
+        let hooks = Hooks::default();
+        assert_eq!(
+            installer.recover(&hooks),
+            Err(LifecycleError::VerificationFailed)
+        );
+        assert_eq!(
+            *hooks.health_checks.lock().expect("health counter locks"),
+            0,
+            "recovery must not execute candidate health after inventory verification fails"
+        );
+        assert_eq!(
+            installer
+                .read_update_journal()
+                .expect("update journal reads")
+                .expect("activated journal remains")
+                .state,
+            UpdateState::Activated,
+            "verification failure remains durable for explicit remediation"
+        );
+        assert_eq!(
+            installer.active_release().expect("active pointer reads"),
+            Some(candidate),
+            "recovery must not guess that rollback is state-compatible after candidate tampering"
+        );
         let _ = remove_owned_path(&root);
     }
 
