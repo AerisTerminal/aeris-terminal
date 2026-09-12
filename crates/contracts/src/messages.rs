@@ -189,6 +189,26 @@ pub struct WorkspaceState {
     /// Bounded deterministic workspace/tab/pane composition.
     #[prost(message, repeated, tag = "16")]
     pub workspace_tabs: Vec<WorkspaceTabState>,
+    /// Bounded user-named chart appearance templates shared by every workspace.
+    #[prost(message, repeated, tag = "17")]
+    pub chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
+    /// Optional user-selected reset/default appearance.
+    #[prost(message, optional, tag = "18")]
+    pub default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
+}
+
+/// One locally persisted chart appearance template. Market data, indicators,
+/// drawings, and scale state are deliberately excluded.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceChartSettingsTemplateState {
+    #[prost(string, tag = "1")]
+    pub name: String,
+    #[prost(string, tag = "2")]
+    pub chart_type: String,
+    #[prost(message, optional, tag = "3")]
+    pub appearance: Option<WorkspaceChartAppearanceState>,
+    #[prost(uint32, tag = "4")]
+    pub crosshair_mode: u32,
 }
 
 /// Persisted presentation state for one pane.

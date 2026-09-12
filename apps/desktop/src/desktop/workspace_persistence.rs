@@ -8,6 +8,8 @@ struct WorkspaceLayoutRequest {
     layout_generation: u64,
     active_workspace_id: u64,
     workspace_tabs: Vec<WorkspaceTabState>,
+    chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
+    default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -130,10 +132,12 @@ impl WorkspaceLayoutPersistence {
         })
     }
 
-    pub(super) fn request(
+    pub(super) fn request_with_chart_settings(
         &self,
         active_workspace_id: u64,
         workspace_tabs: Vec<WorkspaceTabState>,
+        chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
+        default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
     ) -> Result<(), String> {
         let Some(generation) = self.layout_generation.get().checked_add(1) else {
             let error = "workspace layout generation is exhausted".to_string();
@@ -147,6 +151,8 @@ impl WorkspaceLayoutPersistence {
             layout_generation: generation,
             active_workspace_id,
             workspace_tabs,
+            chart_settings_templates,
+            default_chart_settings,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
@@ -168,6 +174,15 @@ impl WorkspaceLayoutPersistence {
                 Err(error)
             }
         }
+    }
+
+    #[cfg(test)]
+    fn request(
+        &self,
+        active_workspace_id: u64,
+        workspace_tabs: Vec<WorkspaceTabState>,
+    ) -> Result<(), String> {
+        self.request_with_chart_settings(active_workspace_id, workspace_tabs, Vec::new(), None)
     }
 
     pub(super) fn poll(&self) -> bool {
@@ -258,6 +273,8 @@ fn run_workspace_layout_persistence(
             .max(current.layout_generation.saturating_add(1));
         current.active_workspace_id = request.active_workspace_id;
         current.workspace_tabs = request.workspace_tabs;
+        current.chart_settings_templates = request.chart_settings_templates;
+        current.default_chart_settings = request.default_chart_settings;
         let completed = local_state::save_workspace(&current).map(|()| current);
         *durability
             .lock()
@@ -347,6 +364,26 @@ mod tests {
         );
         state.request(1, vec![]).expect("retry");
         assert_eq!(state.error(), None);
+    }
+
+    #[test]
+    fn coalesced_request_keeps_chart_settings_templates_with_the_layout() {
+        let (state, _receiver) = persistence();
+        let template = WorkspaceChartSettingsTemplateState {
+            name: "Scalping".to_string(),
+            chart_type: "candles".to_string(),
+            appearance: None,
+            crosshair_mode: 1,
+        };
+
+        state
+            .request_with_chart_settings(7, vec![], vec![template.clone()], Some(template.clone()))
+            .expect("request");
+
+        let latest = state.latest.lock().expect("latest");
+        let request = latest.as_ref().expect("request remains coalesced");
+        assert_eq!(request.chart_settings_templates, vec![template.clone()]);
+        assert_eq!(request.default_chart_settings, Some(template));
     }
 
     #[test]

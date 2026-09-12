@@ -67,12 +67,12 @@ use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartState,
-    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    workspace_study_setting_state,
+    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
+    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, workspace_study_setting_state,
 };
 use axiusflow_design_system::{
     AxiusflowTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
@@ -95,14 +95,14 @@ use axiusflow_market_runtime::{
 };
 use axiusflow_observability::FeedConnectionState;
 use axiusflow_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
+use chart_context_menus::{
+    ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
+    chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
+};
 #[cfg(test)]
 use chart_context_menus::{
     PriceAxisMenuRow, chart_context_menu_items, clamp_chart_context_menu_origin,
     clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
-};
-use chart_context_menus::{
-    account_menu_layer, chart_context_menu_layer, chart_settings_menu_layer, overlay_height,
-    price_axis_menu_layer,
 };
 use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
@@ -2318,6 +2318,14 @@ struct ChartSettingsSnapshot {
     crosshair_mode: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ChartSettingsTemplateOverlay {
+    #[default]
+    Closed,
+    Menu,
+    SaveDialog,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceShellKind {
     Window,
@@ -2348,6 +2356,12 @@ struct TerminalApp {
     chart_settings_menu: Option<ChartContextMenu>,
     chart_settings_section: ChartSettingsSection,
     chart_settings_color_picker: Option<ChartColorSetting>,
+    chart_settings_template_overlay: ChartSettingsTemplateOverlay,
+    chart_settings_template_name: Option<Entity<InputState>>,
+    chart_settings_template_error: Option<String>,
+    chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
+    default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
+    chart_settings_persistence_dirty: bool,
     account_menu_open: bool,
     account_menu_anchor: Option<gpui::Point<Pixels>>,
     profile_refresh_on_activation: bool,

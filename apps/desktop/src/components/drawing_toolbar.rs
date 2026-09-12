@@ -253,7 +253,9 @@ fn drawing_toolbar_actions(
         ))
 }
 
-const DRAWING_TOOLBAR_TOGGLE_HEIGHT: f32 = 28.0;
+// Match Nucleus's default time-axis strip so the drawing rail closes on the
+// same horizontal rhythm as the chart it borders.
+const DRAWING_TOOLBAR_TOGGLE_HEIGHT: f32 = 22.0;
 const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
 
 fn drawing_toolbar_collapse(

@@ -164,6 +164,8 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
         layout_generation: 9,
         active_workspace_id: tab.workspace_id,
         workspace_tabs: vec![tab],
+        chart_settings_templates: Vec::new(),
+        default_chart_settings: None,
     };
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");

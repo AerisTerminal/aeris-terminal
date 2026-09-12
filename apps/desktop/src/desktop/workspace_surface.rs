@@ -45,7 +45,7 @@ fn restored_market_selection(
     }
 }
 
-fn persisted_chart_appearance(
+pub(super) fn persisted_chart_appearance(
     appearance: &ChartAppearanceSettings,
 ) -> WorkspaceChartAppearanceState {
     WorkspaceChartAppearanceState {
@@ -75,7 +75,7 @@ fn persisted_chart_appearance(
     }
 }
 
-fn restored_chart_appearance(
+pub(super) fn restored_chart_appearance(
     appearance: &WorkspaceChartAppearanceState,
 ) -> Option<ChartAppearanceSettings> {
     let grid_style = u8::try_from(appearance.grid_style).ok()?.min(4);

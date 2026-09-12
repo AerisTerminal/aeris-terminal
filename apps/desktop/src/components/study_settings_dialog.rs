@@ -63,7 +63,7 @@ fn boolean_control(
     let update = app.clone();
     Button::new(("study_setting_boolean", control_id))
         .theme(theme)
-        .resting_fill(theme.colors.surface)
+        .resting_fill(theme.colors.surface_secondary)
         .selected(selected)
         .disabled(!enabled)
         .label(if selected { "On" } else { "Off" })
@@ -95,7 +95,7 @@ fn choice_control(
                 control_id.saturating_mul(65).saturating_add(index),
             ))
             .theme(theme)
-            .resting_fill(theme.colors.surface)
+            .resting_fill(theme.colors.surface_secondary)
             .selected(current == Some(option.identifier.as_str()))
             .disabled(!enabled)
             .label(option.label.clone())
@@ -140,7 +140,7 @@ fn text_control(
                 .opacity(if enabled { 1.0 } else { 0.55 })
                 .child(
                     Input::new(input)
-                        .fill(gpui_color(colors.surface))
+                        .fill(gpui_color(colors.surface_secondary))
                         .border_color(gpui_color(colors.border))
                         .focus_border_color(gpui_color(colors.ring))
                         .flex_1(),
@@ -220,7 +220,8 @@ fn setting_row(
             .flex()
             .flex_col()
             .gap_2()
-            .p_3()
+            .px_3()
+            .py_2()
             .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             .bg(gpui_color(colors.surface))
             .child(
@@ -274,7 +275,7 @@ fn study_settings_body(
         .flex()
         .flex_col()
         .gap_2()
-        .p_4();
+        .p_3();
     let mut last_group: Option<&str> = None;
     for (index, spec) in dialog.specs.iter().enumerate() {
         if !workspace_surface::study_setting_condition_matches(
@@ -324,7 +325,8 @@ fn study_settings_header(
         .flex()
         .items_center()
         .justify_between()
-        .p_4()
+        .px_3()
+        .py_2()
         .border_b_1()
         .border_color(gpui_color(colors.border_secondary))
         .child(
@@ -333,7 +335,7 @@ fn study_settings_header(
                 .flex_col()
                 .child(
                     div()
-                        .text_base()
+                        .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
                         .child("Study settings"),
                 )
@@ -347,7 +349,7 @@ fn study_settings_header(
         .child(
             Button::new("study_settings_close")
                 .theme(theme)
-                .with_size(px(30.0))
+                .with_size(px(WORKSPACE_TAB_ICON_HIT))
                 .rounded_full()
                 .resting_fill(colors.surface_secondary)
                 .icon(header_icon(HugeIcon::CancelIcon01))

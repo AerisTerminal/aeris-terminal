@@ -633,21 +633,19 @@ pub(super) fn price_axis_menu_item(
 pub(super) fn chart_settings_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
-    section: ChartSettingsSection,
-    snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<ChartColorSetting>,
+    view: ChartSettingsView<'_>,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let panel_size = chart_settings_panel_size(viewport);
     let origin = chart_settings_centered_origin(viewport, panel_size);
     let dismiss = terminal.clone();
-    let content = match section {
+    let content = match view.section {
         ChartSettingsSection::Series => {
-            chart_series_settings(terminal, menu, snapshot, color_picker, theme)
+            chart_series_settings(terminal, menu, view.snapshot, view.color_picker, theme)
         }
         ChartSettingsSection::Canvas => {
-            chart_canvas_settings(terminal, menu, snapshot, color_picker, theme)
+            chart_canvas_settings(terminal, menu, view.snapshot, view.color_picker, theme)
         }
     };
     div()
@@ -665,9 +663,26 @@ pub(super) fn chart_settings_menu_layer(
             cx.stop_propagation();
         })
         .child(chart_settings_panel(
-            terminal, menu, origin, panel_size, section, content, theme,
+            terminal, menu, origin, panel_size, content, view, theme,
         ))
         .into_any_element()
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ChartSettingsView<'a> {
+    pub(super) section: ChartSettingsSection,
+    pub(super) snapshot: &'a ChartSettingsSnapshot,
+    pub(super) color_picker: Option<ChartColorSetting>,
+    pub(super) templates: ChartSettingsTemplateView<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ChartSettingsTemplateView<'a> {
+    pub(super) overlay: ChartSettingsTemplateOverlay,
+    pub(super) name_input: Option<&'a Entity<InputState>>,
+    pub(super) error: Option<&'a str>,
+    pub(super) templates: &'a [WorkspaceChartSettingsTemplateState],
+    pub(super) apply_to_all: bool,
 }
 
 fn chart_settings_panel(
@@ -675,8 +690,8 @@ fn chart_settings_panel(
     menu: &ChartContextMenu,
     origin: gpui::Point<Pixels>,
     panel_size: gpui::Size<Pixels>,
-    section: ChartSettingsSection,
     content: AnyElement,
+    view: ChartSettingsView<'_>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -693,14 +708,14 @@ fn chart_settings_panel(
         .child(
             Button::new("chart_settings_reset")
                 .theme(theme)
-                .resting_fill(colors.surface)
+                .resting_fill(colors.surface_secondary)
                 .icon(header_icon(HugeIcon::Refresh01Icon))
                 .aria_label("Reset settings")
                 .h(px(26.0))
                 .text_color(gpui_color(colors.text_secondary))
                 .hover(move |button| {
                     button
-                        .bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                        .bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
                         .text_color(gpui_color(colors.text_primary))
                 })
                 .on_click(move |_, _, cx| {
@@ -729,13 +744,19 @@ fn chart_settings_panel(
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
+        .bg(gpui_color(colors.surface))
         .font_family(axiusflow_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_primary))
         .occlude()
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .child(chart_settings_sidebar(terminal, section, theme))
+        .child(chart_settings_sidebar(
+            terminal,
+            menu,
+            view.section,
+            view.templates,
+            theme,
+        ))
         .child(
             div().flex_1().min_w_0().min_h_0().p_2().child(
                 div()
@@ -746,7 +767,7 @@ fn chart_settings_panel(
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_1()
                     .border_color(gpui_color(colors.border_secondary))
-                    .bg(gpui_color(colors.surface))
+                    .bg(gpui_color(colors.surface_secondary))
                     .overflow_hidden()
                     .child(
                         div()
@@ -759,6 +780,17 @@ fn chart_settings_panel(
                     )
                     .child(actions),
             ),
+        )
+        .children(
+            (view.templates.overlay == ChartSettingsTemplateOverlay::SaveDialog).then(|| {
+                chart_settings_template_save_dialog(
+                    terminal,
+                    menu,
+                    view.templates.name_input,
+                    view.templates.error,
+                    theme,
+                )
+            }),
         )
 }
 
@@ -785,29 +817,18 @@ fn chart_settings_panel_size(viewport: gpui::Size<Pixels>) -> gpui::Size<Pixels>
 
 fn chart_settings_sidebar(
     terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
     selected: ChartSettingsSection,
+    templates: ChartSettingsTemplateView<'_>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels()) - 1.0).max(0.0));
-    let mut sidebar = div()
-        .id("chart_settings_sidebar")
-        .w(px(CHART_SETTINGS_SIDEBAR_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .p_2()
-        .border_r_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .rounded_tl(inner_radius)
-        .rounded_bl(inner_radius)
-        .bg(gpui_color(colors.surface));
+    let mut sections = div().flex_1().min_h_0().flex().flex_col().gap_0p5();
     for section in ChartSettingsSection::ALL {
         let active = selected == section;
         let terminal = terminal.clone();
-        sidebar = sidebar.child(
+        sections = sections.child(
             div()
                 .id(("chart_settings_section", section as usize))
                 .w_full()
@@ -847,7 +868,194 @@ fn chart_settings_sidebar(
                 ),
         );
     }
-    sidebar
+    div()
+        .id("chart_settings_sidebar")
+        .w(px(CHART_SETTINGS_SIDEBAR_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .p_2()
+        .rounded_tl(inner_radius)
+        .rounded_bl(inner_radius)
+        .bg(gpui_color(colors.surface))
+        .child(sections)
+        .child(chart_settings_template_control(
+            terminal, menu, templates, theme,
+        ))
+}
+
+fn chart_settings_template_control(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    state: ChartSettingsTemplateView<'_>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let toggle = terminal.clone();
+    let mut control = div().relative().w_full().child(
+        Button::new("chart_settings_templates")
+            .theme(theme)
+            .resting_fill(colors.surface)
+            .w_full()
+            .label("Template")
+            .caret(header_icon(HugeIcon::ChevronDown))
+            .on_click(move |_, _, cx| {
+                toggle.update(cx, |terminal, terminal_cx| {
+                    terminal.toggle_chart_settings_template_menu(terminal_cx);
+                });
+            }),
+    );
+    if state.overlay == ChartSettingsTemplateOverlay::Menu {
+        let save = terminal.clone();
+        let set_default = terminal.clone();
+        let default_menu = menu.clone();
+        let apply_all = terminal.clone();
+        let apply_all_menu = menu.clone();
+        let mut popup = div()
+            .id("chart_settings_template_menu")
+            .absolute()
+            .bottom(px(36.0))
+            .left_0()
+            .w(px(212.0))
+            .max_h(px(360.0))
+            .overflow_y_scroll()
+            .p_1()
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .border_1()
+            .border_color(gpui_color(colors.border_secondary))
+            .bg(gpui_color(colors.surface))
+            .occlude()
+            .child(
+                MenuRow::compact("chart_template_save", "Save…", theme).on_click(
+                    move |_, window, cx| {
+                        save.update(cx, |terminal, terminal_cx| {
+                            terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
+                        });
+                    },
+                ),
+            )
+            .child(
+                MenuRow::compact("chart_template_default", "Set as default", theme).on_click(
+                    move |_, _, cx| {
+                        set_default.update(cx, |terminal, terminal_cx| {
+                            terminal
+                                .set_current_chart_settings_as_default(&default_menu, terminal_cx);
+                        });
+                    },
+                ),
+            );
+        if state.apply_to_all {
+            popup = popup.child(
+                MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme)
+                    .on_click(move |_, _, cx| {
+                        apply_all.update(cx, |terminal, terminal_cx| {
+                            terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
+                        });
+                    }),
+            );
+        }
+        for (index, template) in state.templates.iter().enumerate() {
+            let apply = terminal.clone();
+            let apply_menu = menu.clone();
+            popup = popup.child(
+                MenuRow::compact(("chart_template", index), template.name.clone(), theme).on_click(
+                    move |_, _, cx| {
+                        apply.update(cx, |terminal, terminal_cx| {
+                            terminal.apply_named_chart_settings_template(
+                                &apply_menu,
+                                index,
+                                terminal_cx,
+                            );
+                        });
+                    },
+                ),
+            );
+        }
+        control = control.child(gpui::deferred(popup));
+    }
+    control
+}
+
+fn chart_settings_template_save_dialog(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    input: Option<&Entity<InputState>>,
+    error: Option<&str>,
+    theme: &AxiusflowTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let cancel = terminal.clone();
+    let save = terminal.clone();
+    let save_menu = menu.clone();
+    div()
+        .id("chart_template_save_scrim")
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui_color(colors.surface.with_alpha(0.72)))
+        .child(
+            div()
+                .w(px(360.0))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .border_1()
+                .border_color(gpui_color(colors.border_secondary))
+                .bg(gpui_color(colors.surface))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .child("Save chart template"),
+                )
+                .children(input.map(|input| {
+                    Input::new(input)
+                        .fill(gpui_color(colors.surface_secondary))
+                        .border_color(gpui_color(colors.input_border))
+                        .focus_border_color(gpui_color(colors.ring))
+                }))
+                .children(error.map(|error| {
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.danger))
+                        .child(error.to_string())
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("chart_template_cancel")
+                                .theme(theme)
+                                .resting_fill(colors.surface)
+                                .label("Cancel")
+                                .on_click(move |_, _, cx| {
+                                    cancel.update(cx, |terminal, terminal_cx| {
+                                        terminal.cancel_chart_settings_template_save(terminal_cx);
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("chart_template_confirm")
+                                .theme(theme)
+                                .resting_fill(colors.surface)
+                                .label("Save")
+                                .on_click(move |_, _, cx| {
+                                    save.update(cx, |terminal, terminal_cx| {
+                                        terminal
+                                            .save_chart_settings_template(&save_menu, terminal_cx);
+                                    });
+                                }),
+                        ),
+                ),
+        )
+        .into_any_element()
 }
 
 fn chart_series_settings(

@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 use axiusflow_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
-    workspace_study_setting_state,
+    SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
+    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream,
+    WorkspaceTabState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -18,6 +18,8 @@ const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
 const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
 const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
 const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
+pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATES: usize = 32;
+pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES: usize = 64;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct LegacyWorkspaceEnvelope {
@@ -306,12 +308,29 @@ pub(super) fn default_workspace() -> WorkspaceState {
                 second: None,
             }),
         }],
+        chart_settings_templates: Vec::new(),
+        default_chart_settings: None,
     }
 }
 
 pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceState {
     if workspace.workspace_tabs.is_empty() {
         return default_workspace();
+    }
+    let mut template_names = std::collections::BTreeSet::new();
+    workspace.chart_settings_templates.retain(|template| {
+        valid_chart_settings_template(template)
+            && template_names.insert(template.name.to_ascii_lowercase())
+    });
+    workspace
+        .chart_settings_templates
+        .truncate(MAXIMUM_CHART_SETTINGS_TEMPLATES);
+    if workspace
+        .default_chart_settings
+        .as_ref()
+        .is_some_and(|template| !valid_chart_settings_template(template))
+    {
+        workspace.default_chart_settings = None;
     }
     for pane in workspace
         .workspace_tabs
@@ -350,6 +369,19 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         }
     }
     workspace
+}
+
+fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState) -> bool {
+    let name = template.name.trim();
+    !name.is_empty()
+        && name.len() <= MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
+        && !template.name.chars().any(char::is_control)
+        && axiusflow_chart_integration::ChartType::from_identifier(&template.chart_type).is_some()
+        && template.crosshair_mode <= 3
+        && template
+            .appearance
+            .as_ref()
+            .is_some_and(valid_chart_appearance)
 }
 
 fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
@@ -661,6 +693,15 @@ mod tests {
                 baseline_top_color: "#22c55e".to_string(),
                 baseline_bottom_color: "#ef4444".to_string(),
             }),
+        }
+    }
+
+    fn chart_settings_template(name: impl Into<String>) -> WorkspaceChartSettingsTemplateState {
+        WorkspaceChartSettingsTemplateState {
+            name: name.into(),
+            chart_type: "candles".to_string(),
+            appearance: round_trip_chart_state().appearance,
+            crosshair_mode: 1,
         }
     }
 
@@ -987,6 +1028,53 @@ mod tests {
             .expect("chart remains available");
         assert!(chart.appearance.is_none());
     }
+
+    #[test]
+    fn sanitizer_bounds_and_validates_shared_chart_settings_templates() {
+        let mut workspace = default_workspace();
+        workspace.chart_settings_templates = (0..MAXIMUM_CHART_SETTINGS_TEMPLATES + 4)
+            .map(|index| chart_settings_template(format!("Template {index}")))
+            .collect();
+        workspace
+            .chart_settings_templates
+            .insert(1, chart_settings_template("template 0"));
+        workspace
+            .chart_settings_templates
+            .insert(2, chart_settings_template("\ninvalid"));
+        workspace.default_chart_settings = Some(WorkspaceChartSettingsTemplateState {
+            crosshair_mode: 99,
+            ..chart_settings_template("Default")
+        });
+
+        let sanitized = sanitize_workspace(workspace);
+
+        assert_eq!(
+            sanitized.chart_settings_templates.len(),
+            MAXIMUM_CHART_SETTINGS_TEMPLATES
+        );
+        assert_eq!(sanitized.chart_settings_templates[0].name, "Template 0");
+        assert_eq!(sanitized.chart_settings_templates[1].name, "Template 1");
+        assert!(sanitized.default_chart_settings.is_none());
+    }
+
+    #[test]
+    fn workspace_file_round_trip_preserves_chart_settings_templates_and_default() {
+        let path = temporary_workspace_path();
+        let mut workspace = default_workspace();
+        let saved = chart_settings_template("Scalping");
+        let default = chart_settings_template("Default");
+        workspace.chart_settings_templates = vec![saved.clone()];
+        workspace.default_chart_settings = Some(default.clone());
+
+        save_workspace_to_path(&workspace, &path).expect("workspace saves");
+        let restored = load_workspace_from_path(&path).expect("workspace reloads");
+
+        assert_eq!(restored.chart_settings_templates, vec![saved]);
+        assert_eq!(restored.default_chart_settings, Some(default));
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
     #[test]
     fn legacy_framed_workspace_remains_readable_without_a_transport_runtime() {
         let current = temporary_workspace_path();

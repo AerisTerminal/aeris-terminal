@@ -79,6 +79,12 @@ impl TerminalApp {
             chart_settings_menu: None,
             chart_settings_section: ChartSettingsSection::Series,
             chart_settings_color_picker: None,
+            chart_settings_template_overlay: ChartSettingsTemplateOverlay::Closed,
+            chart_settings_template_name: None,
+            chart_settings_template_error: None,
+            chart_settings_templates: init.chart_settings_templates,
+            default_chart_settings: init.default_chart_settings,
+            chart_settings_persistence_dirty: false,
             account_menu_open: false,
             account_menu_anchor: None,
             profile_refresh_on_activation: false,
@@ -273,6 +279,9 @@ impl TerminalApp {
     pub(super) fn close_chart_settings_menu(&mut self, cx: &mut Context<Self>) {
         if self.chart_settings_menu.take().is_some() {
             self.chart_settings_color_picker = None;
+            self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+            self.chart_settings_template_name = None;
+            self.chart_settings_template_error = None;
             cx.notify();
         }
     }
@@ -403,16 +412,198 @@ impl TerminalApp {
     }
 
     pub(super) fn reset_chart_settings(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {
+        let template = self.default_chart_settings.clone().unwrap_or_else(|| {
+            WorkspaceChartSettingsTemplateState {
+                name: "Default".to_string(),
+                chart_type: ChartType::Candles.identifier().to_string(),
+                appearance: Some(workspace_surface::persisted_chart_appearance(
+                    &ChartAppearanceSettings::default(),
+                )),
+                crosshair_mode: 0,
+            }
+        });
+        self.apply_chart_settings_template_to_surface(menu, &template, cx);
+        self.chart_settings_color_picker = None;
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        cx.notify();
+    }
+
+    fn current_chart_settings_template(
+        &self,
+        menu: &ChartContextMenu,
+        name: String,
+        cx: &App,
+    ) -> Option<WorkspaceChartSettingsTemplateState> {
+        let snapshot = self.chart_settings_snapshot(menu, cx)?;
+        Some(WorkspaceChartSettingsTemplateState {
+            name,
+            chart_type: snapshot.chart_type.identifier().to_string(),
+            appearance: Some(workspace_surface::persisted_chart_appearance(
+                &snapshot.appearance,
+            )),
+            crosshair_mode: u32::from(snapshot.crosshair_mode),
+        })
+    }
+
+    fn apply_chart_settings_template_to_surface(
+        &self,
+        menu: &ChartContextMenu,
+        template: &WorkspaceChartSettingsTemplateState,
+        cx: &mut Context<Self>,
+    ) {
         let Some(surface) = self.chart_settings_surface(menu) else {
             return;
         };
-        let appearance = ChartAppearanceSettings::default();
+        let Some(chart_type) = ChartType::from_identifier(&template.chart_type) else {
+            return;
+        };
+        let Some(appearance) = template
+            .appearance
+            .as_ref()
+            .and_then(workspace_surface::restored_chart_appearance)
+        else {
+            return;
+        };
+        let crosshair_mode = u8::try_from(template.crosshair_mode).unwrap_or(0).min(3);
         surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_type(chart_type, surface_cx);
             surface.set_chart_appearance(&appearance, surface_cx);
-            // Nucleus's canonical default mode is Normal, represented by 0.
-            surface.set_chart_crosshair_mode(0, surface_cx);
+            surface.set_chart_crosshair_mode(crosshair_mode, surface_cx);
         });
+    }
+
+    pub(super) fn toggle_chart_settings_template_menu(&mut self, cx: &mut Context<Self>) {
         self.chart_settings_color_picker = None;
+        self.chart_settings_template_overlay =
+            if self.chart_settings_template_overlay == ChartSettingsTemplateOverlay::Menu {
+                ChartSettingsTemplateOverlay::Closed
+            } else {
+                ChartSettingsTemplateOverlay::Menu
+            };
+        cx.notify();
+    }
+
+    pub(super) fn open_chart_settings_template_save_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input =
+            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Template name"));
+        input.update(cx, |input, input_cx| input.focus(window, input_cx));
+        self.chart_settings_template_name = Some(input);
+        self.chart_settings_template_error = None;
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::SaveDialog;
+        cx.notify();
+    }
+
+    pub(super) fn cancel_chart_settings_template_save(&mut self, cx: &mut Context<Self>) {
+        self.chart_settings_template_name = None;
+        self.chart_settings_template_error = None;
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Menu;
+        cx.notify();
+    }
+
+    pub(super) fn save_chart_settings_template(
+        &mut self,
+        menu: &ChartContextMenu,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = &self.chart_settings_template_name else {
+            return;
+        };
+        let name = input.read(cx).value().trim().to_string();
+        if name.is_empty()
+            || name.len() > local_state::MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
+            || name.chars().any(char::is_control)
+        {
+            self.chart_settings_template_error =
+                Some("Use a name between 1 and 64 characters.".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(template) = self.current_chart_settings_template(menu, name.clone(), cx) else {
+            return;
+        };
+        if let Some(existing) = self
+            .chart_settings_templates
+            .iter_mut()
+            .find(|template| template.name.eq_ignore_ascii_case(&name))
+        {
+            *existing = template;
+        } else if self.chart_settings_templates.len()
+            < local_state::MAXIMUM_CHART_SETTINGS_TEMPLATES
+        {
+            self.chart_settings_templates.push(template);
+        } else {
+            self.chart_settings_template_error =
+                Some("You can save up to 32 chart templates.".to_string());
+            cx.notify();
+            return;
+        }
+        self.chart_settings_template_name = None;
+        self.chart_settings_template_error = None;
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Menu;
+        self.chart_settings_persistence_dirty = true;
+        self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_current_chart_settings_as_default(
+        &mut self,
+        menu: &ChartContextMenu,
+        cx: &mut Context<Self>,
+    ) {
+        self.default_chart_settings =
+            self.current_chart_settings_template(menu, "Default".to_string(), cx);
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        self.chart_settings_persistence_dirty = true;
+        self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
+    }
+
+    pub(super) fn apply_named_chart_settings_template(
+        &mut self,
+        menu: &ChartContextMenu,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(template) = self.chart_settings_templates.get(index).cloned() else {
+            return;
+        };
+        self.apply_chart_settings_template_to_surface(menu, &template, cx);
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        cx.notify();
+    }
+
+    pub(super) fn apply_chart_settings_to_all(
+        &mut self,
+        menu: &ChartContextMenu,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(template) = self.current_chart_settings_template(menu, String::new(), cx) else {
+            return;
+        };
+        let pane_ids = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .map(|workspace| {
+                workspace
+                    .panes
+                    .iter()
+                    .map(|pane| pane.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for pane_id in pane_ids {
+            let target = ChartContextMenu {
+                pane_id,
+                ..menu.clone()
+            };
+            self.apply_chart_settings_template_to_surface(&target, &template, cx);
+        }
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         cx.notify();
     }
 
@@ -659,6 +850,9 @@ impl TerminalApp {
             ChartContextAction::Settings => {
                 self.chart_settings_section = ChartSettingsSection::Series;
                 self.chart_settings_color_picker = None;
+                self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+                self.chart_settings_template_name = None;
+                self.chart_settings_template_error = None;
                 self.chart_settings_menu = Some(menu);
             }
         }
@@ -867,15 +1061,22 @@ impl TerminalApp {
         let active_workspace_id = self.workspaces[self.active].id;
         if layout == self.persisted_layout
             && active_workspace_id == self.persisted_active_workspace_id
+            && !self.chart_settings_persistence_dirty
         {
             return;
         }
-        if let Err(error) = persistence.request(active_workspace_id, layout.clone()) {
+        if let Err(error) = persistence.request_with_chart_settings(
+            active_workspace_id,
+            layout.clone(),
+            self.chart_settings_templates.clone(),
+            self.default_chart_settings.clone(),
+        ) {
             self.workspace_error = Some(error);
             return;
         }
         self.persisted_layout = layout;
         self.persisted_active_workspace_id = active_workspace_id;
+        self.chart_settings_persistence_dirty = false;
     }
 
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
@@ -1752,9 +1953,22 @@ impl TerminalApp {
                 chart_settings_menu_layer(
                     terminal,
                     &menu,
-                    self.chart_settings_section,
-                    &snapshot,
-                    self.chart_settings_color_picker,
+                    ChartSettingsView {
+                        section: self.chart_settings_section,
+                        snapshot: &snapshot,
+                        color_picker: self.chart_settings_color_picker,
+                        templates: ChartSettingsTemplateView {
+                            overlay: self.chart_settings_template_overlay,
+                            name_input: self.chart_settings_template_name.as_ref(),
+                            error: self.chart_settings_template_error.as_deref(),
+                            templates: &self.chart_settings_templates,
+                            apply_to_all: self
+                                .workspaces
+                                .iter()
+                                .find(|workspace| workspace.id == menu.workspace_id)
+                                .is_some_and(|workspace| workspace.panes.len() > 1),
+                        },
+                    },
                     viewport,
                     &self.theme,
                 )

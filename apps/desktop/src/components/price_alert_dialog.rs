@@ -231,6 +231,14 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn close_price_alert_dropdown(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.price_alert_dialog
+            && dialog.open_dropdown.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
     pub(super) fn create_price_alert(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.price_alert_dialog.clone() else {
             self.price_alert_message =
@@ -408,6 +416,7 @@ fn dropdown_trigger(
         .role(Role::Button)
         .aria_label(label)
         .hover(move |style| style.bg(gpui_color(colors.hover_bg.over(colors.input_fill))))
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
             toggle.update(cx, |surface, surface_cx| {
                 surface.toggle_price_alert_dropdown(dropdown, surface_cx);
@@ -418,6 +427,23 @@ fn dropdown_trigger(
         .child(header_icon(HugeIcon::ChevronDown).with_size(px(14.0)))
 }
 
+fn dropdown_panel(id: &'static str, theme: &AxiusflowTheme) -> Stateful<Div> {
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .absolute()
+        .top(px(38.0))
+        .left_0()
+        .right_0()
+        .occlude()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
+        .shadow_md()
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+}
+
 fn condition_dropdown(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
@@ -426,9 +452,8 @@ fn condition_dropdown(
     let open = dialog.open_dropdown == Some(PriceAlertDropdown::Condition);
     let mut field = div()
         .w_full()
-        .flex()
-        .flex_col()
-        .gap_1()
+        .relative()
+        .flex_none()
         .child(dropdown_trigger(
             app,
             PriceAlertDropdown::Condition,
@@ -438,12 +463,7 @@ fn condition_dropdown(
             theme,
         ));
     if open {
-        let mut menu = div()
-            .w_full()
-            .border_1()
-            .border_color(gpui_color(theme.colors.border_secondary))
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .bg(gpui_color(theme.colors.surface_secondary));
+        let mut menu = dropdown_panel("price_alert_condition_menu", theme);
         for (index, condition) in CONDITIONS.into_iter().enumerate() {
             let choose = app.clone();
             menu = menu.child(
@@ -461,7 +481,7 @@ fn condition_dropdown(
                 }),
             );
         }
-        field = field.child(menu);
+        field = field.child(gpui::deferred(menu));
     }
     field
 }
@@ -485,9 +505,8 @@ fn frequency_dropdown(
     let open = dialog.open_dropdown == Some(PriceAlertDropdown::Frequency);
     let mut field = div()
         .w_full()
-        .flex()
-        .flex_col()
-        .gap_1()
+        .relative()
+        .flex_none()
         .child(dropdown_trigger(
             app,
             PriceAlertDropdown::Frequency,
@@ -497,12 +516,7 @@ fn frequency_dropdown(
             theme,
         ));
     if open {
-        let mut menu = div()
-            .w_full()
-            .border_1()
-            .border_color(gpui_color(theme.colors.border_secondary))
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .bg(gpui_color(theme.colors.surface_secondary));
+        let mut menu = dropdown_panel("price_alert_frequency_menu", theme);
         for (index, frequency) in FREQUENCIES.into_iter().enumerate() {
             let choose = app.clone();
             menu = menu.child(
@@ -520,7 +534,7 @@ fn frequency_dropdown(
                 }),
             );
         }
-        field = field.child(menu);
+        field = field.child(gpui::deferred(menu));
     }
     field
 }
@@ -613,7 +627,8 @@ fn price_alert_dialog_header(
         .flex()
         .items_center()
         .justify_between()
-        .p_4()
+        .px_3()
+        .py_2()
         .border_b_1()
         .border_color(gpui_color(colors.border_secondary))
         .child(
@@ -622,7 +637,7 @@ fn price_alert_dialog_header(
                 .flex_col()
                 .child(
                     div()
-                        .text_base()
+                        .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
                         .child("Create price alert"),
                 )
@@ -645,7 +660,7 @@ fn price_alert_dialog_header(
         .child(
             Button::new("price_alert_close")
                 .theme(theme)
-                .with_size(px(30.0))
+                .with_size(px(WORKSPACE_TAB_ICON_HIT))
                 .rounded_full()
                 .resting_fill(colors.surface_secondary)
                 .icon(header_icon(HugeIcon::CancelIcon01))
@@ -705,7 +720,7 @@ fn price_alert_dialog_body(
     div()
         .id("price_alert_dialog_body")
         .flex_1()
-        .overflow_y_scroll()
+        .min_h_0()
         .flex()
         .flex_col()
         .gap_3()
@@ -747,6 +762,8 @@ fn price_alert_dialog_body(
         .children((!existing.is_empty()).then(|| {
             div()
                 .mt_2()
+                .flex_1()
+                .min_h_0()
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -756,7 +773,14 @@ fn price_alert_dialog_body(
                         .text_color(gpui_color(colors.text_muted))
                         .child("Existing alerts for this market"),
                 )
-                .child(price_alert_existing_rows(app, existing, theme))
+                .child(
+                    div()
+                        .id("price_alert_existing_scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(price_alert_existing_rows(app, existing, theme)),
+                )
         }))
         .into_any_element()
 }
@@ -770,6 +794,7 @@ pub(super) fn price_alert_dialog_layer(
 ) -> AnyElement {
     let colors = theme.colors;
     let dismiss = app.clone();
+    let dismiss_dropdown = app.clone();
     let cancel = app.clone();
     let create = app.clone();
     let symbol = dialog.instrument.display_symbol.as_str();
@@ -807,7 +832,10 @@ pub(super) fn price_alert_dialog_layer(
                 .border_color(gpui_color(colors.border_secondary))
                 .bg(gpui_color(colors.surface))
                 .shadow_lg()
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .on_any_mouse_down(move |_, _, cx| {
+                    dismiss_dropdown.update(cx, WorkspaceSurface::close_price_alert_dropdown);
+                    cx.stop_propagation();
+                })
                 .child(price_alert_dialog_header(cancel, symbol, &price, theme))
                 .child(price_alert_dialog_body(
                     &app, dialog, &existing, message, theme,
