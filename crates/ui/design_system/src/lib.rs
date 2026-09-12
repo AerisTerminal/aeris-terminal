@@ -420,7 +420,7 @@ impl AxiusflowTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 20] {
+    pub fn color_tokens(self) -> [ColorToken; 18] {
         let colors = self.colors;
         let dark = self.mode == ThemeMode::Dark;
         [
@@ -436,7 +436,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "border",
-                mode_source(dark, MIX_INK_6, MIX_PAPER_8),
+                mode_source(dark, LIGHT_BORDER, DARK_BORDER),
                 colors.border,
             ),
             ColorToken::new("border-secondary", "var(--border)", colors.border_secondary),
@@ -453,27 +453,27 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "text-secondary",
-                mode_source(dark, MIX_INK_74, MIX_PAPER_74),
+                mode_source(dark, LIGHT_TEXT_SECONDARY, DARK_TEXT_SECONDARY),
                 colors.text_secondary,
             ),
             ColorToken::new(
                 "text-muted",
-                mode_source(dark, MIX_INK_36, MIX_PAPER_36),
+                mode_source(dark, LIGHT_TEXT_MUTED, DARK_TEXT_MUTED),
                 colors.text_muted,
             ),
             ColorToken::new(
                 "hover-bg",
-                mode_source(dark, MIX_INK_3_5, MIX_PAPER_8),
+                mode_source(dark, LIGHT_HOVER, DARK_HOVER),
                 colors.hover_bg,
             ),
             ColorToken::new(
                 "active-bg",
-                mode_source(dark, MIX_INK_5, MIX_PAPER_14),
+                mode_source(dark, LIGHT_ACTIVE, DARK_ACTIVE),
                 colors.active_bg,
             ),
             ColorToken::new(
                 "icon",
-                mode_source(dark, MIX_INK_50, MIX_PAPER_66),
+                mode_source(dark, LIGHT_ICON, DARK_ICON),
                 colors.icon,
             ),
             ColorToken::new(
@@ -482,20 +482,14 @@ impl AxiusflowTheme {
                 colors.icon_active,
             ),
             ColorToken::new("primary", "#3e63dd", colors.primary),
-            ColorToken::new(
-                "primary-foreground",
-                "oklch(0.97 0.014 254.604)",
-                colors.primary_foreground,
-            ),
-            ColorToken::new("danger", "oklch(0.6471 0.2288 22.47)", colors.danger),
+            ColorToken::new("primary-foreground", "#eff6ff", colors.primary_foreground),
+            ColorToken::new("danger", "#fb3748", colors.danger),
             ColorToken::new("danger-foreground", "#ffffff", colors.danger_foreground),
             ColorToken::new(
                 "ring",
-                mode_source(dark, MIX_INK_20, MIX_PAPER_15),
+                mode_source(dark, LIGHT_RING, DARK_RING),
                 colors.ring,
             ),
-            ColorToken::new("bullish", "#089981", colors.bullish),
-            ColorToken::new("bearish", "#f7525f", colors.bearish),
         ]
     }
 }
@@ -506,19 +500,20 @@ impl Default for AxiusflowTheme {
     }
 }
 
-const MIX_INK_3_5: &str = "color-mix(in srgb, #141414 3.5%, transparent)";
-const MIX_INK_5: &str = "color-mix(in srgb, #141414 5%, transparent)";
-const MIX_INK_6: &str = "color-mix(in srgb, #141414 6%, transparent)";
-const MIX_INK_20: &str = "color-mix(in srgb, #141414 20%, transparent)";
-const MIX_INK_36: &str = "color-mix(in srgb, #141414 36%, transparent)";
-const MIX_INK_50: &str = "color-mix(in srgb, #141414 50%, transparent)";
-const MIX_INK_74: &str = "color-mix(in srgb, #141414 74%, transparent)";
-const MIX_PAPER_8: &str = "color-mix(in srgb, #f0f0f0 8%, transparent)";
-const MIX_PAPER_14: &str = "color-mix(in srgb, #f0f0f0 14%, transparent)";
-const MIX_PAPER_15: &str = "color-mix(in srgb, #f0f0f0 15%, transparent)";
-const MIX_PAPER_36: &str = "color-mix(in srgb, #f0f0f0 36%, transparent)";
-const MIX_PAPER_66: &str = "color-mix(in srgb, #f0f0f0 66%, transparent)";
-const MIX_PAPER_74: &str = "color-mix(in srgb, #f0f0f0 74%, transparent)";
+const LIGHT_BORDER: &str = "#1414140f";
+const LIGHT_TEXT_SECONDARY: &str = "#141414bd";
+const LIGHT_TEXT_MUTED: &str = "#1414145c";
+const LIGHT_HOVER: &str = "#14141409";
+const LIGHT_ACTIVE: &str = "#1414140d";
+const LIGHT_ICON: &str = "#14141480";
+const LIGHT_RING: &str = "#14141433";
+const DARK_BORDER: &str = "#f0f0f014";
+const DARK_TEXT_SECONDARY: &str = "#f0f0f0bd";
+const DARK_TEXT_MUTED: &str = "#f0f0f05c";
+const DARK_HOVER: &str = "#f0f0f014";
+const DARK_ACTIVE: &str = "#f0f0f024";
+const DARK_ICON: &str = "#f0f0f0a8";
+const DARK_RING: &str = "#f0f0f026";
 
 const fn mode_source(
     dark: bool,
@@ -528,15 +523,11 @@ const fn mode_source(
     if dark { dark_source } else { light_source }
 }
 
-fn mix_srgb(red: u8, green: u8, blue: u8, percent: f32) -> ThemeColor {
-    ThemeColor::from_rgb8(red, green, blue).with_alpha(percent / 100.0)
-}
-
 fn light_colors() -> ThemeColors {
     let ink = ThemeColor::from_rgb8(20, 20, 20);
     let surface = ThemeColor::from_rgb8(255, 255, 255);
     let surface_secondary = ThemeColor::from_rgb8(250, 250, 250);
-    let border = mix_srgb(20, 20, 20, 6.0);
+    let border = ThemeColor::from_rgba8(20, 20, 20, 0x0f);
     ThemeColors {
         surface,
         surface_secondary,
@@ -545,17 +536,17 @@ fn light_colors() -> ThemeColors {
         input_fill: surface_secondary,
         input_border: border,
         text_primary: ink,
-        text_secondary: mix_srgb(20, 20, 20, 74.0),
-        text_muted: mix_srgb(20, 20, 20, 36.0),
-        hover_bg: mix_srgb(20, 20, 20, 3.5),
-        active_bg: mix_srgb(20, 20, 20, 5.0),
-        icon: mix_srgb(20, 20, 20, 50.0),
+        text_secondary: ThemeColor::from_rgba8(20, 20, 20, 0xbd),
+        text_muted: ThemeColor::from_rgba8(20, 20, 20, 0x5c),
+        hover_bg: ThemeColor::from_rgba8(20, 20, 20, 0x09),
+        active_bg: ThemeColor::from_rgba8(20, 20, 20, 0x0d),
+        icon: ThemeColor::from_rgba8(20, 20, 20, 0x80),
         icon_active: ink,
         primary: ThemeColor::from_rgb8(62, 99, 221),
         primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        ring: mix_srgb(20, 20, 20, 20.0),
+        ring: ThemeColor::from_rgba8(20, 20, 20, 0x33),
         bullish: ThemeColor::from_rgb8(8, 153, 129),
         bearish: ThemeColor::from_rgb8(247, 82, 95),
     }
@@ -564,7 +555,7 @@ fn light_colors() -> ThemeColors {
 fn dark_colors() -> ThemeColors {
     let ink = ThemeColor::from_rgb8(240, 240, 240);
     let surface_secondary = ThemeColor::from_rgb8(24, 24, 24);
-    let border = mix_srgb(240, 240, 240, 8.0);
+    let border = ThemeColor::from_rgba8(240, 240, 240, 0x14);
     ThemeColors {
         surface: ThemeColor::from_rgb8(20, 20, 20),
         surface_secondary,
@@ -573,17 +564,17 @@ fn dark_colors() -> ThemeColors {
         input_fill: surface_secondary,
         input_border: border,
         text_primary: ink,
-        text_secondary: mix_srgb(240, 240, 240, 74.0),
-        text_muted: mix_srgb(240, 240, 240, 36.0),
-        hover_bg: mix_srgb(240, 240, 240, 8.0),
-        active_bg: mix_srgb(240, 240, 240, 14.0),
-        icon: mix_srgb(240, 240, 240, 66.0),
+        text_secondary: ThemeColor::from_rgba8(240, 240, 240, 0xbd),
+        text_muted: ThemeColor::from_rgba8(240, 240, 240, 0x5c),
+        hover_bg: ThemeColor::from_rgba8(240, 240, 240, 0x14),
+        active_bg: ThemeColor::from_rgba8(240, 240, 240, 0x24),
+        icon: ThemeColor::from_rgba8(240, 240, 240, 0xa8),
         icon_active: ink,
         primary: ThemeColor::from_rgb8(62, 99, 221),
         primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        ring: mix_srgb(240, 240, 240, 15.0),
+        ring: ThemeColor::from_rgba8(240, 240, 240, 0x26),
         bullish: ThemeColor::from_rgb8(8, 153, 129),
         bearish: ThemeColor::from_rgb8(247, 82, 95),
     }
@@ -653,10 +644,7 @@ mod tests {
         assert_eq!(light.input_fill, light.surface_secondary);
         assert_eq!(light.input_border, light.border);
         assert_eq!(light.border_secondary, light.border);
-        assert_eq!(
-            light.border,
-            ThemeColor::from_rgb8(20, 20, 20).with_alpha(0.06)
-        );
+        assert_eq!(light.border, ThemeColor::from_rgba8(20, 20, 20, 0x0f));
         assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
@@ -672,14 +660,8 @@ mod tests {
         assert_eq!(dark.primary, light.primary);
         assert_eq!(dark.bullish, light.bullish);
         assert_eq!(dark.bearish, light.bearish);
-        assert_eq!(
-            light.hover_bg,
-            ThemeColor::from_rgb8(20, 20, 20).with_alpha(0.035)
-        );
-        assert_eq!(
-            dark.active_bg,
-            ThemeColor::from_rgb8(240, 240, 240).with_alpha(0.14)
-        );
+        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(20, 20, 20, 0x09));
+        assert_eq!(dark.active_bg, ThemeColor::from_rgba8(240, 240, 240, 0x24));
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
 
@@ -701,27 +683,21 @@ mod tests {
         let light_tokens = AxiusflowTheme::light().color_tokens();
         let dark_tokens = AxiusflowTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
-        assert_eq!(
-            token_source(&light_tokens, "border"),
-            "color-mix(in srgb, #141414 6%, transparent)"
-        );
+        assert_eq!(token_source(&light_tokens, "border"), "#1414140f");
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
-        assert_eq!(
-            token_source(&dark_tokens, "hover-bg"),
-            "color-mix(in srgb, #f0f0f0 8%, transparent)"
-        );
+        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#f0f0f014");
         assert_eq!(
             token_source(&light_tokens, "input-fill"),
             "var(--surface-secondary)"
         );
-        assert_eq!(
-            token_source(&dark_tokens, "danger"),
-            "oklch(0.6471 0.2288 22.47)"
-        );
+        assert_eq!(token_source(&dark_tokens, "danger"), "#fb3748");
         assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
-        assert_eq!(token_source(&light_tokens, "bullish"), "#089981");
-        assert_eq!(token_source(&dark_tokens, "bearish"), "#f7525f");
+        assert!(
+            !light_tokens
+                .iter()
+                .any(|token| matches!(token.canonical_identifier, "bullish" | "bearish"))
+        );
     }
 
     #[test]
@@ -823,6 +799,9 @@ mod tests {
         }
         assert!(!css.contains("HKGrotesk-SemiBold.ttf"));
         assert!(!css.contains("font-weight: 600;"));
+        assert!(!css.contains("/* Chart */"));
+        assert!(!css.contains("--bullish:"));
+        assert!(!css.contains("--bearish:"));
         assert_eq!(platform_font_family(), "HK Grotesk");
         assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
 

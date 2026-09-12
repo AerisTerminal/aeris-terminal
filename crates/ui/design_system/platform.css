@@ -14,97 +14,85 @@
   font-display: swap;
 }
 
-:root,
-[data-theme="light"] {
-  color-scheme: light;
-
+:root {
   --font-sans: "HK Grotesk", sans-serif;
   --font-weight-normal: 500;
   --font-weight-emphasis: 700;
   --font-weight-strong: 700;
   --font-feature-tabular-numerals: "tnum";
+}
 
+:root {
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
 
   /* Borders */
-  --border: color-mix(in srgb, #141414 6%, transparent);
+  --border: #1414140f;
   --border-secondary: var(--border);
   --input-fill: var(--surface-secondary);
   --input-border: var(--border-secondary);
 
   /* Text */
   --text-primary: #141414;
-  --text-secondary: color-mix(in srgb, #141414 74%, transparent);
-  --text-muted: color-mix(in srgb, #141414 36%, transparent);
+  --text-secondary: #141414bd;
+  --text-muted: #1414145c;
 
   /* Interaction states */
-  --hover-bg: color-mix(in srgb, #141414 3.5%, transparent);
-  --active-bg: color-mix(in srgb, #141414 5%, transparent);
+  --hover-bg: #14141409;
+  --active-bg: #1414140d;
 
   /* Icons */
-  --icon: color-mix(in srgb, #141414 50%, transparent);
+  --icon: #14141480;
   --icon-active: #141414;
 
   /* Actions */
   --primary: #3e63dd;
-  --primary-foreground: oklch(0.97 0.014 254.604);
-  --danger: oklch(0.6471 0.2288 22.47);
+  --primary-foreground: #eff6ff;
+  --danger: #fb3748;
   --danger-foreground: #ffffff;
 
   /* Focus */
-  --ring: color-mix(in srgb, #141414 20%, transparent);
+  --ring: #14141433;
 
   /* Radius */
   --radius-default: 8px;
   --radius-small: 4px;
   --radius-large: 999px;
-
-  /* Chart */
-  --bullish: #089981;
-  --bearish: #f7525f;
 }
 
-.dark,
-[data-theme="dark"] {
-  color-scheme: dark;
-
+.dark {
   /* Surfaces */
   --surface: #141414;
   --surface-secondary: #181818;
 
   /* Borders */
-  --border: color-mix(in srgb, #f0f0f0 8%, transparent);
+  --border: #f0f0f014;
   --border-secondary: var(--border);
   --input-fill: var(--surface-secondary);
   --input-border: var(--border-secondary);
 
   /* Text */
   --text-primary: #f0f0f0;
-  --text-secondary: color-mix(in srgb, #f0f0f0 74%, transparent);
-  --text-muted: color-mix(in srgb, #f0f0f0 36%, transparent);
+  --text-secondary: #f0f0f0bd;
+  --text-muted: #f0f0f05c;
 
   /* Interaction states */
-  --hover-bg: color-mix(in srgb, #f0f0f0 8%, transparent);
-  --active-bg: color-mix(in srgb, #f0f0f0 14%, transparent);
+  --hover-bg: #f0f0f014;
+  --active-bg: #f0f0f024;
 
   /* Icons */
-  --icon: color-mix(in srgb, #f0f0f0 66%, transparent);
+  --icon: #f0f0f0a8;
   --icon-active: #f0f0f0;
 
   /* Actions */
   --primary: #3e63dd;
-  --primary-foreground: oklch(0.97 0.014 254.604);
-  --danger: oklch(0.6471 0.2288 22.47);
+  --primary-foreground: #eff6ff;
+  --danger: #fb3748;
   --danger-foreground: #ffffff;
 
   /* Focus */
-  --ring: color-mix(in srgb, #f0f0f0 15%, transparent);
-
-  /* Chart */
-  --bullish: #089981;
-  --bearish: #f7525f;
+  --ring: #f0f0f026;
 }
 
 *,
