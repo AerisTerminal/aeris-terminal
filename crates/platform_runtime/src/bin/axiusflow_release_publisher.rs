@@ -2569,10 +2569,14 @@ mod tests {
             "SetupIconFile={#IconPath}",
             "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
             "[Icons]",
-            "[UninstallRun]",
             "procedure RegisterExtraCloseApplicationsResources;",
             "RegisterExtraCloseApplicationsResource",
+            "procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);",
             "--remove-all-local-data",
+            "ewWaitUntilTerminated",
+            "ResultCode <> 0",
+            "Uninstall has stopped so cleanup can be retried safely.",
+            "Abort;",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
             "RollbackCompatibilityPath",
             "DestName: \"rollback-compatibility.json\"",
@@ -2582,6 +2586,7 @@ mod tests {
                 "installer script lost {required}"
             );
         }
+        assert!(!script.contains("[UninstallRun]"));
         assert!(!script.contains("Parameters: \"--launch-desktop\""));
     }
 }

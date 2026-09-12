@@ -72,9 +72,6 @@ Name: "{autoprograms}\Axiusflow\Axiusflow"; Filename: "{app}\axiusflow_launcher.
 [Run]
 Filename: "{app}\axiusflow_launcher.exe"; Description: "Launch Axiusflow"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-Filename: "{app}\axiusflow_launcher.exe"; Parameters: "--remove-all-local-data"; Flags: runhidden waituntilterminated skipifdoesntexist
-
 [Code]
 procedure RegisterCloseResource(const Filename: String);
 begin
@@ -113,6 +110,33 @@ begin
     finally
       FindClose(FindRec);
     end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+  Launcher: String;
+begin
+  if CurUninstallStep <> usUninstall then
+    exit;
+
+  Launcher := ExpandConstant('{app}\axiusflow_launcher.exe');
+  if (not FileExists(Launcher)) or
+     (not Exec(
+       Launcher,
+       '--remove-all-local-data',
+       ExpandConstant('{app}'),
+       SW_HIDE,
+       ewWaitUntilTerminated,
+       ResultCode)) or
+     (ResultCode <> 0) then
+  begin
+    MsgBox(
+      'Axiusflow could not remove all local application data. Uninstall has stopped so cleanup can be retried safely.',
+      mbError,
+      MB_OK);
+    Abort;
   end;
 end;
 
