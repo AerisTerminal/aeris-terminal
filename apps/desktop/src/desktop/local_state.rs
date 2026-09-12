@@ -1,4 +1,7 @@
-use std::fs;
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use axiusflow_contracts::{
@@ -46,8 +49,8 @@ pub(super) fn load_workspace() -> WorkspaceState {
 /// can read the user's current state before it can pass activation health.
 pub(super) fn load_workspace_for_readiness() -> Result<WorkspaceState, String> {
     let path = workspace_path()?;
-    if path.is_file() {
-        return load_workspace_from_path(&path);
+    if let Some(workspace) = load_recoverable_workspace_from_path(&path)? {
+        return Ok(workspace);
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if legacy.is_file() {
@@ -59,8 +62,8 @@ pub(super) fn load_workspace_for_readiness() -> Result<WorkspaceState, String> {
 
 fn load_workspace_result() -> Result<WorkspaceState, String> {
     let path = workspace_path()?;
-    if path.is_file() {
-        return load_workspace_from_path(&path);
+    if let Some(workspace) = load_recoverable_workspace_from_path(&path)? {
+        return Ok(workspace);
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
     if !legacy.is_file() {
@@ -102,6 +105,32 @@ fn load_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
     WorkspaceState::decode(bytes.as_slice())
         .map(sanitize_workspace)
         .map_err(|error| error.to_string())
+}
+
+fn load_recoverable_workspace_from_path(path: &Path) -> Result<Option<WorkspaceState>, String> {
+    let backup = workspace_backup_path(path);
+    let temporary = workspace_temporary_path(path);
+    let mut first_error = None;
+    let mut found = false;
+    for candidate in [path, backup.as_path(), temporary.as_path()] {
+        if !candidate.is_file() {
+            continue;
+        }
+        found = true;
+        match load_workspace_from_path(candidate) {
+            Ok(workspace) => return Ok(Some(workspace)),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    if found {
+        Err(first_error.unwrap_or_else(|| "workspace persistence is unreadable".to_string()))
+    } else {
+        Ok(None)
+    }
 }
 
 fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
@@ -147,17 +176,63 @@ fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(),
     if bytes.is_empty() || bytes.len() > MAXIMUM_WORKSPACE_FILE_BYTES {
         return Err("workspace file exceeds the local persistence bound".to_string());
     }
-    let temporary = path.with_extension("pb.tmp");
-    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    let temporary = workspace_temporary_path(path);
+    let backup = workspace_backup_path(path);
+    let mut staging = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|error| error.to_string())?;
+    staging
+        .write_all(&bytes)
+        .and_then(|()| staging.sync_all())
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    sync_workspace_directory(parent)?;
+
     if path.exists() {
-        fs::remove_file(path).map_err(|error| error.to_string())?;
+        remove_workspace_file_if_present(&backup)?;
+        fs::rename(path, &backup).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        sync_workspace_directory(parent)?;
     }
-    fs::rename(&temporary, path).map_err(|error| error.to_string())
+    fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    sync_workspace_directory(parent)?;
+    remove_workspace_file_if_present(&backup)?;
+    #[cfg(unix)]
+    sync_workspace_directory(parent)?;
+    Ok(())
+}
+
+fn workspace_temporary_path(path: &Path) -> PathBuf {
+    path.with_extension("pb.tmp")
+}
+
+fn workspace_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("pb.bak")
+}
+
+fn remove_workspace_file_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn sync_workspace_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 pub(super) fn load_workspace_fixture(path: &Path) -> Result<WorkspaceState, String> {
-    load_workspace_from_path(path)
+    load_recoverable_workspace_from_path(path)?
+        .ok_or_else(|| "workspace fixture is unavailable".to_string())
 }
 
 #[cfg(test)]
@@ -456,6 +531,20 @@ mod tests {
         std::env::temp_dir().join(unique).join(WORKSPACE_FILE)
     }
 
+    fn workspace_with_revision(revision: u64) -> WorkspaceState {
+        let mut workspace = default_workspace();
+        workspace.workspace_revision = revision;
+        workspace.layout_generation = revision;
+        workspace
+    }
+
+    fn write_workspace_artifact(path: &Path, workspace: &WorkspaceState) {
+        let parent = path.parent().expect("workspace artifact parent");
+        std::fs::create_dir_all(parent).expect("workspace artifact directory");
+        std::fs::write(path, sanitize_workspace(workspace.clone()).encode_to_vec())
+            .expect("workspace artifact writes");
+    }
+
     fn price_alert(instrument: InstallProviderInstrument) -> WorkspacePriceAlertState {
         WorkspacePriceAlertState {
             id: "alert-1".to_string(),
@@ -666,6 +755,102 @@ mod tests {
 
         let parent = path.parent().expect("temporary workspace parent");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn workspace_recovery_prefers_committed_current_over_backup_or_staging() {
+        let path = temporary_workspace_path();
+        let backup = workspace_backup_path(&path);
+        let temporary = workspace_temporary_path(&path);
+        let previous = workspace_with_revision(11);
+        let current = workspace_with_revision(12);
+        let staged = workspace_with_revision(13);
+        write_workspace_artifact(&backup, &previous);
+        write_workspace_artifact(&path, &current);
+        write_workspace_artifact(&temporary, &staged);
+
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("workspace recovery succeeds")
+                .expect("workspace is present"),
+            current
+        );
+
+        std::fs::write(&temporary, b"corrupt staging").expect("corrupt staging writes");
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("valid current ignores corrupt staging")
+                .expect("workspace is present"),
+            current
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn workspace_recovery_uses_backup_before_unpublished_staging() {
+        let path = temporary_workspace_path();
+        let backup = workspace_backup_path(&path);
+        let temporary = workspace_temporary_path(&path);
+        let previous = workspace_with_revision(21);
+        let staged = workspace_with_revision(22);
+        write_workspace_artifact(&backup, &previous);
+        write_workspace_artifact(&temporary, &staged);
+
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("backup recovery succeeds")
+                .expect("workspace is present"),
+            previous
+        );
+
+        std::fs::write(&path, b"corrupt current").expect("corrupt current writes");
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("corrupt current falls back to backup")
+                .expect("workspace is present"),
+            previous
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn workspace_recovery_accepts_synced_staging_only_for_an_interrupted_first_save() {
+        let path = temporary_workspace_path();
+        let temporary = workspace_temporary_path(&path);
+        let staged = workspace_with_revision(31);
+        write_workspace_artifact(&temporary, &staged);
+
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("first-save staging recovery succeeds")
+                .expect("workspace is present"),
+            staged
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn successful_workspace_save_removes_recovery_artifacts_after_publish() {
+        let path = temporary_workspace_path();
+        let first = workspace_with_revision(41);
+        let second = workspace_with_revision(42);
+        save_workspace_to_path(&first, &path).expect("first workspace saves");
+        save_workspace_to_path(&second, &path).expect("second workspace saves");
+
+        assert!(path.is_file());
+        assert!(!workspace_backup_path(&path).exists());
+        assert!(!workspace_temporary_path(&path).exists());
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("published workspace reloads")
+                .expect("workspace is present"),
+            second
+        );
+        std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+            .expect("temporary workspace cleanup");
     }
 
     #[test]
