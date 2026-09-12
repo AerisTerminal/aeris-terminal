@@ -45,6 +45,13 @@ pub fn project_order_book(
         .max()
         .unwrap_or(0);
     let row_count = publication.bids.len().max(publication.asks.len());
+    // Complete canonical depth and the provider's independent BBO stream are
+    // not one atomic image. Prefer each real depth edge when it exists so a
+    // later-arriving but older quote cannot put the spread behind its own book
+    // and force the continuous ladder into its real-level fallback. The BBO
+    // remains the only valid fallback while that depth side is unavailable.
+    let best_bid = publication.bids.first().copied().or(publication.best_bid);
+    let best_ask = publication.asks.first().copied().or(publication.best_ask);
     let mut rows = Vec::with_capacity(row_count);
     for index in 0..row_count {
         rows.push(OrderBookRow {
@@ -79,7 +86,7 @@ pub fn project_order_book(
         price_scale: selection.precision.price_scale(),
         quantity_scale: selection.precision.quantity_scale(),
         price_increment: selection.price_increment.filter(|increment| *increment > 0),
-        best_bid: publication.best_bid.map(|level| {
+        best_bid: best_bid.map(|level| {
             project_level(
                 level,
                 selection.precision.price_scale(),
@@ -87,7 +94,7 @@ pub fn project_order_book(
                 maximum_quantity,
             )
         }),
-        best_ask: publication.best_ask.map(|level| {
+        best_ask: best_ask.map(|level| {
             project_level(
                 level,
                 selection.precision.price_scale(),
@@ -309,6 +316,62 @@ mod tests {
         );
         assert_eq!(frame.trade_source_watermark, 11);
         assert!(frame.rows[1].ask.is_none());
+    }
+
+    #[test]
+    fn canonical_depth_edges_override_a_divergent_independent_bbo() {
+        let mut publication = publication("mnq");
+        publication.best_bid = Some(DepthLevel {
+            price: 19_960,
+            quantity: 8,
+            order_count: Some(1),
+        });
+        publication.best_ask = Some(DepthLevel {
+            price: 19_970,
+            quantity: 9,
+            order_count: Some(1),
+        });
+        publication.bbo_source_watermark = publication.source_watermark.saturating_add(1);
+
+        let frame = project_order_book(&selection("mnq", 1), &publication)
+            .expect("matching publication projects");
+
+        assert_eq!(
+            frame.best_bid.as_ref().map(|level| level.price),
+            Some(20_025)
+        );
+        assert_eq!(
+            frame.best_ask.as_ref().map(|level| level.price),
+            Some(20_050)
+        );
+        assert_eq!(
+            frame.rows[0].bid.as_ref().map(|level| level.price),
+            frame.best_bid.as_ref().map(|level| level.price)
+        );
+        assert_eq!(
+            frame.rows[0].ask.as_ref().map(|level| level.price),
+            frame.best_ask.as_ref().map(|level| level.price)
+        );
+    }
+
+    #[test]
+    fn independent_bbo_remains_available_without_canonical_depth() {
+        let mut publication = publication("mnq");
+        publication.bids.clear();
+        publication.asks.clear();
+
+        let frame = project_order_book(&selection("mnq", 1), &publication)
+            .expect("matching publication projects");
+
+        assert_eq!(
+            frame.best_bid.as_ref().map(|level| level.price),
+            Some(20_025)
+        );
+        assert_eq!(
+            frame.best_ask.as_ref().map(|level| level.price),
+            Some(20_050)
+        );
+        assert!(frame.rows.is_empty());
     }
 
     #[test]
