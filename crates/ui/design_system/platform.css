@@ -1,8 +1,16 @@
 @font-face {
-  font-family: "DM Sans";
-  src: url("./assets/fonts/DMSans-Regular.ttf") format("truetype");
+  font-family: "HK Grotesk";
+  src: url("./assets/fonts/HKGrotesk-Regular.ttf") format("truetype");
   font-style: normal;
   font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HK Grotesk";
+  src: url("./assets/fonts/HKGrotesk-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
   font-display: swap;
 }
 
@@ -10,10 +18,10 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --font-sans: "DM Sans", sans-serif;
+  --font-sans: "HK Grotesk", sans-serif;
   --font-weight-normal: 400;
-  --font-weight-emphasis: 400;
-  --font-weight-strong: 400;
+  --font-weight-emphasis: 700;
+  --font-weight-strong: 700;
   --font-feature-tabular-numerals: "tnum";
 
   /* Surfaces */
