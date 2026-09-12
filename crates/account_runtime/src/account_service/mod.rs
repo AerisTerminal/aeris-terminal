@@ -577,6 +577,11 @@ impl AccountService {
         if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
             let secret = Zeroizing::new(rotated.as_bytes().to_vec());
             if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
+                // The successful grant may already have invalidated the old
+                // durable refresh token. Retire every artifact that could
+                // restore that stale session, using the same durable marker
+                // fallback as active-session rotation failures.
+                let _ = self.retire_unusable_vault_material(vault);
                 state.restore_allowed = false;
                 state.lease_expires_at = None;
                 state.view = cleared_view(
@@ -632,12 +637,73 @@ impl AccountService {
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
             return;
         }
+        let cleanup_complete = self.retire_unusable_vault_material(vault);
+        state.restore_allowed = false;
+        let (target, detail) = if cleanup_complete {
+            (
+                AccountSessionState::ReauthenticationRequired,
+                "saved sign-in expired; sign in again",
+            )
+        } else {
+            (
+                AccountSessionState::TerminalError,
+                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in",
+            )
+        };
+        // Unlike transient restore failures, an authoritative rejected grant
+        // must never retain cached offline access in memory.
+        state.lease_expires_at = None;
+        state.view = cleared_view(target, 0, detail);
+    }
 
-        // `restore_cached_lease` may already have installed the durable
-        // directory into memory before the online grant is rejected. Retire
-        // that validation authority under the same lifecycle fence as the
-        // durable credentials so a later interactive login cannot reuse the
-        // rejected lease during a transient refresh failure.
+    /// Retires an authoritatively rejected active session under the current
+    /// generation fence. A successful cleanup leaves no restorable refresh or
+    /// lease material; a partial cleanup keeps the durable rejection marker and
+    /// fails the in-memory session closed instead of treating rejection like an
+    /// offline network outage.
+    fn retire_rejected_session<V>(&self, generation: u64, vault: &V)
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.last_generation != generation
+            || !matches!(
+                state.view.state,
+                AccountSessionState::Active | AccountSessionState::OfflineLease
+            )
+        {
+            return;
+        }
+        let cleanup_complete = self.retire_unusable_vault_material(vault);
+        state.lease_expires_at = None;
+        state.view = cleared_view(
+            if cleanup_complete {
+                AccountSessionState::ReauthenticationRequired
+            } else {
+                AccountSessionState::TerminalError
+            },
+            generation,
+            if cleanup_complete {
+                "sign-in expired; sign in again"
+            } else {
+                "sign-in expired but saved credentials could not be retired; retry sign-in"
+            },
+        );
+    }
+
+    /// Removes every durable credential capable of restoring a session that
+    /// must no longer be restorable. Callers hold the account lifecycle state
+    /// lock while this runs so a newer interactive session cannot race these
+    /// vault mutations. The durable rejection marker doubles as the restart
+    /// fence when cleanup cannot complete.
+    fn retire_unusable_vault_material<V>(&self, vault: &V) -> bool
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
         self.lease_keys
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -678,22 +744,7 @@ impl AccountService {
         } else {
             !marker_persisted
         };
-        state.restore_allowed = false;
-        let (target, detail) = if direct_cleanup && marker_cleared {
-            (
-                AccountSessionState::ReauthenticationRequired,
-                "saved sign-in expired; sign in again",
-            )
-        } else {
-            (
-                AccountSessionState::TerminalError,
-                "saved sign-in could not be retired; credential storage is unavailable; retry sign-in",
-            )
-        };
-        // Unlike transient restore failures, an authoritative rejected grant
-        // must never retain cached offline access in memory.
-        state.lease_expires_at = None;
-        state.view = cleared_view(target, 0, detail);
+        direct_cleanup && marker_cleared
     }
 
     fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) -> bool {
@@ -741,7 +792,10 @@ impl AccountService {
     /// Returns whether a verified online or cached-offline session is installed.
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.state.lock().is_ok_and(|mut state| {
+        // Desktop authorization checks run on the GPUI thread. Fail closed
+        // instead of waiting behind background credential/network work that
+        // may currently own the lifecycle lock.
+        self.state.try_lock().is_ok_and(|mut state| {
             expire_lease_if_needed(&mut state, unix_now());
             matches!(
                 state.view.state,
@@ -1329,9 +1383,6 @@ impl AccountService {
         let Ok(_refresh_guard) = self.refresh_gate.lock() else {
             return;
         };
-        if ensure_device_key(vault).is_err() {
-            return;
-        }
         let outcome = initial_lease_round(self, generation, tokens, account_id, agent, vault);
         self.apply_lease_outcome(generation, outcome);
     }
@@ -1347,10 +1398,13 @@ impl AccountService {
             return;
         };
         // Reuse the same verified refresh/link path as the scheduled lease
-        // worker. Its profile assignment is already generation/account fenced.
-        // Ignore the lease outcome here so a cosmetic refresh cannot downgrade
-        // a healthy session because of a transient network failure.
-        let _ = refresh_lease_round(self, generation, &vault);
+        // worker. Profile fields are generation/account fenced, while plan
+        // changes remain lease-authoritative. Apply only verified online lease
+        // outcomes here: a cosmetic refresh must not downgrade a healthy
+        // session because of transient control-plane unavailability. Terminal
+        // rejection/storage failures retire state inside the shared path.
+        let outcome = refresh_lease_round(self, generation, &vault);
+        self.apply_profile_refresh_outcome(generation, outcome);
     }
 
     fn apply_linked_profile(
@@ -1358,7 +1412,6 @@ impl AccountService {
         generation: u64,
         expected_account: &AccountId,
         linked_account: &AccountId,
-        plan: PlanId,
         profile: AccountProfile,
     ) -> bool {
         if linked_account != expected_account {
@@ -1376,7 +1429,6 @@ impl AccountService {
         {
             return false;
         }
-        state.view.plan_id = plan.as_str().to_string();
         state.view.display_name = profile.display_name;
         state.view.email = profile.email;
         state.view.photo_url = profile.photo_url;
@@ -1421,6 +1473,15 @@ impl AccountService {
                 state.view.detail = "sign-in expired; sign in again".to_string();
                 note_lease("unavailable");
             }
+        }
+    }
+
+    fn apply_profile_refresh_outcome(&self, generation: u64, outcome: lease::RefreshOutcome) {
+        if matches!(
+            outcome,
+            lease::RefreshOutcome::Refreshed(_) | lease::RefreshOutcome::Current(Some(_))
+        ) {
+            self.apply_lease_outcome(generation, outcome);
         }
     }
 
@@ -1579,41 +1640,245 @@ struct LeaseSession {
     origin: String,
 }
 
-fn lease_session<V>(service: &AccountService, generation: u64, vault: &V) -> Option<LeaseSession>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaseSessionError {
+    Unavailable,
+    Storage,
+}
+
+fn lease_session<V>(
+    service: &AccountService,
+    generation: u64,
+    vault: &V,
+) -> Result<LeaseSession, LeaseSessionError>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let account_id = {
-        let state = service.state.lock().ok()?;
-        if state.last_generation != generation {
-            return None;
-        }
-        AccountId::try_new(&state.view.account_id).ok()?
-    };
+    // Resolve network-owned endpoint metadata before taking the lifecycle lock.
+    // Credential selection below must then remain under one generation fence:
+    // otherwise a stale worker can pass the generation check, a newer login can
+    // replace the durable refresh token, and the stale worker can consume that
+    // newer rotating token before any later fence observes the replacement.
+    let endpoints = service
+        .oidc_endpoints()
+        .map_err(|_| LeaseSessionError::Unavailable)?;
+    let origin =
+        control_plane_origin(&endpoints.issuer).map_err(|_| LeaseSessionError::Unavailable)?;
+    let state = service
+        .state
+        .lock()
+        .map_err(|_| LeaseSessionError::Unavailable)?;
+    if state.last_generation != generation {
+        return Err(LeaseSessionError::Unavailable);
+    }
+    let account_id =
+        AccountId::try_new(&state.view.account_id).map_err(|_| LeaseSessionError::Unavailable)?;
     let refresh_token = vault
         .load(REFRESH_VAULT_KEY)
-        .ok()
-        .flatten()
+        .map_err(|_| LeaseSessionError::Storage)?
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|token| !token.is_empty())?;
-    let endpoints = service.oidc_endpoints().ok()?;
-    let origin = control_plane_origin(&endpoints.issuer).ok()?;
-    if ensure_device_key(vault).is_err() {
-        return None;
-    }
-    let device_id = vault
+        .filter(|token| !token.is_empty())
+        .ok_or(LeaseSessionError::Storage)?;
+    let mut device_key = vault
         .load(DEVICE_VAULT_KEY)
-        .ok()
-        .flatten()
-        .map(|key| device_id_for_key(&key))?;
-    Some(LeaseSession {
+        .map_err(|_| LeaseSessionError::Storage)?
+        .filter(|key| !key.is_empty());
+    if device_key.is_none() {
+        ensure_device_key(vault).map_err(|_| LeaseSessionError::Storage)?;
+        device_key = vault
+            .load(DEVICE_VAULT_KEY)
+            .map_err(|_| LeaseSessionError::Storage)?
+            .filter(|key| !key.is_empty());
+    }
+    let device_id = device_key
+        .map(|key| device_id_for_key(&key))
+        .ok_or(LeaseSessionError::Storage)?;
+    Ok(LeaseSession {
         account_id,
         device_id,
         refresh_token,
         endpoints,
         origin,
     })
+}
+
+fn persist_rotated_refresh<V>(
+    service: &AccountService,
+    generation: u64,
+    vault: &V,
+    refresh_token: Option<&str>,
+) -> bool
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Some(refresh_token) = refresh_token.filter(|token| !token.is_empty()) else {
+        return service.is_current(generation);
+    };
+    let secret = Zeroizing::new(refresh_token.as_bytes().to_vec());
+    let Ok(mut state) = service.state.lock() else {
+        return false;
+    };
+    if state.last_generation != generation
+        || !matches!(
+            state.view.state,
+            AccountSessionState::Active | AccountSessionState::OfflineLease
+        )
+    {
+        return false;
+    }
+    if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
+        // A successful rotating grant may have invalidated the durable token
+        // we still hold. Retire every restorable artifact under this same
+        // generation fence so a restart cannot resurrect the now-unusable
+        // saved session. Partial cleanup is fenced by the existing durable
+        // rejection marker.
+        let _ = service.retire_unusable_vault_material(vault);
+        state.restore_allowed = false;
+        state.lease_expires_at = None;
+        state.view = cleared_view(
+            AccountSessionState::TerminalError,
+            generation,
+            "credential storage is unavailable; retry sign-in",
+        );
+        return false;
+    }
+    true
+}
+
+fn accept_refresh_grant<V>(
+    service: &AccountService,
+    generation: u64,
+    session: &LeaseSession,
+    vault: &V,
+    outcome: Result<oidc::VerifiedTokens, oidc::RefreshGrantError>,
+    now_unix_seconds: u64,
+) -> Result<oidc::VerifiedTokens, lease::RefreshOutcome>
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    match outcome {
+        Ok(tokens) => {
+            if persist_rotated_refresh(service, generation, vault, tokens.refresh.as_deref()) {
+                Ok(tokens)
+            } else {
+                Err(lease::RefreshOutcome::Unavailable)
+            }
+        }
+        Err(oidc::RefreshGrantError::Rejected) => {
+            note_lease("refresh-rejected");
+            service.retire_rejected_session(generation, vault);
+            Err(lease::RefreshOutcome::Unavailable)
+        }
+        Err(oidc::RefreshGrantError::Unavailable) => Err(cached_outcome(
+            service,
+            generation,
+            session,
+            vault,
+            now_unix_seconds,
+        )),
+    }
+}
+
+fn persist_lease_directory<V>(
+    service: &AccountService,
+    generation: u64,
+    vault: &V,
+    fetched_keys: &[LeaseKey],
+) -> bool
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Ok(encoded) = serde_json::to_vec(fetched_keys) else {
+        fail_current_storage(service, generation);
+        return false;
+    };
+    let Ok(mut state) = service.state.lock() else {
+        return false;
+    };
+    if state.last_generation != generation
+        || !matches!(
+            state.view.state,
+            AccountSessionState::Active | AccountSessionState::OfflineLease
+        )
+    {
+        return false;
+    }
+    // The fetched directory is the authority that validated this online
+    // lease. Commit it under the session-generation fence before any lease
+    // validated by it can become durable. Re-store even when the in-memory
+    // cache matches: memory equality does not prove the durable copy exists.
+    if vault.store(LEASE_DIRECTORY_VAULT_KEY, &encoded).is_err() {
+        note_lease("directory-storage-unavailable");
+        fail_locked_durable_storage(service, &mut state, generation, vault);
+        return false;
+    }
+    let Ok(mut cached) = service.lease_keys.lock() else {
+        fail_locked_durable_storage(service, &mut state, generation, vault);
+        return false;
+    };
+    // Keep the generation fence through the in-memory authority update. A new
+    // login cannot advance ownership between the durable directory commit and
+    // this cache replacement.
+    cached.clear();
+    cached.extend_from_slice(fetched_keys);
+    true
+}
+
+fn fail_current_storage(service: &AccountService, generation: u64) {
+    let Ok(mut state) = service.state.lock() else {
+        return;
+    };
+    if state.last_generation != generation
+        || !matches!(
+            state.view.state,
+            AccountSessionState::Active | AccountSessionState::OfflineLease
+        )
+    {
+        return;
+    }
+    state.restore_allowed = false;
+    state.lease_expires_at = None;
+    state.view = cleared_view(
+        AccountSessionState::TerminalError,
+        generation,
+        "credential storage is unavailable; retry sign-in",
+    );
+}
+
+fn fail_locked_durable_storage<V>(
+    service: &AccountService,
+    state: &mut ServiceState,
+    generation: u64,
+    vault: &V,
+) where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    if state.last_generation != generation
+        || !matches!(
+            state.view.state,
+            AccountSessionState::Active | AccountSessionState::OfflineLease
+        )
+    {
+        return;
+    }
+    // A verified online entitlement could encode a downgrade or revocation.
+    // If its durable commit fails, the previous cached entitlement must not be
+    // able to reappear after restart. Retire every restorable artifact while
+    // the session-generation fence is still held; the independent marker
+    // covers partial vault cleanup.
+    let _ = service.retire_unusable_vault_material(vault);
+    state.restore_allowed = false;
+    state.lease_expires_at = None;
+    state.view = cleared_view(
+        AccountSessionState::TerminalError,
+        generation,
+        "credential storage is unavailable; retry sign-in",
+    );
 }
 
 fn validate_and_cache<V>(
@@ -1629,8 +1894,133 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let fetched_keys = lease::fetch_directory(agent, &session.origin).unwrap_or_default();
-    let (claims, cached_claims) = {
+    let fetched_keys = lease::fetch_directory(agent, &session.origin);
+    match fetched_keys.as_deref() {
+        Ok(keys) => validate_and_cache_after_directory_fetch(
+            service,
+            generation,
+            session,
+            compact,
+            vault,
+            now_unix_seconds,
+            Ok(keys),
+        ),
+        Err(_) => validate_and_cache_after_directory_fetch(
+            service,
+            generation,
+            session,
+            compact,
+            vault,
+            now_unix_seconds,
+            Err(()),
+        ),
+    }
+}
+
+fn validate_and_cache_after_directory_fetch<V>(
+    service: &AccountService,
+    generation: u64,
+    session: &LeaseSession,
+    compact: &str,
+    vault: &V,
+    now_unix_seconds: u64,
+    directory: Result<&[LeaseKey], ()>,
+) -> lease::RefreshOutcome
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let (fetched_keys, directory_unavailable) = match directory {
+        Ok(keys) => (keys, false),
+        Err(()) => (&[][..], true),
+    };
+    let outcome = validate_and_cache_with_directory(
+        service,
+        generation,
+        session,
+        compact,
+        vault,
+        now_unix_seconds,
+        fetched_keys,
+    );
+    if directory_unavailable
+        && outcome == lease::RefreshOutcome::Unavailable
+        && service.is_current(generation)
+    {
+        // Directory reachability is control-plane availability, not an
+        // authoritative entitlement rejection. If a freshly returned lease
+        // needs an unknown rotated key while the directory is unavailable,
+        // keep a still-valid cached lease as the bounded offline authority.
+        return cached_outcome(service, generation, session, vault, now_unix_seconds);
+    }
+    outcome
+}
+
+fn transition_lease_keys(
+    session: &LeaseSession,
+    cached_compact: Option<&str>,
+    cached_keys: &[LeaseKey],
+    fetched_keys: &[LeaseKey],
+    cached_is_authoritative: bool,
+    now_unix_seconds: u64,
+) -> Option<Vec<LeaseKey>> {
+    let mut transition_keys = fetched_keys.to_owned();
+    if fetched_keys.is_empty() || !cached_is_authoritative {
+        return Some(transition_keys);
+    }
+    let cached = cached_compact?;
+    if lease::validate_compact(
+        cached,
+        fetched_keys,
+        &session.account_id,
+        &session.device_id,
+        now_unix_seconds,
+    )
+    .is_ok()
+    {
+        return Some(transition_keys);
+    }
+    let old_key = cached_keys.iter().find(|key| {
+        lease::validate_compact(
+            cached,
+            std::slice::from_ref(*key),
+            &session.account_id,
+            &session.device_id,
+            now_unix_seconds,
+        )
+        .is_ok()
+    })?;
+    if let Some(replacement) = transition_keys.iter().find(|key| key.0 == old_key.0) {
+        // Compact leases resolve keys by `kid`, so different public keys with
+        // one identifier cannot coexist during the two-write transition.
+        if replacement.1 != old_key.1 {
+            note_lease("directory-key-id-conflict");
+            return None;
+        }
+    } else {
+        transition_keys.push(old_key.clone());
+    }
+    Some(transition_keys)
+}
+
+fn validate_and_cache_with_directory<V>(
+    service: &AccountService,
+    generation: u64,
+    session: &LeaseSession,
+    compact: &str,
+    vault: &V,
+    now_unix_seconds: u64,
+    fetched_keys: &[LeaseKey],
+) -> lease::RefreshOutcome
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Ok(cached_compact) = lease::load_cached(vault, LEASE_VAULT_KEY) else {
+        fail_current_storage(service, generation);
+        return lease::RefreshOutcome::Unavailable;
+    };
+    let (claims, cached_claims, transition_keys) = {
         let cached_keys = service
             .lease_keys
             .lock()
@@ -1638,7 +2028,7 @@ where
         let validation_keys = if fetched_keys.is_empty() {
             cached_keys.as_slice()
         } else {
-            fetched_keys.as_slice()
+            fetched_keys
         };
         let Ok(claims) = lease::validate_compact(
             compact,
@@ -1649,27 +2039,47 @@ where
         ) else {
             return lease::RefreshOutcome::Unavailable;
         };
-        let cached_claims = lease::load_cached(vault, LEASE_VAULT_KEY).and_then(|cached| {
+        // Compare revisions against the durable lease using the authority that
+        // made that lease restorable before this refresh. A signing-key
+        // rotation must not let a lower-revision lease bypass monotonic cache
+        // protection merely because the newly fetched directory no longer
+        // contains the old signing key.
+        let cached_claims = cached_compact.as_deref().and_then(|cached| {
             lease::validate_compact(
-                &cached,
-                validation_keys,
+                cached,
+                cached_keys.as_slice(),
                 &session.account_id,
                 &session.device_id,
                 now_unix_seconds,
             )
             .ok()
         });
-        (claims, cached_claims)
+        // Make the directory write compatible with both sides of the durable
+        // lease replacement. If rotation removed the key for the still-valid
+        // cached lease, retain only the old key that verifies that lease. A
+        // crash before the following lease write then leaves a valid old pair;
+        // a crash after it leaves a directory that also contains every fetched
+        // key needed by the new lease. The next successful refresh naturally
+        // drops this compatibility key once the durable lease uses a fetched
+        // key.
+        let Some(transition_keys) = transition_lease_keys(
+            session,
+            cached_compact.as_deref(),
+            cached_keys.as_slice(),
+            fetched_keys,
+            cached_claims.is_some(),
+            now_unix_seconds,
+        ) else {
+            return lease::RefreshOutcome::Unavailable;
+        };
+        (claims, cached_claims, transition_keys)
     };
     // Persist a rotated directory only after it validates a lease from the
     // same response path. A malformed lease cannot poison offline restart.
     if !fetched_keys.is_empty()
-        && let Ok(mut cached) = service.lease_keys.lock()
+        && !persist_lease_directory(service, generation, vault, &transition_keys)
     {
-        cached.clone_from(&fetched_keys);
-        if let Ok(encoded) = serde_json::to_vec(&fetched_keys) {
-            let _ = vault.store(LEASE_DIRECTORY_VAULT_KEY, &encoded);
-        }
+        return lease::RefreshOutcome::Unavailable;
     }
     match cached_claims {
         Some(cached) if cached.revision() >= claims.revision() => {
@@ -1678,18 +2088,24 @@ where
         }
         _ => {
             let secret = Zeroizing::new(compact.as_bytes().to_vec());
-            let current = service.state.lock().is_ok_and(|state| {
-                state.last_generation == generation
-                    && (state.view.state == AccountSessionState::Active
-                        || state.view.state == AccountSessionState::OfflineLease)
-                    && vault.store(LEASE_VAULT_KEY, secret.as_slice()).is_ok()
-            });
-            if current {
-                let _ = service.record_lease_expiry(generation, claims.expires_at());
-                lease::RefreshOutcome::Refreshed(claims.plan())
-            } else {
-                lease::RefreshOutcome::Unavailable
+            let Ok(mut state) = service.state.lock() else {
+                return lease::RefreshOutcome::Unavailable;
+            };
+            if state.last_generation != generation
+                || !matches!(
+                    state.view.state,
+                    AccountSessionState::Active | AccountSessionState::OfflineLease
+                )
+            {
+                return lease::RefreshOutcome::Unavailable;
             }
+            if vault.store(LEASE_VAULT_KEY, secret.as_slice()).is_err() {
+                note_lease("lease-storage-unavailable");
+                fail_locked_durable_storage(service, &mut state, generation, vault);
+                return lease::RefreshOutcome::Unavailable;
+            }
+            state.lease_expires_at = Some(claims.expires_at());
+            lease::RefreshOutcome::Refreshed(claims.plan())
         }
     }
 }
@@ -1708,24 +2124,31 @@ where
     // Offline coverage re-validates the cached lease against the last-known
     // directory without touching the network, and additionally requires the
     // remaining validity to sit inside the approved offline window.
-    let keys = service
-        .lease_keys
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let claims = lease::load_cached(vault, LEASE_VAULT_KEY)
-        .and_then(|cached| {
-            lease::validate_compact(
-                &cached,
-                &keys,
-                &session.account_id,
-                &session.device_id,
-                now_unix_seconds,
-            )
-            .ok()
-        })
+    let cached = match lease::load_cached(vault, LEASE_VAULT_KEY) {
+        Ok(Some(cached)) => cached,
+        Ok(None) => return None,
+        Err(_) => {
+            fail_current_storage(service, generation);
+            return None;
+        }
+    };
+    let claims = {
+        let keys = service
+            .lease_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lease::validate_compact(
+            &cached,
+            &keys,
+            &session.account_id,
+            &session.device_id,
+            now_unix_seconds,
+        )
+        .ok()
         .filter(|claims| {
             claims.expires_at().saturating_sub(now_unix_seconds) <= LEASE_OFFLINE_VALIDITY_SECONDS
-        })?;
+        })?
+    };
     let _ = service.record_lease_expiry(generation, claims.expires_at());
     Some(claims.plan())
 }
@@ -1740,45 +2163,35 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let Some(session) = lease_session(service, generation, vault) else {
-        return lease::RefreshOutcome::Unavailable;
+    let session = match lease_session(service, generation, vault) {
+        Ok(session) => session,
+        Err(LeaseSessionError::Storage) => {
+            fail_current_storage(service, generation);
+            return lease::RefreshOutcome::Unavailable;
+        }
+        Err(LeaseSessionError::Unavailable) => return lease::RefreshOutcome::Unavailable,
     };
     let now = unix_now();
     // One connection pool per background round: grant, link, lease, and
     // directory reuse it instead of paying a fresh handshake per stage.
     let agent = oidc_agent();
-    let Ok(tokens) = refresh_grant(
+    let refresh = refresh_grant(
         &session.endpoints,
         &agent,
         &service.config.client_id,
         &session.refresh_token,
-    ) else {
-        return cached_outcome(service, generation, &session, vault, now);
+    );
+    let tokens = match accept_refresh_grant(service, generation, &session, vault, refresh, now) {
+        Ok(tokens) => tokens,
+        Err(outcome) => return outcome,
     };
-    if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
-        let secret = Zeroizing::new(rotated.as_bytes().to_vec());
-        let _ = service.state.lock().map(|state| {
-            if state.last_generation == generation
-                && (state.view.state == AccountSessionState::Active
-                    || state.view.state == AccountSessionState::OfflineLease)
-            {
-                let _ = vault.store(REFRESH_VAULT_KEY, secret.as_slice());
-            }
-        });
-    }
-    if let Ok((account_id, plan, profile)) = link_subject(
+    if let Ok((account_id, _plan, profile)) = link_subject(
         &session.endpoints,
         &agent,
         &tokens.id_token,
         &tokens.subject,
     ) {
-        let _ = service.apply_linked_profile(
-            generation,
-            &session.account_id,
-            &account_id,
-            plan,
-            profile,
-        );
+        let _ = service.apply_linked_profile(generation, &session.account_id, &account_id, profile);
     }
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
@@ -1823,8 +2236,13 @@ where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    let Some(session) = lease_session(service, generation, vault) else {
-        return lease::RefreshOutcome::Unavailable;
+    let session = match lease_session(service, generation, vault) {
+        Ok(session) => session,
+        Err(LeaseSessionError::Storage) => {
+            fail_current_storage(service, generation);
+            return lease::RefreshOutcome::Unavailable;
+        }
+        Err(LeaseSessionError::Unavailable) => return lease::RefreshOutcome::Unavailable,
     };
     if &session.account_id != account_id {
         return lease::RefreshOutcome::Unavailable;
@@ -1939,7 +2357,7 @@ mod tests {
         net::TcpListener,
         path::PathBuf,
         sync::{
-            Mutex,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
     };
@@ -1996,6 +2414,63 @@ mod tests {
             if key == self.failing_key {
                 return Err("selected load failure".to_string());
             }
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            self.inner.delete(key)
+        }
+    }
+
+    struct GenerationRaceVault<'a> {
+        inner: &'a MemoryVault,
+        state: Arc<Mutex<super::ServiceState>>,
+        attempted_advance: AtomicBool,
+        advanced: AtomicBool,
+        replacement_generation: u64,
+    }
+
+    impl CredentialVault for GenerationRaceVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+            if key == REFRESH_VAULT_KEY {
+                self.attempted_advance.store(true, Ordering::Release);
+                if let Ok(mut state) = self.state.try_lock() {
+                    state.last_generation = self.replacement_generation;
+                    state.view.request_generation = self.replacement_generation;
+                    self.inner.store(REFRESH_VAULT_KEY, b"newer-refresh")?;
+                    self.advanced.store(true, Ordering::Release);
+                }
+            }
+            self.inner.load(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), Self::Error> {
+            self.inner.delete(key)
+        }
+    }
+
+    struct SelectiveStoreFailureVault<'a> {
+        inner: &'a MemoryVault,
+        failing_key: &'static str,
+    }
+
+    impl CredentialVault for SelectiveStoreFailureVault<'_> {
+        type Error = String;
+
+        fn store(&self, key: &str, secret: &[u8]) -> Result<(), Self::Error> {
+            if key == self.failing_key {
+                return Err("selected store failure".to_string());
+            }
+            self.inner.store(key, secret)
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
             self.inner.load(key)
         }
 
@@ -2193,21 +2668,26 @@ mod tests {
         service
     }
 
-    fn seed_current_cached_lease(vault: &MemoryVault, expires_at: u64) {
-        let seed = [9_u8; 32];
+    fn signed_lease_fixture(
+        seed: [u8; 32],
+        key_id: &str,
+        account_id: &str,
+        device_key: &[u8],
+        plan: &str,
+        revision: u64,
+        expires_at: u64,
+    ) -> (String, super::LeaseKey) {
         let signing_key = SigningKey::from_bytes(&seed);
-        let key_id = "ent1";
-        let device_key = b"cached-lease-device-key";
         let device_id = super::lease::device_id_for_key(device_key);
         let now = super::unix_now();
         let header = serde_json::json!({ "alg": "EdDSA", "kid": key_id, "typ": "JWT" });
         let payload = serde_json::json!({
             "ver": 1,
-            "aid": "acct_cached",
+            "aid": account_id,
             "did": device_id,
-            "plan": "pro",
+            "plan": plan,
             "feat": 7,
-            "rev": 1,
+            "rev": revision,
             "iat": now.saturating_sub(1),
             "nbf": now.saturating_sub(1),
             "exp": expires_at,
@@ -2220,7 +2700,24 @@ mod tests {
         let input = format!("{}.{}", encode(&header), encode(&payload));
         let signature = signing_key.sign(input.as_bytes());
         let compact = format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
-        let directory = vec![(key_id.to_string(), signing_key.verifying_key().to_bytes())];
+        (
+            compact,
+            (key_id.to_string(), signing_key.verifying_key().to_bytes()),
+        )
+    }
+
+    fn seed_current_cached_lease(vault: &MemoryVault, expires_at: u64) {
+        let device_key = b"cached-lease-device-key";
+        let (compact, key) = signed_lease_fixture(
+            [9_u8; 32],
+            "ent1",
+            "acct_cached",
+            device_key,
+            "pro",
+            1,
+            expires_at,
+        );
+        let directory = vec![key];
 
         vault
             .store(DEVICE_VAULT_KEY, device_key)
@@ -2363,6 +2860,763 @@ mod tests {
             AccountSessionState::OfflineLease
         );
         assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn active_refresh_rejection_cannot_fall_back_to_cached_offline_access() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"rejected-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+
+        let outcome = super::accept_refresh_grant(
+            &service,
+            0,
+            &session,
+            &vault,
+            Err(oidc::RefreshGrantError::Rejected),
+            super::unix_now(),
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(super::lease::RefreshOutcome::Unavailable)
+        ));
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::ReauthenticationRequired
+        );
+        assert!(!service.is_authenticated());
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .is_none()
+        );
+        assert!(vault.load(LEASE_VAULT_KEY).expect("lease reads").is_none());
+    }
+
+    #[test]
+    fn transient_refresh_unavailability_still_uses_valid_cached_lease() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+
+        let outcome = super::accept_refresh_grant(
+            &service,
+            0,
+            &session,
+            &vault,
+            Err(oidc::RefreshGrantError::Unavailable),
+            super::unix_now(),
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(super::lease::RefreshOutcome::OfflineCovered(PlanId::Pro))
+        ));
+        assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn directory_unavailability_during_key_rotation_keeps_valid_cached_coverage() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        let now = super::unix_now();
+        seed_current_cached_lease(&vault, now.saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let old_lease = vault
+            .load(LEASE_VAULT_KEY)
+            .expect("cached lease reads")
+            .expect("cached lease exists");
+        let (rotated_compact, _rotated_key) = signed_lease_fixture(
+            [41_u8; 32],
+            "ent2",
+            "acct_cached",
+            b"cached-lease-device-key",
+            "elite",
+            2,
+            now.saturating_add(60),
+        );
+
+        let outcome = super::validate_and_cache_after_directory_fetch(
+            &service,
+            0,
+            &session,
+            &rotated_compact,
+            &vault,
+            now,
+            Err(()),
+        );
+
+        assert_eq!(
+            outcome,
+            super::lease::RefreshOutcome::OfflineCovered(PlanId::Pro),
+            "a transient directory outage must not invalidate a still-valid cached lease"
+        );
+        assert!(service.is_authenticated());
+        assert_eq!(
+            vault.load(LEASE_VAULT_KEY).expect("lease reads").as_deref(),
+            Some(old_lease.as_slice()),
+            "an unverifiable rotated lease must not replace cached offline authority"
+        );
+    }
+
+    #[test]
+    fn lease_session_binds_refresh_token_read_to_its_generation() {
+        let service = service();
+        let vault = MemoryVault::default();
+        vault
+            .store(REFRESH_VAULT_KEY, b"generation-refresh")
+            .expect("refresh fixture stores");
+        vault
+            .store(DEVICE_VAULT_KEY, b"generation-device-key")
+            .expect("device fixture stores");
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.last_generation = 61;
+            state.view = AccountView {
+                state: AccountSessionState::Active,
+                account_id: "acct_01".to_string(),
+                plan_id: "pro".to_string(),
+                detail: "signed in".to_string(),
+                request_generation: 61,
+                display_name: String::new(),
+                email: String::new(),
+                photo_url: String::new(),
+            };
+        }
+        let racing = GenerationRaceVault {
+            inner: &vault,
+            state: Arc::clone(&service.state),
+            attempted_advance: AtomicBool::new(false),
+            advanced: AtomicBool::new(false),
+            replacement_generation: 62,
+        };
+
+        let session = super::lease_session(&service, 61, &racing).expect("lease session builds");
+
+        assert!(racing.attempted_advance.load(Ordering::Acquire));
+        assert!(
+            !racing.advanced.load(Ordering::Acquire),
+            "a newer generation must not replace durable refresh material while stale credential selection owns the lifecycle fence"
+        );
+        assert_eq!(session.refresh_token, "generation-refresh");
+        assert_eq!(
+            service
+                .state
+                .lock()
+                .expect("account state locks")
+                .last_generation,
+            61
+        );
+    }
+
+    #[test]
+    fn initial_lease_warmup_device_storage_failure_retires_active_access() {
+        let service = service();
+        let vault = MemoryVault::default();
+        vault
+            .store(REFRESH_VAULT_KEY, b"warmup-refresh")
+            .expect("refresh fixture stores");
+        vault
+            .store(DEVICE_VAULT_KEY, b"warmup-device-key")
+            .expect("device fixture stores");
+        let account = AccountId::try_new("acct_01").expect("account fixture builds");
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.last_generation = 71;
+            state.view = AccountView {
+                state: AccountSessionState::Active,
+                account_id: account.as_str().to_string(),
+                plan_id: "pro".to_string(),
+                detail: "signed in".to_string(),
+                request_generation: 71,
+                display_name: String::new(),
+                email: String::new(),
+                photo_url: String::new(),
+            };
+        }
+        let failing = SelectiveLoadFailureVault {
+            inner: &vault,
+            failing_key: DEVICE_VAULT_KEY,
+        };
+        let tokens = verified_restore("acct_01", None).3;
+
+        service.refresh_lease_once(71, &tokens, &account, &super::oidc_agent(), &failing);
+
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError,
+            "post-login warmup must not ignore an observed protected-storage failure"
+        );
+        assert!(!service.is_authenticated());
+    }
+
+    #[test]
+    fn active_refresh_credential_reads_fail_closed_instead_of_looking_transient() {
+        for failing_key in [REFRESH_VAULT_KEY, DEVICE_VAULT_KEY] {
+            let service = restoring_service();
+            let vault = MemoryVault::default();
+            seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+            vault
+                .store(REFRESH_VAULT_KEY, b"cached-refresh")
+                .expect("refresh fixture stores");
+            assert!(matches!(
+                service.restore_local_session(&vault),
+                LocalRestore::ContinueOnline { .. }
+            ));
+            let failing = SelectiveLoadFailureVault {
+                inner: &vault,
+                failing_key,
+            };
+
+            let outcome = super::refresh_lease_round(&service, 0, &failing);
+
+            assert_eq!(outcome, super::lease::RefreshOutcome::Unavailable);
+            assert_eq!(
+                service.account_status().state,
+                AccountSessionState::TerminalError,
+                "protected credential reads must retire current access instead of becoming a cosmetic network outage"
+            );
+            assert!(!service.is_authenticated());
+        }
+    }
+
+    #[test]
+    fn cached_lease_read_failure_during_transient_refresh_fails_current_access_closed() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let failing = SelectiveLoadFailureVault {
+            inner: &vault,
+            failing_key: LEASE_VAULT_KEY,
+        };
+
+        let outcome = super::accept_refresh_grant(
+            &service,
+            0,
+            &session,
+            &failing,
+            Err(oidc::RefreshGrantError::Unavailable),
+            super::unix_now(),
+        );
+
+        assert_eq!(outcome, Err(super::lease::RefreshOutcome::Unavailable));
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(!service.is_authenticated());
+    }
+
+    #[test]
+    fn stale_refresh_rejection_cannot_retire_newer_session_credentials() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"old-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let stale_session =
+            super::lease_session(&service, 0, &vault).expect("stale lease session builds");
+        {
+            let mut state = service.state.lock().expect("account state locks");
+            state.last_generation = 11;
+            state.view.request_generation = 11;
+            state.view.state = AccountSessionState::Active;
+        }
+        vault
+            .store(REFRESH_VAULT_KEY, b"new-refresh")
+            .expect("new refresh fixture stores");
+
+        let _ = super::accept_refresh_grant(
+            &service,
+            0,
+            &stale_session,
+            &vault,
+            Err(oidc::RefreshGrantError::Rejected),
+            super::unix_now(),
+        );
+
+        assert!(service.is_authenticated());
+        assert_eq!(service.account_status().request_generation, 11);
+        assert_eq!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .as_deref(),
+            Some(b"new-refresh".as_slice())
+        );
+    }
+
+    #[test]
+    fn rotated_refresh_store_failure_fails_current_session_closed() {
+        let (root, marker) = marker_fixture();
+        let service = restoring_service_with_marker(Some(marker.clone()));
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"old-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let failing = AllMutationFailureVault { inner: &vault };
+        let tokens = VerifiedTokens {
+            subject: "subject".to_string(),
+            access: "access".to_string(),
+            id_token: "identity".to_string(),
+            refresh: Some("rotated-refresh".to_string()),
+        };
+
+        let outcome = super::accept_refresh_grant(
+            &service,
+            0,
+            &session,
+            &failing,
+            Ok(tokens),
+            super::unix_now(),
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(super::lease::RefreshOutcome::Unavailable)
+        ));
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(!service.is_authenticated());
+        assert_eq!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .as_deref(),
+            Some(b"old-refresh".as_slice())
+        );
+
+        let restarted = restoring_service_with_marker(Some(marker));
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::TerminalError,
+            "a failed rotated-token commit must remain fail-closed across restart"
+        );
+        assert!(!restarted.is_authenticated());
+        fs::remove_dir_all(root).expect("marker fixture removes");
+    }
+
+    #[test]
+    fn rotated_directory_and_lease_remain_restart_compatible_at_every_commit_boundary() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        let now = super::unix_now();
+        seed_current_cached_lease(&vault, now.saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let old_compact = String::from_utf8(
+            vault
+                .load(LEASE_VAULT_KEY)
+                .expect("old lease reads")
+                .expect("old lease exists"),
+        )
+        .expect("old lease is utf8");
+        let (new_compact, new_key) = signed_lease_fixture(
+            [19_u8; 32],
+            "ent2",
+            "acct_cached",
+            b"cached-lease-device-key",
+            "pro",
+            2,
+            now.saturating_add(60),
+        );
+
+        let outcome = super::validate_and_cache_with_directory(
+            &service,
+            0,
+            &session,
+            &new_compact,
+            &vault,
+            now,
+            std::slice::from_ref(&new_key),
+        );
+        assert!(matches!(
+            outcome,
+            super::lease::RefreshOutcome::Refreshed(PlanId::Pro)
+        ));
+        let transition_directory: Vec<super::LeaseKey> = serde_json::from_slice(
+            &vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .expect("directory exists"),
+        )
+        .expect("transition directory decodes");
+        assert_eq!(transition_directory.len(), 2);
+        assert!(
+            super::lease::validate_compact(
+                &old_compact,
+                &transition_directory,
+                &session.account_id,
+                &session.device_id,
+                now,
+            )
+            .is_ok(),
+            "directory-first commit must retain authority for the old durable lease"
+        );
+        assert!(
+            super::lease::validate_compact(
+                &new_compact,
+                &transition_directory,
+                &session.account_id,
+                &session.device_id,
+                now,
+            )
+            .is_ok(),
+            "the same durable directory must authorize the replacement lease"
+        );
+
+        let outcome = super::validate_and_cache_with_directory(
+            &service,
+            0,
+            &session,
+            &new_compact,
+            &vault,
+            now,
+            std::slice::from_ref(&new_key),
+        );
+        assert!(matches!(
+            outcome,
+            super::lease::RefreshOutcome::Current(Some(PlanId::Pro))
+        ));
+        let converged: Vec<super::LeaseKey> = serde_json::from_slice(
+            &vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .expect("directory exists"),
+        )
+        .expect("directory decodes");
+        assert_eq!(converged, vec![new_key]);
+    }
+
+    #[test]
+    fn signing_key_rotation_cannot_roll_back_the_cached_lease_revision() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        let now = super::unix_now();
+        let device_key = b"cached-lease-device-key";
+        let (old_compact, old_key) = signed_lease_fixture(
+            [9_u8; 32],
+            "ent1",
+            "acct_cached",
+            device_key,
+            "elite",
+            9,
+            now.saturating_add(60),
+        );
+        vault
+            .store(DEVICE_VAULT_KEY, device_key)
+            .expect("device fixture stores");
+        vault
+            .store(LEASE_VAULT_KEY, old_compact.as_bytes())
+            .expect("old lease fixture stores");
+        vault
+            .store(
+                LEASE_DIRECTORY_VAULT_KEY,
+                &serde_json::to_vec(&vec![old_key.clone()]).expect("old directory encodes"),
+            )
+            .expect("old directory fixture stores");
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let (rollback_compact, new_key) = signed_lease_fixture(
+            [19_u8; 32],
+            "ent2",
+            "acct_cached",
+            device_key,
+            "starter",
+            3,
+            now.saturating_add(60),
+        );
+
+        let outcome = super::validate_and_cache_with_directory(
+            &service,
+            0,
+            &session,
+            &rollback_compact,
+            &vault,
+            now,
+            std::slice::from_ref(&new_key),
+        );
+
+        assert_eq!(
+            outcome,
+            super::lease::RefreshOutcome::Current(Some(PlanId::Elite)),
+            "key rotation must not let a lower signed revision replace a newer cached entitlement"
+        );
+        assert_eq!(
+            vault.load(LEASE_VAULT_KEY).expect("lease reads").as_deref(),
+            Some(old_compact.as_bytes()),
+            "the durable lease must remain at the highest verified revision"
+        );
+        let transition_directory: Vec<super::LeaseKey> = serde_json::from_slice(
+            &vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .expect("directory exists"),
+        )
+        .expect("transition directory decodes");
+        assert_eq!(transition_directory.len(), 2);
+        assert!(
+            super::lease::validate_compact(
+                &old_compact,
+                &transition_directory,
+                &session.account_id,
+                &session.device_id,
+                now,
+            )
+            .is_ok(),
+            "the transition directory must keep the highest-revision durable lease restorable"
+        );
+    }
+
+    #[test]
+    fn same_key_id_with_different_signing_key_is_rejected_before_durable_rotation() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        let now = super::unix_now();
+        seed_current_cached_lease(&vault, now.saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let old_lease = vault
+            .load(LEASE_VAULT_KEY)
+            .expect("old lease reads")
+            .expect("old lease exists");
+        let old_directory = vault
+            .load(LEASE_DIRECTORY_VAULT_KEY)
+            .expect("old directory reads")
+            .expect("old directory exists");
+        let (replacement, replacement_key) = signed_lease_fixture(
+            [29_u8; 32],
+            "ent1",
+            "acct_cached",
+            b"cached-lease-device-key",
+            "pro",
+            2,
+            now.saturating_add(60),
+        );
+
+        let outcome = super::validate_and_cache_with_directory(
+            &service,
+            0,
+            &session,
+            &replacement,
+            &vault,
+            now,
+            std::slice::from_ref(&replacement_key),
+        );
+
+        assert_eq!(outcome, super::lease::RefreshOutcome::Unavailable);
+        assert_eq!(
+            vault.load(LEASE_VAULT_KEY).expect("lease reads").as_deref(),
+            Some(old_lease.as_slice())
+        );
+        assert_eq!(
+            vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .as_deref(),
+            Some(old_directory.as_slice())
+        );
+        assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn directory_store_failure_cannot_publish_or_persist_replacement_lease() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        let now = super::unix_now();
+        seed_current_cached_lease(&vault, now.saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let old_lease = vault
+            .load(LEASE_VAULT_KEY)
+            .expect("old lease reads")
+            .expect("old lease exists");
+        let old_directory = vault
+            .load(LEASE_DIRECTORY_VAULT_KEY)
+            .expect("old directory reads")
+            .expect("old directory exists");
+        let (new_compact, new_key) = signed_lease_fixture(
+            [23_u8; 32],
+            "ent2",
+            "acct_cached",
+            b"cached-lease-device-key",
+            "pro",
+            2,
+            now.saturating_add(60),
+        );
+        let failing = LeaseArtifactMutationFailureVault { inner: &vault };
+
+        let outcome = super::validate_and_cache_with_directory(
+            &service,
+            0,
+            &session,
+            &new_compact,
+            &failing,
+            now,
+            std::slice::from_ref(&new_key),
+        );
+
+        assert_eq!(outcome, super::lease::RefreshOutcome::Unavailable);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(!service.is_authenticated());
+        assert_eq!(
+            vault.load(LEASE_VAULT_KEY).expect("lease reads").as_deref(),
+            Some(old_lease.as_slice())
+        );
+        assert_eq!(
+            vault
+                .load(LEASE_DIRECTORY_VAULT_KEY)
+                .expect("directory reads")
+                .as_deref(),
+            Some(old_directory.as_slice())
+        );
+    }
+
+    #[test]
+    fn replacement_lease_store_failure_retires_cached_entitlement_across_restart() {
+        let (root, marker) = marker_fixture();
+        let service = restoring_service_with_marker(Some(marker.clone()));
+        let vault = MemoryVault::default();
+        let now = super::unix_now();
+        seed_current_cached_lease(&vault, now.saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline { .. }
+        ));
+        let session = super::lease_session(&service, 0, &vault).expect("lease session builds");
+        let (replacement, replacement_key) = signed_lease_fixture(
+            [31_u8; 32],
+            "ent2",
+            "acct_cached",
+            b"cached-lease-device-key",
+            "starter",
+            2,
+            now.saturating_add(60),
+        );
+        let failing = SelectiveStoreFailureVault {
+            inner: &vault,
+            failing_key: LEASE_VAULT_KEY,
+        };
+
+        let outcome = super::validate_and_cache_with_directory(
+            &service,
+            0,
+            &session,
+            &replacement,
+            &failing,
+            now,
+            std::slice::from_ref(&replacement_key),
+        );
+
+        assert_eq!(outcome, super::lease::RefreshOutcome::Unavailable);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError,
+            "a verified replacement lease that cannot become durable must retire current access"
+        );
+        assert!(!service.is_authenticated());
+        assert!(vault.load(LEASE_VAULT_KEY).expect("lease reads").is_none());
+        // Once the cached lease itself is deleted, retaining the bounded key
+        // directory is harmless: there is no durable entitlement left for it
+        // to authorize on restart.
+        assert!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .is_none()
+        );
+
+        let restarted = restoring_service_with_marker(Some(marker));
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert!(!restarted.is_authenticated());
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::SignedOut
+        );
+        fs::remove_dir_all(root).expect("marker fixture removes");
     }
 
     #[test]
@@ -2608,11 +3862,10 @@ mod tests {
             9,
             &account,
             &account,
-            PlanId::Pro,
             profile("new", "new@example.test"),
         ));
         let refreshed = service.account_status();
-        assert_eq!(refreshed.plan_id, "pro");
+        assert_eq!(refreshed.plan_id, "starter");
         assert_eq!(refreshed.display_name, "new");
 
         let other = AccountId::try_new("acct_02").expect("other account builds");
@@ -2620,18 +3873,16 @@ mod tests {
             9,
             &account,
             &other,
-            PlanId::Elite,
             profile("wrong", "wrong@example.test"),
         ));
         assert!(!service.apply_linked_profile(
             8,
             &account,
             &account,
-            PlanId::Elite,
             profile("stale", "stale@example.test"),
         ));
         let still_current = service.account_status();
-        assert_eq!(still_current.plan_id, "pro");
+        assert_eq!(still_current.plan_id, "starter");
         assert_eq!(still_current.display_name, "new");
 
         service.state.lock().expect("state locks").view.state = AccountSessionState::SignedOut;
@@ -2639,9 +3890,75 @@ mod tests {
             9,
             &account,
             &account,
-            PlanId::Elite,
             profile("late", "late@example.test"),
         ));
+    }
+
+    #[test]
+    fn profile_refresh_applies_only_verified_online_lease_plan_changes() {
+        use super::lease::RefreshOutcome;
+
+        let service = service();
+        {
+            let mut state = service.state.lock().expect("state locks");
+            state.last_generation = 9;
+            state.view = AccountView {
+                state: AccountSessionState::Active,
+                account_id: "acct_01".to_string(),
+                plan_id: "starter".to_string(),
+                detail: "signed in".to_string(),
+                request_generation: 9,
+                display_name: "Ada".to_string(),
+                email: "ada@example.test".to_string(),
+                photo_url: String::new(),
+            };
+        }
+
+        service.apply_profile_refresh_outcome(9, RefreshOutcome::Refreshed(PlanId::Pro));
+        let refreshed = service.account_status();
+        assert_eq!(refreshed.state, AccountSessionState::Active);
+        assert_eq!(refreshed.plan_id, "pro");
+
+        service.apply_profile_refresh_outcome(9, RefreshOutcome::OfflineCovered(PlanId::Elite));
+        let transient = service.account_status();
+        assert_eq!(transient.state, AccountSessionState::Active);
+        assert_eq!(transient.plan_id, "pro");
+
+        service.apply_profile_refresh_outcome(9, RefreshOutcome::Unavailable);
+        let unavailable = service.account_status();
+        assert_eq!(unavailable.state, AccountSessionState::Active);
+        assert_eq!(unavailable.plan_id, "pro");
+
+        service.apply_profile_refresh_outcome(9, RefreshOutcome::Current(Some(PlanId::Elite)));
+        let current = service.account_status();
+        assert_eq!(current.state, AccountSessionState::Active);
+        assert_eq!(current.plan_id, "elite");
+    }
+
+    #[test]
+    fn authenticated_check_fails_closed_when_runtime_state_is_busy() {
+        let service = service();
+        {
+            let mut state = service.state.lock().expect("state locks");
+            state.last_generation = 9;
+            state.view = AccountView {
+                state: AccountSessionState::Active,
+                account_id: "acct_01".to_string(),
+                plan_id: "pro".to_string(),
+                detail: "signed in".to_string(),
+                request_generation: 9,
+                display_name: String::new(),
+                email: String::new(),
+                photo_url: String::new(),
+            };
+            state.lease_expires_at = Some(super::unix_now().saturating_add(60));
+        }
+
+        let _busy = service.state.lock().expect("state locks");
+        assert!(
+            !service.is_authenticated(),
+            "the GPUI hard-auth check must fail closed instead of waiting on the runtime lifecycle lock"
+        );
     }
 
     fn verified_restore(
@@ -3229,6 +4546,57 @@ mod tests {
             service.account_status().state,
             AccountSessionState::TerminalError
         );
+    }
+
+    #[test]
+    fn online_restore_rotation_store_failure_cannot_restore_cached_access_after_restart() {
+        let (root, marker) = marker_fixture();
+        let service = restoring_service_with_marker(Some(marker.clone()));
+        let vault = MemoryVault::default();
+        seed_current_cached_lease(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"old-refresh")
+            .expect("refresh fixture stores");
+        let failing = AllMutationFailureVault { inner: &vault };
+        assert!(matches!(
+            service.restore_local_session(&failing),
+            LocalRestore::ContinueOnline { .. }
+        ));
+
+        assert!(
+            service
+                .apply_online_restore(
+                    &failing,
+                    Ok(verified_restore("acct_cached", Some("rotated-refresh")).3),
+                    |_| panic!("storage failure must stop restore before account linking")
+                )
+                .is_none()
+        );
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::TerminalError
+        );
+        assert!(!service.is_authenticated());
+        assert_eq!(
+            vault
+                .load(REFRESH_VAULT_KEY)
+                .expect("refresh reads")
+                .as_deref(),
+            Some(b"old-refresh".as_slice())
+        );
+
+        let restarted = restoring_service_with_marker(Some(marker));
+        assert!(matches!(
+            restarted.restore_local_session(&vault),
+            LocalRestore::Settled
+        ));
+        assert_eq!(
+            restarted.account_status().state,
+            AccountSessionState::TerminalError,
+            "failed restore-time rotation must remain fail-closed across restart"
+        );
+        assert!(!restarted.is_authenticated());
+        fs::remove_dir_all(root).expect("marker fixture removes");
     }
 
     #[test]

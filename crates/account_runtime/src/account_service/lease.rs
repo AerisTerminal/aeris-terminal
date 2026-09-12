@@ -224,17 +224,20 @@ struct DirectoryKey {
 }
 
 /// Loads the cached compact lease from the vault, if any.
-pub fn load_cached<V>(vault: &V, key: &str) -> Option<String>
+///
+/// # Errors
+///
+/// Returns a redacted error when protected credential storage cannot be read.
+pub fn load_cached<V>(vault: &V, key: &str) -> Result<Option<String>, String>
 where
     V: CredentialVault,
     V::Error: std::fmt::Display,
 {
-    vault
+    Ok(vault
         .load(key)
-        .ok()
-        .flatten()
+        .map_err(|_| "credential storage is unavailable".to_string())?
         .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|lease| !lease.is_empty() && lease.len() <= MAXIMUM_LEASE_BYTES)
+        .filter(|lease| !lease.is_empty() && lease.len() <= MAXIMUM_LEASE_BYTES))
 }
 
 /// Fetches one compact lease for a verified session.

@@ -380,6 +380,7 @@ fn signed_out_view() -> AccountView {
 #[derive(Clone)]
 pub struct DesktopAccount {
     shared: Arc<AccountShared>,
+    authoritative_runtime: Option<AccountService>,
 }
 
 static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
@@ -436,6 +437,9 @@ impl DesktopAccount {
     /// workspace or market worker.
     #[must_use]
     pub fn authenticated(&self) -> bool {
+        if let Some(runtime) = &self.authoritative_runtime {
+            return runtime.is_authenticated();
+        }
         self.shared.view.lock().is_ok_and(|view| {
             matches!(
                 view.state,
@@ -458,13 +462,21 @@ impl DesktopAccount {
     }
 
     fn spawn() -> Result<Self, String> {
-        Self::spawn_with(handle_account_request)
+        Self::spawn_with_runtime(handle_account_request, Some(account_service().clone()))
     }
 
     /// Spawns one isolated session with a scripted worker. Production uses
     /// [`handle_account_request`]; tests inject a fake runtime handler.
+    #[cfg(test)]
     fn spawn_with(
         handle: impl Fn(AccountRequest) -> AccountResponse + Send + 'static,
+    ) -> Result<Self, String> {
+        Self::spawn_with_runtime(handle, None)
+    }
+
+    fn spawn_with_runtime(
+        handle: impl Fn(AccountRequest) -> AccountResponse + Send + 'static,
+        authoritative_runtime: Option<AccountService>,
     ) -> Result<Self, String> {
         let (request_tx, request_rx) = mpsc::sync_channel(2);
         let (result_tx, result_rx) = mpsc::sync_channel(2);
@@ -504,7 +516,10 @@ impl DesktopAccount {
                 }
             })
             .map_err(|_| "desktop account client could not start".to_string())?;
-        let session = Self { shared };
+        let session = Self {
+            shared,
+            authoritative_runtime,
+        };
         // Fetch engine state at startup so a restored session (or an
         // runtime expiry) reaches the UI on the first frames.
         session.queue_status();
@@ -1078,6 +1093,7 @@ mod tests {
         AccountRequest, AccountResponse, DesktopAccount, MANAGE_PROFILE_URL, account_action_label,
         account_state_label, open_login_browser_with, sanitized_plan_label, unavailable_menu_state,
     };
+    use axiusflow_account_runtime::{AccountService, AccountServiceConfig};
     use axiusflow_contracts::{AccountSessionState, AccountView};
     use std::sync::{Arc, Mutex, atomic::Ordering};
     use std::time::{Duration, Instant};
@@ -1613,6 +1629,33 @@ mod tests {
         assert!(session.authenticated());
         assert!(session.error().is_none());
         assert!(!session.menu_state().retry_sign_out);
+    }
+
+    #[test]
+    fn authoritative_runtime_authentication_overrides_stale_desktop_view() {
+        let runtime = AccountService::new(
+            AccountServiceConfig::try_new("https://auth.axiusflow.test/api/auth", "desktop-test")
+                .expect("test account config builds"),
+        );
+        let session = DesktopAccount::spawn_with_runtime(inert_engine, Some(runtime))
+            .expect("isolated session spawns");
+        *session.shared.view.lock().expect("desktop view locks") =
+            view(AccountSessionState::Active);
+
+        assert_eq!(
+            session
+                .shared
+                .view
+                .lock()
+                .expect("desktop view locks")
+                .state,
+            AccountSessionState::Active,
+            "the regression requires a deliberately stale authorized presentation"
+        );
+        assert!(
+            !session.authenticated(),
+            "hard authorization must use the current in-process runtime, not the 30s presentation cache"
+        );
     }
 
     #[test]
