@@ -3016,13 +3016,20 @@ impl WorkspaceSurface {
             });
         }
         let preferences = self.chart_chrome;
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = chart_chrome::save_chart_chrome_preferences(preferences) {
-                    eprintln!("Axiusflow chart chrome could not be saved: {error}");
-                }
-            })
-            .detach();
+        match chart_chrome::request_chart_chrome_preferences_save(preferences) {
+            Ok(true) => cx
+                .background_executor()
+                .spawn(async move {
+                    if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
+                        eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                    }
+                })
+                .detach(),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Axiusflow chart chrome could not be saved: {error}");
+            }
+        }
         cx.notify();
     }
 

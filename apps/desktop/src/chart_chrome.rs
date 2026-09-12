@@ -1,8 +1,10 @@
 use axiusflow_chart_integration::ChartType;
 use axiusflow_design_system::RadiusToken;
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write as _,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;
@@ -232,6 +234,38 @@ impl Default for ChartChromePreferences {
     }
 }
 
+static CHART_CHROME_FILE_LOCK: Mutex<()> = Mutex::new(());
+static CHART_CHROME_SAVE_STATE: Mutex<ChartChromeSaveState> = Mutex::new(ChartChromeSaveState {
+    worker_active: false,
+    latest: None,
+});
+
+#[derive(Default)]
+struct ChartChromeSaveState {
+    worker_active: bool,
+    latest: Option<ChartChromePreferences>,
+}
+
+impl ChartChromeSaveState {
+    fn request(&mut self, preferences: ChartChromePreferences) -> bool {
+        self.latest = Some(preferences);
+        if self.worker_active {
+            false
+        } else {
+            self.worker_active = true;
+            true
+        }
+    }
+
+    fn take_next(&mut self) -> Option<ChartChromePreferences> {
+        self.latest.take()
+    }
+
+    fn finish(&mut self) {
+        self.worker_active = false;
+    }
+}
+
 fn parse_chrome_flag(value: &str) -> bool {
     value.trim() != "0"
 }
@@ -287,20 +321,73 @@ pub fn chart_chrome_state_path() -> Option<PathBuf> {
 
 #[must_use]
 pub fn load_chart_chrome_preferences() -> ChartChromePreferences {
-    chart_chrome_state_path()
-        .and_then(|path| fs::read_to_string(path).ok())
+    chart_chrome_state_path().map_or_else(ChartChromePreferences::default, |path| {
+        load_chart_chrome_preferences_from(&path)
+    })
+}
+
+fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
+    fs::read_to_string(path)
+        .or_else(|_| fs::read_to_string(chart_chrome_backup_path(path)))
+        .ok()
         .as_deref()
         .map(parse_chart_chrome_preferences)
         .unwrap_or_default()
 }
 
+/// Coalesces one UI-owned preference snapshot. Returns whether the caller must
+/// start the single background saver. The lock protects only this tiny in-memory
+/// slot; filesystem work remains entirely off the GPUI thread.
+pub(crate) fn request_chart_chrome_preferences_save(
+    preferences: ChartChromePreferences,
+) -> Result<bool, String> {
+    let mut state = CHART_CHROME_SAVE_STATE
+        .lock()
+        .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
+    Ok(state.request(preferences))
+}
+
+/// Drains coalesced chart-chrome persistence until no newer UI snapshot remains.
+///
 /// # Errors
 ///
-/// Returns an error when the per-user desktop directory cannot be created or replaced.
-pub fn save_chart_chrome_preferences(preferences: ChartChromePreferences) -> Result<(), String> {
-    let path = chart_chrome_state_path()
-        .ok_or_else(|| "desktop chart chrome directory is unavailable".to_string())?;
-    save_chart_chrome_preferences_to(&path, preferences)
+/// Returns an error when the per-user desktop directory or persistence worker
+/// state is unavailable, or when the latest pending snapshot cannot be saved.
+pub(crate) fn run_chart_chrome_preferences_save_worker() -> Result<(), String> {
+    let Some(path) = chart_chrome_state_path() else {
+        if let Ok(mut state) = CHART_CHROME_SAVE_STATE.lock() {
+            state.finish();
+        }
+        return Err("desktop chart chrome directory is unavailable".to_string());
+    };
+    run_chart_chrome_preferences_save_worker_to(&path, &CHART_CHROME_SAVE_STATE)
+}
+
+fn run_chart_chrome_preferences_save_worker_to(
+    path: &Path,
+    state: &Mutex<ChartChromeSaveState>,
+) -> Result<(), String> {
+    loop {
+        let next = {
+            let mut state = state
+                .lock()
+                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
+            let Some(next) = state.take_next() else {
+                state.finish();
+                return Ok(());
+            };
+            next
+        };
+        if let Err(error) = save_chart_chrome_preferences_to(path, next) {
+            let mut state = state
+                .lock()
+                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
+            if state.latest.is_none() {
+                state.finish();
+                return Err(error);
+            }
+        }
+    }
 }
 
 /// # Errors
@@ -310,32 +397,107 @@ pub fn save_chart_chrome_preferences_to(
     path: &Path,
     preferences: ChartChromePreferences,
 ) -> Result<(), String> {
+    let _save_guard = CHART_CHROME_FILE_LOCK
+        .lock()
+        .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|_| "desktop chart chrome directory could not be created".to_string())?;
     }
-    let staging = path.with_extension("tmp");
-    fs::write(
-        &staging,
-        encode_chart_chrome_preferences(preferences).as_bytes(),
-    )
-    .map_err(|_| "desktop chart chrome could not be written".to_string())?;
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|_| "desktop chart chrome could not be replaced".to_string())?;
+    let staging = chart_chrome_staging_path(path);
+    let backup = chart_chrome_backup_path(path);
+    let encoded = encode_chart_chrome_preferences(preferences);
+    let mut staging_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&staging)
+        .map_err(|_| "desktop chart chrome could not be written".to_string())?;
+    staging_file
+        .write_all(encoded.as_bytes())
+        .and_then(|()| staging_file.sync_all())
+        .map_err(|_| "desktop chart chrome could not be written".to_string())?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        sync_chart_chrome_directory(parent)?;
     }
-    fs::rename(&staging, path)
-        .map_err(|_| "desktop chart chrome could not be published".to_string())
+    if path.exists() {
+        remove_chart_chrome_file_if_present(&backup)?;
+        fs::rename(path, &backup)
+            .map_err(|_| "desktop chart chrome could not be replaced".to_string())?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            sync_chart_chrome_directory(parent)?;
+        }
+    }
+    if fs::rename(&staging, path).is_err() {
+        if !path.exists() && backup.exists() {
+            let _ = fs::rename(&backup, path);
+        }
+        return Err("desktop chart chrome could not be published".to_string());
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        sync_chart_chrome_directory(parent)?;
+    }
+    remove_chart_chrome_file_if_present(&backup)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        sync_chart_chrome_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn chart_chrome_staging_path(path: &Path) -> PathBuf {
+    path.with_extension("tmp")
+}
+
+fn chart_chrome_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("bak")
+}
+
+fn remove_chart_chrome_file_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("desktop chart chrome could not be replaced".to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn sync_chart_chrome_directory(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "desktop chart chrome directory could not be synchronized".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartChromePreferences, INDICATOR_SPECS, IndicatorKind, IndicatorLocation,
-        IndicatorParameters, encode_chart_chrome_preferences, filter_indicator_specs,
-        parse_chart_chrome_preferences, save_chart_chrome_preferences_to,
+        ChartChromePreferences, ChartChromeSaveState, INDICATOR_SPECS, IndicatorKind,
+        IndicatorLocation, IndicatorParameters, chart_chrome_backup_path,
+        chart_chrome_staging_path, encode_chart_chrome_preferences, filter_indicator_specs,
+        load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
+        run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
     };
     use axiusflow_chart_integration::ChartType;
+    use std::sync::Mutex;
+
+    fn temporary_chart_chrome_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "axiusflow-chart-chrome-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ))
+    }
+
+    fn remove_chart_chrome_test_files(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(chart_chrome_staging_path(path));
+        let _ = std::fs::remove_file(chart_chrome_backup_path(path));
+    }
 
     #[test]
     fn catalog_order_matches_the_platform_menu() {
@@ -450,19 +612,85 @@ mod tests {
             encode_chart_chrome_preferences(hidden),
             "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\n"
         );
-        let path = std::env::temp_dir().join(format!(
-            "axiusflow-chart-chrome-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_nanos())
-        ));
+        let path = temporary_chart_chrome_path("round-trip");
         save_chart_chrome_preferences_to(&path, hidden).expect("temp chrome file writes");
         let restored = parse_chart_chrome_preferences(
             &std::fs::read_to_string(&path).expect("temp chrome file reads"),
         );
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("tmp"));
+        remove_chart_chrome_test_files(&path);
         assert_eq!(restored, hidden);
+    }
+
+    #[test]
+    fn chart_chrome_load_recovers_committed_preferences_from_backup_boundary() {
+        let path = temporary_chart_chrome_path("backup-recovery");
+        let backup = chart_chrome_backup_path(&path);
+        let staging = chart_chrome_staging_path(&path);
+        let committed = ChartChromePreferences {
+            indicator_name_labels_visible: false,
+            indicator_value_labels_visible: true,
+            indicator_price_lines_visible: false,
+            chart_type: ChartType::Bars,
+        };
+        let pending = ChartChromePreferences {
+            indicator_name_labels_visible: true,
+            indicator_value_labels_visible: false,
+            indicator_price_lines_visible: true,
+            chart_type: ChartType::Line,
+        };
+        save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
+
+        std::fs::rename(&path, &backup).expect("crash boundary moves current to backup");
+        std::fs::write(&staging, encode_chart_chrome_preferences(pending))
+            .expect("pending staging writes");
+
+        assert_eq!(
+            load_chart_chrome_preferences_from(&path),
+            committed,
+            "a crash after current-to-backup must retain the last committed preferences"
+        );
+        remove_chart_chrome_test_files(&path);
+    }
+
+    #[test]
+    fn chart_chrome_save_queue_coalesces_to_latest_ui_snapshot() {
+        let path = temporary_chart_chrome_path("coalesced");
+        let first = ChartChromePreferences {
+            indicator_name_labels_visible: false,
+            indicator_value_labels_visible: false,
+            indicator_price_lines_visible: true,
+            chart_type: ChartType::Line,
+        };
+        let second = ChartChromePreferences {
+            indicator_name_labels_visible: true,
+            indicator_value_labels_visible: true,
+            indicator_price_lines_visible: false,
+            chart_type: ChartType::Bars,
+        };
+        let state = Mutex::new(ChartChromeSaveState::default());
+        let inflight = {
+            let mut state = state.lock().expect("save state locks");
+            assert!(state.request(first), "the first request starts one worker");
+            state.take_next().expect("worker claims first request")
+        };
+        {
+            let mut state = state.lock().expect("save state locks");
+            assert!(
+                !state.request(second),
+                "a newer request coalesces while the single saver is active"
+            );
+        }
+        save_chart_chrome_preferences_to(&path, inflight).expect("inflight save succeeds");
+        run_chart_chrome_preferences_save_worker_to(&path, &state)
+            .expect("worker drains the newer coalesced request");
+
+        assert_eq!(load_chart_chrome_preferences_from(&path), second);
+        let state = state.lock().expect("save state locks");
+        assert!(!state.worker_active);
+        assert!(state.latest.is_none());
+        assert!(!chart_chrome_staging_path(&path).exists());
+        assert!(!chart_chrome_backup_path(&path).exists());
+        drop(state);
+        remove_chart_chrome_test_files(&path);
     }
 }
