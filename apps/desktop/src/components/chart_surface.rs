@@ -7,7 +7,7 @@ use super::{
     Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
     WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
     chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
-    platform_tabular_numerals, px, relative,
+    platform_tabular_numerals, px,
 };
 use gpui::{AppContext, Stateful};
 
@@ -85,10 +85,7 @@ fn order_book_side_panel(
         .bg(gpui_color(theme.colors.surface))
         .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
         .when(both_visible, |panel| {
-            panel
-                .flex_basis(relative(ratio))
-                .flex_grow_0()
-                .flex_shrink_1()
+            panel.flex_basis(px(0.0)).flex_grow(ratio).flex_shrink_1()
         })
         .when(!both_visible, gpui::Styled::flex_1)
         .child(side_panel_header(
@@ -126,8 +123,8 @@ fn watchlist_side_panel(
         .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
         .when(both_visible, |panel| {
             panel
-                .flex_basis(relative(1.0 - ratio))
-                .flex_grow_0()
+                .flex_basis(px(0.0))
+                .flex_grow(1.0 - ratio)
                 .flex_shrink_1()
         })
         .when(!both_visible, gpui::Styled::flex_1)
