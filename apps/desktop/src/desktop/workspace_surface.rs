@@ -1069,9 +1069,10 @@ impl WorkspaceSurface {
         Self {
             chart,
             order_book,
-            side_panel: None,
+            side_panels: SidePanelVisibility::default(),
             side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
             side_panel_resize: None,
+            side_panel_split_basis_points: 5_000,
             menu_state: WorkspaceMenuState::default(),
             scrolls: WorkspaceScrollHandles::default(),
             chart_state,
@@ -1092,6 +1093,8 @@ impl WorkspaceSurface {
             symbol_browser: initial_symbol_browser(),
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
+            symbol_selection_target: SymbolSelectionTarget::Chart,
+            pending_watchlist_instrument: None,
             series_message: "Select a symbol before choosing a series".to_string(),
             symbol_input,
             indicator_input,
@@ -1109,10 +1112,7 @@ impl WorkspaceSurface {
             chart_type_trigger_bounds: None,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
-            instrument_exchange: InstrumentExchangeUi::Idle(match provider {
-                TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
-                TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
-            }),
+            instrument_exchange: initial_instrument_exchange(provider),
             provider,
             product,
             rithmic_switch: RithmicSwitchState::Idle,
@@ -1470,6 +1470,9 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if overlay == ChromeOverlay::Instrument {
+            self.symbol_selection_target = SymbolSelectionTarget::Chart;
+        }
         self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
         self.chrome_overlay_phase = ChromeOverlayPhase::Opening;
         self.chrome_overlay = Some(overlay);
@@ -1533,6 +1536,9 @@ impl WorkspaceSurface {
         if self.chrome_overlay.is_none() || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
         {
             return;
+        }
+        if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
+            self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }
         match self.chrome_overlay {
             Some(ChromeOverlay::Indicator) => {
@@ -3233,6 +3239,22 @@ impl WorkspaceSurface {
                 // Both engine providers resolve selections through the same
                 // switch flow: the pending product replaces the chart only
                 // when its covering snapshot arrives.
+                if self.symbol_selection_target == SymbolSelectionTarget::Watchlist {
+                    let Some(selection) = usize_generation(command_generation)
+                        .and_then(|generation| self.symbol_browser.resolve_selection(generation))
+                    else {
+                        return;
+                    };
+                    self.symbol_browser
+                        .consume_completed_search(selection.search_generation);
+                    self.pending_watchlist_instrument = Some(instrument);
+                    self.symbol_selection_target = SymbolSelectionTarget::Chart;
+                    self.market_state.symbol_selection_pending = false;
+                    self.chrome_overlay = None;
+                    self.symbol_message = "Watchlist symbol resolved".to_string();
+                    cx.notify();
+                    return;
+                }
                 if !self.confirm_catalog_selection(command_generation) {
                     return;
                 }
@@ -3329,26 +3351,54 @@ impl WorkspaceSurface {
 
     pub(super) fn toggle_order_book(&mut self, cx: &mut Context<Self>) {
         if self.has_market_selection() {
-            let visible = self.side_panel != Some(SidePanel::OrderBook);
+            let visible = !self.side_panels.contains(SidePanel::OrderBook);
             self.set_order_book_visible(visible, cx);
         }
     }
 
     pub(super) fn set_order_book_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        let next_panel = visible.then_some(SidePanel::OrderBook);
-        if self.side_panel == next_panel {
+        if self.side_panels.contains(SidePanel::OrderBook) == visible {
             return;
         }
-        self.side_panel = next_panel;
+        self.side_panels.set(SidePanel::OrderBook, visible);
         if visible {
             self.order_book
                 .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
         } else {
             self.menu_state.order_book_column_open = false;
-            self.side_panel_resize = None;
+            if !self.side_panels.any() {
+                self.side_panel_resize = None;
+            }
         }
         let _ = self.market_worker.try_set_order_book_visible(visible);
+        self.chart_persistence_dirty = true;
         cx.notify();
+    }
+
+    pub(super) fn toggle_watchlist(&mut self, cx: &mut Context<Self>) {
+        let visible = !self.side_panels.contains(SidePanel::Watchlist);
+        self.set_watchlist_visible(visible, cx);
+    }
+
+    pub(super) fn set_watchlist_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.side_panels.contains(SidePanel::Watchlist) == visible {
+            return;
+        }
+        self.side_panels.set(SidePanel::Watchlist, visible);
+        if !self.side_panels.any() {
+            self.side_panel_resize = None;
+        }
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
+    pub(super) fn open_watchlist_symbol_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chrome_overlay(ChromeOverlay::Instrument, window, cx);
+        self.symbol_selection_target = SymbolSelectionTarget::Watchlist;
     }
 
     pub(super) fn toggle_order_book_column_menu(&mut self, cx: &mut Context<Self>) {
@@ -3363,8 +3413,11 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn close_side_panel(&mut self, cx: &mut Context<Self>) {
-        self.set_order_book_visible(false, cx);
+    pub(super) fn close_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
+        match panel {
+            SidePanel::OrderBook => self.set_order_book_visible(false, cx),
+            SidePanel::Watchlist => self.set_watchlist_visible(false, cx),
+        }
     }
 
     pub(super) fn begin_side_panel_resize(&mut self, pointer_x: f32) {
@@ -3396,6 +3449,18 @@ impl WorkspaceSurface {
 
     pub(super) fn end_side_panel_resize(&mut self) {
         self.side_panel_resize = None;
+    }
+
+    pub(super) fn set_side_panel_split_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {
+        let basis_points = (ratio.clamp(0.05, 0.95) * 10_000.0)
+            .round()
+            .to_u32()
+            .unwrap_or(5_000);
+        if basis_points != self.side_panel_split_basis_points {
+            self.side_panel_split_basis_points = basis_points;
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
     }
 
     pub(super) fn reset_chart_view(&mut self, cx: &mut Context<Self>) {

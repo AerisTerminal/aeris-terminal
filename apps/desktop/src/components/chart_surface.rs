@@ -1,12 +1,14 @@
 use super::{
-    AxiusflowTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Div,
-    Entity, FluentBuilder, HugeIcon, InteractiveElement, IntoElement, Loader, MenuRow, MouseButton,
-    NucleusChartView, OrderBookColumn, OrderBookColumnVisibility, ParentElement, RadiusToken,
-    ReadOnlyOrderBookView, Role, SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel,
-    StatefulInteractiveElement, Styled, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
-    WorkspaceSurface, chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div,
-    gpui_color, header_icon, px,
+    AxiusflowTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
+    Div, Entity, FluentBuilder, HugeIcon, InteractiveElement, IntoElement, Loader, MenuRow,
+    MouseButton, NucleusChartView, OrderBookColumn, OrderBookColumnVisibility, ParentElement,
+    RadiusToken, ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel,
+    SidePanelVisibility, StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive,
+    WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT, WatchlistRow, Window, WorkspaceSurface,
+    chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div, gpui_color,
+    header_icon, platform_tabular_numerals, px, relative,
 };
+use gpui::AppContext;
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
@@ -45,22 +47,72 @@ pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElem
 
 pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) app: Entity<WorkspaceSurface>,
+    pub(super) terminal: Entity<TerminalApp>,
     pub(super) workspace_id: u64,
-    pub(super) panel: SidePanel,
+    pub(super) visible: SidePanelVisibility,
     pub(super) width: f32,
+    pub(super) split_basis_points: u32,
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
+    pub(super) watchlist: Vec<WatchlistRow>,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
     pub(super) theme: &'a AxiusflowTheme,
 }
 
+fn order_book_side_panel(
+    app: Entity<WorkspaceSurface>,
+    order_book: &Entity<ReadOnlyOrderBookView>,
+    both_visible: bool,
+    ratio: f32,
+    column_menu_open: bool,
+    columns: OrderBookColumnVisibility,
+    theme: &AxiusflowTheme,
+) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .when(both_visible, |panel| panel.h(relative(ratio)).flex_none())
+        .when(!both_visible, gpui::Styled::flex_1)
+        .child(side_panel_header(
+            SidePanel::OrderBook,
+            app.clone(),
+            column_menu_open,
+            theme,
+        ))
+        .child(div().flex_1().overflow_hidden().child(order_book.clone()))
+        .children(
+            column_menu_open.then(|| order_book_column_menu_layer(app, order_book, columns, theme)),
+        )
+}
+
+fn watchlist_side_panel(
+    app: Entity<WorkspaceSurface>,
+    terminal: &Entity<TerminalApp>,
+    watchlist: Vec<WatchlistRow>,
+    theme: &AxiusflowTheme,
+) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .flex_1()
+        .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
+        .child(watchlist_table(terminal, watchlist, theme))
+}
+
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
     let WorkspaceSidePanelState {
         app,
+        terminal,
         workspace_id,
-        panel,
+        visible,
         width,
+        split_basis_points,
         order_book,
+        watchlist,
         order_book_column_menu_open,
         order_book_columns,
         theme,
@@ -69,6 +121,28 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let resize_app = app.clone();
     let move_app = app.clone();
     let release_app = app.clone();
+    let order_book_visible = visible.contains(SidePanel::OrderBook);
+    let watchlist_visible = visible.contains(SidePanel::Watchlist);
+    let both_visible = order_book_visible && watchlist_visible;
+    let ratio = if both_visible {
+        (split_basis_points.to_f32().unwrap_or(5_000.0) / 10_000.0).clamp(0.05, 0.95)
+    } else {
+        1.0
+    };
+    let order_book_panel = order_book_visible.then(|| {
+        order_book_side_panel(
+            app.clone(),
+            order_book,
+            both_visible,
+            ratio,
+            order_book_column_menu_open,
+            order_book_columns,
+            theme,
+        )
+    });
+    let watchlist_panel =
+        watchlist_visible.then(|| watchlist_side_panel(app.clone(), &terminal, watchlist, theme));
+    let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
         .w(px(width))
@@ -81,22 +155,23 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         .bg(gpui_color(colors.surface))
         .border_l_1()
         .border_color(gpui_color(colors.border))
-        .child(side_panel_header(
-            panel,
-            app.clone(),
-            order_book_column_menu_open,
-            theme,
-        ))
-        .child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .children((panel == SidePanel::OrderBook).then_some(order_book.clone())),
-        )
+        .children(order_book_panel)
+        .children(watchlist_panel)
         .children(
-            (panel == SidePanel::OrderBook && order_book_column_menu_open)
-                .then(|| order_book_column_menu_layer(app, order_book, order_book_columns, theme)),
+            both_visible
+                .then(|| side_panel_split_handle(workspace_id, ratio, gpui_color(colors.border))),
         )
+        .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
+            let height = f32::from(event.bounds.size.height);
+            if height <= 0.0 {
+                return;
+            }
+            let ratio =
+                (f32::from(event.event.position.y) - f32::from(event.bounds.top())) / height;
+            split_drag_app.update(cx, |surface, surface_cx| {
+                surface.set_side_panel_split_ratio(ratio, surface_cx);
+            });
+        })
         .child(
             div()
                 .id(("side_panel_resize", workspace_id))
@@ -140,6 +215,212 @@ pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
         .children(chart.cloned())
 }
 
+#[derive(Clone)]
+struct SidePanelSplitDrag;
+
+impl Render for SidePanelSplitDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+fn side_panel_split_handle(workspace_id: u64, ratio: f32, border: gpui::Hsla) -> impl IntoElement {
+    div()
+        .id(("side_panel_split", workspace_id))
+        .absolute()
+        .occlude()
+        .left_0()
+        .top(relative(ratio))
+        .mt(px(-4.0))
+        .w_full()
+        .h(px(8.0))
+        .cursor_row_resize()
+        .on_drag(SidePanelSplitDrag, |drag, _, _, cx| {
+            cx.new(|_| drag.clone())
+        })
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(3.0))
+                .w_full()
+                .h(px(1.0))
+                .bg(border),
+        )
+}
+
+fn watchlist_table(
+    terminal: &Entity<TerminalApp>,
+    rows: Vec<WatchlistRow>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let mut body = div()
+        .flex_1()
+        .min_h_0()
+        .font_features(platform_tabular_numerals());
+    if rows.is_empty() {
+        body = body.child(
+            div()
+                .px_3()
+                .py_4()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child("Add symbols with +"),
+        );
+    } else {
+        for row in rows {
+            body = body.child(watchlist_row(terminal, row, theme));
+        }
+    }
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(watchlist_columns(theme))
+        .child(body.id("watchlist_body").overflow_y_scroll())
+}
+
+fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    div()
+        .h(px(26.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .px_2()
+        .text_xs()
+        .text_color(gpui_color(colors.text_muted))
+        .child(div().min_w_0().flex_1().child("ASSET"))
+        .child(watchlist_cell("LAST", 76.0))
+        .child(watchlist_cell("CHANGE", 66.0))
+        .child(watchlist_cell("CHANGE %", 68.0))
+        .child(watchlist_cell("VOLUME", 72.0))
+}
+
+fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {
+    div()
+        .w(px(width))
+        .flex_none()
+        .text_right()
+        .overflow_hidden()
+        .child(value.into())
+}
+
+fn watchlist_row(
+    terminal: &Entity<TerminalApp>,
+    row: WatchlistRow,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let scale = row.instrument.price_scale;
+    let last = row.last.map(|bar| bar.close);
+    let change = last
+        .zip(row.previous_close)
+        .map(|(last, previous)| last - previous);
+    let change_percent = change
+        .zip(row.previous_close)
+        .and_then(|(change, previous)| {
+            (previous != 0)
+                .then(|| change.to_f64().unwrap_or(0.0) / previous.to_f64().unwrap_or(1.0) * 100.0)
+        });
+    let tone = change.map_or(colors.text_muted, |value| match value.cmp(&0) {
+        std::cmp::Ordering::Less => colors.danger,
+        std::cmp::Ordering::Greater => colors.primary,
+        std::cmp::Ordering::Equal => colors.text_secondary,
+    });
+    let provider = row.instrument.provider.clone();
+    let instrument_id = row.instrument.instrument_id.clone();
+    let remove_terminal = terminal.clone();
+    div()
+        .id(gpui::SharedString::from(format!(
+            "watchlist_row_{}_{}",
+            row.instrument.provider, row.instrument.instrument_id
+        )))
+        .group("watchlist_asset_row")
+        .h(px(28.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px_2()
+        .border_b_1()
+        .border_color(gpui_color(colors.border.with_alpha(0.55)))
+        .text_xs()
+        .hover(move |item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .text_color(gpui_color(colors.text_primary))
+                .child(row.instrument.display_symbol),
+        )
+        .child(watchlist_cell(
+            last.map_or_else(|| "—".to_string(), |value| watchlist_price(value, scale)),
+            76.0,
+        ))
+        .child(
+            watchlist_cell(
+                change.map_or_else(|| "—".to_string(), |value| watchlist_change(value, scale)),
+                66.0,
+            )
+            .text_color(gpui_color(tone)),
+        )
+        .child(
+            watchlist_cell(
+                change_percent.map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%")),
+                68.0,
+            )
+            .text_color(gpui_color(tone)),
+        )
+        .child(watchlist_cell(
+            row.last.map_or_else(
+                || row.message.unwrap_or_else(|| "—".to_string()),
+                |bar| compact_watchlist_volume(bar.volume, row.instrument.quantity_scale),
+            ),
+            72.0,
+        ))
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            remove_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.remove_watchlist_instrument(&provider, &instrument_id, terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+}
+
+fn watchlist_price(value: i64, scale: u32) -> String {
+    let exponent = i32::try_from(scale).unwrap_or(i32::MAX);
+    let divisor = 10_f64.powi(exponent);
+    let value = value.to_f64().unwrap_or(0.0) / divisor;
+    let precision =
+        usize::try_from(scale.min(if value.abs() >= 1_000.0 { 2 } else { 4 })).unwrap_or(4);
+    format!("{value:.precision$}")
+}
+
+fn watchlist_change(value: i64, scale: u32) -> String {
+    let text = watchlist_price(value.abs(), scale);
+    match value.cmp(&0) {
+        std::cmp::Ordering::Greater => format!("+{text}"),
+        std::cmp::Ordering::Less => format!("-{text}"),
+        std::cmp::Ordering::Equal => text,
+    }
+}
+
+fn compact_watchlist_volume(value: i64, scale: u32) -> String {
+    let exponent = i32::try_from(scale).unwrap_or(i32::MAX);
+    let divisor = 10_f64.powi(exponent);
+    let value = value.to_f64().unwrap_or(0.0) / divisor;
+    for (threshold, suffix) in [(1_000_000_000.0, "B"), (1_000_000.0, "M"), (1_000.0, "K")] {
+        if value.abs() >= threshold {
+            return format!("{:.2}{suffix}", value / threshold);
+        }
+    }
+    format!("{value:.2}")
+}
+
 pub(super) fn side_panel_header(
     panel: SidePanel,
     app: Entity<WorkspaceSurface>,
@@ -148,6 +429,11 @@ pub(super) fn side_panel_header(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let settings_app = app.clone();
+    let add_app = app.clone();
+    let close_id = match panel {
+        SidePanel::OrderBook => "close_order_book_panel",
+        SidePanel::Watchlist => "close_watchlist_panel",
+    };
     div()
         .h(px(30.0))
         .flex_none()
@@ -160,42 +446,82 @@ pub(super) fn side_panel_header(
         .text_xs()
         .text_color(gpui_color(colors.text_secondary))
         .child(div().flex_1().child(panel.title().to_uppercase()))
+        .children((panel == SidePanel::OrderBook).then(|| {
+            chrome_tooltip(
+                "order_book_column_settings",
+                "Choose order-book columns",
+                div()
+                    .id("order_book_column_settings")
+                    .occlude()
+                    .size(px(WORKSPACE_TAB_ICON_HIT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                    .text_color(gpui_color(if order_book_column_menu_open {
+                        colors.icon_active
+                    } else {
+                        colors.icon
+                    }))
+                    .cursor_pointer()
+                    .role(Role::Button)
+                    .aria_label("Choose order-book columns")
+                    .when(order_book_column_menu_open, |button| {
+                        button.bg(gpui_color(colors.active_bg.over(colors.surface)))
+                    })
+                    .hover(move |button| {
+                        button.bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        header_icon(HugeIcon::Settings01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)),
+                    ),
+                theme,
+            )
+        }))
+        .children((panel == SidePanel::Watchlist).then(|| {
+            chrome_tooltip(
+                "watchlist_add_symbol",
+                "Add symbol to watchlist",
+                div()
+                    .id("watchlist_add_symbol")
+                    .occlude()
+                    .size(px(WORKSPACE_TAB_ICON_HIT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                    .text_color(gpui_color(colors.icon))
+                    .cursor_pointer()
+                    .role(Role::Button)
+                    .aria_label("Add symbol to watchlist")
+                    .hover(move |button| {
+                        button.bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        add_app.update(cx, |surface, surface_cx| {
+                            surface.open_watchlist_symbol_menu(window, surface_cx);
+                        });
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        header_icon(HugeIcon::AddIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)),
+                    ),
+                theme,
+            )
+        }))
         .child(chrome_tooltip(
-            "order_book_column_settings",
-            "Choose order-book columns",
-            div()
-                .id("order_book_column_settings")
-                .occlude()
-                .size(px(WORKSPACE_TAB_ICON_HIT))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-                .text_color(gpui_color(if order_book_column_menu_open {
-                    colors.icon_active
-                } else {
-                    colors.icon
-                }))
-                .cursor_pointer()
-                .role(Role::Button)
-                .aria_label("Choose order-book columns")
-                .when(order_book_column_menu_open, |button| {
-                    button.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                })
-                .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
-                    cx.stop_propagation();
-                })
-                .child(header_icon(HugeIcon::Settings01).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
-            theme,
-        ))
-        .child(chrome_tooltip(
-            "close_side_panel",
+            close_id,
             "Close side panel",
-            chrome_close_button("close_side_panel", theme, move |_, cx| {
-                app.update(cx, WorkspaceSurface::close_side_panel);
+            chrome_close_button(close_id, theme, move |_, cx| {
+                app.update(cx, |surface, surface_cx| {
+                    surface.close_side_panel(panel, surface_cx);
+                });
             }),
             theme,
         ))

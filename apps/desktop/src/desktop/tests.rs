@@ -10,11 +10,12 @@ use super::{
     RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SidePanelResize, SymbolInputAction,
     SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
     TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
-    WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
-    WorkspaceDragState, active_workspace_after_close, bounded_status_detail,
-    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_status_detail, chart_surface_notice, chrome_control_foreground, chrome_menu_extent,
-    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    WORKSPACE_TAB_WIDTH, WatchlistEntry, WindowCommand, WindowMoveGestureEvent,
+    WindowMoveGestureTransition, WorkspaceDragState, active_workspace_after_close,
+    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    catalog_rejection_message, chart_status_detail, chart_surface_notice,
+    chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
+    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
     connectivity_chart_state, current_instrument_menu_index, default_rithmic_contract_index,
     durable_workspace_viewport, fullscreen_escape_command, gpui_color,
@@ -39,7 +40,7 @@ use axiusflow_contracts::{
     SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
 use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
-use axiusflow_market_data::ChartInterval;
+use axiusflow_market_data::{ChartInterval, MarketBar};
 use axiusflow_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
 
@@ -1514,6 +1515,36 @@ fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
         SidePanel::OrderBook.toggle_tooltip(),
         "Toggle read-only order book"
     );
+    assert_eq!(SidePanel::Watchlist.toggle_label(), "Watchlist");
+    assert_eq!(SidePanel::Watchlist.title(), "Watchlist");
+    assert_eq!(SidePanel::Watchlist.toggle_tooltip(), "Toggle watchlist");
+}
+
+#[test]
+fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
+    let instrument = super::local_state::default_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("default watchlist instrument");
+    let mut entry = WatchlistEntry::new(instrument, None, None);
+    let bar = |sequence, timestamp, close| MarketBar {
+        source_sequence: sequence,
+        exchange_timestamp_seconds: timestamp,
+        exchange_timestamp_unix_nanos: timestamp * 1_000_000_000,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 10,
+    };
+
+    entry.apply_bar(bar(1, 100, 10_000));
+    entry.apply_bar(bar(2, 200, 10_500));
+    entry.apply_bar(bar(3, 200, 10_600));
+    entry.apply_bar(bar(4, 150, 9_000));
+
+    assert_eq!(entry.previous_close, Some(10_000));
+    assert_eq!(entry.last.expect("current bar").close, 10_600);
 }
 
 #[test]

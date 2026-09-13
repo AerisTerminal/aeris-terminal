@@ -530,6 +530,13 @@ pub(super) fn header_controls(
         state.controls.enabled(HeaderControls::ORDER_BOOK),
         state.order_book_visible,
     );
+    let watchlist_toggle = side_panel_toggle(
+        app.clone(),
+        &state.theme,
+        SidePanel::Watchlist,
+        true,
+        state.watchlist_visible,
+    );
     let connection = connection_presentation(
         state.provider,
         state.connection_state,
@@ -599,7 +606,8 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(order_book_toggle);
+        .child(order_book_toggle)
+        .child(watchlist_toggle);
     let global_controls = header_global_controls(terminal, &state.theme);
 
     div()
@@ -641,6 +649,12 @@ pub(super) fn side_panel_toggle(
             "order_book_toggle",
             HugeIcon::SidebarRightIcon01,
             WorkspaceSurface::toggle_order_book
+                as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+        ),
+        SidePanel::Watchlist => (
+            "watchlist_toggle",
+            HugeIcon::AnalyticsUpIcon,
+            WorkspaceSurface::toggle_watchlist
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         ),
     };

@@ -2,6 +2,39 @@
 
 use super::*;
 
+fn restore_watchlist(
+    entries: Vec<WorkspaceWatchlistEntryState>,
+    factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
+    workspace_id: u64,
+    wake: &UiWake,
+) -> Vec<WatchlistEntry> {
+    entries
+        .into_iter()
+        .filter_map(|entry| entry.instrument)
+        .map(|instrument| {
+            let worker = factory.and_then(|factory| {
+                match factory.create_pane(workspace_id, instrument.clone(), ChartInterval::Day1) {
+                    Ok(pane) => {
+                        pane.worker.set_message_wake(wake.callback());
+                        let _ = pane
+                            .worker
+                            .try_set_market_resource_class(ConsumerResourceClass::Background);
+                        Some(pane.worker)
+                    }
+                    Err(error) => {
+                        eprintln!("watchlist market demand could not start: {error}");
+                        None
+                    }
+                }
+            });
+            let message = worker
+                .is_none()
+                .then(|| "Market data unavailable".to_string());
+            WatchlistEntry::new(instrument, worker, message)
+        })
+        .collect()
+}
+
 impl TerminalApp {
     pub(super) fn new(
         init: TerminalShellInit,
@@ -47,6 +80,13 @@ impl TerminalApp {
                 });
             }
         }
+        let persisted_watchlist = init.watchlist_entries.clone();
+        let watchlist = restore_watchlist(
+            init.watchlist_entries,
+            init.workspace_factory.as_ref(),
+            workspaces[active].id,
+            &market_frame_wake,
+        );
         let workspace_persistence = (init.workspace_shell == WorkspaceShellKind::Tabs)
             .then(|| {
                 WorkspaceLayoutPersistence::new(init.workspace_revision, init.layout_generation)
@@ -70,6 +110,9 @@ impl TerminalApp {
             chrome_focus: cx.focus_handle().tab_stop(true),
             lifecycle,
             workspace_factory: init.workspace_factory,
+            watchlist,
+            persisted_watchlist,
+            watchlist_persistence_dirty: false,
             workspace_persistence,
             persisted_layout,
             persisted_active_workspace_id,
@@ -102,6 +145,88 @@ impl TerminalApp {
     pub(super) fn active_surface(&self) -> Entity<WorkspaceSurface> {
         let workspace = &self.workspaces[self.active];
         workspace.panes[workspace.active_pane].surface.clone()
+    }
+
+    fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
+        self.watchlist
+            .iter()
+            .map(|entry| WorkspaceWatchlistEntryState {
+                instrument: Some(entry.instrument.clone()),
+            })
+            .collect()
+    }
+
+    pub(super) fn watchlist_rows(&self) -> Vec<WatchlistRow> {
+        self.watchlist.iter().map(WatchlistEntry::row).collect()
+    }
+
+    pub(super) fn absorb_watchlist_requests(&mut self, cx: &mut Context<Self>) {
+        let requests = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.panes)
+            .filter_map(|pane| {
+                pane.surface
+                    .update(cx, |surface, _| surface.pending_watchlist_instrument.take())
+            })
+            .collect::<Vec<_>>();
+        for instrument in requests {
+            self.add_watchlist_instrument(instrument, cx);
+        }
+    }
+
+    fn add_watchlist_instrument(
+        &mut self,
+        instrument: InstallProviderInstrument,
+        cx: &mut Context<Self>,
+    ) {
+        if self.watchlist.iter().any(|entry| {
+            entry.instrument.provider == instrument.provider
+                && entry.instrument.instrument_id == instrument.instrument_id
+        }) || self.watchlist.len() >= local_state::MAXIMUM_WATCHLIST_ENTRIES
+        {
+            return;
+        }
+        let (worker, message) = self.workspace_factory.as_ref().map_or_else(
+            || (None, Some("Market data unavailable".to_string())),
+            |factory| match factory.create_pane(
+                self.workspaces[self.active].id,
+                instrument.clone(),
+                ChartInterval::Day1,
+            ) {
+                Ok(pane) => {
+                    pane.worker
+                        .set_message_wake(self.market_frame_wake.callback());
+                    let _ = pane
+                        .worker
+                        .try_set_market_resource_class(ConsumerResourceClass::Background);
+                    (Some(pane.worker), None)
+                }
+                Err(error) => (None, Some(error)),
+            },
+        );
+        self.watchlist
+            .push(WatchlistEntry::new(instrument, worker, message));
+        self.watchlist_persistence_dirty = true;
+        self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
+    }
+
+    pub(super) fn remove_watchlist_instrument(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.watchlist.len();
+        self.watchlist.retain(|entry| {
+            entry.instrument.provider != provider || entry.instrument.instrument_id != instrument_id
+        });
+        if self.watchlist.len() != before {
+            self.watchlist_persistence_dirty = true;
+            self.persist_workspace_layout_if_changed(cx);
+            cx.notify();
+        }
     }
 
     fn chart_chrome_for_new_surface(&self, cx: &App) -> chart_chrome::ChartChromePreferences {
@@ -153,18 +278,23 @@ impl TerminalApp {
 
         let previous = workspace.panes[workspace.active_pane].surface.clone();
         let next = workspace.panes[index].surface.clone();
-        let (order_book_visible, side_panel_width) = previous.read_with(cx, |surface, _| {
-            (
-                surface.side_panel == Some(SidePanel::OrderBook),
-                surface.side_panel_width,
-            )
-        });
+        let (side_panels, side_panel_width, side_panel_split) =
+            previous.read_with(cx, |surface, _| {
+                (
+                    surface.side_panels,
+                    surface.side_panel_width,
+                    surface.side_panel_split_basis_points,
+                )
+            });
         previous.update(cx, |surface, surface_cx| {
             surface.set_order_book_visible(false, surface_cx);
+            surface.set_watchlist_visible(false, surface_cx);
         });
         next.update(cx, |surface, surface_cx| {
             surface.side_panel_width = side_panel_width;
-            surface.set_order_book_visible(order_book_visible, surface_cx);
+            surface.side_panel_split_basis_points = side_panel_split;
+            surface.set_order_book_visible(side_panels.contains(SidePanel::OrderBook), surface_cx);
+            surface.set_watchlist_visible(side_panels.contains(SidePanel::Watchlist), surface_cx);
         });
 
         let workspace = &mut self.workspaces[workspace_index];
@@ -1146,9 +1276,12 @@ impl TerminalApp {
         };
         let layout = workspace_layout_tabs(&self.workspaces, cx);
         let active_workspace_id = self.workspaces[self.active].id;
+        let watchlist = self.watchlist_entries();
         if layout == self.persisted_layout
             && active_workspace_id == self.persisted_active_workspace_id
             && !self.chart_settings_persistence_dirty
+            && !self.watchlist_persistence_dirty
+            && watchlist == self.persisted_watchlist
         {
             return;
         }
@@ -1157,6 +1290,7 @@ impl TerminalApp {
             layout.clone(),
             self.chart_settings_templates.clone(),
             self.default_chart_settings.clone(),
+            watchlist.clone(),
         ) {
             self.workspace_error = Some(error);
             return;
@@ -1164,6 +1298,8 @@ impl TerminalApp {
         self.persisted_layout = layout;
         self.persisted_active_workspace_id = active_workspace_id;
         self.chart_settings_persistence_dirty = false;
+        self.persisted_watchlist = watchlist;
+        self.watchlist_persistence_dirty = false;
     }
 
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
@@ -1466,7 +1602,7 @@ impl TerminalApp {
             pane.worker,
             &self.lifecycle,
             self.chart_chrome_for_new_surface(cx),
-            None,
+            WorkspaceSurfaceRestore::default(),
             window,
             cx,
         );
@@ -1533,7 +1669,7 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let (product, interval, drawing_tool, order_book_visible, side_panel_width) = {
+        let (product, interval, drawing_tool, side_panels, side_panel_width, side_panel_split) = {
             let source = workspace.panes[workspace.active_pane].surface.read(cx);
             let Some(product) = source.product.clone() else {
                 self.workspace_error = Some("The active pane has no market to copy".to_string());
@@ -1544,8 +1680,9 @@ impl TerminalApp {
                 product,
                 source.interval,
                 source.drawing_toolbar_state(cx).active_tool,
-                source.side_panel == Some(SidePanel::OrderBook),
+                source.side_panels,
                 source.side_panel_width,
+                source.side_panel_split_basis_points,
             )
         };
         let source_surface = workspace.panes[workspace.active_pane].surface.clone();
@@ -1564,7 +1701,7 @@ impl TerminalApp {
             pane.worker,
             &self.lifecycle,
             self.chart_chrome_for_new_surface(cx),
-            None,
+            WorkspaceSurfaceRestore::default(),
             window,
             cx,
         );
@@ -1573,6 +1710,10 @@ impl TerminalApp {
             surface.set_market_resource_class(ConsumerResourceClass::Foreground);
             surface.set_market_message_wake(self.market_frame_wake.callback());
             surface.select_drawing_tool(drawing_tool, surface_cx);
+            surface.side_panel_width = side_panel_width;
+            surface.side_panel_split_basis_points = side_panel_split;
+            surface.set_order_book_visible(side_panels.contains(SidePanel::OrderBook), surface_cx);
+            surface.set_watchlist_visible(side_panels.contains(SidePanel::Watchlist), surface_cx);
         });
         cx.observe(&surface, |app, surface, cx| {
             if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
@@ -1597,10 +1738,7 @@ impl TerminalApp {
         }
         source_surface.update(cx, |surface, surface_cx| {
             surface.set_order_book_visible(false, surface_cx);
-        });
-        surface.update(cx, |surface, surface_cx| {
-            surface.side_panel_width = side_panel_width;
-            surface.set_order_book_visible(order_book_visible, surface_cx);
+            surface.set_watchlist_visible(false, surface_cx);
         });
         workspace.panes.insert(
             insertion_index,
@@ -1652,13 +1790,14 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        let (removed_order_book_visible, removed_side_panel_width) = workspace.panes
-            [workspace.active_pane]
+        let (removed_side_panels, removed_side_panel_width, removed_side_panel_split) = workspace
+            .panes[workspace.active_pane]
             .surface
             .read_with(cx, |surface, _| {
                 (
-                    surface.side_panel == Some(SidePanel::OrderBook),
+                    surface.side_panels,
                     surface.side_panel_width,
+                    surface.side_panel_split_basis_points,
                 )
             });
         let removed = workspace.panes.remove(workspace.active_pane);
@@ -1680,6 +1819,7 @@ impl TerminalApp {
         workspace.generation = workspace.generation.saturating_add(1);
         removed.surface.update(cx, |surface, surface_cx| {
             surface.set_order_book_visible(false, surface_cx);
+            surface.set_watchlist_visible(false, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Detached);
             surface.retire_market_worker(surface_cx);
         });
@@ -1687,7 +1827,15 @@ impl TerminalApp {
             .surface
             .update(cx, |surface, surface_cx| {
                 surface.side_panel_width = removed_side_panel_width;
-                surface.set_order_book_visible(removed_order_book_visible, surface_cx);
+                surface.side_panel_split_basis_points = removed_side_panel_split;
+                surface.set_order_book_visible(
+                    removed_side_panels.contains(SidePanel::OrderBook),
+                    surface_cx,
+                );
+                surface.set_watchlist_visible(
+                    removed_side_panels.contains(SidePanel::Watchlist),
+                    surface_cx,
+                );
             });
         workspace.panes[recipient].focus.focus(window, cx);
         self.workspace_error = None;
@@ -1913,6 +2061,15 @@ impl TerminalApp {
                 let authenticated = axiusflow_desktop::account::DesktopAccount::shared()
                     .is_some_and(|account| account.authenticated());
                 let mut diagnostics = Vec::new();
+                let mut watchlist_changed = false;
+                if authenticated {
+                    for entry in &mut terminal.watchlist {
+                        watchlist_changed |= entry.poll();
+                    }
+                }
+                if watchlist_changed {
+                    cx.notify();
+                }
                 for workspace in &terminal.workspaces {
                     for pane in &workspace.panes {
                         let surface = pane.surface.clone();

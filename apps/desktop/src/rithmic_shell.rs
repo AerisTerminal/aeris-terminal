@@ -193,6 +193,14 @@ impl RithmicSymbolBrowser {
         true
     }
 
+    pub(crate) fn resolve_selection(
+        &mut self,
+        generation: NonZeroUsize,
+    ) -> Option<RithmicSymbolSelection> {
+        self.pending_selection
+            .take_if(|selection| selection.generation == generation)
+    }
+
     pub(crate) fn reject_search(&mut self, generation: NonZeroUsize) -> bool {
         if self.pending_search_id == Some(generation) {
             self.pending_search_id = None;
@@ -315,6 +323,22 @@ mod tests {
         assert!(!browser.confirm_selection(first_selection.generation));
         assert!(browser.confirm_selection(second_selection.generation));
         assert_eq!(browser.selected(), Some(&second_selection));
+    }
+
+    #[test]
+    fn resolving_a_secondary_selection_does_not_replace_the_chart_selection() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let search = browser.begin_search("ES").expect("query validates");
+        assert!(browser.apply_results(search.request_id, vec![result("ESM7")]));
+        let chart = browser.select(0).expect("chart selection");
+        assert!(browser.confirm_selection(chart.generation));
+
+        let watchlist = browser.select(0).expect("watchlist selection");
+        assert_eq!(
+            browser.resolve_selection(watchlist.generation),
+            Some(watchlist)
+        );
+        assert_eq!(browser.selected(), Some(&chart));
     }
 
     #[test]

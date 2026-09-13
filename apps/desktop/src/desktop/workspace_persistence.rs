@@ -10,6 +10,7 @@ struct WorkspaceLayoutRequest {
     workspace_tabs: Vec<WorkspaceTabState>,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
+    watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -138,6 +139,7 @@ impl WorkspaceLayoutPersistence {
         workspace_tabs: Vec<WorkspaceTabState>,
         chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
         default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
+        watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     ) -> Result<(), String> {
         let Some(generation) = self.layout_generation.get().checked_add(1) else {
             let error = "workspace layout generation is exhausted".to_string();
@@ -153,6 +155,7 @@ impl WorkspaceLayoutPersistence {
             workspace_tabs,
             chart_settings_templates,
             default_chart_settings,
+            watchlist_entries,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
@@ -182,7 +185,13 @@ impl WorkspaceLayoutPersistence {
         active_workspace_id: u64,
         workspace_tabs: Vec<WorkspaceTabState>,
     ) -> Result<(), String> {
-        self.request_with_chart_settings(active_workspace_id, workspace_tabs, Vec::new(), None)
+        self.request_with_chart_settings(
+            active_workspace_id,
+            workspace_tabs,
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
     }
 
     pub(super) fn poll(&self) -> bool {
@@ -275,6 +284,17 @@ fn run_workspace_layout_persistence(
         current.workspace_tabs = request.workspace_tabs;
         current.chart_settings_templates = request.chart_settings_templates;
         current.default_chart_settings = request.default_chart_settings;
+        current.watchlist = request
+            .watchlist_entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .instrument
+                    .as_ref()
+                    .map(|instrument| instrument.display_symbol.clone())
+            })
+            .collect();
+        current.watchlist_entries = request.watchlist_entries;
         let completed = local_state::save_workspace(&current).map(|()| current);
         *durability
             .lock()
@@ -376,14 +396,26 @@ mod tests {
             crosshair_mode: 1,
         };
 
+        let watchlist_entry = WorkspaceWatchlistEntryState {
+            instrument: local_state::default_workspace().watchlist_entries[0]
+                .instrument
+                .clone(),
+        };
         state
-            .request_with_chart_settings(7, vec![], vec![template.clone()], Some(template.clone()))
+            .request_with_chart_settings(
+                7,
+                vec![],
+                vec![template.clone()],
+                Some(template.clone()),
+                vec![watchlist_entry.clone()],
+            )
             .expect("request");
 
         let latest = state.latest.lock().expect("latest");
         let request = latest.as_ref().expect("request remains coalesced");
         assert_eq!(request.chart_settings_templates, vec![template.clone()]);
         assert_eq!(request.default_chart_settings, Some(template));
+        assert_eq!(request.watchlist_entries, vec![watchlist_entry]);
     }
 
     #[test]

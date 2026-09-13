@@ -21,5 +21,6 @@ pub use messages::{
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
     WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
     WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, workspace_study_setting_state,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };

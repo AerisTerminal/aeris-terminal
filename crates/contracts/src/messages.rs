@@ -195,6 +195,17 @@ pub struct WorkspaceState {
     /// Optional user-selected reset/default appearance.
     #[prost(message, optional, tag = "18")]
     pub default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
+    /// Durable provider-neutral instruments shown in the native watchlist.
+    #[prost(message, repeated, tag = "19")]
+    pub watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
+}
+
+/// One durable native watchlist row. Live prices remain runtime-owned and are
+/// deliberately rebuilt from provider state after restart.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceWatchlistEntryState {
+    #[prost(message, optional, tag = "1")]
+    pub instrument: Option<InstallProviderInstrument>,
 }
 
 /// One locally persisted chart appearance template. Market data, indicators,
@@ -237,6 +248,15 @@ pub struct WorkspacePaneState {
     /// Durable user-authored chart presentation and drawing state.
     #[prost(message, optional, tag = "10")]
     pub chart: Option<WorkspaceChartState>,
+    /// Visible native side-panel components: bit 0 order book, bit 1 watchlist.
+    #[prost(uint32, tag = "11")]
+    pub side_panel_visibility: u32,
+    /// Side-panel width in logical pixels.
+    #[prost(uint32, tag = "12")]
+    pub side_panel_width: u32,
+    /// Order-book share when both side-panel components are visible.
+    #[prost(uint32, tag = "13")]
+    pub side_panel_split_basis_points: u32,
 }
 
 /// Durable chart state owned by one workspace pane.

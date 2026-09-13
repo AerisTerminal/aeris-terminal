@@ -4,6 +4,7 @@ use axiusflow_contracts::{
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
     WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState,
     workspace_study_setting_state,
 };
 use prost::Message as _;
@@ -44,6 +45,9 @@ fn workspace_tab() -> WorkspaceTabState {
             viewport_end_unix_nanos: Some(2),
             size_basis_points: 10_000,
             generation: 4,
+            side_panel_visibility: 3,
+            side_panel_width: 420,
+            side_panel_split_basis_points: 5_000,
             chart: Some(WorkspaceChartState {
                 studies: vec![WorkspaceChartStudyState {
                     local_id: 1,
@@ -154,6 +158,7 @@ fn retired_process_lifecycle_workspace_fields_are_ignored_when_loading_old_bytes
 #[test]
 fn workspace_contract_round_trips_directly_as_protobuf() {
     let tab = workspace_tab();
+    let watchlist_instrument = tab.panes[0].instrument.clone();
     let workspace = WorkspaceState {
         provider: "rithmic".into(),
         market: "MNQ".into(),
@@ -166,6 +171,9 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
         workspace_tabs: vec![tab],
         chart_settings_templates: Vec::new(),
         default_chart_settings: None,
+        watchlist_entries: vec![WorkspaceWatchlistEntryState {
+            instrument: watchlist_instrument,
+        }],
     };
     let decoded =
         WorkspaceState::decode(workspace.encode_to_vec().as_slice()).expect("workspace decodes");

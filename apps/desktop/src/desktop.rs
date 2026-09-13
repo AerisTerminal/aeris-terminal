@@ -52,7 +52,6 @@ mod workspace_layout;
 
 use about_dialog::about_dialog_layer;
 use assets::UiIcon as HugeIcon;
-#[cfg(feature = "diagnostics")]
 use axiusflow_application::ReplayStreamUpdate;
 use axiusflow_chart_integration::{
     ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
@@ -72,7 +71,8 @@ use axiusflow_contracts::{
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
     WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
     WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, workspace_study_setting_state,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };
 use axiusflow_design_system::{
     AxiusflowTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
@@ -82,7 +82,7 @@ use axiusflow_desktop::market_worker::{
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
     PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
-use axiusflow_market_data::{BarSeriesKey, ChartAggregation, ChartInterval};
+use axiusflow_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
 use axiusflow_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
 use axiusflow_market_runtime::study::{
     NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
@@ -645,9 +645,10 @@ fn elapsed_nanos(started: Instant) -> u64 {
 struct WorkspaceSurface {
     chart: Option<Entity<NucleusChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
-    side_panel: Option<SidePanel>,
+    side_panels: SidePanelVisibility,
     side_panel_width: f32,
     side_panel_resize: Option<SidePanelResize>,
+    side_panel_split_basis_points: u32,
     menu_state: WorkspaceMenuState,
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
@@ -666,6 +667,8 @@ struct WorkspaceSurface {
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
     market_state: WorkspaceMarketState,
+    symbol_selection_target: SymbolSelectionTarget,
+    pending_watchlist_instrument: Option<InstallProviderInstrument>,
     series_message: String,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
@@ -1283,6 +1286,7 @@ struct HeaderState {
     drawing_history: DrawingHistoryState,
     controls: HeaderControls,
     order_book_visible: bool,
+    watchlist_visible: bool,
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
     instrument_scroll: ScrollHandle,
@@ -1304,6 +1308,53 @@ struct HeaderPendingState {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SidePanel {
     OrderBook,
+    Watchlist,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SidePanelVisibility(u8);
+
+impl SidePanelVisibility {
+    const ORDER_BOOK: u8 = 1;
+    const WATCHLIST: u8 = 2;
+
+    const fn contains(self, panel: SidePanel) -> bool {
+        let bit = match panel {
+            SidePanel::OrderBook => Self::ORDER_BOOK,
+            SidePanel::Watchlist => Self::WATCHLIST,
+        };
+        self.0 & bit != 0
+    }
+
+    fn set(&mut self, panel: SidePanel, visible: bool) {
+        let bit = match panel {
+            SidePanel::OrderBook => Self::ORDER_BOOK,
+            SidePanel::Watchlist => Self::WATCHLIST,
+        };
+        if visible {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.0 != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SymbolSelectionTarget {
+    #[default]
+    Chart,
+    Watchlist,
+}
+
+const fn initial_instrument_exchange(provider: TerminalProvider) -> InstrumentExchangeUi {
+    InstrumentExchangeUi::Idle(match provider {
+        TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
+        TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1330,18 +1381,115 @@ impl SidePanel {
     const fn title(self) -> &'static str {
         match self {
             Self::OrderBook => "Order Book",
+            Self::Watchlist => "Watchlist",
         }
     }
 
     const fn toggle_label(self) -> &'static str {
         match self {
             Self::OrderBook => "Order Book",
+            Self::Watchlist => "Watchlist",
         }
     }
 
     const fn toggle_tooltip(self) -> &'static str {
         match self {
             Self::OrderBook => "Toggle read-only order book",
+            Self::Watchlist => "Toggle watchlist",
+        }
+    }
+}
+
+struct WatchlistEntry {
+    instrument: InstallProviderInstrument,
+    worker: Option<MarketDataWorker>,
+    previous_close: Option<i64>,
+    last: Option<MarketBar>,
+    message: Option<String>,
+}
+
+#[derive(Clone)]
+struct WatchlistRow {
+    instrument: InstallProviderInstrument,
+    previous_close: Option<i64>,
+    last: Option<MarketBar>,
+    message: Option<String>,
+}
+
+impl WatchlistEntry {
+    fn new(
+        instrument: InstallProviderInstrument,
+        worker: Option<MarketDataWorker>,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            instrument,
+            worker,
+            previous_close: None,
+            last: None,
+            message,
+        }
+    }
+
+    fn apply_bar(&mut self, bar: MarketBar) {
+        match self.last {
+            Some(current)
+                if bar.exchange_timestamp_unix_nanos < current.exchange_timestamp_unix_nanos => {}
+            Some(current)
+                if bar.exchange_timestamp_unix_nanos == current.exchange_timestamp_unix_nanos =>
+            {
+                self.last = Some(bar);
+            }
+            Some(current) => {
+                self.previous_close = Some(current.close);
+                self.last = Some(bar);
+            }
+            None => self.last = Some(bar),
+        }
+    }
+
+    fn apply_update(&mut self, update: ReplayStreamUpdate) {
+        match update {
+            ReplayStreamUpdate::Snapshot(snapshot) => {
+                let mut bars = snapshot.bars().iter().rev();
+                self.last = bars.next().map(|item| *item.value());
+                self.previous_close = bars.next().map(|item| item.value().close);
+            }
+            ReplayStreamUpdate::Delta(delta) => self.apply_bar(*delta.item().value()),
+            ReplayStreamUpdate::Tail(tail) => self.apply_bar(*tail.item().value()),
+        }
+        self.message = None;
+    }
+
+    fn poll(&mut self) -> bool {
+        let Some(worker) = &mut self.worker else {
+            return false;
+        };
+        let (messages, disconnected) = worker.drain_messages_up_to(32);
+        let changed = !messages.is_empty() || disconnected;
+        for message in messages {
+            match message {
+                MarketWorkerMessage::Update(publication) => self.apply_update(publication.update),
+                MarketWorkerMessage::State {
+                    state: ChartState::Error,
+                    message,
+                } => self.message = Some(message),
+                _ => {}
+            }
+        }
+        if disconnected {
+            self.message = Some("Market data unavailable".to_string());
+            self.worker = None;
+        }
+        changed
+    }
+
+    fn row(&self) -> WatchlistRow {
+        WatchlistRow {
+            instrument: self.instrument.clone(),
+            previous_close: self.previous_close,
+            last: self.last,
+            message: self.message.clone(),
         }
     }
 }
@@ -2101,12 +2249,18 @@ fn subscribe_timeframe_input(
         .detach();
 }
 
+#[derive(Default)]
+struct WorkspaceSurfaceRestore {
+    chart: Option<WorkspaceChartState>,
+    side_panel: Option<(u32, u32, u32)>,
+}
+
 fn workspace_surface_entity(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
     lifecycle: &DesktopLifecycle,
     chart_chrome: chart_chrome::ChartChromePreferences,
-    restored_chart_state: Option<WorkspaceChartState>,
+    restored: WorkspaceSurfaceRestore,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<WorkspaceSurface> {
@@ -2132,9 +2286,26 @@ fn workspace_surface_entity(
             indicator_input,
             timeframe_input,
             chart_chrome,
-            restored_chart_state,
+            restored.chart,
         )
     });
+    if let Some((visibility, width, split)) = restored.side_panel {
+        workspace.update(cx, |surface, surface_cx| {
+            surface.side_panel_width = width
+                .to_f32()
+                .filter(|width| *width > 0.0)
+                .unwrap_or(SIDE_PANEL_INITIAL_WIDTH)
+                .clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH);
+            surface.side_panel_split_basis_points = if split == 0 {
+                5_000
+            } else {
+                split.clamp(500, 9_500)
+            };
+            surface.set_order_book_visible(visibility & 1 != 0, surface_cx);
+            surface.set_watchlist_visible(visibility & 2 != 0, surface_cx);
+            surface.chart_persistence_dirty = false;
+        });
+    }
     lifecycle.register_terminal(&workspace);
     subscribe_symbol_input(search_input, &workspace, window, cx);
     subscribe_indicator_input(&indicator_search_input, &workspace, window, cx);
@@ -2357,6 +2528,9 @@ struct TerminalApp {
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
+    watchlist: Vec<WatchlistEntry>,
+    persisted_watchlist: Vec<WorkspaceWatchlistEntryState>,
+    watchlist_persistence_dirty: bool,
     workspace_persistence: Option<WorkspaceLayoutPersistence>,
     persisted_layout: Vec<WorkspaceTabState>,
     persisted_active_workspace_id: u64,
@@ -2474,6 +2648,13 @@ fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<Workspace
                                 .unwrap_or(1),
                             generation: workspace.generation.max(1),
                             chart: surface.workspace_chart_state(cx),
+                            side_panel_visibility: u32::from(surface.side_panels.0),
+                            side_panel_width: surface
+                                .side_panel_width
+                                .round()
+                                .to_u32()
+                                .unwrap_or(400),
+                            side_panel_split_basis_points: surface.side_panel_split_basis_points,
                         })
                     })
                     .collect(),

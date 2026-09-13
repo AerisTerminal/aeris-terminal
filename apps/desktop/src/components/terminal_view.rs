@@ -28,7 +28,8 @@ fn active_header_state(
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
-        order_book_visible: workspace.side_panel == Some(SidePanel::OrderBook),
+        order_book_visible: workspace.side_panels.contains(SidePanel::OrderBook),
+        watchlist_visible: workspace.side_panels.contains(SidePanel::Watchlist),
         connection_state: workspace
             .connection_state
             .unwrap_or(FeedConnectionState::Disconnected),
@@ -38,6 +39,14 @@ fn active_header_state(
 }
 
 impl TerminalApp {
+    fn absorb_render_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.absorb_pane_activate_requests(cx);
+        self.absorb_watchlist_requests(cx);
+        self.absorb_chart_context_menu_requests(cx);
+        self.absorb_study_settings_requests(window, cx);
+        self.absorb_study_remove_requests(cx);
+    }
+
     fn rendered_title_bar(
         &self,
         terminal: &Entity<Self>,
@@ -99,10 +108,7 @@ impl Render for TerminalApp {
             self.workspace_drag = None;
         }
         self.track_window_activation(window, cx);
-        self.absorb_pane_activate_requests(cx);
-        self.absorb_chart_context_menu_requests(cx);
-        self.absorb_study_settings_requests(window, cx);
-        self.absorb_study_remove_requests(cx);
+        self.absorb_render_requests(window, cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
@@ -136,11 +142,13 @@ impl Render for TerminalApp {
         let about_dialog = self.rendered_about_dialog(&terminal);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
         let header = self.rendered_header(&terminal, &active, cx);
+        let watchlist = self.watchlist_rows();
         let market = workspace_market_area(
             &terminal,
             &self.workspaces[self.active],
             &active,
             self.drawing_toolbar.is_collapsed(),
+            watchlist,
             &self.theme,
             cx,
         );
@@ -565,7 +573,7 @@ pub(super) fn terminal_root(
         market_worker,
         lifecycle,
         chart_chrome,
-        None,
+        WorkspaceSurfaceRestore::default(),
         window,
         cx,
     );
@@ -593,6 +601,7 @@ pub(super) fn terminal_root(
             chart_chrome,
             chart_settings_templates: Vec::new(),
             default_chart_settings: None,
+            watchlist_entries: Vec::new(),
         },
         lifecycle,
         window,
@@ -610,6 +619,7 @@ pub(super) struct TerminalShellInit {
     pub(super) chart_chrome: chart_chrome::ChartChromePreferences,
     pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     pub(super) default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
+    pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
 }
 
 fn terminal_shell_root(
@@ -682,7 +692,14 @@ pub(super) fn workspace_tabs_root(
                     pane.worker,
                     lifecycle,
                     chart_chrome,
-                    persisted.chart.clone(),
+                    WorkspaceSurfaceRestore {
+                        chart: persisted.chart.clone(),
+                        side_panel: Some((
+                            persisted.side_panel_visibility,
+                            persisted.side_panel_width,
+                            persisted.side_panel_split_basis_points,
+                        )),
+                    },
                     window,
                     cx,
                 ),
@@ -730,6 +747,7 @@ pub(super) fn workspace_tabs_root(
             chart_chrome,
             chart_settings_templates: restored.chart_settings_templates.clone(),
             default_chart_settings: restored.default_chart_settings.clone(),
+            watchlist_entries: restored.watchlist_entries.clone(),
         },
         lifecycle,
         window,

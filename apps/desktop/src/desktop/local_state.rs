@@ -9,7 +9,7 @@ use axiusflow_contracts::{
     SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
     WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
     WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream,
-    WorkspaceTabState, workspace_study_setting_state,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -20,6 +20,7 @@ const MAXIMUM_WORKSPACE_FILE_BYTES: usize = 12 * 1_048_576;
 const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATES: usize = 32;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES: usize = 64;
+pub(super) const MAXIMUM_WATCHLIST_ENTRIES: usize = 64;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct LegacyWorkspaceEnvelope {
@@ -276,13 +277,16 @@ pub(super) fn default_workspace() -> WorkspaceState {
         pane_id: 1,
         consumer_id: 1,
         kind: WorkspacePaneKind::Chart as i32,
-        instrument: Some(instrument),
+        instrument: Some(instrument.clone()),
         series: Some(series),
         viewport_start_unix_nanos: None,
         viewport_end_unix_nanos: None,
         size_basis_points: 10_000,
         generation: 1,
         chart: None,
+        side_panel_visibility: 0,
+        side_panel_width: 400,
+        side_panel_split_basis_points: 5_000,
     };
     WorkspaceState {
         provider: "hyperliquid".to_string(),
@@ -310,6 +314,9 @@ pub(super) fn default_workspace() -> WorkspaceState {
         }],
         chart_settings_templates: Vec::new(),
         default_chart_settings: None,
+        watchlist_entries: vec![WorkspaceWatchlistEntryState {
+            instrument: Some(instrument),
+        }],
     }
 }
 
@@ -332,11 +339,20 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     {
         workspace.default_chart_settings = None;
     }
+    sanitize_watchlist(&mut workspace);
     for pane in workspace
         .workspace_tabs
         .iter_mut()
         .flat_map(|tab| tab.panes.iter_mut())
     {
+        pane.side_panel_visibility &= 0b11;
+        if pane.side_panel_width != 0 {
+            pane.side_panel_width = pane.side_panel_width.clamp(300, 480);
+        }
+        if pane.side_panel_split_basis_points != 0 {
+            pane.side_panel_split_basis_points =
+                pane.side_panel_split_basis_points.clamp(500, 9_500);
+        }
         let Some(chart) = &mut pane.chart else {
             continue;
         };
@@ -369,6 +385,65 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         }
     }
     workspace
+}
+
+fn sanitize_watchlist(workspace: &mut WorkspaceState) {
+    if workspace.watchlist_entries.is_empty() && !workspace.watchlist.is_empty() {
+        workspace.watchlist_entries = workspace
+            .workspace_tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .filter_map(|pane| pane.instrument.as_ref())
+            .filter(|instrument| {
+                workspace.watchlist.iter().any(|symbol| {
+                    symbol.eq_ignore_ascii_case(&instrument.display_symbol)
+                        || symbol.eq_ignore_ascii_case(&instrument.provider_symbol)
+                })
+            })
+            .cloned()
+            .map(|instrument| WorkspaceWatchlistEntryState {
+                instrument: Some(instrument),
+            })
+            .collect();
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    workspace.watchlist_entries.retain(|entry| {
+        entry.instrument.as_ref().is_some_and(|instrument| {
+            valid_watchlist_instrument(instrument)
+                && identities.insert((
+                    instrument.provider.to_ascii_lowercase(),
+                    instrument.instrument_id.clone(),
+                ))
+        })
+    });
+    workspace
+        .watchlist_entries
+        .truncate(MAXIMUM_WATCHLIST_ENTRIES);
+    workspace.watchlist = workspace
+        .watchlist_entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .instrument
+                .as_ref()
+                .map(|instrument| instrument.display_symbol.clone())
+        })
+        .collect();
+}
+
+fn valid_watchlist_instrument(instrument: &InstallProviderInstrument) -> bool {
+    !instrument.provider.is_empty()
+        && instrument.provider.len() <= 64
+        && !instrument.instrument_id.is_empty()
+        && instrument.instrument_id.len() <= 256
+        && !instrument.provider_symbol.is_empty()
+        && instrument.provider_symbol.len() <= 128
+        && !instrument.display_symbol.is_empty()
+        && instrument.display_symbol.len() <= 128
+        && !instrument.entitlement_id.is_empty()
+        && instrument.entitlement_id.len() <= 256
+        && instrument.price_scale <= 18
+        && instrument.quantity_scale <= 18
 }
 
 fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState) -> bool {
@@ -723,6 +798,9 @@ mod tests {
         first.pane_id = 7;
         first.consumer_id = 17;
         first.size_basis_points = 4_000;
+        first.side_panel_visibility = 3;
+        first.side_panel_width = 420;
+        first.side_panel_split_basis_points = 6_250;
         first.chart = Some(round_trip_chart_state());
         let instrument = first.instrument.as_mut().expect("default instrument");
         instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
@@ -796,6 +874,36 @@ mod tests {
 
         let parent = path.parent().expect("temporary workspace parent");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn workspace_sanitizer_bounds_and_deduplicates_watchlist_state() {
+        let mut workspace = default_workspace();
+        let instrument = workspace.watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default watchlist instrument");
+        workspace
+            .watchlist_entries
+            .push(WorkspaceWatchlistEntryState {
+                instrument: Some(instrument),
+            });
+        workspace
+            .watchlist_entries
+            .push(WorkspaceWatchlistEntryState { instrument: None });
+        let pane = &mut workspace.workspace_tabs[0].panes[0];
+        pane.side_panel_visibility = u32::MAX;
+        pane.side_panel_width = 9_000;
+        pane.side_panel_split_basis_points = 10_000;
+
+        let sanitized = sanitize_workspace(workspace);
+
+        assert_eq!(sanitized.watchlist_entries.len(), 1);
+        assert_eq!(sanitized.watchlist, vec!["BTC-PERP"]);
+        let pane = &sanitized.workspace_tabs[0].panes[0];
+        assert_eq!(pane.side_panel_visibility, 3);
+        assert_eq!(pane.side_panel_width, 480);
+        assert_eq!(pane.side_panel_split_basis_points, 9_500);
     }
 
     #[test]

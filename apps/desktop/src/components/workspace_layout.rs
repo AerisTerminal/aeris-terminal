@@ -271,6 +271,7 @@ pub(super) fn workspace_market_area(
     workspace: &WorkspaceTab,
     active_surface: &Entity<WorkspaceSurface>,
     drawing_toolbar_collapsed: bool,
+    watchlist: Vec<WatchlistRow>,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> impl IntoElement + use<> {
@@ -279,13 +280,16 @@ pub(super) fn workspace_market_area(
     let drawing_state = surface.drawing_toolbar_state(cx);
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
-    let side_panel = surface.side_panel.map(|panel| {
+    let side_panel = surface.side_panels.any().then(|| {
         workspace_side_panel(WorkspaceSidePanelState {
             app: active_surface.clone(),
+            terminal: terminal.clone(),
             workspace_id: workspace.id,
-            panel,
+            visible: surface.side_panels,
             width: surface.side_panel_width,
+            split_basis_points: surface.side_panel_split_basis_points,
             order_book: &surface.order_book,
+            watchlist,
             order_book_column_menu_open: surface.menu_state.order_book_column_open,
             order_book_columns: surface.order_book.read(cx).columns(),
             theme,

@@ -61,7 +61,8 @@ pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
 /// Keep the reader wait short so a symbol click cannot sit behind a half-frame
 /// polling quantum before the runtime receives it.
 const EVENT_WAIT: Duration = Duration::from_millis(2);
-const WORKSPACE_ADDITION_CAPACITY: usize = 8;
+const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST_ENTRIES
+    + super::MAXIMUM_OPEN_WORKSPACES * super::MAXIMUM_PANES_PER_WORKSPACE;
 
 static MARKET_RUNTIME: OnceLock<Result<MarketService, String>> = OnceLock::new();
 
