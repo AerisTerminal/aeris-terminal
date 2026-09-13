@@ -73,6 +73,7 @@ pub(super) struct InstrumentSelectorState {
     pub(super) catalog_exchange: assets::ExchangeLogo,
     pub(super) menu: InstrumentSelectorMenu,
     pub(super) scroll: ScrollHandle,
+    pub(super) target: SymbolSelectionTarget,
 }
 
 pub(super) struct InstrumentSelectorAvailability {
@@ -158,6 +159,14 @@ pub(super) fn instrument_dialog_content(
                 }));
         }
     }
+    let action = match state.target {
+        SymbolSelectionTarget::Chart => "Select",
+        SymbolSelectionTarget::Watchlist => "Add",
+    };
+    let trailing = match state.target {
+        SymbolSelectionTarget::Chart => trailing,
+        SymbolSelectionTarget::Watchlist => "Add symbols to watchlist".to_string(),
+    };
     chrome_menu_surface(&colors, extent)
         .child(state.input.as_ref().map_or_else(
             || div().into_any_element(),
@@ -172,7 +181,7 @@ pub(super) fn instrument_dialog_content(
             colors.text_secondary,
             extent,
         ))
-        .child(chrome_menu_footer(&colors, "Select", trailing))
+        .child(chrome_menu_footer(&colors, action, trailing))
         .when(state.menu.exchange_open, |surface| {
             surface.child(instrument_exchange_menu(app, state.catalog_exchange, theme))
         })
@@ -187,6 +196,7 @@ pub(super) fn instrument_dialog_row(
 ) -> impl IntoElement + use<> {
     let checked = instrument.checked;
     let app = app.clone();
+    let add_app = app.clone();
     let selection = instrument.selection;
     let mut row = MenuRow::search_result(
         ("instrument_dialog_row", index),
@@ -212,7 +222,29 @@ pub(super) fn instrument_dialog_row(
         true,
         &theme.colors,
     ));
-    if checked {
+    if state.target == SymbolSelectionTarget::Watchlist {
+        row = row.trailing(button_activation(
+            Button::new(("add_watchlist_symbol", index))
+                .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
+                .theme(theme)
+                .resting_fill(theme.colors.surface)
+                .w(px(24.0))
+                .h(px(24.0))
+                .compact()
+                .border_1()
+                .border_color(gpui_color(theme.colors.border))
+                .cursor_pointer()
+                .tab_stop(false),
+            true,
+            move |window, cx| {
+                if add_app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
+                    add_app.update(cx, |app, app_cx| {
+                        app.close_chrome_overlay(window, app_cx);
+                    });
+                }
+            },
+        ));
+    } else if checked {
         row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
     }
     row

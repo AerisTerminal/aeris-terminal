@@ -137,6 +137,7 @@ pub(super) fn chrome_overlay_content(
                     keyboard_active: app_state.menu_state.chrome_list_keyboard,
                 },
                 scroll: app_state.scrolls.instrument.clone(),
+                target: app_state.symbol_selection_target,
             },
             theme,
         )

@@ -1538,7 +1538,10 @@ impl WorkspaceSurface {
             return;
         }
         if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
-            self.symbol_selection_target = SymbolSelectionTarget::Chart;
+            self.symbol_selection_target = instrument_target_after_close(
+                self.symbol_selection_target,
+                self.market_state.symbol_selection_pending,
+            );
         }
         match self.chrome_overlay {
             Some(ChromeOverlay::Indicator) => {

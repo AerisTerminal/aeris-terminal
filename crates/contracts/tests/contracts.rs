@@ -4,8 +4,7 @@ use axiusflow_contracts::{
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
     WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 

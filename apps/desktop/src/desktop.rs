@@ -1350,6 +1350,17 @@ enum SymbolSelectionTarget {
     Watchlist,
 }
 
+const fn instrument_target_after_close(
+    target: SymbolSelectionTarget,
+    selection_pending: bool,
+) -> SymbolSelectionTarget {
+    if selection_pending {
+        target
+    } else {
+        SymbolSelectionTarget::Chart
+    }
+}
+
 const fn initial_instrument_exchange(provider: TerminalProvider) -> InstrumentExchangeUi {
     InstrumentExchangeUi::Idle(match provider {
         TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,

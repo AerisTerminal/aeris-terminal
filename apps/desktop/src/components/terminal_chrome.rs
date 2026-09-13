@@ -569,6 +569,7 @@ pub(super) fn header_controls(
                     keyboard_active: false,
                 },
                 scroll: state.instrument_scroll,
+                target: SymbolSelectionTarget::Chart,
             },
             &state.theme,
         ))
