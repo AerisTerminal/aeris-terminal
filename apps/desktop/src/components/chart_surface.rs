@@ -83,7 +83,8 @@ fn order_book_side_panel(
         .flex_col()
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface))
-        .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
+        .h_full()
+        .min_w_0()
         .when(both_visible, |panel| {
             panel.flex_basis(px(0.0)).flex_grow(ratio).flex_shrink_1()
         })
@@ -120,7 +121,8 @@ fn watchlist_side_panel(
         .flex_col()
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface))
-        .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
+        .h_full()
+        .min_w_0()
         .when(both_visible, |panel| {
             panel
                 .flex_basis(px(0.0))
@@ -150,6 +152,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let order_book_visible = visible.contains(SidePanel::OrderBook);
     let watchlist_visible = visible.contains(SidePanel::Watchlist);
     let both_visible = order_book_visible && watchlist_visible;
+    let panel_count = if both_visible { 2.0 } else { 1.0 };
     let ratio = if both_visible {
         (split_basis_points.to_f32().unwrap_or(5_000.0) / 10_000.0).clamp(0.05, 0.95)
     } else {
@@ -179,12 +182,11 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
-        .w(px(width))
+        .w(px(width * panel_count))
         .h_full()
         .flex_none()
         .relative()
         .flex()
-        .flex_col()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
         .border_l_1()
@@ -195,19 +197,19 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         )
         .children(watchlist_panel)
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
-            let height = f32::from(event.bounds.size.height);
-            if height <= 0.0 {
+            let width = f32::from(event.bounds.size.width);
+            if width <= 0.0 {
                 return;
             }
             let ratio =
-                (f32::from(event.event.position.y) - f32::from(event.bounds.top())) / height;
+                (f32::from(event.event.position.x) - f32::from(event.bounds.left())) / width;
             split_drag_app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_split_ratio(ratio, surface_cx);
             });
         })
         .on_drag_move::<SidePanelWidthDrag>(move |event, _, cx| {
             let width = super::clamped_side_panel_width(
-                f32::from(event.bounds.right()) - f32::from(event.event.position.x),
+                (f32::from(event.bounds.right()) - f32::from(event.event.position.x)) / panel_count,
             );
             app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_width(width, surface_cx);
@@ -277,20 +279,20 @@ fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoEl
         .relative()
         .flex_none()
         .occlude()
-        .left_0()
-        .w_full()
-        .h(px(8.0))
-        .cursor_row_resize()
+        .top_0()
+        .h_full()
+        .w(px(8.0))
+        .cursor_col_resize()
         .on_drag(SidePanelSplitDrag, |drag, _, _, cx| {
             cx.new(|_| drag.clone())
         })
         .child(
             div()
                 .absolute()
-                .left_0()
-                .top(px(3.0))
-                .w_full()
-                .h(px(1.0))
+                .top_0()
+                .left(px(3.0))
+                .h_full()
+                .w(px(1.0))
                 .bg(border),
         )
 }
