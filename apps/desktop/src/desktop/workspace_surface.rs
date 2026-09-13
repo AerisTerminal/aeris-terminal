@@ -1093,6 +1093,7 @@ impl WorkspaceSurface {
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
             symbol_selection_target: SymbolSelectionTarget::Chart,
+            pending_symbol_selection_target: None,
             pending_watchlist_instrument: None,
             series_message: "Select a symbol before choosing a series".to_string(),
             symbol_input,
@@ -1420,6 +1421,7 @@ impl WorkspaceSurface {
     pub(super) fn select_instrument(
         &mut self,
         selection: InstrumentMenuSelection,
+        target: SymbolSelectionTarget,
         cx: &mut Context<Self>,
     ) -> bool {
         #[cfg(feature = "diagnostics")]
@@ -1451,6 +1453,7 @@ impl WorkspaceSurface {
                     cx.notify();
                     return false;
                 }
+                self.pending_symbol_selection_target = Some(target);
                 self.market_state.symbol_selection_pending = true;
                 self.symbol_message = format!("Selecting {}", selection.instrument.symbol);
                 cx.notify();
@@ -3181,9 +3184,9 @@ impl WorkspaceSurface {
     pub(super) fn submit_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.instrument_entries(cx);
         match symbol_submit_decision(self.provider, entries.len(), self.chrome_selection) {
-            SymbolSubmitDecision::Select(index) => entries
-                .get(index)
-                .is_some_and(|entry| self.select_instrument(entry.selection, cx)),
+            SymbolSubmitDecision::Select(index) => entries.get(index).is_some_and(|entry| {
+                self.select_instrument(entry.selection, self.symbol_selection_target, cx)
+            }),
             SymbolSubmitDecision::Search => {
                 self.search_symbol_input(cx);
                 false
@@ -3241,7 +3244,7 @@ impl WorkspaceSurface {
                 // Both engine providers resolve selections through the same
                 // switch flow: the pending product replaces the chart only
                 // when its covering snapshot arrives.
-                if self.symbol_selection_target == SymbolSelectionTarget::Watchlist {
+                if self.pending_symbol_selection_target == Some(SymbolSelectionTarget::Watchlist) {
                     let Some(selection) = usize_generation(command_generation)
                         .and_then(|generation| self.symbol_browser.resolve_selection(generation))
                     else {
@@ -3250,6 +3253,7 @@ impl WorkspaceSurface {
                     self.symbol_browser
                         .consume_completed_search(selection.search_generation);
                     self.pending_watchlist_instrument = Some(instrument);
+                    self.pending_symbol_selection_target = None;
                     self.symbol_selection_target = SymbolSelectionTarget::Chart;
                     self.market_state.symbol_selection_pending = false;
                     self.chrome_overlay = None;
@@ -3260,6 +3264,7 @@ impl WorkspaceSurface {
                 if !self.confirm_catalog_selection(command_generation) {
                     return;
                 }
+                self.pending_symbol_selection_target = None;
                 self.consume_catalog_search_authorization();
                 let display = terminal_provider_display(self.provider);
                 let interval = self.rithmic_pending_interval.unwrap_or(self.interval);
@@ -3338,6 +3343,9 @@ impl WorkspaceSurface {
         };
         if !rejected {
             return;
+        }
+        if selection {
+            self.pending_symbol_selection_target = None;
         }
         self.market_state.symbol_selection_pending = false;
         let reason = rejection.reason;

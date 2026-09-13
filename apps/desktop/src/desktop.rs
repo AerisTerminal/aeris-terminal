@@ -667,6 +667,7 @@ struct WorkspaceSurface {
     symbol_message: String,
     market_state: WorkspaceMarketState,
     symbol_selection_target: SymbolSelectionTarget,
+    pending_symbol_selection_target: Option<SymbolSelectionTarget>,
     pending_watchlist_instrument: Option<InstallProviderInstrument>,
     series_message: String,
     symbol_input: Option<Entity<InputState>>,

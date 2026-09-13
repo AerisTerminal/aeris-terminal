@@ -198,6 +198,7 @@ pub(super) fn instrument_dialog_row(
     let app = app.clone();
     let add_app = app.clone();
     let selection = instrument.selection;
+    let target = state.target;
     let mut row = MenuRow::search_result(
         ("instrument_dialog_row", index),
         instrument.symbol.clone(),
@@ -210,7 +211,7 @@ pub(super) fn instrument_dialog_row(
         state.menu.keyboard_active,
     ))
     .on_click(move |_, window, cx| {
-        if app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
+        if app.update(cx, |app, cx| app.select_instrument(selection, target, cx)) {
             app.update(cx, |app, app_cx| {
                 app.close_chrome_overlay(window, app_cx);
             });
@@ -237,7 +238,9 @@ pub(super) fn instrument_dialog_row(
                 .tab_stop(false),
             true,
             move |window, cx| {
-                if add_app.update(cx, |app, cx| app.select_instrument(selection, cx)) {
+                if add_app.update(cx, |app, cx| {
+                    app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx)
+                }) {
                     add_app.update(cx, |app, app_cx| {
                         app.close_chrome_overlay(window, app_cx);
                     });

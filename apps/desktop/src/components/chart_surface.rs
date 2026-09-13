@@ -80,6 +80,8 @@ fn order_book_side_panel(
         .relative()
         .flex()
         .flex_col()
+        .overflow_hidden()
+        .bg(gpui_color(theme.colors.surface))
         .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
         .when(both_visible, |panel| {
             panel.h(relative(ratio)).flex_shrink_1()
@@ -91,7 +93,13 @@ fn order_book_side_panel(
             column_menu_open,
             theme,
         ))
-        .child(div().flex_1().overflow_hidden().child(order_book.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(order_book.clone()),
+        )
         .children(
             column_menu_open.then(|| order_book_column_menu_layer(app, order_book, columns, theme)),
         )
@@ -107,6 +115,8 @@ fn watchlist_side_panel(
         .relative()
         .flex()
         .flex_col()
+        .overflow_hidden()
+        .bg(gpui_color(theme.colors.surface))
         .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
         .flex_1()
         .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
@@ -311,17 +321,23 @@ fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
                 .text_ellipsis()
                 .child("ASSET"),
         )
-        .child(watchlist_cell("LAST", WATCHLIST_LAST_WIDTH))
-        .child(watchlist_cell("CHANGE", WATCHLIST_CHANGE_WIDTH))
-        .child(watchlist_cell("CHANGE %", WATCHLIST_CHANGE_PERCENT_WIDTH))
-        .child(watchlist_cell("VOLUME", WATCHLIST_VOLUME_WIDTH))
+        .child(watchlist_cell("LAST", WATCHLIST_LAST_WIDTH, theme))
+        .child(watchlist_cell("CHANGE", WATCHLIST_CHANGE_WIDTH, theme))
+        .child(watchlist_cell(
+            "CHANGE %",
+            WATCHLIST_CHANGE_PERCENT_WIDTH,
+            theme,
+        ))
+        .child(watchlist_cell("VOLUME", WATCHLIST_VOLUME_WIDTH, theme))
 }
 
-fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {
+fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32, theme: &AxiusflowTheme) -> Div {
     div()
         .w(px(width))
         .flex_none()
         .pr_1()
+        .border_l_1()
+        .border_color(gpui_color(theme.colors.border))
         .text_right()
         .whitespace_nowrap()
         .text_ellipsis()
@@ -375,7 +391,7 @@ fn watchlist_row(
         .items_center()
         .px_2()
         .border_b_1()
-        .border_color(gpui_color(colors.border.with_alpha(0.55)))
+        .border_color(gpui_color(colors.border))
         .text_xs()
         .hover(move |item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
         .child(
@@ -399,11 +415,13 @@ fn watchlist_row(
         .child(watchlist_cell(
             last.map_or_else(|| "—".to_string(), |value| watchlist_price(value, scale)),
             WATCHLIST_LAST_WIDTH,
+            theme,
         ))
         .child(
             watchlist_cell(
                 change.map_or_else(|| "—".to_string(), |value| watchlist_change(value, scale)),
                 WATCHLIST_CHANGE_WIDTH,
+                theme,
             )
             .text_color(gpui_color(tone)),
         )
@@ -411,6 +429,7 @@ fn watchlist_row(
             watchlist_cell(
                 change_percent.map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%")),
                 WATCHLIST_CHANGE_PERCENT_WIDTH,
+                theme,
             )
             .text_color(gpui_color(tone)),
         )
@@ -420,6 +439,7 @@ fn watchlist_row(
                 |bar| compact_watchlist_volume(bar.volume, row.instrument.quantity_scale),
             ),
             WATCHLIST_VOLUME_WIDTH,
+            theme,
         ))
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             remove_terminal.update(cx, |terminal, terminal_cx| {
