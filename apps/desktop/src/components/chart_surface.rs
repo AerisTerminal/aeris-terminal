@@ -7,7 +7,7 @@ use super::{
     Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
     WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
     chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
-    platform_tabular_numerals, px,
+    platform_tabular_numerals, px, relative,
 };
 use gpui::{AppContext, Stateful};
 
@@ -71,8 +71,6 @@ pub(super) struct WorkspaceSidePanelState<'a> {
 fn order_book_side_panel(
     app: Entity<WorkspaceSurface>,
     order_book: &Entity<ReadOnlyOrderBookView>,
-    both_visible: bool,
-    ratio: f32,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
     theme: &AxiusflowTheme,
@@ -83,12 +81,7 @@ fn order_book_side_panel(
         .flex_col()
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface))
-        .h_full()
-        .min_w_0()
-        .when(both_visible, |panel| {
-            panel.flex_basis(px(0.0)).flex_grow(ratio).flex_shrink_1()
-        })
-        .when(!both_visible, gpui::Styled::flex_1)
+        .size_full()
         .child(side_panel_header(
             SidePanel::OrderBook,
             app.clone(),
@@ -111,8 +104,6 @@ fn watchlist_side_panel(
     app: Entity<WorkspaceSurface>,
     terminal: &Entity<TerminalApp>,
     watchlist: Vec<WatchlistRow>,
-    both_visible: bool,
-    ratio: f32,
     theme: &AxiusflowTheme,
 ) -> Div {
     div()
@@ -121,17 +112,29 @@ fn watchlist_side_panel(
         .flex_col()
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface))
-        .h_full()
-        .min_w_0()
-        .when(both_visible, |panel| {
-            panel
-                .flex_basis(px(0.0))
-                .flex_grow(1.0 - ratio)
-                .flex_shrink_1()
-        })
-        .when(!both_visible, gpui::Styled::flex_1)
+        .size_full()
         .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
         .child(watchlist_table(terminal, watchlist, theme))
+}
+
+fn side_panel_region(content: Div, panel: SidePanel, both_visible: bool, ratio: f32) -> Div {
+    if !both_visible {
+        return content;
+    }
+    let region = div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .h(relative(match panel {
+            SidePanel::OrderBook => ratio,
+            SidePanel::Watchlist => 1.0 - ratio,
+        }))
+        .overflow_hidden()
+        .child(content);
+    match panel {
+        SidePanel::OrderBook => region.top_0(),
+        SidePanel::Watchlist => region.bottom_0(),
+    }
 }
 
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
@@ -152,64 +155,66 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let order_book_visible = visible.contains(SidePanel::OrderBook);
     let watchlist_visible = visible.contains(SidePanel::Watchlist);
     let both_visible = order_book_visible && watchlist_visible;
-    let panel_count = if both_visible { 2.0 } else { 1.0 };
     let ratio = if both_visible {
         (split_basis_points.to_f32().unwrap_or(5_000.0) / 10_000.0).clamp(0.05, 0.95)
     } else {
         1.0
     };
     let order_book_panel = order_book_visible.then(|| {
-        order_book_side_panel(
-            app.clone(),
-            order_book,
+        side_panel_region(
+            order_book_side_panel(
+                app.clone(),
+                order_book,
+                order_book_column_menu_open,
+                order_book_columns,
+                theme,
+            ),
+            SidePanel::OrderBook,
             both_visible,
             ratio,
-            order_book_column_menu_open,
-            order_book_columns,
-            theme,
         )
     });
     let watchlist_panel = watchlist_visible.then(|| {
-        watchlist_side_panel(
-            app.clone(),
-            &terminal,
-            watchlist,
+        side_panel_region(
+            watchlist_side_panel(app.clone(), &terminal, watchlist, theme),
+            SidePanel::Watchlist,
             both_visible,
             ratio,
-            theme,
         )
     });
     let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
-        .w(px(width * panel_count))
+        .w(px(width))
         .h_full()
         .flex_none()
         .relative()
         .flex()
+        .flex_col()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
         .border_l_1()
         .border_color(gpui_color(colors.border))
         .children(order_book_panel)
         .children(
-            both_visible.then(|| side_panel_split_handle(workspace_id, gpui_color(colors.border))),
+            both_visible
+                .then(|| side_panel_split_handle(workspace_id, ratio, gpui_color(colors.border))),
         )
         .children(watchlist_panel)
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
-            let width = f32::from(event.bounds.size.width);
-            if width <= 0.0 {
+            let height = f32::from(event.bounds.size.height);
+            if height <= 0.0 {
                 return;
             }
             let ratio =
-                (f32::from(event.event.position.x) - f32::from(event.bounds.left())) / width;
+                (f32::from(event.event.position.y) - f32::from(event.bounds.top())) / height;
             split_drag_app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_split_ratio(ratio, surface_cx);
             });
         })
         .on_drag_move::<SidePanelWidthDrag>(move |event, _, cx| {
             let width = super::clamped_side_panel_width(
-                (f32::from(event.bounds.right()) - f32::from(event.event.position.x)) / panel_count,
+                f32::from(event.bounds.right()) - f32::from(event.event.position.x),
             );
             app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_width(width, surface_cx);
@@ -273,26 +278,27 @@ impl Render for WatchlistRowDrag {
     }
 }
 
-fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoElement {
+fn side_panel_split_handle(workspace_id: u64, ratio: f32, border: gpui::Hsla) -> impl IntoElement {
     div()
         .id(("side_panel_split", workspace_id))
-        .relative()
-        .flex_none()
+        .absolute()
         .occlude()
-        .top_0()
-        .h_full()
-        .w(px(8.0))
-        .cursor_col_resize()
+        .left_0()
+        .top(relative(ratio))
+        .mt(px(-4.0))
+        .w_full()
+        .h(px(8.0))
+        .cursor_row_resize()
         .on_drag(SidePanelSplitDrag, |drag, _, _, cx| {
             cx.new(|_| drag.clone())
         })
         .child(
             div()
                 .absolute()
-                .top_0()
-                .left(px(3.0))
-                .h_full()
-                .w(px(1.0))
+                .left_0()
+                .top(px(3.0))
+                .w_full()
+                .h(px(1.0))
                 .bg(border),
         )
 }
