@@ -1071,7 +1071,6 @@ impl WorkspaceSurface {
             order_book,
             side_panels: SidePanelVisibility::default(),
             side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
-            side_panel_resize: None,
             side_panel_split_basis_points: 5_000,
             menu_state: WorkspaceMenuState::default(),
             scrolls: WorkspaceScrollHandles::default(),
@@ -3369,9 +3368,6 @@ impl WorkspaceSurface {
                 .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
         } else {
             self.menu_state.order_book_column_open = false;
-            if !self.side_panels.any() {
-                self.side_panel_resize = None;
-            }
         }
         let _ = self.market_worker.try_set_order_book_visible(visible);
         self.chart_persistence_dirty = true;
@@ -3388,9 +3384,6 @@ impl WorkspaceSurface {
             return;
         }
         self.side_panels.set(SidePanel::Watchlist, visible);
-        if !self.side_panels.any() {
-            self.side_panel_resize = None;
-        }
         self.chart_persistence_dirty = true;
         cx.notify();
     }
@@ -3423,35 +3416,13 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn begin_side_panel_resize(&mut self, pointer_x: f32) {
-        self.side_panel_resize = Some(SidePanelResize {
-            pointer_x,
-            width: self.side_panel_width,
-        });
-    }
-
-    pub(super) fn update_side_panel_resize(
-        &mut self,
-        pointer_x: f32,
-        left_pressed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(resize) = self.side_panel_resize else {
-            return;
-        };
-        if !left_pressed {
-            self.side_panel_resize = None;
-            return;
-        }
-        let width = resized_side_panel_width(resize, pointer_x);
+    pub(super) fn set_side_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = clamped_side_panel_width(width);
         if (width - self.side_panel_width).abs() > f32::EPSILON {
             self.side_panel_width = width;
+            self.chart_persistence_dirty = true;
             cx.notify();
         }
-    }
-
-    pub(super) fn end_side_panel_resize(&mut self) {
-        self.side_panel_resize = None;
     }
 
     pub(super) fn set_side_panel_split_ratio(&mut self, ratio: f32, cx: &mut Context<Self>) {

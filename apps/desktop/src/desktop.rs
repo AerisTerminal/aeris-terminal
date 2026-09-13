@@ -365,8 +365,8 @@ impl std::future::Future for UiWakeNotified {
     }
 }
 
-const SIDE_PANEL_INITIAL_WIDTH: f32 = 340.0;
-const SIDE_PANEL_MINIMUM_WIDTH: f32 = 300.0;
+const SIDE_PANEL_INITIAL_WIDTH: f32 = 400.0;
+const SIDE_PANEL_MINIMUM_WIDTH: f32 = 360.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 480.0;
 const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
@@ -647,7 +647,6 @@ struct WorkspaceSurface {
     order_book: Entity<ReadOnlyOrderBookView>,
     side_panels: SidePanelVisibility,
     side_panel_width: f32,
-    side_panel_resize: Option<SidePanelResize>,
     side_panel_split_basis_points: u32,
     menu_state: WorkspaceMenuState,
     scrolls: WorkspaceScrollHandles,
@@ -1368,15 +1367,8 @@ const fn initial_instrument_exchange(provider: TerminalProvider) -> InstrumentEx
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct SidePanelResize {
-    pointer_x: f32,
-    width: f32,
-}
-
-fn resized_side_panel_width(resize: SidePanelResize, pointer_x: f32) -> f32 {
-    (resize.width + resize.pointer_x - pointer_x)
-        .clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
+fn clamped_side_panel_width(width: f32) -> f32 {
+    width.clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
 }
 
 #[cfg(test)]
@@ -1417,6 +1409,7 @@ struct WatchlistEntry {
     previous_close: Option<i64>,
     last: Option<MarketBar>,
     message: Option<String>,
+    resource_class: ConsumerResourceClass,
 }
 
 #[derive(Clone)]
@@ -1439,6 +1432,20 @@ impl WatchlistEntry {
             previous_close: None,
             last: None,
             message,
+            resource_class: ConsumerResourceClass::Background,
+        }
+    }
+
+    fn set_resource_class(&mut self, resource_class: ConsumerResourceClass) {
+        if self.resource_class == resource_class {
+            return;
+        }
+        let Some(worker) = &self.worker else {
+            self.resource_class = resource_class;
+            return;
+        };
+        if worker.try_set_market_resource_class(resource_class).is_ok() {
+            self.resource_class = resource_class;
         }
     }
 

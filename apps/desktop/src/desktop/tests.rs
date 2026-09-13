@@ -4,10 +4,10 @@ use super::{
     CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_FOOTER_HEIGHT,
     CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
     CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
-    ChromeOverlayPhase, HeaderControls, InputEvent, InstrumentMenuEntry, InstrumentMenuSelection,
-    OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow,
-    ProviderCatalogCommand, ProviderConnectionPresentation, RITHMIC_ENTITLEMENT_ID,
-    RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SidePanelResize, SymbolInputAction,
+    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
+    InstrumentMenuSelection, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout,
+    PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
+    RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SymbolInputAction,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
     TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
     WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WatchlistEntry, WindowCommand,
@@ -16,13 +16,13 @@ use super::{
     caption_pointer_owner, catalog_rejection_message, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
-    clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, connection_presentation,
-    connectivity_chart_state, current_instrument_menu_index, default_rithmic_contract_index,
-    durable_workspace_viewport, fullscreen_escape_command, gpui_color,
-    instrument_listing_refresh_needed, instrument_row_highlighted, instrument_selector_label,
-    instrument_target_after_close, nucleus_chart_theme, price_axis_flyout_rows,
-    price_axis_root_rows, publication_chart_state, ready_state_can_complete_switch,
-    reconciled_bridge_state, reorder_workspace_ids, resized_side_panel_width,
+    clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
+    connection_presentation, connectivity_chart_state, current_instrument_menu_index,
+    default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
+    gpui_color, instrument_listing_refresh_needed, instrument_row_highlighted,
+    instrument_selector_label, instrument_target_after_close, nucleus_chart_theme,
+    price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
     series_selector_label, should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
     stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
     switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
@@ -499,14 +499,10 @@ fn window_move_waits_for_a_pressed_pointer_move_and_cancels_cleanly() {
 }
 
 #[test]
-fn side_panel_resize_clamps_and_reuses_no_stale_pointer_state() {
-    let resize = SidePanelResize {
-        pointer_x: 500.0,
-        width: 320.0,
-    };
-    assert!((resized_side_panel_width(resize, 420.0) - 400.0).abs() < f32::EPSILON);
-    assert!((resized_side_panel_width(resize, -500.0) - 480.0).abs() < f32::EPSILON);
-    assert!((resized_side_panel_width(resize, 1_000.0) - 300.0).abs() < f32::EPSILON);
+fn side_panel_width_clamps_to_renderable_watchlist_bounds() {
+    assert!((clamped_side_panel_width(400.0) - 400.0).abs() < f32::EPSILON);
+    assert!((clamped_side_panel_width(900.0) - 480.0).abs() < f32::EPSILON);
+    assert!((clamped_side_panel_width(100.0) - 360.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -1540,6 +1536,9 @@ fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
         .clone()
         .expect("default watchlist instrument");
     let mut entry = WatchlistEntry::new(instrument, None, None);
+    assert_eq!(entry.resource_class, ConsumerResourceClass::Background);
+    entry.set_resource_class(ConsumerResourceClass::Foreground);
+    assert_eq!(entry.resource_class, ConsumerResourceClass::Foreground);
     let bar = |sequence, timestamp, close| MarketBar {
         source_sequence: sequence,
         exchange_timestamp_seconds: timestamp,

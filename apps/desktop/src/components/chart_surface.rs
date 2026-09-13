@@ -5,10 +5,18 @@ use super::{
     RadiusToken, ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel,
     SidePanelVisibility, StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive,
     WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT, WatchlistRow, Window, WorkspaceSurface,
-    chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div, gpui_color,
-    header_icon, platform_tabular_numerals, px, relative,
+    chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div, exchange_mark,
+    gpui_color, header_icon, platform_tabular_numerals, px, relative,
 };
 use gpui::AppContext;
+
+const SIDE_PANEL_HEADER_HEIGHT: f32 = 30.0;
+const WATCHLIST_COLUMNS_HEIGHT: f32 = 26.0;
+const WATCHLIST_ROW_HEIGHT: f32 = 30.0;
+const WATCHLIST_LAST_WIDTH: f32 = 62.0;
+const WATCHLIST_CHANGE_WIDTH: f32 = 54.0;
+const WATCHLIST_CHANGE_PERCENT_WIDTH: f32 = 58.0;
+const WATCHLIST_VOLUME_WIDTH: f32 = 52.0;
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
@@ -72,8 +80,10 @@ fn order_book_side_panel(
         .relative()
         .flex()
         .flex_col()
-        .min_h_0()
-        .when(both_visible, |panel| panel.h(relative(ratio)).flex_none())
+        .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
+        .when(both_visible, |panel| {
+            panel.h(relative(ratio)).flex_shrink_1()
+        })
         .when(!both_visible, gpui::Styled::flex_1)
         .child(side_panel_header(
             SidePanel::OrderBook,
@@ -97,7 +107,7 @@ fn watchlist_side_panel(
         .relative()
         .flex()
         .flex_col()
-        .min_h_0()
+        .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
         .flex_1()
         .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
         .child(watchlist_table(terminal, watchlist, theme))
@@ -118,9 +128,6 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         theme,
     } = state;
     let colors = theme.colors;
-    let resize_app = app.clone();
-    let move_app = app.clone();
-    let release_app = app.clone();
     let order_book_visible = visible.contains(SidePanel::OrderBook);
     let watchlist_visible = visible.contains(SidePanel::Watchlist);
     let both_visible = order_book_visible && watchlist_visible;
@@ -156,11 +163,10 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         .border_l_1()
         .border_color(gpui_color(colors.border))
         .children(order_book_panel)
-        .children(watchlist_panel)
         .children(
-            both_visible
-                .then(|| side_panel_split_handle(workspace_id, ratio, gpui_color(colors.border))),
+            both_visible.then(|| side_panel_split_handle(workspace_id, gpui_color(colors.border))),
         )
+        .children(watchlist_panel)
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
             let height = f32::from(event.bounds.size.height);
             if height <= 0.0 {
@@ -170,6 +176,14 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 (f32::from(event.event.position.y) - f32::from(event.bounds.top())) / height;
             split_drag_app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_split_ratio(ratio, surface_cx);
+            });
+        })
+        .on_drag_move::<SidePanelWidthDrag>(move |event, _, cx| {
+            let width = super::clamped_side_panel_width(
+                f32::from(event.bounds.right()) - f32::from(event.event.position.x),
+            );
+            app.update(cx, |surface, surface_cx| {
+                surface.set_side_panel_width(width, surface_cx);
             });
         })
         .child(
@@ -182,25 +196,10 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 .h_full()
                 .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
                 .cursor_col_resize()
-                .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                    resize_app.update(cx, |surface, _| {
-                        surface.begin_side_panel_resize(f32::from(event.position.x));
-                    });
-                    cx.stop_propagation();
+                .on_drag(SidePanelWidthDrag, |drag, _, _, cx| {
+                    cx.new(|_| drag.clone())
                 }),
         )
-        .on_mouse_move(move |event, _, cx| {
-            move_app.update(cx, |surface, surface_cx| {
-                surface.update_side_panel_resize(
-                    f32::from(event.position.x),
-                    event.pressed_button == Some(MouseButton::Left),
-                    surface_cx,
-                );
-            });
-        })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-            release_app.update(cx, |surface, _| surface.end_side_panel_resize());
-        })
 }
 
 pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
@@ -224,14 +223,22 @@ impl Render for SidePanelSplitDrag {
     }
 }
 
-fn side_panel_split_handle(workspace_id: u64, ratio: f32, border: gpui::Hsla) -> impl IntoElement {
+#[derive(Clone)]
+struct SidePanelWidthDrag;
+
+impl Render for SidePanelWidthDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoElement {
     div()
         .id(("side_panel_split", workspace_id))
-        .absolute()
+        .relative()
+        .flex_none()
         .occlude()
         .left_0()
-        .top(relative(ratio))
-        .mt(px(-4.0))
         .w_full()
         .h(px(8.0))
         .cursor_row_resize()
@@ -278,6 +285,8 @@ fn watchlist_table(
         .min_h_0()
         .flex()
         .flex_col()
+        .overflow_hidden()
+        .bg(gpui_color(colors.surface))
         .child(watchlist_columns(theme))
         .child(body.id("watchlist_body").overflow_y_scroll())
 }
@@ -285,7 +294,7 @@ fn watchlist_table(
 fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
     let colors = theme.colors;
     div()
-        .h(px(26.0))
+        .h(px(WATCHLIST_COLUMNS_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
@@ -294,19 +303,28 @@ fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
         .px_2()
         .text_xs()
         .text_color(gpui_color(colors.text_muted))
-        .child(div().min_w_0().flex_1().child("ASSET"))
-        .child(watchlist_cell("LAST", 76.0))
-        .child(watchlist_cell("CHANGE", 66.0))
-        .child(watchlist_cell("CHANGE %", 68.0))
-        .child(watchlist_cell("VOLUME", 72.0))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child("ASSET"),
+        )
+        .child(watchlist_cell("LAST", WATCHLIST_LAST_WIDTH))
+        .child(watchlist_cell("CHANGE", WATCHLIST_CHANGE_WIDTH))
+        .child(watchlist_cell("CHANGE %", WATCHLIST_CHANGE_PERCENT_WIDTH))
+        .child(watchlist_cell("VOLUME", WATCHLIST_VOLUME_WIDTH))
 }
 
 fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {
     div()
         .w(px(width))
         .flex_none()
+        .pr_1()
         .text_right()
-        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
         .child(value.into())
 }
 
@@ -334,14 +352,24 @@ fn watchlist_row(
     });
     let provider = row.instrument.provider.clone();
     let instrument_id = row.instrument.instrument_id.clone();
+    let asset_tone = if row.message.is_some() {
+        colors.text_muted
+    } else {
+        colors.text_primary
+    };
     let remove_terminal = terminal.clone();
+    let logo = match row.instrument.provider.as_str() {
+        "hyperliquid" => Some(super::assets::ExchangeLogo::Hyperliquid),
+        "rithmic" => Some(super::assets::ExchangeLogo::Rithmic),
+        _ => None,
+    };
     div()
         .id(gpui::SharedString::from(format!(
             "watchlist_row_{}_{}",
             row.instrument.provider, row.instrument.instrument_id
         )))
         .group("watchlist_asset_row")
-        .h(px(28.0))
+        .h(px(WATCHLIST_ROW_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
@@ -354,34 +382,44 @@ fn watchlist_row(
             div()
                 .min_w_0()
                 .flex_1()
-                .overflow_hidden()
-                .text_color(gpui_color(colors.text_primary))
-                .child(row.instrument.display_symbol),
+                .flex()
+                .items_center()
+                .gap_1()
+                .whitespace_nowrap()
+                .text_color(gpui_color(asset_tone))
+                .children(logo.map(|logo| exchange_mark(logo, px(16.0), false, &colors)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .text_ellipsis()
+                        .child(row.instrument.display_symbol),
+                ),
         )
         .child(watchlist_cell(
             last.map_or_else(|| "—".to_string(), |value| watchlist_price(value, scale)),
-            76.0,
+            WATCHLIST_LAST_WIDTH,
         ))
         .child(
             watchlist_cell(
                 change.map_or_else(|| "—".to_string(), |value| watchlist_change(value, scale)),
-                66.0,
+                WATCHLIST_CHANGE_WIDTH,
             )
             .text_color(gpui_color(tone)),
         )
         .child(
             watchlist_cell(
                 change_percent.map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%")),
-                68.0,
+                WATCHLIST_CHANGE_PERCENT_WIDTH,
             )
             .text_color(gpui_color(tone)),
         )
         .child(watchlist_cell(
             row.last.map_or_else(
-                || row.message.unwrap_or_else(|| "—".to_string()),
+                || "—".to_string(),
                 |bar| compact_watchlist_volume(bar.volume, row.instrument.quantity_scale),
             ),
-            72.0,
+            WATCHLIST_VOLUME_WIDTH,
         ))
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             remove_terminal.update(cx, |terminal, terminal_cx| {
@@ -435,7 +473,7 @@ pub(super) fn side_panel_header(
         SidePanel::Watchlist => "close_watchlist_panel",
     };
     div()
-        .h(px(30.0))
+        .h(px(SIDE_PANEL_HEADER_HEIGHT))
         .flex_none()
         .flex()
         .items_center()

@@ -173,6 +173,23 @@ impl TerminalApp {
         for instrument in requests {
             self.add_watchlist_instrument(instrument, cx);
         }
+        self.sync_watchlist_resource_class(cx);
+    }
+
+    fn sync_watchlist_resource_class(&mut self, cx: &App) {
+        let visible = self
+            .active_surface()
+            .read(cx)
+            .side_panels
+            .contains(SidePanel::Watchlist);
+        let resource_class = if visible {
+            ConsumerResourceClass::Foreground
+        } else {
+            ConsumerResourceClass::Background
+        };
+        for entry in &mut self.watchlist {
+            entry.set_resource_class(resource_class);
+        }
     }
 
     fn add_watchlist_instrument(
@@ -1992,12 +2009,6 @@ impl TerminalApp {
         self.window_active = window_active;
         if !window_active {
             self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
-            for workspace in &self.workspaces {
-                for pane in &workspace.panes {
-                    pane.surface
-                        .update(cx, |surface, _| surface.end_side_panel_resize());
-                }
-            }
             if self.workspace_drag.is_some() {
                 cx.stop_active_drag(window);
                 self.end_workspace_drag(cx);

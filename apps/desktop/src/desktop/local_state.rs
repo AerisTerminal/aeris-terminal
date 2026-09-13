@@ -347,7 +347,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     {
         pane.side_panel_visibility &= 0b11;
         if pane.side_panel_width != 0 {
-            pane.side_panel_width = pane.side_panel_width.clamp(300, 480);
+            pane.side_panel_width = pane.side_panel_width.clamp(360, 480);
         }
         if pane.side_panel_split_basis_points != 0 {
             pane.side_panel_split_basis_points =
