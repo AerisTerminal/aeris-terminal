@@ -415,6 +415,7 @@ fn watchlist_row(
         _ => None,
     };
     let instrument = row.instrument.clone();
+    let active = row.active;
     let content = div()
         .id(gpui::SharedString::from(format!(
             "watchlist_row_{}_{}",
@@ -429,7 +430,14 @@ fn watchlist_row(
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .text_xs()
-        .hover(move |item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+        .bg(gpui_color(if active {
+            colors.active_bg.over(colors.surface)
+        } else {
+            colors.surface
+        }))
+        .when(!active, |item| {
+            item.hover(move |item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+        })
         .child(
             div()
                 .min_w_0()
@@ -477,7 +485,7 @@ fn watchlist_row(
             WATCHLIST_VOLUME_WIDTH,
             theme,
         ));
-    interactive_watchlist_row(content, terminal, instrument, index)
+    interactive_watchlist_row(content, terminal, instrument, index, active)
 }
 
 fn interactive_watchlist_row(
@@ -485,6 +493,7 @@ fn interactive_watchlist_row(
     terminal: &Entity<TerminalApp>,
     instrument: InstallProviderInstrument,
     index: usize,
+    active: bool,
 ) -> Stateful<Div> {
     let provider = instrument.provider.clone();
     let instrument_id = instrument.instrument_id.clone();
@@ -497,6 +506,7 @@ fn interactive_watchlist_row(
     };
     row.cursor_pointer()
         .role(Role::Button)
+        .aria_selected(active)
         .aria_label(format!("Select {}", instrument.display_symbol))
         .on_click(move |_, _, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {

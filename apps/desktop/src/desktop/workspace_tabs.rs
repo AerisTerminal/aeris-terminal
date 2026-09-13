@@ -169,8 +169,17 @@ impl TerminalApp {
             .collect()
     }
 
-    pub(super) fn watchlist_rows(&self) -> Vec<WatchlistRow> {
-        self.watchlist.iter().map(WatchlistEntry::row).collect()
+    pub(super) fn watchlist_rows(&self, cx: &App) -> Vec<WatchlistRow> {
+        let surface = self.active_surface();
+        let surface = surface.read(cx);
+        let active = surface
+            .rithmic_pending_product
+            .as_ref()
+            .or(surface.product.as_ref());
+        self.watchlist
+            .iter()
+            .map(|entry| entry.row(active))
+            .collect()
     }
 
     pub(super) fn absorb_watchlist_requests(&mut self, cx: &mut Context<Self>) {

@@ -142,7 +142,7 @@ impl Render for TerminalApp {
         let about_dialog = self.rendered_about_dialog(&terminal);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
         let header = self.rendered_header(&terminal, &active, cx);
-        let watchlist = self.watchlist_rows();
+        let watchlist = self.watchlist_rows(cx);
         let market = workspace_market_area(
             &terminal,
             &self.workspaces[self.active],

@@ -1419,6 +1419,7 @@ struct WatchlistRow {
     previous_close: Option<i64>,
     last: Option<MarketBar>,
     message: Option<String>,
+    active: bool,
 }
 
 impl WatchlistEntry {
@@ -1503,12 +1504,16 @@ impl WatchlistEntry {
         changed
     }
 
-    fn row(&self) -> WatchlistRow {
+    fn row(&self, active: Option<&InstallProviderInstrument>) -> WatchlistRow {
         WatchlistRow {
             instrument: self.instrument.clone(),
             previous_close: self.previous_close,
             last: self.last,
             message: self.message.clone(),
+            active: active.is_some_and(|active| {
+                active.provider == self.instrument.provider
+                    && active.instrument_id == self.instrument.instrument_id
+            }),
         }
     }
 }
