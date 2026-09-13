@@ -113,7 +113,13 @@ fn gpui_theme_color(color: ThemeColor) -> Rgba {
     }
 }
 
-fn apply_platform_chrome_contract(engine: &mut ChartEngine) {
+fn replay_time_visible(replay: &ReplaySnapshot) -> bool {
+    let definition = replay.bar_definition();
+    definition.trades_per_bar.is_some()
+        || (definition.calendar_months.is_none() && definition.interval_seconds < 86_400)
+}
+
+fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) {
     let options = serde_json::json!({
         "layout": {
             "fontFamily": platform_font_stack(),
@@ -122,7 +128,7 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine) {
             "fontFamily": platform_font_stack(),
         },
         "timeScale": {
-            "timeVisible": true,
+            "timeVisible": time_visible,
             "secondsVisible": false,
         },
     })
@@ -1069,7 +1075,7 @@ impl NucleusChartView {
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        apply_platform_chrome_contract(&mut engine);
+        apply_platform_chrome_contract(&mut engine, true);
         let volume_series = install_volume_series(&mut engine);
         Self {
             engine,
@@ -1159,7 +1165,7 @@ impl NucleusChartView {
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
-        apply_platform_chrome_contract(&mut engine);
+        apply_platform_chrome_contract(&mut engine, replay_time_visible(replay));
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
@@ -1251,6 +1257,7 @@ impl NucleusChartView {
             self.chart_type,
             &mut self.product_bars,
         );
+        apply_platform_chrome_contract(&mut self.engine, replay_time_visible(replay));
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
@@ -1546,9 +1553,10 @@ impl NucleusChartView {
         let grid_tracks_nucleus_theme = is_nucleus_grid_default(&current_grid_color);
         let current_crosshair_color = self.engine.options.get().crosshair.vert_line.color.clone();
         let crosshair_tracks_nucleus_theme = is_nucleus_crosshair_default(&current_crosshair_color);
+        let time_visible = self.engine.time_visible;
         self.theme = theme;
         self.engine.set_theme(theme);
-        apply_platform_chrome_contract(&mut self.engine);
+        apply_platform_chrome_contract(&mut self.engine, time_visible);
         if !grid_tracks_nucleus_theme {
             let patch = serde_json::json!({
                 "grid": {
@@ -1788,6 +1796,7 @@ impl NucleusChartView {
             self.chart_type,
             &mut self.product_bars,
         );
+        apply_platform_chrome_contract(&mut self.engine, replay_time_visible(replay));
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
@@ -1877,6 +1886,9 @@ impl NucleusChartView {
                     &mut self.product_bars,
                     &update,
                 );
+                if let Some(snapshot) = update.snapshot() {
+                    apply_platform_chrome_contract(&mut self.engine, replay_time_visible(snapshot));
+                }
                 if mutation == SeriesMutation::Snapshot {
                     self.sync_brushable_interaction();
                     self.apply_price_series_kind();

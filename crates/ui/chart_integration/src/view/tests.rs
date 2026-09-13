@@ -2723,6 +2723,79 @@ fn platform_crosshair_time_label_keeps_time_of_day_visible() {
     assert!(chart.engine.time_visible);
     assert!(!chart.engine.seconds_visible);
     assert!(label.text.contains(':'), "time missing from {}", label.text);
+    assert_ne!(
+        label.text.split_whitespace().last(),
+        Some("00:00"),
+        "intraday crosshair collapsed to midnight in {}",
+        label.text
+    );
+}
+
+#[test]
+fn platform_crosshair_time_label_omits_midnight_for_weekly_bars() {
+    let baseline = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 3 })
+        .expect("fixture snapshot");
+    let week_starts = [1_735_689_600_i64, 1_736_294_400, 1_736_899_200];
+    let bars = baseline
+        .bars()
+        .iter()
+        .zip(week_starts)
+        .map(|(item, timestamp)| {
+            let mut bar = *item.value();
+            bar.exchange_timestamp_seconds = timestamp;
+            bar.exchange_timestamp_unix_nanos = timestamp.saturating_mul(1_000_000_000);
+            bar
+        })
+        .collect();
+    let mut definition = baseline.bar_definition().clone();
+    definition.definition_id = "fixture:calendar-weeks:1".to_string();
+    definition.interval_seconds = 7 * 86_400;
+    definition.trades_per_bar = None;
+    definition.calendar_months = None;
+    let replay = ReplaySnapshot::try_new(
+        baseline.instrument().clone(),
+        baseline.provenance(),
+        definition,
+        bars,
+    )
+    .expect("weekly snapshot validates");
+    let mut chart = NucleusChartView::with_replay(&replay);
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    chart.engine.fit_content();
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    let time = week_starts[2]
+        .to_f64()
+        .expect("weekly timestamp is representable");
+    let x = chart
+        .engine
+        .time_to_coordinate(time)
+        .expect("weekly timestamp is visible");
+    chart.engine.crosshair = Some((x, 100.0));
+    let measure =
+        |text: &str, _bold: bool| f64::from(u32::try_from(text.len()).unwrap_or(u32::MAX)) * 7.0;
+
+    let label = chart
+        .engine
+        .build_axis_frame(80.0, measure, measure)
+        .labels
+        .into_iter()
+        .find(|label| label.midpoint == AxisTextMidpoint::StableTime)
+        .expect("weekly crosshair date label is present");
+
+    assert!(!chart.engine.time_visible);
+    assert!(!chart.engine.seconds_visible);
+    assert!(
+        !label.text.contains(':'),
+        "weekly label shows time: {}",
+        label.text
+    );
+    chart.set_theme(ChartTheme::Light);
+    assert!(!chart.engine.time_visible);
 }
 
 #[test]
