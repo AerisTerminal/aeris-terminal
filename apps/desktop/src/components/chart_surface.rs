@@ -7,11 +7,12 @@ use super::{
     Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
     WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
     chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
-    platform_tabular_numerals, px, relative,
+    platform_tabular_numerals, px,
 };
 use gpui::{AppContext, Stateful};
 
 const SIDE_PANEL_HEADER_HEIGHT: f32 = 30.0;
+const SIDE_PANEL_SPLIT_HANDLE_HEIGHT: f32 = 8.0;
 const WATCHLIST_COLUMNS_HEIGHT: f32 = 26.0;
 const WATCHLIST_ROW_HEIGHT: f32 = 30.0;
 const WATCHLIST_LAST_WIDTH: f32 = 62.0;
@@ -121,20 +122,16 @@ fn side_panel_region(content: Div, panel: SidePanel, both_visible: bool, ratio: 
     if !both_visible {
         return content;
     }
-    let region = div()
-        .absolute()
-        .left_0()
-        .right_0()
-        .h(relative(match panel {
+    div()
+        .w_full()
+        .min_h_0()
+        .flex_basis(px(0.0))
+        .flex_grow(match panel {
             SidePanel::OrderBook => ratio,
             SidePanel::Watchlist => 1.0 - ratio,
-        }))
+        })
         .overflow_hidden()
-        .child(content);
-    match panel {
-        SidePanel::OrderBook => region.top_0(),
-        SidePanel::Watchlist => region.bottom_0(),
-    }
+        .child(content)
 }
 
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
@@ -197,17 +194,18 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         .border_color(gpui_color(colors.border))
         .children(order_book_panel)
         .children(
-            both_visible
-                .then(|| side_panel_split_handle(workspace_id, ratio, gpui_color(colors.border))),
+            both_visible.then(|| side_panel_split_handle(workspace_id, gpui_color(colors.border))),
         )
         .children(watchlist_panel)
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
-            let height = f32::from(event.bounds.size.height);
+            let height = f32::from(event.bounds.size.height) - SIDE_PANEL_SPLIT_HANDLE_HEIGHT;
             if height <= 0.0 {
                 return;
             }
-            let ratio =
-                (f32::from(event.event.position.y) - f32::from(event.bounds.top())) / height;
+            let ratio = (f32::from(event.event.position.y)
+                - f32::from(event.bounds.top())
+                - SIDE_PANEL_SPLIT_HANDLE_HEIGHT / 2.0)
+                / height;
             split_drag_app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_split_ratio(ratio, surface_cx);
             });
@@ -278,16 +276,14 @@ impl Render for WatchlistRowDrag {
     }
 }
 
-fn side_panel_split_handle(workspace_id: u64, ratio: f32, border: gpui::Hsla) -> impl IntoElement {
+fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoElement {
     div()
         .id(("side_panel_split", workspace_id))
-        .absolute()
+        .relative()
         .occlude()
-        .left_0()
-        .top(relative(ratio))
-        .mt(px(-4.0))
+        .flex_none()
         .w_full()
-        .h(px(8.0))
+        .h(px(SIDE_PANEL_SPLIT_HANDLE_HEIGHT))
         .cursor_row_resize()
         .on_drag(SidePanelSplitDrag, |drag, _, _, cx| {
             cx.new(|_| drag.clone())
