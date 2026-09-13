@@ -127,11 +127,11 @@ use chrome_menu::{
 };
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
-    Entity, FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit,
-    Orientation, Pixels, QuitMode, Render, RenderOnce, Role, ScrollHandle, SharedString, Stateful,
-    Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions,
-    actions, canvas, div, ease_out_quint, img, point, prelude::*, px, relative, size,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity,
+    FocusHandle, Hsla, KeyBinding, KeyDownEvent, MouseButton, ObjectFit, Orientation, Pixels,
+    QuitMode, Render, Role, ScrollHandle, SharedString, Stateful, Task, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, actions, canvas, div,
+    ease_out_quint, img, point, prelude::*, px, relative, size,
 };
 use gpui_platform::application;
 use indicator_menu::{
@@ -148,6 +148,7 @@ use native_ui::{
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     tab::Tab,
     tooltip::{TooltipSpec, with_tooltip},
+    vector_image::VectorImage,
 };
 use num_traits::ToPrimitive;
 use price_alert_dialog::{
@@ -3013,6 +3014,7 @@ fn run_onboarding() {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             install_platform_http_client(cx);
+            native_ui::vector_image::init(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
                 .add_fonts(
@@ -3049,6 +3051,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             install_platform_http_client(cx);
+            native_ui::vector_image::init(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
                 .add_fonts(

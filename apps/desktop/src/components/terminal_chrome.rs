@@ -925,114 +925,8 @@ pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
     }
 }
 
-// GPUI's `img()` rasterizes an SVG once at intrinsic size and stretches that bitmap,
-// which pixelates large artwork; its `svg()` element only paints a monochrome mask.
-// Rasterize bundled colored marks at the exact device-pixel size they are drawn instead.
-struct ColoredMarkCache {
-    images: HashMap<(SharedString, u64, u64), Arc<gpui::RenderImage>>,
-}
-
-impl ColoredMarkCache {
-    fn new() -> Self {
-        Self {
-            images: HashMap::new(),
-        }
-    }
-}
-
-static MARK_CACHE: std::sync::LazyLock<Mutex<ColoredMarkCache>> =
-    std::sync::LazyLock::new(|| Mutex::new(ColoredMarkCache::new()));
-
-pub(super) fn ordered_f32_key(value: f32) -> u64 {
-    value.to_bits().into()
-}
-
-pub(super) fn svg_intrinsic_width(bytes: &[u8]) -> Option<f32> {
-    let header = std::str::from_utf8(bytes.get(..768)?).ok()?;
-    let svg = header.find("<svg")?;
-    let width = header[svg..].find("width=\"")? + svg + 7;
-    let rest = &header[width..];
-    let end = rest.find('"')?;
-    rest[..end].parse().ok()
-}
-
-pub(super) fn rasterize_colored_svg(
-    path: &SharedString,
-    logical_size: Pixels,
-    window_scale: f32,
-    cx: &App,
-) -> Result<Arc<gpui::RenderImage>, gpui::ImageCacheError> {
-    let window_scale = window_scale.max(1.0);
-    let size_key = ordered_f32_key(f32::from(logical_size));
-    let scale_key = ordered_f32_key(window_scale);
-    let key = (path.clone(), size_key, scale_key);
-
-    if let Ok(cache) = MARK_CACHE.lock()
-        && let Some(image) = cache.images.get(&key)
-    {
-        return Ok(Arc::clone(image));
-    }
-
-    let bytes = assets::AxiusflowAssets
-        .load(path.as_ref())
-        .map_err(|error| gpui::ImageCacheError::Other(Arc::new(error)))?
-        .ok_or_else(|| {
-            gpui::ImageCacheError::Asset(format!("Embedded resource not found: {path}").into())
-        })?;
-    let intrinsic = svg_intrinsic_width(&bytes).ok_or_else(|| {
-        gpui::ImageCacheError::Asset(format!("SVG intrinsic width missing: {path}").into())
-    })?;
-    let target_logical = f32::from(logical_size) * window_scale;
-    let scale_factor = (target_logical / intrinsic).max(1.0 / intrinsic);
-
-    let image = cx
-        .svg_renderer()
-        .render_single_frame(&bytes, scale_factor)
-        .map_err(|error| gpui::ImageCacheError::Usvg(Arc::new(error)))?;
-
-    if let Ok(mut cache) = MARK_CACHE.lock() {
-        cache.images.insert(key, Arc::clone(&image));
-    }
-    Ok(image)
-}
-
-#[derive(Clone, IntoElement)]
-struct ColoredSvgMark {
-    path: SharedString,
-    size: Pixels,
-}
-
-impl RenderOnce for ColoredSvgMark {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        colored_svg_element(&self.path, self.size, window.scale_factor(), cx)
-    }
-}
-
-pub(super) fn colored_svg_element(
-    path: &SharedString,
-    size: Pixels,
-    window_scale: f32,
-    cx: &App,
-) -> AnyElement {
-    match rasterize_colored_svg(path, size, window_scale, cx) {
-        Ok(image) => img(ImageSource::Render(image))
-            .size(size)
-            .flex_none()
-            .object_fit(ObjectFit::Fill)
-            .into_any_element(),
-        Err(_) => img(path.clone())
-            .size(size)
-            .flex_none()
-            .object_fit(ObjectFit::Fill)
-            .into_any_element(),
-    }
-}
-
 pub(super) fn series_glyph(chart_type: ChartType, size: Pixels) -> impl IntoElement {
-    ColoredSvgMark {
-        path: series_icon_kind(chart_type).path(),
-        size,
-    }
+    VectorImage::square(series_icon_kind(chart_type), size)
 }
 
 pub(super) fn exchange_mark(
@@ -1053,17 +947,11 @@ pub(super) fn exchange_mark(
         .when(bordered, |mark| {
             mark.border_1().border_color(gpui_color(colors.border))
         })
-        .child(ColoredSvgMark {
-            path: logo.path(),
-            size: glyph_size,
-        })
+        .child(VectorImage::square(logo, glyph_size))
 }
 
 pub(super) fn brand_mark_sized(size: Pixels) -> impl IntoElement {
-    ColoredSvgMark {
-        path: assets::BrandIcon::Mark.path(),
-        size,
-    }
+    VectorImage::square(assets::BrandIcon::Mark, size)
 }
 
 pub(super) fn chrome_tooltip(

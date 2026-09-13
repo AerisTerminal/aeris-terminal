@@ -67,6 +67,7 @@ protoc-bin-vendored = "=3.2.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }
+roxmltree = "=0.21.1"
 nucleuscharts_engine = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a", version = "=0.1.0" }
 nucleuscharts_indicators = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a", version = "=0.1.0" }
 nucleuscharts_render = { git = "https://github.com/NucleusCharts/financial-charts.git", rev = "e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a", version = "=0.1.0" }
