@@ -1382,6 +1382,51 @@ impl WorkspaceSurface {
         selected
     }
 
+    pub(super) fn select_installed_instrument(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.product.as_ref().is_some_and(|current| {
+            current.provider == instrument.provider
+                && current.instrument_id == instrument.instrument_id
+        }) && self.rithmic_pending_product.is_none()
+        {
+            return true;
+        }
+        if self
+            .rithmic_pending_product
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.provider == instrument.provider
+                    && pending.instrument_id == instrument.instrument_id
+            })
+        {
+            return true;
+        }
+        let interval = self.interval;
+        let Ok(sequence) = self
+            .market_worker
+            .try_select_engine(instrument.clone(), interval)
+        else {
+            self.series_message = format!(
+                "{} market history could not start",
+                instrument.display_symbol
+            );
+            cx.notify();
+            return false;
+        };
+        self.rithmic_pending_product = Some(instrument.clone());
+        self.rithmic_pending_interval = Some(interval);
+        self.rithmic_pending_sequence = Some(sequence);
+        self.rithmic_switch = RithmicSwitchState::Pending;
+        self.chart_state = ChartState::Loading;
+        self.chart_state_message = format!("Loading {} market history", instrument.display_symbol);
+        self.series_message = format!("Switching to {}", instrument.display_symbol);
+        cx.notify();
+        true
+    }
+
     pub(super) fn instrument_entries(&self, _cx: &App) -> Vec<InstrumentMenuEntry> {
         self.symbol_browser
             .results()
@@ -2700,6 +2745,13 @@ impl WorkspaceSurface {
             self.interval = interval;
         }
         if let Some(product) = self.rithmic_pending_product.take() {
+            let provider = terminal_provider_from_id(&product.provider);
+            if provider != self.provider {
+                self.provider = provider;
+                self.instrument_exchange = initial_instrument_exchange(provider);
+                self.symbol_browser = initial_symbol_browser();
+                self.symbol_message = initial_symbol_message(provider);
+            }
             self.product = Some(product);
             // Price levels belong to one instrument: a product switch drops
             // the old book back to loading instead of showing BTC levels

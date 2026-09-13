@@ -2,6 +2,19 @@
 
 use super::*;
 
+pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize) -> bool {
+    if items.is_empty() {
+        return false;
+    }
+    let destination = destination.min(items.len() - 1);
+    if source >= items.len() || source == destination {
+        return false;
+    }
+    let item = items.remove(source);
+    items.insert(destination, item);
+    true
+}
+
 fn restore_watchlist(
     entries: Vec<WorkspaceWatchlistEntryState>,
     factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
@@ -244,6 +257,36 @@ impl TerminalApp {
             self.persist_workspace_layout_if_changed(cx);
             cx.notify();
         }
+    }
+
+    pub(super) fn move_watchlist_instrument(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        destination: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self.watchlist.iter().position(|entry| {
+            entry.instrument.provider == provider && entry.instrument.instrument_id == instrument_id
+        }) else {
+            return;
+        };
+        if !move_item(&mut self.watchlist, source, destination) {
+            return;
+        }
+        self.watchlist_persistence_dirty = true;
+        self.persist_workspace_layout_if_changed(cx);
+        cx.notify();
+    }
+
+    pub(super) fn select_watchlist_instrument(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_surface().update(cx, |surface, surface_cx| {
+            surface.select_installed_instrument(instrument, surface_cx);
+        });
     }
 
     fn chart_chrome_for_new_surface(&self, cx: &App) -> chart_chrome::ChartChromePreferences {

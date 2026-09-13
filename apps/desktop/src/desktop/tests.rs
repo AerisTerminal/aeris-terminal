@@ -1560,6 +1560,22 @@ fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
 }
 
 #[test]
+fn watchlist_reordering_moves_both_directions_and_clamps_the_destination() {
+    let mut symbols = vec!["BTC", "ETH", "SOL", "DOGE"];
+    assert!(super::workspace_tabs::move_item(&mut symbols, 0, 2));
+    assert_eq!(symbols, vec!["ETH", "SOL", "BTC", "DOGE"]);
+    assert!(super::workspace_tabs::move_item(&mut symbols, 3, 0));
+    assert_eq!(symbols, vec!["DOGE", "ETH", "SOL", "BTC"]);
+    assert!(super::workspace_tabs::move_item(
+        &mut symbols,
+        1,
+        usize::MAX
+    ));
+    assert_eq!(symbols, vec!["DOGE", "SOL", "BTC", "ETH"]);
+    assert!(!super::workspace_tabs::move_item(&mut symbols, 3, 3));
+}
+
+#[test]
 fn chart_notice_distinguishes_empty_loading_from_retained_recovery() {
     let loading = chart_surface_notice(
         ChartState::Loading,

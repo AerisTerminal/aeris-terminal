@@ -1,14 +1,15 @@
 use super::{
     AxiusflowTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
-    Div, Entity, FluentBuilder, HugeIcon, InteractiveElement, IntoElement, Loader, MenuRow,
-    MouseButton, NucleusChartView, OrderBookColumn, OrderBookColumnVisibility, ParentElement,
-    RadiusToken, ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel,
-    SidePanelVisibility, StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive,
-    WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT, WatchlistRow, Window, WorkspaceSurface,
-    chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div, exchange_mark,
-    gpui_color, header_icon, platform_tabular_numerals, px, relative,
+    Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
+    IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
+    OrderBookColumnVisibility, ParentElement, RadiusToken, ReadOnlyOrderBookView, Render, Role,
+    SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel, SidePanelVisibility, StatefulInteractiveElement,
+    Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
+    WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
+    chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
+    platform_tabular_numerals, px, relative,
 };
-use gpui::AppContext;
+use gpui::{AppContext, Stateful};
 
 const SIDE_PANEL_HEADER_HEIGHT: f32 = 30.0;
 const WATCHLIST_COLUMNS_HEIGHT: f32 = 26.0;
@@ -84,7 +85,10 @@ fn order_book_side_panel(
         .bg(gpui_color(theme.colors.surface))
         .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
         .when(both_visible, |panel| {
-            panel.h(relative(ratio)).flex_shrink_1()
+            panel
+                .flex_basis(relative(ratio))
+                .flex_grow_0()
+                .flex_shrink_1()
         })
         .when(!both_visible, gpui::Styled::flex_1)
         .child(side_panel_header(
@@ -109,6 +113,8 @@ fn watchlist_side_panel(
     app: Entity<WorkspaceSurface>,
     terminal: &Entity<TerminalApp>,
     watchlist: Vec<WatchlistRow>,
+    both_visible: bool,
+    ratio: f32,
     theme: &AxiusflowTheme,
 ) -> Div {
     div()
@@ -118,7 +124,13 @@ fn watchlist_side_panel(
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface))
         .min_h(px(SIDE_PANEL_HEADER_HEIGHT + WATCHLIST_COLUMNS_HEIGHT))
-        .flex_1()
+        .when(both_visible, |panel| {
+            panel
+                .flex_basis(relative(1.0 - ratio))
+                .flex_grow_0()
+                .flex_shrink_1()
+        })
+        .when(!both_visible, gpui::Styled::flex_1)
         .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
         .child(watchlist_table(terminal, watchlist, theme))
 }
@@ -157,8 +169,16 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
             theme,
         )
     });
-    let watchlist_panel =
-        watchlist_visible.then(|| watchlist_side_panel(app.clone(), &terminal, watchlist, theme));
+    let watchlist_panel = watchlist_visible.then(|| {
+        watchlist_side_panel(
+            app.clone(),
+            &terminal,
+            watchlist,
+            both_visible,
+            ratio,
+            theme,
+        )
+    });
     let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
@@ -242,6 +262,18 @@ impl Render for SidePanelWidthDrag {
     }
 }
 
+#[derive(Clone)]
+struct WatchlistRowDrag {
+    provider: String,
+    instrument_id: String,
+}
+
+impl Render for WatchlistRowDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
 fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoElement {
     div()
         .id(("side_panel_split", workspace_id))
@@ -286,8 +318,8 @@ fn watchlist_table(
                 .child("Add symbols with +"),
         );
     } else {
-        for row in rows {
-            body = body.child(watchlist_row(terminal, row, theme));
+        for (index, row) in rows.into_iter().enumerate() {
+            body = body.child(watchlist_row(terminal, row, index, theme));
         }
     }
     div()
@@ -347,6 +379,7 @@ fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32, theme: &Axiu
 fn watchlist_row(
     terminal: &Entity<TerminalApp>,
     row: WatchlistRow,
+    index: usize,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -366,20 +399,18 @@ fn watchlist_row(
         std::cmp::Ordering::Greater => colors.primary,
         std::cmp::Ordering::Equal => colors.text_secondary,
     });
-    let provider = row.instrument.provider.clone();
-    let instrument_id = row.instrument.instrument_id.clone();
     let asset_tone = if row.message.is_some() {
         colors.text_muted
     } else {
         colors.text_primary
     };
-    let remove_terminal = terminal.clone();
     let logo = match row.instrument.provider.as_str() {
         "hyperliquid" => Some(super::assets::ExchangeLogo::Hyperliquid),
         "rithmic" => Some(super::assets::ExchangeLogo::Rithmic),
         _ => None,
     };
-    div()
+    let instrument = row.instrument.clone();
+    let content = div()
         .id(gpui::SharedString::from(format!(
             "watchlist_row_{}_{}",
             row.instrument.provider, row.instrument.instrument_id
@@ -440,7 +471,45 @@ fn watchlist_row(
             ),
             WATCHLIST_VOLUME_WIDTH,
             theme,
-        ))
+        ));
+    interactive_watchlist_row(content, terminal, instrument, index)
+}
+
+fn interactive_watchlist_row(
+    row: Stateful<Div>,
+    terminal: &Entity<TerminalApp>,
+    instrument: InstallProviderInstrument,
+    index: usize,
+) -> Stateful<Div> {
+    let provider = instrument.provider.clone();
+    let instrument_id = instrument.instrument_id.clone();
+    let remove_terminal = terminal.clone();
+    let select_terminal = terminal.clone();
+    let move_terminal = terminal.clone();
+    let drag = WatchlistRowDrag {
+        provider: provider.clone(),
+        instrument_id: instrument_id.clone(),
+    };
+    row.cursor_pointer()
+        .role(Role::Button)
+        .aria_label(format!("Select {}", instrument.display_symbol))
+        .on_click(move |_, _, cx| {
+            select_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.select_watchlist_instrument(&instrument, terminal_cx);
+            });
+        })
+        .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+        .on_drag_move::<WatchlistRowDrag>(move |event, _, cx| {
+            let drag = event.drag(cx).clone();
+            move_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.move_watchlist_instrument(
+                    &drag.provider,
+                    &drag.instrument_id,
+                    index,
+                    terminal_cx,
+                );
+            });
+        })
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             remove_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.remove_watchlist_instrument(&provider, &instrument_id, terminal_cx);
