@@ -376,7 +376,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a";
+        let expected_revision = "ee68e9dd71585f5c16a40ee286ca8b9ebe9a911a";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_indicators",
@@ -630,61 +630,6 @@ mod tests {
                 "desktop main must compose component modules instead of rendering {rendering_primitive} inline"
             );
         }
-    }
-
-    #[test]
-    fn full_color_vectors_remain_owned_and_bounded() {
-        let vector = manifest("apps/desktop/src/native_ui/vector_image.rs");
-        for contract in [
-            "MAX_CONCURRENT_RASTER_JOBS",
-            "MAX_PENDING_RASTER_JOBS",
-            "MAX_CACHE_ENTRIES",
-            "MAX_CACHE_DECODED_BYTES",
-            "MAX_NEGATIVE_CACHE_ENTRIES",
-            "SvgSize::ExactSize",
-            "cx.background_executor().spawn",
-            "ImageSource::Render",
-            "validate_vector_asset",
-        ] {
-            assert!(
-                vector.contains(contract),
-                "vector presentation owner lost {contract}"
-            );
-        }
-        for retired in [
-            "ColoredSvgMark",
-            "MARK_CACHE",
-            "svg_intrinsic_width",
-            "rasterize_colored_svg",
-        ] {
-            assert!(
-                !production_rust_sources().iter().any(|path| {
-                    relative_string(path).starts_with("apps/desktop/src/")
-                        && fs::read_to_string(path)
-                            .expect("desktop source")
-                            .contains(retired)
-                }),
-                "desktop restored retired full-color SVG path {retired}"
-            );
-        }
-        let desktop_manifest = manifest("apps/desktop/Cargo.toml");
-        for renderer in ["vello", "wgpu", "usvg", "resvg", "tiny-skia"] {
-            assert!(
-                !desktop_manifest.lines().any(|line| {
-                    line.split_once('=')
-                        .is_some_and(|(name, _)| name.trim() == renderer)
-                }),
-                "desktop must use GPUI's pinned SVG renderer instead of {renderer} directly"
-            );
-        }
-        let terminal_chrome = manifest("apps/desktop/src/components/terminal_chrome.rs");
-        assert!(
-            terminal_chrome.contains("VectorImage::square")
-                && !terminal_chrome.contains("ImageSource::Render")
-                && !terminal_chrome.contains("img(logo.path()")
-                && !terminal_chrome.contains("img(path.clone())"),
-            "terminal full-color assets must use the shared vector component only"
-        );
     }
 
     #[test]

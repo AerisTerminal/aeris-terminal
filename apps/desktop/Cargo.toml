@@ -30,7 +30,6 @@ axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui_platform.workspace = true
 reqwest_client.workspace = true
-roxmltree.workspace = true
 num-traits = "=0.2.19"
 prost.workspace = true
 unicode-segmentation.workspace = true

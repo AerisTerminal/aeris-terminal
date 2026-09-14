@@ -125,61 +125,58 @@ impl UiIcon {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DrawingIcon {
     TrendLine,
-    ExtendedLine,
     HorizontalLine,
     VerticalLine,
     Ray,
-    DirectionalRay,
     Rectangle,
     Path,
     Cursor,
     Brush,
-    Fibonacci,
-    Ruler,
     Text,
 }
 
 impl DrawingIcon {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 9] = [
         Self::TrendLine,
-        Self::ExtendedLine,
         Self::HorizontalLine,
         Self::VerticalLine,
         Self::Ray,
-        Self::DirectionalRay,
         Self::Rectangle,
         Self::Path,
         Self::Cursor,
         Self::Brush,
-        Self::Fibonacci,
-        Self::Ruler,
         Self::Text,
+    ];
+    #[cfg(test)]
+    pub const GEOMETRIC: [Self; 6] = [
+        Self::TrendLine,
+        Self::HorizontalLine,
+        Self::VerticalLine,
+        Self::Ray,
+        Self::Rectangle,
+        Self::Path,
     ];
 
     #[must_use]
     pub fn path(self) -> SharedString {
         match self {
             Self::TrendLine => concat!("axiusflow/icons/drawing/", "trend-line.svg"),
-            Self::ExtendedLine => concat!("axiusflow/icons/drawing/", "extended-line.svg"),
             Self::HorizontalLine => {
                 concat!("axiusflow/icons/drawing/", "horizontal-line.svg")
             }
             Self::VerticalLine => concat!("axiusflow/icons/drawing/", "vertical-line.svg"),
             Self::Ray => concat!("axiusflow/icons/drawing/", "horizontal-ray.svg"),
-            Self::DirectionalRay => concat!("axiusflow/icons/drawing/", "ray.svg"),
             Self::Rectangle => concat!("axiusflow/icons/drawing/", "rectangle.svg"),
             Self::Path => concat!("axiusflow/icons/drawing/", "path.svg"),
             Self::Cursor => concat!("axiusflow/icons/drawing/", "cursor.svg"),
             Self::Brush => concat!("axiusflow/icons/drawing/", "brush.svg"),
-            Self::Fibonacci => concat!("axiusflow/icons/drawing/", "fibonacci.svg"),
-            Self::Ruler => concat!("axiusflow/icons/drawing/", "ruler.svg"),
             Self::Text => concat!("axiusflow/icons/drawing/", "text.svg"),
         }
         .into()
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeriesIcon {
     Candlestick,
     OhlcBar,
@@ -213,7 +210,7 @@ impl SeriesIcon {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrandIcon {
     Mark,
     WordmarkDarkText,
@@ -234,7 +231,7 @@ impl BrandIcon {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExchangeLogo {
     Binance,
     #[default]
@@ -263,249 +260,6 @@ impl ExchangeLogo {
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
     }
-}
-
-pub(crate) const MAX_VECTOR_ASSET_ENCODED_BYTES: usize = 256 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum VectorAsset {
-    Series(SeriesIcon),
-    Brand(BrandIcon),
-    Exchange(ExchangeLogo),
-}
-
-impl VectorAsset {
-    pub(crate) const ALL: [Self; 12] = [
-        Self::Series(SeriesIcon::Candlestick),
-        Self::Series(SeriesIcon::OhlcBar),
-        Self::Series(SeriesIcon::Line),
-        Self::Series(SeriesIcon::Area),
-        Self::Series(SeriesIcon::HeikinAshi),
-        Self::Series(SeriesIcon::BrushableArea),
-        Self::Brand(BrandIcon::Mark),
-        Self::Brand(BrandIcon::WordmarkDarkText),
-        Self::Brand(BrandIcon::WordmarkLightText),
-        Self::Exchange(ExchangeLogo::Rithmic),
-        Self::Exchange(ExchangeLogo::Hyperliquid),
-        Self::Exchange(ExchangeLogo::Binance),
-    ];
-
-    pub(crate) const fn identity(self) -> &'static str {
-        match self {
-            Self::Series(SeriesIcon::Candlestick) => "series:candlestick",
-            Self::Series(SeriesIcon::OhlcBar) => "series:ohlc_bar",
-            Self::Series(SeriesIcon::Line) => "series:line",
-            Self::Series(SeriesIcon::Area) => "series:area",
-            Self::Series(SeriesIcon::HeikinAshi) => "series:heikin_ashi",
-            Self::Series(SeriesIcon::BrushableArea) => "series:brushable_area",
-            Self::Brand(BrandIcon::Mark) => "brand:mark",
-            Self::Brand(BrandIcon::WordmarkDarkText) => "brand:wordmark_dark_text",
-            Self::Brand(BrandIcon::WordmarkLightText) => "brand:wordmark_light_text",
-            Self::Exchange(ExchangeLogo::Binance) => "exchange:binance",
-            Self::Exchange(ExchangeLogo::Rithmic) => "exchange:rithmic",
-            Self::Exchange(ExchangeLogo::Hyperliquid) => "exchange:hyperliquid",
-        }
-    }
-
-    pub(crate) const fn spec(self) -> VectorAssetSpec {
-        let (path, width, height, revision) = match self {
-            Self::Series(SeriesIcon::Candlestick) => (
-                "axiusflow/icons/series/candlestick-chart.svg",
-                24,
-                24,
-                0x8ea9_d080_508a_fc57,
-            ),
-            Self::Series(SeriesIcon::OhlcBar) => (
-                "axiusflow/icons/series/ohlc-bar-chart.svg",
-                24,
-                24,
-                0x5c62_97b7_fccb_a7cb,
-            ),
-            Self::Series(SeriesIcon::Line) => (
-                "axiusflow/icons/series/line-chart-type.svg",
-                24,
-                24,
-                0x158e_c604_523b_1c73,
-            ),
-            Self::Series(SeriesIcon::Area) => (
-                "axiusflow/icons/series/area-chart-type.svg",
-                24,
-                24,
-                0x5460_94d4_bae1_1d60,
-            ),
-            Self::Series(SeriesIcon::HeikinAshi) => (
-                "axiusflow/icons/series/heikin-ashi-chart.svg",
-                24,
-                24,
-                0xe6f3_72b6_c033_daff,
-            ),
-            Self::Series(SeriesIcon::BrushableArea) => (
-                "axiusflow/icons/series/brushable-area-chart.svg",
-                24,
-                24,
-                0x0508_6250_3b1b_7a00,
-            ),
-            Self::Brand(BrandIcon::Mark) => (
-                "axiusflow/brand/axiusflow_logo.svg",
-                54,
-                54,
-                0x55ab_4a10_4e5c_749a,
-            ),
-            Self::Brand(BrandIcon::WordmarkDarkText) => (
-                "axiusflow/brand/axiusflow_logo_with_text_dark.svg",
-                188,
-                54,
-                0xb0e8_51a5_51a7_09d6,
-            ),
-            Self::Brand(BrandIcon::WordmarkLightText) => (
-                "axiusflow/brand/axiusflow_logo_with_text_light.svg",
-                188,
-                54,
-                0x8b4c_9672_0fdc_6482,
-            ),
-            Self::Exchange(ExchangeLogo::Rithmic) => (
-                "axiusflow/exchange_logo/rithmic.svg",
-                32,
-                32,
-                0x7c52_ef04_3d26_e396,
-            ),
-            Self::Exchange(ExchangeLogo::Hyperliquid) => (
-                "axiusflow/exchange_logo/hyperliquid.svg",
-                270,
-                270,
-                0x22fb_3cca_ae73_a11c,
-            ),
-            Self::Exchange(ExchangeLogo::Binance) => (
-                "axiusflow/exchange_logo/binance.svg",
-                800,
-                800,
-                0x6f19_aca5_8f1b_171a,
-            ),
-        };
-        VectorAssetSpec {
-            path,
-            view_box_width: width,
-            view_box_height: height,
-            fit: VectorFit::Contain,
-            content_revision: revision,
-        }
-    }
-}
-
-impl From<SeriesIcon> for VectorAsset {
-    fn from(value: SeriesIcon) -> Self {
-        Self::Series(value)
-    }
-}
-
-impl From<BrandIcon> for VectorAsset {
-    fn from(value: BrandIcon) -> Self {
-        Self::Brand(value)
-    }
-}
-
-impl From<ExchangeLogo> for VectorAsset {
-    fn from(value: ExchangeLogo) -> Self {
-        Self::Exchange(value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum VectorFit {
-    Contain,
-    Cover,
-    Stretch,
-}
-
-impl VectorFit {
-    const ALL: [Self; 3] = [Self::Contain, Self::Cover, Self::Stretch];
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct VectorAssetSpec {
-    pub(crate) path: &'static str,
-    pub(crate) view_box_width: u32,
-    pub(crate) view_box_height: u32,
-    pub(crate) fit: VectorFit,
-    pub(crate) content_revision: u64,
-}
-
-pub(crate) fn validate_vector_asset(asset: VectorAsset, bytes: &[u8]) -> Result<(), &'static str> {
-    if bytes.len() > MAX_VECTOR_ASSET_ENCODED_BYTES {
-        return Err("encoded asset exceeds limit");
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| "asset is not UTF-8")?;
-    let document = roxmltree::Document::parse(text).map_err(|_| "malformed SVG XML")?;
-    let root = document.root_element();
-    if root.tag_name().name() != "svg" {
-        return Err("document root is not SVG");
-    }
-    let view_box = root.attribute("viewBox").ok_or("viewBox is missing")?;
-    let mut values = view_box.split_ascii_whitespace();
-    let x = values.next().ok_or("viewBox is incomplete")?;
-    let y = values.next().ok_or("viewBox is incomplete")?;
-    let width = values.next().ok_or("viewBox is incomplete")?;
-    let height = values.next().ok_or("viewBox is incomplete")?;
-    let x = x.parse::<f64>().map_err(|_| "viewBox x is invalid")?;
-    let y = y.parse::<f64>().map_err(|_| "viewBox y is invalid")?;
-    if values.next().is_some() || !x.is_finite() || !y.is_finite() {
-        return Err("viewBox is invalid");
-    }
-    let width = width
-        .parse::<f64>()
-        .map_err(|_| "viewBox width is invalid")?;
-    let height = height
-        .parse::<f64>()
-        .map_err(|_| "viewBox height is invalid")?;
-    let spec = asset.spec();
-    if !VectorFit::ALL.contains(&spec.fit) {
-        return Err("unsupported vector fit");
-    }
-    if !width.is_finite()
-        || !height.is_finite()
-        || width <= 0.0
-        || height <= 0.0
-        || (width - f64::from(spec.view_box_width)).abs() > f64::EPSILON
-        || (height - f64::from(spec.view_box_height)).abs() > f64::EPSILON
-    {
-        return Err("viewBox disagrees with typed metadata");
-    }
-
-    for node in document.descendants().filter(roxmltree::Node::is_element) {
-        match node.tag_name().name() {
-            "script" | "animate" | "animateMotion" | "animateTransform" | "set"
-            | "foreignObject" | "image" | "text" | "style" => {
-                return Err("SVG contains forbidden content");
-            }
-            _ => {}
-        }
-        for attribute in node.attributes() {
-            let name = attribute.name();
-            let value = attribute.value().trim();
-            if name.starts_with("on") {
-                return Err("SVG contains an event handler");
-            }
-            if matches!(name, "href" | "src") && !value.starts_with('#') {
-                return Err("SVG contains an external reference");
-            }
-            let lower = value.to_ascii_lowercase();
-            if lower.contains("currentcolor") {
-                return Err("full-color SVG depends on currentColor");
-            }
-            for reference in lower
-                .match_indices("url(")
-                .map(|(index, _)| &value[index + 4..])
-            {
-                if !reference
-                    .trim_start_matches([' ', '\'', '"'])
-                    .starts_with('#')
-                {
-                    return Err("SVG contains an external URL");
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -537,17 +291,13 @@ impl AssetSource for AxiusflowAssets {
 fn drawing_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(DRAWING_ASSET_PREFIX)? {
         "trend-line.svg" => include_bytes!("../assets/icons/drawing/trend-line.svg"),
-        "extended-line.svg" => include_bytes!("../assets/icons/drawing/extended-line.svg"),
         "horizontal-line.svg" => include_bytes!("../assets/icons/drawing/horizontal-line.svg"),
         "vertical-line.svg" => include_bytes!("../assets/icons/drawing/vertical-line.svg"),
         "horizontal-ray.svg" => include_bytes!("../assets/icons/drawing/horizontal-ray.svg"),
-        "ray.svg" => include_bytes!("../assets/icons/drawing/ray.svg"),
         "rectangle.svg" => include_bytes!("../assets/icons/drawing/rectangle.svg"),
         "path.svg" => include_bytes!("../assets/icons/drawing/path.svg"),
         "cursor.svg" => include_bytes!("../assets/icons/drawing/cursor.svg"),
         "brush.svg" => include_bytes!("../assets/icons/drawing/brush.svg"),
-        "fibonacci.svg" => include_bytes!("../assets/icons/drawing/fibonacci.svg"),
-        "ruler.svg" => include_bytes!("../assets/icons/drawing/ruler.svg"),
         "text.svg" => include_bytes!("../assets/icons/drawing/text.svg"),
         _ => return None,
     })
@@ -657,7 +407,7 @@ mod tests {
     fn drawing_icons_are_theme_neutral_svg() {
         let assets = AxiusflowAssets;
 
-        for icon in DrawingIcon::ALL {
+        for icon in DrawingIcon::GEOMETRIC {
             let path = icon.path();
             let bytes = assets
                 .load(path.as_ref())
@@ -666,24 +416,9 @@ mod tests {
             let svg = std::str::from_utf8(&bytes).expect("UTF-8 SVG");
             let normalized = svg.to_ascii_lowercase();
 
-            let document = roxmltree::Document::parse(svg).expect("valid drawing SVG");
-            let view_box = document
-                .root_element()
-                .attribute("viewBox")
-                .expect("drawing viewBox");
-            let values = view_box
-                .split_ascii_whitespace()
-                .map(str::parse::<f64>)
-                .collect::<Result<Vec<_>, _>>()
-                .expect("numeric drawing viewBox");
-            assert_eq!(values.len(), 4, "invalid viewBox: {path}");
             assert!(
-                values[2].is_finite() && values[2] > 0.0,
-                "invalid width: {path}"
-            );
-            assert!(
-                values[3].is_finite() && values[3] > 0.0,
-                "invalid height: {path}"
+                svg.contains("viewBox=\"0 0 28 28\""),
+                "invalid viewBox: {path}"
             );
             assert!(svg.contains("currentColor"), "missing currentColor: {path}");
             assert!(!normalized.contains('#'), "hard-coded hex color: {path}");
@@ -750,124 +485,93 @@ mod tests {
     }
 
     #[test]
-    fn every_full_color_vector_is_classified_unique_and_structurally_safe() {
+    fn colored_marks_use_square_vector_masks() {
         let assets = AxiusflowAssets;
-        let mut identities = HashSet::new();
-        let mut paths = HashSet::new();
-        for asset in VectorAsset::ALL {
-            let spec = asset.spec();
-            assert!(identities.insert(asset.identity()), "duplicate identity");
-            assert!(paths.insert(spec.path), "duplicate path: {}", spec.path);
-            let bytes = assets.load(spec.path).unwrap().expect("full-color vector");
-            validate_vector_asset(asset, &bytes)
-                .unwrap_or_else(|error| panic!("{}: {error}", asset.identity()));
+        for icon in SeriesIcon::ALL {
+            let bytes = assets
+                .load(icon.path().as_ref())
+                .unwrap()
+                .expect("series icon");
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("viewBox=\"0 0 24 24\""));
+            assert!(!svg.contains("<image"));
+            assert!(!svg.contains("<filter"));
         }
-        assert_eq!(
-            VectorAsset::ALL.len(),
-            SeriesIcon::ALL.len() + BrandIcon::ALL.len() + ExchangeLogo::ALL.len()
+        for logo in ExchangeLogo::ALL {
+            let bytes = assets
+                .load(logo.path().as_ref())
+                .unwrap()
+                .expect("exchange logo");
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("<svg"), "{}", logo.path());
+            assert!(!svg.contains("<image"), "{}", logo.path());
+        }
+
+        for logo in BrandIcon::ALL {
+            let bytes = assets
+                .load(logo.path().as_ref())
+                .unwrap()
+                .expect("brand logo");
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("<svg"), "{}", logo.path());
+            assert!(!svg.contains("<image"), "{}", logo.path());
+        }
+
+        let mark = assets
+            .load(BrandIcon::Mark.path().as_ref())
+            .unwrap()
+            .expect("brand mark");
+        assert!(
+            std::str::from_utf8(&mark)
+                .unwrap()
+                .contains("viewBox=\"0 0 54 54\"")
         );
-    }
 
-    #[test]
-    fn vector_content_revisions_match_embedded_bytes() {
-        use sha2::{Digest, Sha256};
-
-        let assets = AxiusflowAssets;
-        for asset in VectorAsset::ALL {
-            let spec = asset.spec();
-            let bytes = assets.load(spec.path).unwrap().expect("full-color vector");
-            let digest = Sha256::digest(&bytes);
-            assert_eq!(
-                spec.content_revision,
-                u64::from_be_bytes(digest[..8].try_into().unwrap()),
-                "stale content revision: {}",
-                asset.identity()
+        for wordmark in [BrandIcon::WordmarkDarkText, BrandIcon::WordmarkLightText] {
+            let bytes = assets
+                .load(wordmark.path().as_ref())
+                .unwrap()
+                .expect("brand wordmark");
+            assert!(
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .contains("viewBox=\"0 0 188 54\"")
             );
         }
     }
 
     #[test]
-    fn unsafe_or_malformed_vector_fixtures_are_rejected() {
-        let asset = VectorAsset::Brand(BrandIcon::Mark);
-        let fixture = |body: &str| {
-            format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 54 54">{body}</svg>"#)
-        };
-        for body in [
-            "<script/>",
-            "<image href=\"https://example.com/a.png\"/>",
-            "<foreignObject/>",
-            "<animate/>",
-            "<text>Axiusflow</text>",
-            "<path onclick=\"alert(1)\"/>",
-            "<path fill=\"url(https://example.com/a.svg#paint)\"/>",
-        ] {
-            assert!(validate_vector_asset(asset, fixture(body).as_bytes()).is_err());
-        }
-        assert!(validate_vector_asset(asset, b"<svg").is_err());
-        assert!(
-            validate_vector_asset(asset, b"<svg xmlns='http://www.w3.org/2000/svg'/>").is_err()
-        );
-    }
-
-    #[test]
-    fn safe_svg_feature_fixture_parses_and_rasterizes() {
-        use gpui::{DevicePixels, SvgRenderer, SvgSize, size};
-        use std::sync::Arc;
-
-        let fixture = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 54 54">
-          <defs><linearGradient id="g"><stop stop-color="#f00" stop-opacity=".5"/><stop offset="1" stop-color="#00f"/></linearGradient><clipPath id="c"><circle cx="27" cy="27" r="24"/></clipPath><mask id="m"><rect width="54" height="54" fill="#fff"/></mask></defs>
-          <rect width="54" height="54" fill="url(#g)" clip-path="url(#c)" mask="url(#m)"/>
-        </svg>"##;
-        validate_vector_asset(VectorAsset::Brand(BrandIcon::Mark), fixture).unwrap();
-        let renderer = SvgRenderer::new(Arc::new(AxiusflowAssets));
-        let parsed = renderer.parse_svg(fixture).expect("parse feature fixture");
-        let image = renderer
-            .render_parsed(
-                &parsed,
-                SvgSize::ExactSize(size(DevicePixels(81), DevicePixels(81))),
-            )
-            .expect("rasterize feature fixture");
-        assert_eq!(image.size(0), size(DevicePixels(81), DevicePixels(81)));
-        assert!(
-            image
-                .as_bytes(0)
-                .unwrap()
-                .iter()
-                .any(|channel| *channel != 0)
-        );
-    }
-
-    #[test]
-    fn deterministic_vector_contact_sheet_covers_every_asset() {
-        use gpui::{DevicePixels, SvgRenderer, SvgSize, size};
-        use num_traits::ToPrimitive;
+    fn colored_marks_rasterize_at_display_size() {
+        use gpui::SvgRenderer;
         use std::sync::Arc;
 
         let assets = AxiusflowAssets;
         let renderer = SvgRenderer::new(Arc::new(AxiusflowAssets));
-        let mut rendered_pixels = 0_u64;
-        for asset in VectorAsset::ALL {
-            let spec = asset.spec();
-            let bytes = assets.load(spec.path).unwrap().expect("asset bytes");
-            let parsed = renderer
-                .parse_svg(&bytes)
-                .expect("parse contact-sheet asset");
-            let width = 96_u32;
-            let height = (f64::from(width) * f64::from(spec.view_box_height)
-                / f64::from(spec.view_box_width))
-            .round()
-            .max(1.0)
-            .to_u32()
-            .expect("bounded contact-sheet height");
-            let image = renderer
-                .render_parsed(
-                    &parsed,
-                    SvgSize::ExactSize(size(DevicePixels::from(width), DevicePixels::from(height))),
-                )
-                .expect("rasterize contact-sheet asset");
-            assert_eq!(image.size(0), size(width.into(), height.into()));
-            rendered_pixels += u64::from(width) * u64::from(height);
+        let rasterize = |path: &SharedString, logical_size: f32, window_scale: f32| {
+            let bytes = assets.load(path.as_ref()).unwrap().expect("asset bytes");
+            let header = std::str::from_utf8(&bytes[..bytes.len().min(768)]).unwrap();
+            let svg = header.find("<svg").unwrap();
+            let width = header[svg..].find("width=\"").unwrap() + svg + 7;
+            let rest = &header[width..];
+            let end = rest.find('"').unwrap();
+            let intrinsic: f32 = rest[..end].parse().unwrap();
+            let scale_factor = (logical_size * window_scale / intrinsic).max(1.0 / intrinsic);
+            renderer
+                .render_single_frame(&bytes, scale_factor)
+                .expect("rasterize colored mark")
+        };
+
+        for icon in SeriesIcon::ALL {
+            let image = rasterize(&icon.path(), 18.0, 2.0);
+            assert_eq!(image.frame_count(), 1);
+            assert!(image.size(0).width.0 > 0);
+            assert!(image.size(0).height.0 > 0);
         }
-        assert!(rendered_pixels > 0);
+        for logo in ExchangeLogo::ALL {
+            let image = rasterize(&logo.path(), 20.0, 2.0);
+            assert_eq!(image.frame_count(), 1);
+            assert!(image.size(0).width.0 > 0);
+            assert!(image.size(0).height.0 > 0);
+        }
     }
 }

@@ -7,7 +7,6 @@ pub(crate) mod menu;
 pub(crate) mod scroll;
 pub(crate) mod tab;
 pub(crate) mod tooltip;
-pub(crate) mod vector_image;
 
 use std::sync::Arc;
 
