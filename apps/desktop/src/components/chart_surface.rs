@@ -3,23 +3,25 @@ use super::{
     Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
     IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
     OrderBookColumnVisibility, ParentElement, RadiusToken, ReadOnlyOrderBookView, Render, Role,
-    SIDE_PANEL_RESIZE_HANDLE_WIDTH, SidePanel, SidePanelVisibility, StatefulInteractiveElement,
-    Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
+    SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_RESIZE_HANDLE_WIDTH,
+    ScrollHandle, SidePanel, SidePanelVisibility, StatefulInteractiveElement, Styled, TerminalApp,
+    ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT, WatchlistDragState,
     WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
     chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
     market_summary_change, market_summary_price, market_summary_values, platform_tabular_numerals,
-    px,
+    px, watchlist_drag_translation,
 };
 use gpui::{AppContext, Stateful};
 
 const SIDE_PANEL_HEADER_HEIGHT: f32 = 30.0;
-const SIDE_PANEL_SPLIT_HANDLE_HEIGHT: f32 = 8.0;
+const SIDE_PANEL_SPLIT_DIVIDER_WIDTH: f32 = 1.0;
+const SIDE_PANEL_SPLIT_HANDLE_WIDTH: f32 = 8.0;
 const WATCHLIST_COLUMNS_HEIGHT: f32 = 26.0;
-const WATCHLIST_ROW_HEIGHT: f32 = 30.0;
-const WATCHLIST_LAST_WIDTH: f32 = 62.0;
-const WATCHLIST_CHANGE_WIDTH: f32 = 54.0;
-const WATCHLIST_CHANGE_PERCENT_WIDTH: f32 = 58.0;
-const WATCHLIST_VOLUME_WIDTH: f32 = 52.0;
+pub(super) const WATCHLIST_ROW_HEIGHT: f32 = 30.0;
+const WATCHLIST_LAST_WIDTH: f32 = 70.0;
+const WATCHLIST_CHANGE_WIDTH: f32 = 66.0;
+const WATCHLIST_CHANGE_PERCENT_WIDTH: f32 = 64.0;
+const WATCHLIST_VOLUME_WIDTH: f32 = 60.0;
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
@@ -64,10 +66,16 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) width: f32,
     pub(super) split_basis_points: u32,
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
-    pub(super) watchlist: Vec<WatchlistRow>,
+    pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
     pub(super) theme: &'a AxiusflowTheme,
+}
+
+pub(super) struct WatchlistPanelState {
+    pub(super) rows: Vec<WatchlistRow>,
+    pub(super) drag: Option<WatchlistDragState>,
+    pub(super) scroll: ScrollHandle,
 }
 
 fn order_book_side_panel(
@@ -105,9 +113,10 @@ fn order_book_side_panel(
 fn watchlist_side_panel(
     app: Entity<WorkspaceSurface>,
     terminal: &Entity<TerminalApp>,
-    watchlist: Vec<WatchlistRow>,
+    watchlist: WatchlistPanelState,
     theme: &AxiusflowTheme,
 ) -> Div {
+    let WatchlistPanelState { rows, drag, scroll } = watchlist;
     div()
         .relative()
         .flex()
@@ -116,7 +125,13 @@ fn watchlist_side_panel(
         .bg(gpui_color(theme.colors.surface))
         .size_full()
         .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
-        .child(watchlist_table(terminal, watchlist, theme))
+        .child(watchlist_table(
+            terminal,
+            rows,
+            drag.as_ref(),
+            &scroll,
+            theme,
+        ))
 }
 
 fn side_panel_region(content: Div, panel: SidePanel, both_visible: bool, ratio: f32) -> Div {
@@ -124,8 +139,8 @@ fn side_panel_region(content: Div, panel: SidePanel, both_visible: bool, ratio: 
         return content;
     }
     div()
-        .w_full()
-        .min_h_0()
+        .h_full()
+        .min_w_0()
         .flex_basis(px(0.0))
         .flex_grow(match panel {
             SidePanel::OrderBook => ratio,
@@ -133,6 +148,60 @@ fn side_panel_region(content: Div, panel: SidePanel, both_visible: bool, ratio: 
         })
         .overflow_hidden()
         .child(content)
+}
+
+fn side_panel_total_width(width: f32, both_visible: bool) -> f32 {
+    if both_visible {
+        width * 2.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH
+    } else {
+        width
+    }
+}
+
+fn side_panel_horizontal_ratio(width: f32, split_basis_points: u32) -> f32 {
+    let requested = split_basis_points.to_f32().unwrap_or(5_000.0) / 10_000.0;
+    let total_width = width * 2.0;
+    let lower = (SIDE_PANEL_MINIMUM_WIDTH / total_width)
+        .max(1.0 - SIDE_PANEL_MAXIMUM_WIDTH / total_width)
+        .clamp(0.05, 0.5);
+    let upper = (SIDE_PANEL_MAXIMUM_WIDTH / total_width)
+        .min(1.0 - SIDE_PANEL_MINIMUM_WIDTH / total_width)
+        .clamp(0.5, 0.95);
+    requested.clamp(lower, upper)
+}
+
+fn side_panel_split_ratio_from_drag(left: f32, total_width: f32, pointer_x: f32) -> Option<f32> {
+    let content_width = total_width - SIDE_PANEL_SPLIT_DIVIDER_WIDTH;
+    (content_width > 0.0)
+        .then(|| (pointer_x - left - SIDE_PANEL_SPLIT_DIVIDER_WIDTH / 2.0) / content_width)
+}
+
+fn side_panel_width_from_drag(right: f32, pointer_x: f32, both_visible: bool) -> f32 {
+    let panel_count = if both_visible { 2.0 } else { 1.0 };
+    let split_width = if both_visible {
+        SIDE_PANEL_SPLIT_DIVIDER_WIDTH
+    } else {
+        0.0
+    };
+    super::clamped_side_panel_width((right - pointer_x - split_width) / panel_count)
+}
+
+fn side_panel_visibility(visible: SidePanelVisibility) -> (bool, bool, bool) {
+    let order_book_visible = visible.contains(SidePanel::OrderBook);
+    let watchlist_visible = visible.contains(SidePanel::Watchlist);
+    (
+        order_book_visible,
+        watchlist_visible,
+        order_book_visible && watchlist_visible,
+    )
+}
+
+fn side_panel_ratio(width: f32, split_basis_points: u32, both_visible: bool) -> f32 {
+    if both_visible {
+        side_panel_horizontal_ratio(width, split_basis_points)
+    } else {
+        1.0
+    }
 }
 
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
@@ -150,14 +219,8 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         theme,
     } = state;
     let colors = theme.colors;
-    let order_book_visible = visible.contains(SidePanel::OrderBook);
-    let watchlist_visible = visible.contains(SidePanel::Watchlist);
-    let both_visible = order_book_visible && watchlist_visible;
-    let ratio = if both_visible {
-        (split_basis_points.to_f32().unwrap_or(5_000.0) / 10_000.0).clamp(0.05, 0.95)
-    } else {
-        1.0
-    };
+    let (order_book_visible, watchlist_visible, both_visible) = side_panel_visibility(visible);
+    let ratio = side_panel_ratio(width, split_basis_points, both_visible);
     let order_book_panel = order_book_visible.then(|| {
         side_panel_region(
             order_book_side_panel(
@@ -183,12 +246,11 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
-        .w(px(width))
+        .w(px(side_panel_total_width(width, both_visible)))
         .h_full()
         .flex_none()
         .relative()
         .flex()
-        .flex_col()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
         .border_l_1()
@@ -199,21 +261,22 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         )
         .children(watchlist_panel)
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
-            let height = f32::from(event.bounds.size.height) - SIDE_PANEL_SPLIT_HANDLE_HEIGHT;
-            if height <= 0.0 {
+            let Some(ratio) = side_panel_split_ratio_from_drag(
+                f32::from(event.bounds.left()),
+                f32::from(event.bounds.size.width),
+                f32::from(event.event.position.x),
+            ) else {
                 return;
-            }
-            let ratio = (f32::from(event.event.position.y)
-                - f32::from(event.bounds.top())
-                - SIDE_PANEL_SPLIT_HANDLE_HEIGHT / 2.0)
-                / height;
+            };
             split_drag_app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_split_ratio(ratio, surface_cx);
             });
         })
         .on_drag_move::<SidePanelWidthDrag>(move |event, _, cx| {
-            let width = super::clamped_side_panel_width(
-                f32::from(event.bounds.right()) - f32::from(event.event.position.x),
+            let width = side_panel_width_from_drag(
+                f32::from(event.bounds.right()),
+                f32::from(event.event.position.x),
+                both_visible,
             );
             app.update(cx, |surface, surface_cx| {
                 surface.set_side_panel_width(width, surface_cx);
@@ -281,28 +344,33 @@ fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoEl
     div()
         .id(("side_panel_split", workspace_id))
         .relative()
-        .occlude()
         .flex_none()
-        .w_full()
-        .h(px(SIDE_PANEL_SPLIT_HANDLE_HEIGHT))
-        .cursor_row_resize()
-        .on_drag(SidePanelSplitDrag, |drag, _, _, cx| {
-            cx.new(|_| drag.clone())
-        })
+        .h_full()
+        .w(px(SIDE_PANEL_SPLIT_DIVIDER_WIDTH))
+        .bg(border)
         .child(
             div()
+                .id(("side_panel_split_hit", workspace_id))
                 .absolute()
-                .left_0()
-                .top(px(3.0))
-                .w_full()
-                .h(px(1.0))
-                .bg(border),
+                .top_0()
+                .left(px(-(SIDE_PANEL_SPLIT_HANDLE_WIDTH
+                    - SIDE_PANEL_SPLIT_DIVIDER_WIDTH)
+                    / 2.0))
+                .h_full()
+                .w(px(SIDE_PANEL_SPLIT_HANDLE_WIDTH))
+                .occlude()
+                .cursor_col_resize()
+                .on_drag(SidePanelSplitDrag, |drag, _, _, cx| {
+                    cx.new(|_| drag.clone())
+                }),
         )
 }
 
 fn watchlist_table(
     terminal: &Entity<TerminalApp>,
     rows: Vec<WatchlistRow>,
+    watchlist_drag: Option<&WatchlistDragState>,
+    watchlist_scroll: &ScrollHandle,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -321,9 +389,12 @@ fn watchlist_table(
         );
     } else {
         for (index, row) in rows.into_iter().enumerate() {
-            body = body.child(watchlist_row(terminal, row, index, theme));
+            body = body.child(watchlist_row(terminal, &row, index, watchlist_drag, theme));
         }
     }
+    let move_terminal = terminal.clone();
+    let move_scroll = watchlist_scroll.clone();
+    let end_terminal = terminal.clone();
     div()
         .flex_1()
         .min_h_0()
@@ -332,7 +403,27 @@ fn watchlist_table(
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
         .child(watchlist_columns(theme))
-        .child(body.id("watchlist_body").overflow_y_scroll())
+        .child(
+            body.id("watchlist_body")
+                .overflow_y_scroll()
+                .track_scroll(watchlist_scroll)
+                .on_drag_move::<WatchlistRowDrag>(move |event, _, cx| {
+                    let drag = event.drag(cx).clone();
+                    move_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.move_watchlist_drag(
+                            &drag.provider,
+                            &drag.instrument_id,
+                            f32::from(event.event.position.y),
+                            f32::from(event.bounds.top()),
+                            f32::from(move_scroll.offset().y),
+                            terminal_cx,
+                        );
+                    });
+                })
+                .on_drop(move |_: &WatchlistRowDrag, _, cx| {
+                    end_terminal.update(cx, TerminalApp::end_watchlist_drag);
+                }),
+        )
 }
 
 fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
@@ -344,32 +435,47 @@ fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
         .items_center()
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .px_2()
         .text_xs()
         .text_color(gpui_color(colors.text_muted))
         .child(
             div()
                 .min_w_0()
                 .flex_1()
+                .h_full()
+                .flex()
+                .items_center()
+                .px_2()
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .child("ASSET"),
         )
-        .child(watchlist_cell("LAST", WATCHLIST_LAST_WIDTH, theme))
-        .child(watchlist_cell("CHANGE", WATCHLIST_CHANGE_WIDTH, theme))
-        .child(watchlist_cell(
-            "CHANGE %",
+        .child(watchlist_header_cell("LAST", WATCHLIST_LAST_WIDTH, theme))
+        .child(watchlist_header_cell("CHG", WATCHLIST_CHANGE_WIDTH, theme))
+        .child(watchlist_header_cell(
+            "CHG %",
             WATCHLIST_CHANGE_PERCENT_WIDTH,
             theme,
         ))
-        .child(watchlist_cell("VOLUME", WATCHLIST_VOLUME_WIDTH, theme))
+        .child(watchlist_header_cell(
+            "VOLUME",
+            WATCHLIST_VOLUME_WIDTH,
+            theme,
+        ))
 }
 
-fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32, theme: &AxiusflowTheme) -> Div {
+fn watchlist_header_cell(
+    value: impl Into<gpui::SharedString>,
+    width: f32,
+    theme: &AxiusflowTheme,
+) -> Div {
     div()
         .w(px(width))
+        .h_full()
         .flex_none()
-        .pr_1()
+        .flex()
+        .items_center()
+        .justify_end()
+        .px_1()
         .border_l_1()
         .border_color(gpui_color(theme.colors.border))
         .text_right()
@@ -378,22 +484,23 @@ fn watchlist_cell(value: impl Into<gpui::SharedString>, width: f32, theme: &Axiu
         .child(value.into())
 }
 
-fn watchlist_row(
-    terminal: &Entity<TerminalApp>,
-    row: WatchlistRow,
-    index: usize,
-    theme: &AxiusflowTheme,
-) -> impl IntoElement + use<> {
+fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div {
+    div()
+        .w(px(width))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_end()
+        .px_1()
+        .text_right()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(value.into())
+}
+
+fn watchlist_asset_cell(row: &WatchlistRow, theme: &AxiusflowTheme) -> Div {
     let colors = theme.colors;
-    let scale = row.instrument.price_scale;
-    let values = market_summary_values(row.last, row.previous_close);
-    let tone = values
-        .change
-        .map_or(colors.text_muted, |value| match value.cmp(&0) {
-            std::cmp::Ordering::Less => colors.danger,
-            std::cmp::Ordering::Greater => colors.primary,
-            std::cmp::Ordering::Equal => colors.text_secondary,
-        });
     let asset_tone = if row.message.is_some() {
         colors.text_muted
     } else {
@@ -404,9 +511,37 @@ fn watchlist_row(
         "rithmic" => Some(super::assets::ExchangeLogo::Rithmic),
         _ => None,
     };
-    let instrument = row.instrument.clone();
-    let active = row.active;
-    let content = div()
+    div()
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .whitespace_nowrap()
+        .text_color(gpui_color(asset_tone))
+        .children(logo.map(|logo| exchange_mark(logo, px(16.0), false, &colors)))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_ellipsis()
+                .child(row.instrument.display_symbol.clone()),
+        )
+}
+
+fn watchlist_row_content(row: &WatchlistRow, theme: &AxiusflowTheme) -> Stateful<Div> {
+    let colors = theme.colors;
+    let scale = row.instrument.price_scale;
+    let values = market_summary_values(row.last, row.previous_close);
+    let tone = values
+        .change
+        .map_or(colors.text_muted, |value| match value.cmp(&0) {
+            std::cmp::Ordering::Less => colors.danger,
+            std::cmp::Ordering::Greater => colors.primary,
+            std::cmp::Ordering::Equal => colors.text_secondary,
+        });
+    div()
         .id(gpui::SharedString::from(format!(
             "watchlist_row_{}_{}",
             row.instrument.provider, row.instrument.instrument_id
@@ -416,88 +551,104 @@ fn watchlist_row(
         .flex_none()
         .flex()
         .items_center()
-        .px_2()
-        .border_b_1()
-        .border_color(gpui_color(colors.border))
         .text_xs()
-        .bg(gpui_color(if active {
+        .bg(gpui_color(if row.active {
             colors.active_bg.over(colors.surface)
         } else {
             colors.surface
         }))
-        .when(!active, |item| {
+        .when(!row.active, |item| {
             item.hover(move |item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
         })
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .items_center()
-                .gap_1()
-                .whitespace_nowrap()
-                .text_color(gpui_color(asset_tone))
-                .children(logo.map(|logo| exchange_mark(logo, px(16.0), false, &colors)))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .text_ellipsis()
-                        .child(row.instrument.display_symbol),
-                ),
-        )
-        .child(watchlist_cell(
+        .child(watchlist_asset_cell(row, theme))
+        .child(watchlist_value_cell(
             values.last.map_or_else(
                 || "—".to_string(),
                 |value| market_summary_price(value, scale),
             ),
             WATCHLIST_LAST_WIDTH,
-            theme,
         ))
         .child(
-            watchlist_cell(
+            watchlist_value_cell(
                 values.change.map_or_else(
                     || "—".to_string(),
                     |value| market_summary_change(value, scale),
                 ),
                 WATCHLIST_CHANGE_WIDTH,
-                theme,
             )
             .text_color(gpui_color(tone)),
         )
         .child(
-            watchlist_cell(
+            watchlist_value_cell(
                 values
                     .change_percent
                     .map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%")),
                 WATCHLIST_CHANGE_PERCENT_WIDTH,
-                theme,
             )
             .text_color(gpui_color(tone)),
         )
-        .child(watchlist_cell(
+        .child(watchlist_value_cell(
             row.last.map_or_else(
                 || "—".to_string(),
                 |bar| compact_watchlist_volume(bar.volume, row.instrument.quantity_scale),
             ),
             WATCHLIST_VOLUME_WIDTH,
-            theme,
-        ));
-    interactive_watchlist_row(content, terminal, instrument, index, active)
+        ))
+}
+
+fn watchlist_row(
+    terminal: &Entity<TerminalApp>,
+    row: &WatchlistRow,
+    index: usize,
+    drag: Option<&WatchlistDragState>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let instrument = row.instrument.clone();
+    let active = row.active;
+    let dragging = drag.is_some_and(|drag| {
+        drag.provider == row.instrument.provider
+            && drag.instrument_id == row.instrument.instrument_id
+    });
+    let drag_translation = watchlist_drag_translation(
+        drag,
+        &row.instrument.provider,
+        &row.instrument.instrument_id,
+        index,
+    );
+    let content = watchlist_row_content(row, theme);
+    let row = interactive_watchlist_row(content, terminal, instrument, active)
+        .when(dragging, gpui::Styled::shadow_md)
+        .when_some(drag_translation, |row, translation| {
+            row.relative().top(px(translation))
+        });
+    div()
+        .relative()
+        .h(px(WATCHLIST_ROW_HEIGHT))
+        .flex_none()
+        .child(row)
+        .children(dragging.then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top_0()
+                .h(px(2.0))
+                .bg(gpui_color(colors.primary))
+        }))
 }
 
 fn interactive_watchlist_row(
     row: Stateful<Div>,
     terminal: &Entity<TerminalApp>,
     instrument: InstallProviderInstrument,
-    index: usize,
     active: bool,
 ) -> Stateful<Div> {
     let provider = instrument.provider.clone();
     let instrument_id = instrument.instrument_id.clone();
     let remove_terminal = terminal.clone();
     let select_terminal = terminal.clone();
-    let move_terminal = terminal.clone();
+    let begin_terminal = terminal.clone();
     let drag = WatchlistRowDrag {
         provider: provider.clone(),
         instrument_id: instrument_id.clone(),
@@ -511,17 +662,16 @@ fn interactive_watchlist_row(
                 terminal.select_watchlist_instrument(&instrument, terminal_cx);
             });
         })
-        .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-        .on_drag_move::<WatchlistRowDrag>(move |event, _, cx| {
-            let drag = event.drag(cx).clone();
-            move_terminal.update(cx, |terminal, terminal_cx| {
-                terminal.move_watchlist_instrument(
+        .on_drag(drag, move |drag, cursor_offset, _, cx| {
+            begin_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.begin_watchlist_drag(
                     &drag.provider,
                     &drag.instrument_id,
-                    index,
+                    f32::from(cursor_offset.y),
                     terminal_cx,
                 );
             });
+            cx.new(|_| drag.clone())
         })
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             remove_terminal.update(cx, |terminal, terminal_cx| {
@@ -824,5 +974,28 @@ pub(super) fn chart_notice(
             .bottom_2()
             .child(label)
             .into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simultaneous_side_panels_allocate_two_docked_columns() {
+        assert!((side_panel_total_width(400.0, false) - 400.0).abs() < f32::EPSILON);
+        assert!(
+            (side_panel_total_width(400.0, true) - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH)).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn horizontal_split_keeps_both_panels_renderable() {
+        assert!((side_panel_horizontal_ratio(400.0, 5_000) - 0.5).abs() < f32::EPSILON);
+        assert!((side_panel_horizontal_ratio(400.0, 500) - 0.45).abs() < f32::EPSILON);
+        assert!((side_panel_horizontal_ratio(400.0, 9_500) - 0.55).abs() < f32::EPSILON);
+        assert!((side_panel_horizontal_ratio(480.0, 500) - 0.5).abs() < f32::EPSILON);
+        assert!((side_panel_horizontal_ratio(480.0, 9_500) - 0.5).abs() < f32::EPSILON);
     }
 }

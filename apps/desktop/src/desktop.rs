@@ -105,7 +105,8 @@ use chart_context_menus::{
     clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
 };
 use chart_surface::{
-    MarketWorkspaceState, WorkspaceSidePanelState, market_workspace, workspace_side_panel,
+    MarketWorkspaceState, WATCHLIST_ROW_HEIGHT, WatchlistPanelState, WorkspaceSidePanelState,
+    market_workspace, workspace_side_panel,
 };
 use chart_toolbar_menus::{
     chrome_overlay_layer, chrome_typeahead_blocked, chrome_typeahead_char,
@@ -2415,6 +2416,16 @@ struct WorkspaceDragState {
     strip_left: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct WatchlistDragState {
+    provider: String,
+    instrument_id: String,
+    cursor_offset_y: f32,
+    pointer_y: Option<f32>,
+    body_top: f32,
+    scroll_offset_y: f32,
+}
+
 #[derive(Clone, Copy)]
 struct ChartContextMenuState {
     pane_count: usize,
@@ -2614,6 +2625,8 @@ struct TerminalApp {
     persisted_active_workspace_id: u64,
     workspace_error: Option<String>,
     workspace_drag: Option<WorkspaceDragState>,
+    watchlist_drag: Option<WatchlistDragState>,
+    watchlist_scroll: ScrollHandle,
     chart_context_menu: Option<ChartContextMenu>,
     chart_settings_menu: Option<ChartContextMenu>,
     chart_settings_section: ChartSettingsSection,
@@ -2869,6 +2882,41 @@ fn workspace_drag_translation(
     });
     let slot_left = drag.strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + index_offset;
     Some(pointer_x - drag.cursor_offset_x - slot_left)
+}
+
+fn watchlist_drag_destination(
+    pointer_y: f32,
+    body_top: f32,
+    scroll_offset_y: f32,
+    cursor_offset_y: f32,
+    row_count: usize,
+) -> Option<usize> {
+    let last = row_count.checked_sub(1)?;
+    let dragged_top = pointer_y - cursor_offset_y - body_top - scroll_offset_y;
+    if !dragged_top.is_finite() {
+        return None;
+    }
+    let mut destination = 0;
+    let mut boundary = WATCHLIST_ROW_HEIGHT / 2.0;
+    while destination < last && dragged_top >= boundary {
+        destination += 1;
+        boundary += WATCHLIST_ROW_HEIGHT;
+    }
+    Some(destination)
+}
+
+fn watchlist_drag_translation(
+    drag: Option<&WatchlistDragState>,
+    provider: &str,
+    instrument_id: &str,
+    index: usize,
+) -> Option<f32> {
+    let drag =
+        drag.filter(|drag| drag.provider == provider && drag.instrument_id == instrument_id)?;
+    let pointer_y = drag.pointer_y?;
+    let index = index.to_f32()?;
+    let slot_top = drag.body_top + drag.scroll_offset_y + index * WATCHLIST_ROW_HEIGHT;
+    Some(pointer_y - drag.cursor_offset_y - slot_top)
 }
 
 fn active_workspace_after_close(ids: &[u64], active_id: u64, closing_id: u64) -> Option<u64> {

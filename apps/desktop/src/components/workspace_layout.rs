@@ -271,7 +271,7 @@ pub(super) fn workspace_market_area(
     workspace: &WorkspaceTab,
     active_surface: &Entity<WorkspaceSurface>,
     drawing_toolbar_collapsed: bool,
-    watchlist: Vec<WatchlistRow>,
+    watchlist: WatchlistPanelState,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> impl IntoElement + use<> {

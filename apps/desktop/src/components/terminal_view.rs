@@ -105,9 +105,7 @@ impl Render for TerminalApp {
         {
             return onboarding::onboarding_surface(window, &self.theme, None);
         }
-        if self.workspace_drag.is_some() && !cx.has_active_drag() {
-            self.workspace_drag = None;
-        }
+        self.reconcile_active_drags(cx);
         self.track_window_activation(window, cx);
         self.absorb_render_requests(window, cx);
         self.sync_market_summaries(cx);
@@ -144,7 +142,7 @@ impl Render for TerminalApp {
         let about_dialog = self.rendered_about_dialog(&terminal);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
         let header = self.rendered_header(&terminal, &active, cx);
-        let watchlist = self.watchlist_rows(cx);
+        let watchlist = self.watchlist_panel_state(cx);
         let market = workspace_market_area(
             &terminal,
             &self.workspaces[self.active],
@@ -167,6 +165,7 @@ impl Render for TerminalApp {
                 cx.listener(|terminal, _, window, cx| {
                     terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
                     terminal.end_workspace_drag(cx);
+                    terminal.end_watchlist_drag(cx);
                 }),
             )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())

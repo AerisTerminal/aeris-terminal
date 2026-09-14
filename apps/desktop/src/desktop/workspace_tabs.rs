@@ -174,6 +174,8 @@ impl TerminalApp {
             persisted_active_workspace_id,
             workspace_error: None,
             workspace_drag: None,
+            watchlist_drag: None,
+            watchlist_scroll: ScrollHandle::new(),
             chart_context_menu: None,
             chart_settings_menu: None,
             chart_settings_section: ChartSettingsSection::Series,
@@ -243,6 +245,22 @@ impl TerminalApp {
                 }
             })
             .collect()
+    }
+
+    pub(super) fn watchlist_panel_state(&self, cx: &App) -> WatchlistPanelState {
+        WatchlistPanelState {
+            rows: self.watchlist_rows(cx),
+            drag: self.watchlist_drag.clone(),
+            scroll: self.watchlist_scroll.clone(),
+        }
+    }
+
+    pub(super) fn reconcile_active_drags(&mut self, cx: &mut Context<Self>) {
+        if cx.has_active_drag() {
+            return;
+        }
+        self.workspace_drag = None;
+        self.end_watchlist_drag(cx);
     }
 
     pub(super) fn absorb_watchlist_requests(&mut self, cx: &mut Context<Self>) {
@@ -357,13 +375,65 @@ impl TerminalApp {
         }
     }
 
-    pub(super) fn move_watchlist_instrument(
+    pub(super) fn begin_watchlist_drag(
         &mut self,
         provider: &str,
         instrument_id: &str,
-        destination: usize,
+        cursor_offset_y: f32,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .watchlist
+            .iter()
+            .any(|entry| entry.provider == provider && entry.instrument_id == instrument_id)
+        {
+            return;
+        }
+        self.watchlist_drag = Some(WatchlistDragState {
+            provider: provider.to_string(),
+            instrument_id: instrument_id.to_string(),
+            cursor_offset_y: if cursor_offset_y.is_finite() {
+                cursor_offset_y.clamp(0.0, WATCHLIST_ROW_HEIGHT)
+            } else {
+                WATCHLIST_ROW_HEIGHT / 2.0
+            },
+            pointer_y: None,
+            body_top: 0.0,
+            scroll_offset_y: 0.0,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn move_watchlist_drag(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        pointer_y: f32,
+        body_top: f32,
+        scroll_offset_y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor_offset_y =
+            {
+                let Some(drag) = self.watchlist_drag.as_mut().filter(|drag| {
+                    drag.provider == provider && drag.instrument_id == instrument_id
+                }) else {
+                    return;
+                };
+                drag.pointer_y = Some(pointer_y);
+                drag.body_top = body_top;
+                drag.scroll_offset_y = scroll_offset_y;
+                drag.cursor_offset_y
+            };
+        let Some(destination) = watchlist_drag_destination(
+            pointer_y,
+            body_top,
+            scroll_offset_y,
+            cursor_offset_y,
+            self.watchlist.len(),
+        ) else {
+            return;
+        };
         let Some(source) = self
             .watchlist
             .iter()
@@ -371,10 +441,16 @@ impl TerminalApp {
         else {
             return;
         };
-        if !move_item(&mut self.watchlist, source, destination) {
+        if move_item(&mut self.watchlist, source, destination) {
+            self.watchlist_persistence_dirty = true;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn end_watchlist_drag(&mut self, cx: &mut Context<Self>) {
+        if self.watchlist_drag.take().is_none() {
             return;
         }
-        self.watchlist_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
     }

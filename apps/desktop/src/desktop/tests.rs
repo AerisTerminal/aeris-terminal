@@ -10,10 +10,10 @@ use super::{
     RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SymbolInputAction,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
     TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
-    WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent,
-    WindowMoveGestureTransition, WorkspaceDragState, active_workspace_after_close,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_status_detail, chart_surface_notice,
+    WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WatchlistDragState, WindowCommand,
+    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+    active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
+    caption_pointer_owner, catalog_rejection_message, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
@@ -29,9 +29,9 @@ use super::{
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
     timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
-    window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-    workspace_label, workspace_series, workspace_split_ratio, workspace_switch,
-    workspace_title_bar_visible, wrapped_workspace_index,
+    watchlist_drag_destination, watchlist_drag_translation, window_move_gesture_transition,
+    workspace_drag_destination, workspace_drag_translation, workspace_label, workspace_series,
+    workspace_split_ratio, workspace_switch, workspace_title_bar_visible, wrapped_workspace_index,
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -758,6 +758,54 @@ fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
     };
     assert_eq!(workspace_drag_translation(Some(drag), 7, 1), Some(10.0));
     assert_eq!(workspace_drag_translation(Some(drag), 8, 1), None);
+}
+
+#[test]
+fn watchlist_drag_reflows_continuously_at_row_midpoints() {
+    let body_top = 100.0;
+    let cursor_offset = super::WATCHLIST_ROW_HEIGHT / 2.0;
+    assert_eq!(
+        watchlist_drag_destination(body_top + cursor_offset, body_top, 0.0, cursor_offset, 5,),
+        Some(0)
+    );
+    assert_eq!(
+        watchlist_drag_destination(
+            body_top + cursor_offset + super::WATCHLIST_ROW_HEIGHT / 2.0,
+            body_top,
+            0.0,
+            cursor_offset,
+            5,
+        ),
+        Some(1)
+    );
+    let drag = WatchlistDragState {
+        provider: "hyperliquid".to_string(),
+        instrument_id: "hyperliquid:perp:BTC".to_string(),
+        cursor_offset_y: cursor_offset,
+        pointer_y: Some(body_top + cursor_offset + super::WATCHLIST_ROW_HEIGHT + 7.0),
+        body_top,
+        scroll_offset_y: 0.0,
+    };
+    assert_eq!(
+        watchlist_drag_translation(Some(&drag), "hyperliquid", "hyperliquid:perp:BTC", 1,),
+        Some(7.0)
+    );
+    assert_eq!(
+        watchlist_drag_translation(Some(&drag), "hyperliquid", "hyperliquid:perp:ETH", 1),
+        None
+    );
+
+    let scroll_offset = -60.0;
+    assert_eq!(
+        watchlist_drag_destination(
+            body_top + scroll_offset + 3.0 * super::WATCHLIST_ROW_HEIGHT + cursor_offset,
+            body_top,
+            scroll_offset,
+            cursor_offset,
+            5,
+        ),
+        Some(3)
+    );
 }
 
 #[test]
