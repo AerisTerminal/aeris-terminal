@@ -324,6 +324,22 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     if workspace.workspace_tabs.is_empty() {
         return default_workspace();
     }
+    // Provider session/selection generations fence one live runtime process.
+    // They are not durable instrument identity. Persisting a generation > 1
+    // across the desktop's in-process runtime restart can make that old value
+    // authoritative before the new provider session starts at generation 1,
+    // causing every real provider event and freshly resolved selection to be
+    // rejected as stale. Rebase every durable instrument copy to the initial
+    // process generation while preserving its stable provider/instrument route.
+    for pane in workspace
+        .workspace_tabs
+        .iter_mut()
+        .flat_map(|tab| tab.panes.iter_mut())
+    {
+        if let Some(instrument) = pane.instrument.as_mut() {
+            rebase_durable_instrument(instrument);
+        }
+    }
     let mut template_names = std::collections::BTreeSet::new();
     workspace.chart_settings_templates.retain(|template| {
         valid_chart_settings_template(template)
@@ -356,6 +372,11 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         let Some(chart) = &mut pane.chart else {
             continue;
         };
+        for alert in &mut chart.price_alerts {
+            if let Some(instrument) = alert.instrument.as_mut() {
+                rebase_durable_instrument(instrument);
+            }
+        }
         let mut ids = std::collections::BTreeSet::new();
         chart.price_alerts.retain(|alert| {
             !alert.id.is_empty()
@@ -406,6 +427,11 @@ fn sanitize_watchlist(workspace: &mut WorkspaceState) {
             })
             .collect();
     }
+    for entry in &mut workspace.watchlist_entries {
+        if let Some(instrument) = entry.instrument.as_mut() {
+            rebase_durable_instrument(instrument);
+        }
+    }
     let mut identities = std::collections::BTreeSet::new();
     workspace.watchlist_entries.retain(|entry| {
         entry.instrument.as_ref().is_some_and(|instrument| {
@@ -429,6 +455,11 @@ fn sanitize_watchlist(workspace: &mut WorkspaceState) {
                 .map(|instrument| instrument.display_symbol.clone())
         })
         .collect();
+}
+
+fn rebase_durable_instrument(instrument: &mut InstallProviderInstrument) {
+    instrument.session_generation = 1;
+    instrument.selection_generation = 1;
 }
 
 fn valid_watchlist_instrument(instrument: &InstallProviderInstrument) -> bool {
@@ -904,6 +935,56 @@ mod tests {
         assert_eq!(pane.side_panel_visibility, 3);
         assert_eq!(pane.side_panel_width, 480);
         assert_eq!(pane.side_panel_split_basis_points, 9_500);
+    }
+
+    #[test]
+    fn workspace_sanitizer_rebases_process_local_instrument_generations() {
+        let mut workspace = default_workspace();
+        let pane = &mut workspace.workspace_tabs[0].panes[0];
+        let instrument = pane.instrument.as_mut().expect("default pane instrument");
+        instrument.session_generation = 3;
+        instrument.selection_generation = 6;
+        let mut alert_instrument = instrument.clone();
+        alert_instrument.session_generation = 8;
+        alert_instrument.selection_generation = 11;
+        pane.chart = Some(round_trip_chart_state());
+        pane.chart
+            .as_mut()
+            .expect("chart state")
+            .price_alerts
+            .push(price_alert(alert_instrument));
+        let watchlist = workspace.watchlist_entries[0]
+            .instrument
+            .as_mut()
+            .expect("default watchlist instrument");
+        watchlist.session_generation = 5;
+        watchlist.selection_generation = 9;
+
+        let sanitized = sanitize_workspace(workspace);
+
+        let pane = &sanitized.workspace_tabs[0].panes[0];
+        let instrument = pane.instrument.as_ref().expect("pane instrument survives");
+        assert_eq!(instrument.session_generation, 1);
+        assert_eq!(instrument.selection_generation, 1);
+        let alert = pane
+            .chart
+            .as_ref()
+            .expect("chart survives")
+            .price_alerts
+            .first()
+            .expect("alert survives");
+        let alert_instrument = alert
+            .instrument
+            .as_ref()
+            .expect("alert instrument survives");
+        assert_eq!(alert_instrument.session_generation, 1);
+        assert_eq!(alert_instrument.selection_generation, 1);
+        let watchlist = sanitized.watchlist_entries[0]
+            .instrument
+            .as_ref()
+            .expect("watchlist instrument survives");
+        assert_eq!(watchlist.session_generation, 1);
+        assert_eq!(watchlist.selection_generation, 1);
     }
 
     #[test]
