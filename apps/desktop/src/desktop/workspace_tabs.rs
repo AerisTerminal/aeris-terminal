@@ -15,37 +15,61 @@ pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize
     true
 }
 
-fn restore_watchlist(
-    entries: Vec<WorkspaceWatchlistEntryState>,
-    factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
-    workspace_id: u64,
-    wake: &UiWake,
-) -> Vec<WatchlistEntry> {
+fn restore_watchlist(entries: Vec<WorkspaceWatchlistEntryState>) -> Vec<InstallProviderInstrument> {
     entries
         .into_iter()
         .filter_map(|entry| entry.instrument)
-        .map(|instrument| {
-            let worker = factory.and_then(|factory| {
-                match factory.create_pane(workspace_id, instrument.clone(), ChartInterval::Day1) {
-                    Ok(pane) => {
-                        pane.worker.set_message_wake(wake.callback());
-                        let _ = pane
-                            .worker
-                            .try_set_market_resource_class(ConsumerResourceClass::Background);
-                        Some(pane.worker)
-                    }
-                    Err(error) => {
-                        eprintln!("watchlist market demand could not start: {error}");
-                        None
-                    }
-                }
-            });
-            let message = worker
-                .is_none()
-                .then(|| "Market data unavailable".to_string());
-            WatchlistEntry::new(instrument, worker, message)
-        })
         .collect()
+}
+
+fn start_market_summary(
+    factory: Option<&engine_market_worker::WorkspaceMarketFactory>,
+    workspace_id: u64,
+    instrument: InstallProviderInstrument,
+    resource_class: ConsumerResourceClass,
+    wake: &UiWake,
+) -> MarketQuoteEntry {
+    let worker = factory.and_then(|factory| {
+        match factory.create_pane(workspace_id, instrument.clone(), ChartInterval::Day1) {
+            Ok(pane) => {
+                pane.worker.set_message_wake(wake.callback());
+                let _ = pane.worker.try_set_market_resource_class(resource_class);
+                Some(pane.worker)
+            }
+            Err(error) => {
+                eprintln!("market summary demand could not start: {error}");
+                None
+            }
+        }
+    });
+    let message = worker
+        .is_none()
+        .then(|| "Market data unavailable".to_string());
+    let mut entry = MarketQuoteEntry::new(instrument, worker, message);
+    entry.resource_class = resource_class;
+    entry
+}
+
+pub(super) fn market_summary_requirements(
+    tab_instruments: impl IntoIterator<Item = InstallProviderInstrument>,
+    watchlist: &[InstallProviderInstrument],
+    watchlist_visible: bool,
+) -> BTreeMap<MarketSummaryKey, (InstallProviderInstrument, bool)> {
+    let mut desired = BTreeMap::new();
+    for instrument in tab_instruments {
+        desired.insert(
+            MarketSummaryKey::from_instrument(&instrument),
+            (instrument, true),
+        );
+    }
+    for instrument in watchlist {
+        let key = MarketSummaryKey::from_instrument(instrument);
+        desired
+            .entry(key)
+            .and_modify(|(_, foreground)| *foreground |= watchlist_visible)
+            .or_insert_with(|| (instrument.clone(), watchlist_visible));
+    }
+    desired
 }
 
 impl TerminalApp {
@@ -94,12 +118,7 @@ impl TerminalApp {
             }
         }
         let persisted_watchlist = init.watchlist_entries.clone();
-        let watchlist = restore_watchlist(
-            init.watchlist_entries,
-            init.workspace_factory.as_ref(),
-            workspaces[active].id,
-            &market_frame_wake,
-        );
+        let watchlist = restore_watchlist(init.watchlist_entries);
         let workspace_persistence = (init.workspace_shell == WorkspaceShellKind::Tabs)
             .then(|| {
                 WorkspaceLayoutPersistence::new(init.workspace_revision, init.layout_generation)
@@ -124,6 +143,7 @@ impl TerminalApp {
             lifecycle,
             workspace_factory: init.workspace_factory,
             watchlist,
+            market_summaries: BTreeMap::new(),
             persisted_watchlist,
             watchlist_persistence_dirty: false,
             workspace_persistence,
@@ -163,8 +183,8 @@ impl TerminalApp {
     fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
         self.watchlist
             .iter()
-            .map(|entry| WorkspaceWatchlistEntryState {
-                instrument: Some(entry.instrument.clone()),
+            .map(|instrument| WorkspaceWatchlistEntryState {
+                instrument: Some(instrument.clone()),
             })
             .collect()
     }
@@ -178,7 +198,26 @@ impl TerminalApp {
             .or(surface.product.as_ref());
         self.watchlist
             .iter()
-            .map(|entry| entry.row(active))
+            .map(|instrument| {
+                let key = MarketSummaryKey::from_instrument(instrument);
+                let summary = self.market_summaries.get(&key);
+                WatchlistRow {
+                    instrument: instrument.clone(),
+                    previous_close: summary.and_then(|summary| summary.previous_close),
+                    last: summary.and_then(|summary| summary.last),
+                    message: summary
+                        .and_then(|summary| summary.message.clone())
+                        .or_else(|| {
+                            summary
+                                .is_none()
+                                .then(|| "Market data unavailable".to_string())
+                        }),
+                    active: active.is_some_and(|active| {
+                        active.provider == instrument.provider
+                            && active.instrument_id == instrument.instrument_id
+                    }),
+                }
+            })
             .collect()
     }
 
@@ -199,18 +238,72 @@ impl TerminalApp {
     }
 
     fn sync_watchlist_resource_class(&mut self, cx: &App) {
-        let visible = self
+        self.sync_market_summaries(cx);
+    }
+
+    pub(super) fn sync_market_summaries(&mut self, cx: &App) {
+        let watchlist_visible = self
             .active_surface()
             .read(cx)
             .side_panels
             .contains(SidePanel::Watchlist);
-        let resource_class = if visible {
-            ConsumerResourceClass::Foreground
-        } else {
-            ConsumerResourceClass::Background
-        };
-        for entry in &mut self.watchlist {
-            entry.set_resource_class(resource_class);
+        // Every workspace tab is visible even when its full chart is parked in
+        // Background. Keep only the compact Day1 summary live so tab prices do
+        // not freeze while inactive charts continue to release provider demand.
+        let tab_instruments = self.workspaces.iter().filter_map(|workspace| {
+            let surface = workspace.panes[workspace.active_pane].surface.read(cx);
+            // A switch marker updates `product` before the replacement chart is
+            // authoritative. Retain the prior summary through that handoff so
+            // failed selections never create speculative live-summary demand.
+            surface
+                .rithmic_previous_selection
+                .as_ref()
+                .and_then(|(instrument, _)| instrument.clone())
+                .or_else(|| surface.product.clone())
+        });
+        let desired =
+            market_summary_requirements(tab_instruments, &self.watchlist, watchlist_visible);
+
+        let stale = self
+            .market_summaries
+            .keys()
+            .filter(|key| !desired.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale {
+            if let Some(mut entry) = self.market_summaries.remove(&key)
+                && let Some(retirement) = entry
+                    .worker
+                    .as_mut()
+                    .and_then(MarketDataWorker::begin_retirement)
+            {
+                self.lifecycle.retire_market_worker(retirement, cx);
+            }
+        }
+
+        let workspace_id = self.workspaces[self.active].id;
+        let factory = self.workspace_factory.clone();
+        for (key, (instrument, foreground)) in desired {
+            let resource_class = if foreground {
+                ConsumerResourceClass::Foreground
+            } else {
+                ConsumerResourceClass::Background
+            };
+            if let Some(entry) = self.market_summaries.get_mut(&key) {
+                entry.instrument = instrument;
+                entry.set_resource_class(resource_class);
+                continue;
+            }
+            self.market_summaries.insert(
+                key,
+                start_market_summary(
+                    factory.as_ref(),
+                    workspace_id,
+                    instrument,
+                    resource_class,
+                    &self.market_frame_wake,
+                ),
+            );
         }
     }
 
@@ -220,32 +313,13 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         if self.watchlist.iter().any(|entry| {
-            entry.instrument.provider == instrument.provider
-                && entry.instrument.instrument_id == instrument.instrument_id
+            entry.provider == instrument.provider && entry.instrument_id == instrument.instrument_id
         }) || self.watchlist.len() >= local_state::MAXIMUM_WATCHLIST_ENTRIES
         {
             return;
         }
-        let (worker, message) = self.workspace_factory.as_ref().map_or_else(
-            || (None, Some("Market data unavailable".to_string())),
-            |factory| match factory.create_pane(
-                self.workspaces[self.active].id,
-                instrument.clone(),
-                ChartInterval::Day1,
-            ) {
-                Ok(pane) => {
-                    pane.worker
-                        .set_message_wake(self.market_frame_wake.callback());
-                    let _ = pane
-                        .worker
-                        .try_set_market_resource_class(ConsumerResourceClass::Background);
-                    (Some(pane.worker), None)
-                }
-                Err(error) => (None, Some(error)),
-            },
-        );
-        self.watchlist
-            .push(WatchlistEntry::new(instrument, worker, message));
+        self.watchlist.push(instrument);
+        self.sync_market_summaries(cx);
         self.watchlist_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
@@ -258,10 +332,10 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         let before = self.watchlist.len();
-        self.watchlist.retain(|entry| {
-            entry.instrument.provider != provider || entry.instrument.instrument_id != instrument_id
-        });
+        self.watchlist
+            .retain(|entry| entry.provider != provider || entry.instrument_id != instrument_id);
         if self.watchlist.len() != before {
+            self.sync_market_summaries(cx);
             self.watchlist_persistence_dirty = true;
             self.persist_workspace_layout_if_changed(cx);
             cx.notify();
@@ -275,9 +349,11 @@ impl TerminalApp {
         destination: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) = self.watchlist.iter().position(|entry| {
-            entry.instrument.provider == provider && entry.instrument.instrument_id == instrument_id
-        }) else {
+        let Some(source) = self
+            .watchlist
+            .iter()
+            .position(|entry| entry.provider == provider && entry.instrument_id == instrument_id)
+        else {
             return;
         };
         if !move_item(&mut self.watchlist, source, destination) {
@@ -1995,6 +2071,15 @@ impl TerminalApp {
             self.lifecycle
                 .await_workspace_persistence(persistence.shutdown_wait());
         }
+        for entry in self.market_summaries.values_mut() {
+            if let Some(retirement) = entry
+                .worker
+                .as_mut()
+                .and_then(MarketDataWorker::begin_retirement)
+            {
+                self.lifecycle.retire_market_worker(retirement, cx);
+            }
+        }
         self.retire_workspaces(cx);
         true
     }
@@ -2125,13 +2210,13 @@ impl TerminalApp {
                 let authenticated = axiusflow_desktop::account::DesktopAccount::shared()
                     .is_some_and(|account| account.authenticated());
                 let mut diagnostics = Vec::new();
-                let mut watchlist_changed = false;
+                let mut summaries_changed = false;
                 if authenticated {
-                    for entry in &mut terminal.watchlist {
-                        watchlist_changed |= entry.poll();
+                    for entry in terminal.market_summaries.values_mut() {
+                        summaries_changed |= entry.poll();
                     }
                 }
-                if watchlist_changed {
+                if summaries_changed {
                     cx.notify();
                 }
                 for workspace in &terminal.workspaces {
