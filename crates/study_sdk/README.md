@@ -86,8 +86,9 @@ instance; a shallow `Arc<Mutex<_>>`/interior-mutable clone is not a valid transa
 This remains a reviewed trusted-native contract rather than a sandbox boundary.
 
 Market dependencies are declarations, not provider handles. `MarketEngine` remains the only owner
-of provider sessions and canonical market state. Requesting Quotes/Trades/Depth extends the
-engine-owned stream demand and exposes borrowed canonical views during execution. Current non-bar
+of canonical market demand and series state, while `market_runtime` exclusively owns provider
+sessions. Requesting Quotes/Trades/Depth extends the MarketEngine-owned stream demand and exposes
+borrowed canonical views during execution. Current non-bar
 state can recalculate a bar-aligned study; pure non-bar output timelines are intentionally not part
 of this contract until a concrete product study requires them.
 

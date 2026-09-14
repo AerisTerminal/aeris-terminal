@@ -846,9 +846,6 @@ impl Coordinator<'_> {
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
         if current != Some(generation) {
-            if current == Some(generation) && self.engine.has_subscription(series) {
-                let _ = self.enqueue_history(series, generation);
-            }
             return None;
         }
         match result {

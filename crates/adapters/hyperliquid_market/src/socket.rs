@@ -1,6 +1,6 @@
 //! Blocking WebSocket transport for the public Hyperliquid market feed.
 //!
-//! Exactly one engine-owned thread drives one of these sockets at a time:
+//! Exactly one market-runtime-owned thread drives one of these sockets at a time:
 //! connect with bounded TCP/TLS setup, exchange bounded text frames, and
 //! shut the socket down from another thread for prompt cancellation. Only
 //! text frames are accepted; the public feed is text JSON, so a binary frame

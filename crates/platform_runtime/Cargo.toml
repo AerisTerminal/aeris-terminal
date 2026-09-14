@@ -23,7 +23,7 @@ wayland-protocols.workspace = true
 zbus.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-signal-hook = "0.3.18"
+signal-hook = "=0.4.4"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 keyring.workspace = true

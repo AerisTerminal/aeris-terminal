@@ -56,7 +56,7 @@ jobs:
       AUTHENTICODE_TIMESTAMP_URL: ${{ vars.AUTHENTICODE_TIMESTAMP_URL }}
     steps:
       - name: Check out main
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -191,7 +191,7 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "desktop_sha256=$((Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash.ToLowerInvariant())"
 
       - name: Upload qualified release binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qualified-release-binaries-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -223,7 +223,7 @@ jobs:
       RELEASE_PUBLISHER_SHA256: ${{ vars.RELEASE_PUBLISHER_SHA256 }}
     steps:
       - name: Check out exact main source
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -261,7 +261,7 @@ jobs:
           if ($status) { throw 'Release checkout is not clean.' }
 
       - name: Download qualified release binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: qualified-release-binaries-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/release

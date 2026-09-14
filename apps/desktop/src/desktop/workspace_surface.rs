@@ -1967,7 +1967,7 @@ impl WorkspaceSurface {
                 let (accepted, recovery_pending) = chart.update(cx, |chart, _| {
                     let accepted = chart.try_queue_replay_update(update).is_ok();
                     if !accepted {
-                        eprintln!("bounded chart queue overflowed; fixture resnapshot required");
+                        eprintln!("bounded chart queue overflowed; canonical resnapshot required");
                     }
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
                 });

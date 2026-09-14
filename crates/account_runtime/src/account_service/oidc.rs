@@ -86,6 +86,8 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
     if metadata.issuer != issuer {
         return Err("sign-in verification failed; retry sign-in".to_string());
     }
+    let issuer_uri = parse_https_uri(issuer)
+        .map_err(|_| "sign-in verification failed; retry sign-in".to_string())?;
     let origin = control_plane_origin(issuer)?;
     for endpoint in [
         &metadata.authorization_endpoint,
@@ -93,7 +95,7 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
         &metadata.jwks_uri,
         &metadata.revocation_endpoint,
     ] {
-        if !endpoint.starts_with(&origin) {
+        if !same_https_origin(&issuer_uri, endpoint) {
             return Err("sign-in verification failed; retry sign-in".to_string());
         }
     }
@@ -146,11 +148,41 @@ pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<
 ///
 /// Returns an error when the issuer does not carry the expected mount.
 pub fn control_plane_origin(issuer: &str) -> Result<String, String> {
+    let uri = parse_https_uri(issuer)?;
+    if uri.path() != "/api/auth" || uri.query().is_some() {
+        return Err("account control plane issuer is invalid".to_string());
+    }
+    let authority = uri
+        .authority()
+        .ok_or_else(|| "account control plane issuer is invalid".to_string())?;
+    Ok(format!("https://{authority}"))
+}
+
+fn parse_https_uri(value: &str) -> Result<ureq::http::Uri, String> {
+    let uri = value
+        .parse::<ureq::http::Uri>()
+        .map_err(|_| "account control plane issuer is invalid".to_string())?;
+    let Some(authority) = uri.authority() else {
+        return Err("account control plane issuer is invalid".to_string());
+    };
+    if uri.scheme_str() != Some("https") || uri.host().is_none() || authority.as_str().contains('@')
+    {
+        return Err("account control plane issuer is invalid".to_string());
+    }
+    Ok(uri)
+}
+
+fn same_https_origin(issuer: &ureq::http::Uri, endpoint: &str) -> bool {
+    let Ok(endpoint) = parse_https_uri(endpoint) else {
+        return false;
+    };
     issuer
-        .strip_suffix("/api/auth")
-        .filter(|origin| origin.starts_with("https://") && !origin.contains([' ', '?', '#']))
-        .map(str::to_string)
-        .ok_or_else(|| "account control plane issuer is invalid".to_string())
+        .host()
+        .zip(endpoint.host())
+        .is_some_and(|(issuer_host, endpoint_host)| {
+            issuer_host.eq_ignore_ascii_case(endpoint_host)
+                && issuer.port_u16().unwrap_or(443) == endpoint.port_u16().unwrap_or(443)
+        })
 }
 
 /// Builds the system-browser authorization URL for one transaction.
@@ -159,11 +191,7 @@ pub fn control_plane_origin(issuer: &str) -> Result<String, String> {
 ///
 /// Returns an error when the discovered authorization endpoint is invalid.
 pub fn authorization_url(request: &AuthorizationRequest<'_>) -> Result<String, String> {
-    if !request
-        .endpoints
-        .authorization_endpoint
-        .starts_with("https://")
-    {
+    if parse_https_uri(&request.endpoints.authorization_endpoint).is_err() {
         return Err("account control plane issuer is invalid".to_string());
     }
     // Every desktop sign-in requires an explicit browser confirmation even
@@ -497,8 +525,7 @@ fn verify_id_token(
     if claims.exp <= unix_now() {
         return Err("sign-in session expired; retry sign-in".to_string());
     }
-    // A present nonce must match the transaction; refresh grants carry none.
-    if !claims.nonce.is_empty() && Some(claims.nonce.as_str()) != expected_nonce {
+    if !nonce_matches(&claims.nonce, expected_nonce) {
         return Err(claim_failure());
     }
     if claims.sub.trim().is_empty() {
@@ -528,6 +555,13 @@ fn audience_matches(audience: &serde_json::Value, client_id: &str) -> bool {
         serde_json::Value::String(single) => single == client_id,
         serde_json::Value::Array(members) => members.iter().any(|member| member == client_id),
         _ => false,
+    }
+}
+
+fn nonce_matches(claim_nonce: &str, expected_nonce: Option<&str>) -> bool {
+    match expected_nonce {
+        Some(expected) => claim_nonce == expected,
+        None => claim_nonce.is_empty(),
     }
 }
 
@@ -610,7 +644,7 @@ fn unix_now() -> u64 {
 mod tests {
     use super::{
         AuthorizationRequest, OidcEndpoints, audience_matches, authorization_url,
-        control_plane_origin, split_jwt, url_encode,
+        control_plane_origin, nonce_matches, split_jwt, url_encode,
     };
 
     fn endpoints() -> OidcEndpoints {
@@ -701,6 +735,37 @@ mod tests {
             )
             .is_err()
         );
+        for jwks_uri in [
+            "https://auth.axiusflow.com.evil.example/jwks",
+            "https://auth.axiusflow.com@evil.example/jwks",
+            "https://auth.axiusflow.com:444/jwks",
+            "http://auth.axiusflow.com/jwks",
+        ] {
+            assert!(
+                super::parse_discovery(
+                    "https://auth.axiusflow.com/api/auth",
+                    &super::DiscoveryMetadata {
+                        jwks_uri: jwks_uri.to_string(),
+                        ..discovery_fixture()
+                    }
+                )
+                .is_err(),
+                "off-origin endpoint must be rejected: {jwks_uri}"
+            );
+        }
+
+        let endpoints = super::parse_discovery(
+            "https://auth.axiusflow.com/api/auth",
+            &super::DiscoveryMetadata {
+                jwks_uri: "https://AUTH.AXIUSFLOW.COM:443/api/auth/jwks".to_string(),
+                ..discovery_fixture()
+            },
+        )
+        .expect("host case and the explicit default HTTPS port preserve the same origin");
+        assert_eq!(
+            endpoints.jwks_uri,
+            "https://AUTH.AXIUSFLOW.COM:443/api/auth/jwks"
+        );
         assert!(
             super::parse_discovery(
                 "https://auth.axiusflow.com/api/auth",
@@ -749,6 +814,9 @@ mod tests {
         );
         assert!(control_plane_origin("https://auth.axiusflow.com").is_err());
         assert!(control_plane_origin("http://auth.axiusflow.com/api/auth").is_err());
+        assert!(control_plane_origin("https://auth.axiusflow.com.evil/api/auth").is_ok());
+        assert!(control_plane_origin("https://auth.axiusflow.com/api/auth?next=evil").is_err());
+        assert!(control_plane_origin("https://user@auth.axiusflow.com/api/auth").is_err());
     }
 
     #[test]
@@ -783,5 +851,14 @@ mod tests {
         assert!(!audience_matches(&single, "other"));
         let many = serde_json::Value::Array(vec![serde_json::Value::String("other".to_string())]);
         assert!(!audience_matches(&many, "axiusflow-desktop"));
+    }
+
+    #[test]
+    fn authorization_nonce_is_exact_and_refresh_nonce_is_absent() {
+        assert!(nonce_matches("nonce-value", Some("nonce-value")));
+        assert!(!nonce_matches("", Some("nonce-value")));
+        assert!(!nonce_matches("other", Some("nonce-value")));
+        assert!(nonce_matches("", None));
+        assert!(!nonce_matches("unexpected", None));
     }
 }

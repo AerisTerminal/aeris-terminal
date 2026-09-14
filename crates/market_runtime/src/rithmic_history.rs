@@ -152,7 +152,7 @@ fn collect_replay(
         bars.drain(..bars.len() - maximum_visible_bars);
     }
     if bars.is_empty() {
-        return Err("Rithmic returned no completed historical bars".to_string());
+        return empty_replay_result(replay);
     }
     for (index, bar) in bars.iter_mut().enumerate() {
         bar.source_sequence = u64::try_from(index)
@@ -162,6 +162,16 @@ fn collect_replay(
     }
     let (forming, boundary) = split_forming_period(transport, instrument, replay, &mut bars, stop)?;
     Ok((bars, forming, boundary))
+}
+
+fn empty_replay_result(
+    replay: ReplayEnvelope,
+) -> Result<(Vec<MarketBar>, Option<FormingBar>, i64), String> {
+    if replay.allow_empty {
+        Ok((Vec::new(), None, replay.range.end_unix_nanos))
+    } else {
+        Err("Rithmic returned no completed historical bars".to_string())
+    }
 }
 
 /// Separates the period the replay caught mid-flight from closed history.
@@ -360,6 +370,10 @@ struct ReplayEnvelope {
     range: HistoryRange,
     maximum_bars: NonZeroUsize,
     forming: FormingPlan,
+    /// An explicit viewport repair may legitimately land before the provider's
+    /// available history. Current-history loads still treat an empty page as a
+    /// failure because they need a covering baseline for the live handoff.
+    allow_empty: bool,
 }
 
 fn replay_envelope(
@@ -428,6 +442,7 @@ fn replay_envelope(
         range: history_range(start_seconds, end_seconds)?,
         maximum_bars: NonZeroUsize::new(theoretical_bars).unwrap_or(NonZeroUsize::MIN),
         forming,
+        allow_empty: false,
     })
 }
 
@@ -447,6 +462,7 @@ fn explicit_replay_envelope(
         // invent an open bucket. The existing realtime handoff remains owner
         // of the forming candle while the repair replaces completed history.
         forming: FormingPlan::Closed,
+        allow_empty: true,
     })
 }
 
@@ -509,6 +525,7 @@ fn aggregate_replay_envelope(
         // Splitting an open one here would need that calendar, so the live
         // handoff opens it from trades as it always has.
         forming: FormingPlan::Closed,
+        allow_empty: false,
     })
 }
 
@@ -610,5 +627,20 @@ mod tests {
         .expect("fractional viewport range aligns");
         assert_eq!(replay.range.start_unix_nanos, 1_000_000_000);
         assert_eq!(replay.range.end_unix_nanos, 62_000_000_000);
+
+        let (bars, forming, boundary) =
+            empty_replay_result(replay).expect("an empty viewport repair is valid coverage");
+        assert!(bars.is_empty());
+        assert!(forming.is_none());
+        assert_eq!(boundary, 62_000_000_000);
+    }
+
+    #[test]
+    fn empty_current_history_still_requires_a_covering_baseline() {
+        let now = UNIX_EPOCH + Duration::from_hours(240);
+        let replay =
+            replay_envelope(ChartInterval::Minute1, 100, now).expect("current replay envelope");
+
+        assert!(empty_replay_result(replay).is_err());
     }
 }

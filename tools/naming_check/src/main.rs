@@ -376,7 +376,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "ee68e9dd71585f5c16a40ee286ca8b9ebe9a911a";
+        let expected_revision = "e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_indicators",
@@ -1261,10 +1261,22 @@ mod tests {
             restart < close && close < quit,
             "update restart must commit only after durability, then claim shared close before lifecycle quit"
         );
+        let update = manifest("apps/desktop/src/update.rs");
+        let cleanup_start = update
+            .find("impl Drop for PreparedRestart")
+            .expect("prepared restart cleanup owner");
+        let cleanup_end = update[cleanup_start..]
+            .find("fn spawn_update_restart")
+            .map(|offset| cleanup_start + offset)
+            .expect("prepared restart cleanup boundary");
+        let cleanup = &update[cleanup_start..cleanup_end];
         assert!(
-            workspace_tabs.contains("cx.background_executor()")
-                && workspace_tabs.contains("spawn(async move { drop(cleanup) })"),
-            "failed update restart preparation must retire its uncommitted helper off GPUI"
+            workspace_tabs.contains("drop(cleanup);")
+                && cleanup.contains("axiusflow-update-restart-cleanup")
+                && cleanup.contains(".spawn(move || {")
+                && cleanup.contains("child.kill()")
+                && cleanup.contains("child.wait()"),
+            "failed update restart preparation must transfer helper termination and reaping off GPUI"
         );
         let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
         assert!(

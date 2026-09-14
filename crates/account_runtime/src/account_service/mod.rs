@@ -1393,7 +1393,7 @@ impl AccountService {
     /// Active session published: `Ok(true)` completes the sign-in,
     /// `Ok(false)` leaves an already-recorded terminal failure (vault
     /// failure) or a retired generation untouched, and `Err` carries the
-    /// redacted detail for the browser page and the engine view.
+    /// redacted detail for the browser page and the desktop account view.
     fn exchange_and_link(&self, generation: u64, code: &str) -> Result<bool, String> {
         let (redirect_uri, verifier, nonce) = {
             let Ok(state) = self.state.lock() else {

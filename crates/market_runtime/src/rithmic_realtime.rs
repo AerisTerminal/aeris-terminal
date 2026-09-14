@@ -1126,6 +1126,7 @@ fn drain_live_events(
     subscription_generation: &mut Option<SessionGeneration>,
 ) -> Option<SelectionExit> {
     let (environment, environment_state) = environment;
+    let mut pending_depth = None;
     while events.has_ready() {
         match try_recv_rithmic_event(runtime, events, retries, Instant::now()) {
             Ok(Some(AppliedRithmicEvent::Semantic(event))) => match event {
@@ -1133,6 +1134,7 @@ fn drain_live_events(
                     generation: ready_generation,
                     ..
                 } => {
+                    publish_pending_depth(channels, generation, &mut pending_depth);
                     *subscription_generation = Some(ready_generation);
                     channels.publish_realtime(RithmicRealtimeEvent::Connected(generation));
                 }
@@ -1140,6 +1142,7 @@ fn drain_live_events(
                     event: MarketEvent::Trade(mut trade),
                     ..
                 } => {
+                    publish_pending_depth(channels, generation, &mut pending_depth);
                     trade.metadata.session_generation = generation;
                     channels.publish_realtime(RithmicRealtimeEvent::Trade(generation, trade));
                 }
@@ -1147,6 +1150,7 @@ fn drain_live_events(
                     event: MarketEvent::Quote(mut quote),
                     ..
                 } => {
+                    publish_pending_depth(channels, generation, &mut pending_depth);
                     quote.metadata.session_generation = generation;
                     channels.publish_realtime(RithmicRealtimeEvent::Quote(generation, quote));
                 }
@@ -1155,25 +1159,29 @@ fn drain_live_events(
                     ..
                 } => {
                     snapshot.metadata.session_generation = generation;
-                    channels.publish_realtime(RithmicRealtimeEvent::Depth(generation, snapshot));
+                    if let Some(previous) = queue_depth_snapshot(&mut pending_depth, snapshot) {
+                        channels
+                            .publish_realtime(RithmicRealtimeEvent::Depth(generation, previous));
+                    }
                 }
                 ProviderSessionEvent::Heartbeat {
                     transport_rtt_nanos,
                     ..
                 } => {
-                    channels.publish_realtime(RithmicRealtimeEvent::Heartbeat(
-                        generation,
-                        transport_rtt_nanos,
-                    ));
+                    publish_pending_depth(channels, generation, &mut pending_depth);
+                    publish_heartbeat(channels, generation, transport_rtt_nanos);
                 }
                 ProviderSessionEvent::DiscoveryStarted
                 | ProviderSessionEvent::SystemsDiscovered { .. }
                 | ProviderSessionEvent::AuthenticationChanged { .. }
                 | ProviderSessionEvent::Market { .. }
                 | ProviderSessionEvent::Invalidated { .. }
-                | ProviderSessionEvent::Stopped => {}
+                | ProviderSessionEvent::Stopped => {
+                    publish_pending_depth(channels, generation, &mut pending_depth);
+                }
             },
             Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket))) => {
+                publish_pending_depth(channels, generation, &mut pending_depth);
                 *subscription_generation = None;
                 channels.publish_realtime(RithmicRealtimeEvent::Recovering(
                     generation,
@@ -1181,6 +1189,7 @@ fn drain_live_events(
                 ));
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
+                publish_pending_depth(channels, generation, &mut pending_depth);
                 eprintln!("Axiusflow Rithmic live session failed: {reason:?}");
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
@@ -1194,6 +1203,7 @@ fn drain_live_events(
                 ));
             }
             Err(error) => {
+                publish_pending_depth(channels, generation, &mut pending_depth);
                 eprintln!("Axiusflow Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
@@ -1205,10 +1215,53 @@ fn drain_live_events(
                     true,
                 ));
             }
-            Ok(None) => break,
+            Ok(None) => {
+                publish_pending_depth(channels, generation, &mut pending_depth);
+                break;
+            }
         }
     }
+    publish_pending_depth(channels, generation, &mut pending_depth);
     None
+}
+
+fn queue_depth_snapshot(
+    pending: &mut Option<DepthSnapshot>,
+    next: DepthSnapshot,
+) -> Option<DepthSnapshot> {
+    if let Some(current) = pending.as_ref()
+        && current.metadata.provider_id == next.metadata.provider_id
+        && current.metadata.instrument_id == next.metadata.instrument_id
+        && current.metadata.entitlement_id == next.metadata.entitlement_id
+        && current.metadata.session_generation == next.metadata.session_generation
+    {
+        if next.metadata.source_sequence > current.metadata.source_sequence {
+            *pending = Some(next);
+        }
+        return None;
+    }
+    pending.replace(next)
+}
+
+fn publish_pending_depth(
+    channels: ProviderChannels<'_>,
+    generation: u64,
+    pending: &mut Option<DepthSnapshot>,
+) {
+    if let Some(snapshot) = pending.take() {
+        channels.publish_realtime(RithmicRealtimeEvent::Depth(generation, snapshot));
+    }
+}
+
+fn publish_heartbeat(
+    channels: ProviderChannels<'_>,
+    generation: u64,
+    transport_rtt_nanos: Option<u64>,
+) {
+    channels.publish_realtime(RithmicRealtimeEvent::Heartbeat(
+        generation,
+        transport_rtt_nanos,
+    ));
 }
 
 fn stop_selection(runtime: &mut Runtime, generation: u64) -> SelectionExit {
@@ -1487,9 +1540,10 @@ mod tests {
 
     use super::{
         EnvironmentState, RithmicCatalogEvent, catalog_selection_subscription, next_generation,
-        publish_catalog_callback, reject_deferred_selection, reject_pending_catalog,
-        retire_pending_catalog_generation,
+        publish_catalog_callback, queue_depth_snapshot, reject_deferred_selection,
+        reject_pending_catalog, retire_pending_catalog_generation,
     };
+    use axiusflow_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
     use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
     use axiusflow_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
@@ -1501,6 +1555,55 @@ mod tests {
         assert_eq!(next_generation(7, 7), 8);
         assert_eq!(next_generation(8, 12), 12);
         assert_eq!(next_generation(u64::MAX, 1), u64::MAX);
+    }
+
+    fn depth_snapshot(instrument_id: &str, source_sequence: u64) -> DepthSnapshot {
+        DepthSnapshot {
+            metadata: EventMetadata {
+                provider_id: "rithmic".to_string(),
+                instrument_id: instrument_id.to_string(),
+                entitlement_id: format!("rithmic-test:{instrument_id}"),
+                source_sequence,
+                session_generation: 7,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(
+                        i64::try_from(source_sequence).expect("test sequence"),
+                    ),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: i64::try_from(source_sequence).expect("test sequence") + 1,
+                },
+            },
+            bids: Vec::new(),
+            asks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn consecutive_depth_snapshots_keep_only_newest_complete_image_per_instrument() {
+        let mut pending = None;
+        assert!(queue_depth_snapshot(&mut pending, depth_snapshot("MNQ", 1)).is_none());
+        assert!(queue_depth_snapshot(&mut pending, depth_snapshot("MNQ", 2)).is_none());
+        assert!(
+            queue_depth_snapshot(&mut pending, depth_snapshot("MNQ", 1)).is_none(),
+            "a stale complete image must not replace the newer pending image"
+        );
+        assert_eq!(
+            pending
+                .as_ref()
+                .map(|snapshot| snapshot.metadata.source_sequence),
+            Some(2)
+        );
+
+        let emitted = queue_depth_snapshot(&mut pending, depth_snapshot("ES", 3))
+            .expect("a different instrument flushes the previous complete image");
+        assert_eq!(emitted.metadata.instrument_id, "MNQ");
+        assert_eq!(emitted.metadata.source_sequence, 2);
+        assert_eq!(
+            pending
+                .as_ref()
+                .map(|snapshot| snapshot.metadata.instrument_id.as_str()),
+            Some("ES")
+        );
     }
 
     #[test]

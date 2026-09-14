@@ -6,7 +6,7 @@
 
 use std::{
     fs::File,
-    io::{BufRead as _, Read as _},
+    io::{BufRead as _, Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -26,7 +26,8 @@ const RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const RESTART_CHILD_STABILITY_WINDOW: Duration = Duration::from_millis(150);
 const MAXIMUM_RESTART_ACK_BYTES: usize = 128;
 const MAXIMUM_LAUNCHER_BYTES: u64 = 64 * 1024 * 1024;
-const UPDATE_RESTART_READY: &str = "AXIUSFLOW_UPDATE_RESTART_READY_V1\n";
+const UPDATE_RESTART_READY: &str = "AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
+const UPDATE_RESTART_COMMIT: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
 
 static UPDATE_RESTART_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
@@ -234,9 +235,9 @@ impl DesktopUpdater {
         }
     }
 
-    /// Re-checks and commits the already-acknowledged launcher handoff
-    /// immediately before global shutdown. A helper that has already exited
-    /// is rejected and the desktop remains open.
+    /// Sends the launcher's explicit post-durability commit immediately before
+    /// global shutdown. A helper that has already exited or whose commit pipe
+    /// cannot be written is rejected and the desktop remains open.
     pub fn commit_restart(&mut self) -> Result<(), String> {
         let mut prepared = self
             .prepared_restart
@@ -244,13 +245,14 @@ impl DesktopUpdater {
             .ok_or_else(|| "update restart is not prepared".to_string())?;
         if let Err(error) = prepared.require_running() {
             self.presentation.state = UpdateState::Error(error.clone());
-            // Keep cleanup ownership in the updater so the GPUI caller can
-            // transfer the uncommitted helper to a background owner. Dropping
-            // `PreparedRestart` here would synchronously kill/wait the child.
             self.prepared_restart = Some(prepared);
             return Err(error);
         }
-        prepared.commit();
+        if let Err(error) = prepared.commit() {
+            self.presentation.state = UpdateState::Error(error.clone());
+            self.prepared_restart = Some(prepared);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -581,7 +583,7 @@ impl Drop for RestartSlot {
 #[derive(Debug)]
 pub(super) struct PreparedRestart {
     child: Option<Child>,
-    slot: RestartSlot,
+    slot: Option<RestartSlot>,
     committed: bool,
 }
 
@@ -598,9 +600,17 @@ impl PreparedRestart {
         }
     }
 
-    fn commit(&mut self) {
+    fn commit(&mut self) -> Result<(), String> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| "update restart helper is unavailable".to_string())?;
+        send_restart_commit(child)?;
         self.committed = true;
-        self.slot.commit();
+        if let Some(slot) = self.slot.as_mut() {
+            slot.commit();
+        }
+        Ok(())
     }
 }
 
@@ -609,9 +619,19 @@ impl Drop for PreparedRestart {
         if self.committed {
             return;
         }
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        let slot = self.slot.take();
+        if let Some(mut child) = self.child.take() {
+            // Entity teardown may drop the updater on GPUI. Reaping an
+            // uncommitted helper belongs to a detached process-cleanup worker;
+            // closing this value on GPUI must never wait for process exit. Keep
+            // the single-flight slot until that old helper has actually gone.
+            let _ = thread::Builder::new()
+                .name("axiusflow-update-restart-cleanup".to_string())
+                .spawn(move || {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    drop(slot);
+                });
         }
     }
 }
@@ -621,7 +641,7 @@ fn spawn_update_restart() -> Result<PreparedRestart, String> {
     let result = (|| {
         let child = launcher_command(&stable_launcher()?)
             .arg("--update-and-restart")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -630,7 +650,7 @@ fn spawn_update_restart() -> Result<PreparedRestart, String> {
     })();
     result.map(|child| PreparedRestart {
         child: Some(child),
-        slot,
+        slot: Some(slot),
         committed: false,
     })
 }
@@ -652,6 +672,16 @@ fn validate_restart_acknowledgement(line: &str) -> Result<(), String> {
     } else {
         Err("update restart was not accepted".to_string())
     }
+}
+
+fn send_restart_commit(child: &mut Child) -> Result<(), String> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "update restart commit channel is unavailable".to_string())?;
+    stdin
+        .write_all(UPDATE_RESTART_COMMIT)
+        .map_err(|_| "update restart could not be committed".to_string())
 }
 
 fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
@@ -739,8 +769,8 @@ mod tests {
     use super::{
         DesktopUpdater, LauncherUpdateCheck, PreparedRestart, RestartSlot, UpdatePresentation,
         UpdateRequest, UpdateResult, UpdateState, claim_restart_slot, launcher_files_match,
-        launcher_is_trusted_with, release_restart_slot, validate_launcher_report,
-        validate_restart_acknowledgement, wait_for_restart_ready,
+        launcher_is_trusted_with, release_restart_slot, send_restart_commit,
+        validate_launcher_report, validate_restart_acknowledgement, wait_for_restart_ready,
     };
 
     #[cfg(target_os = "windows")]
@@ -754,9 +784,9 @@ mod tests {
             .args([
                 "-NoProfile",
                 "-Command",
-                &format!("[Console]::Out.Write(\"AXIUSFLOW_UPDATE_RESTART_READY_V1`n\"){tail}"),
+                &format!("[Console]::Out.Write(\"AXIUSFLOW_UPDATE_RESTART_READY_V2`n\"){tail}"),
             ])
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -769,13 +799,42 @@ mod tests {
         Command::new("sh")
             .args([
                 "-c",
-                &format!("printf 'AXIUSFLOW_UPDATE_RESTART_READY_V1\\n'{tail}"),
+                &format!("printf 'AXIUSFLOW_UPDATE_RESTART_READY_V2\\n'{tail}"),
             ])
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .expect("ack fixture starts")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn commit_receiver_child() -> Child {
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$line=[Console]::In.ReadLine(); if ($line -ceq 'AXIUSFLOW_UPDATE_RESTART_COMMIT_V1') { exit 0 } else { exit 7 }",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("commit receiver starts")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn commit_receiver_child() -> Child {
+        Command::new("sh")
+            .args([
+                "-c",
+                "IFS= read -r line; [ \"$line\" = 'AXIUSFLOW_UPDATE_RESTART_COMMIT_V1' ]",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("commit receiver starts")
     }
 
     fn temporary_base(name: &str) -> std::path::PathBuf {
@@ -955,13 +1014,20 @@ mod tests {
         assert!(validate_restart_acknowledgement(super::UPDATE_RESTART_READY).is_ok());
         for invalid in [
             "",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V1",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V1\r\n",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V2\n",
-            "AXIUSFLOW_UPDATE_RESTART_READY_V1\nextra",
+            "AXIUSFLOW_UPDATE_RESTART_READY_V2",
+            "AXIUSFLOW_UPDATE_RESTART_READY_V2\r\n",
+            "AXIUSFLOW_UPDATE_RESTART_READY_V1\n",
+            "AXIUSFLOW_UPDATE_RESTART_READY_V2\nextra",
         ] {
             assert!(validate_restart_acknowledgement(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn restart_commit_sends_the_exact_post_durability_token() {
+        let mut child = commit_receiver_child();
+        send_restart_commit(&mut child).expect("commit token writes");
+        assert!(child.wait().expect("commit receiver exits").success());
     }
 
     #[test]
@@ -986,7 +1052,7 @@ mod tests {
         {
             let prepared = PreparedRestart {
                 child: None,
-                slot: RestartSlot::claim(&SLOT).expect("slot claims"),
+                slot: Some(RestartSlot::claim(&SLOT).expect("slot claims")),
                 committed: false,
             };
             assert!(SLOT.load(Ordering::Acquire));
@@ -998,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_restart_commit_preserves_cleanup_for_a_background_owner() {
+    fn failed_restart_commit_preserves_cleanup_ownership() {
         static SLOT: AtomicBool = AtomicBool::new(false);
         SLOT.store(false, Ordering::Release);
         let (requests, _request_rx) = mpsc::sync_channel(1);
@@ -1016,7 +1082,7 @@ mod tests {
         result_tx
             .send(UpdateResult::RestartPrepared(Ok(PreparedRestart {
                 child: None,
-                slot: RestartSlot::claim(&SLOT).expect("slot claims"),
+                slot: Some(RestartSlot::claim(&SLOT).expect("slot claims")),
                 committed: false,
             })))
             .expect("prepared restart result queues");
@@ -1033,14 +1099,14 @@ mod tests {
         );
         let cleanup = updater
             .cancel_prepared_restart(error)
-            .expect("failed commit returns helper to background cleanup owner");
+            .expect("failed commit retains cleanup ownership");
         assert!(SLOT.load(Ordering::Acquire));
         drop(cleanup);
         assert!(!SLOT.load(Ordering::Acquire));
     }
 
     #[test]
-    fn cancelling_prepared_restart_returns_cleanup_to_a_background_owner() {
+    fn cancelling_prepared_restart_returns_cleanup_ownership() {
         static SLOT: AtomicBool = AtomicBool::new(false);
         SLOT.store(false, Ordering::Release);
         let (requests, _request_rx) = mpsc::sync_channel(1);
@@ -1055,14 +1121,14 @@ mod tests {
             request_pending: false,
             prepared_restart: Some(PreparedRestart {
                 child: None,
-                slot: RestartSlot::claim(&SLOT).expect("slot claims"),
+                slot: Some(RestartSlot::claim(&SLOT).expect("slot claims")),
                 committed: false,
             }),
         };
 
         let cleanup = updater
             .cancel_prepared_restart("workspace durability failed".to_string())
-            .expect("prepared restart transfers to cleanup owner");
+            .expect("prepared restart returns cleanup ownership");
         assert_eq!(
             updater.presentation.state,
             UpdateState::Error("workspace durability failed".to_string())

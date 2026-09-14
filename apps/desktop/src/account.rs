@@ -100,7 +100,7 @@ pub fn prepare_for_process_lifecycle() {
     let _ = account_service();
 }
 
-/// Cancels one pending engine-owned login transaction.
+/// Cancels one pending account-runtime-owned login transaction.
 ///
 /// # Errors
 ///
@@ -404,14 +404,14 @@ pub struct DesktopAccount {
 static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
-/// How often the engine view refreshes while a browser transaction is open.
+/// How often the runtime account view refreshes while a browser transaction is open.
 /// Fast enough that runtime completion reaches the UI within a frame
 /// budget, slow enough to keep one bounded runtime fetch in flight. Idle
 /// sessions poll slowly for restore and expiry.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INITIAL_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// Briefly poll the engine faster after returning from Manage Profile so a
-/// completed engine-owned refresh reaches presentation promptly.
+/// Briefly poll the runtime faster after returning from Manage Profile so a
+/// completed runtime-owned refresh reaches presentation promptly.
 const PROFILE_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PROFILE_REFRESH_POLL_WINDOW: Duration = Duration::from_secs(10);
 /// Idle refresh so restored sessions and runtime expiry reach the UI.
@@ -622,7 +622,7 @@ impl DesktopAccount {
         account_error_snapshot(&self.shared).0
     }
 
-    /// Starts one engine-owned login transaction and opens the browser URL.
+    /// Starts one account-runtime-owned login transaction and opens the browser URL.
     ///
     /// Repeated clicks collapse into the in-flight request; a click while
     /// a transaction is already open reopens the same browser page instead
@@ -671,9 +671,9 @@ impl DesktopAccount {
         self.shared.version.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Cancels the pending engine-owned login transaction.
+    /// Cancels the pending account-runtime-owned login transaction.
     ///
-    /// Engine state clears immediately and the generation-aware loopback wait
+    /// Runtime state clears immediately and the generation-aware loopback wait
     /// observes that retirement promptly, so retired callbacks cannot sign
     /// the user in and cancelled listeners are not retained until timeout.
     ///
@@ -770,7 +770,7 @@ impl DesktopAccount {
             })
     }
 
-    /// Applies worker results and keeps the engine view fresh. Status
+    /// Applies worker results and keeps the runtime account view fresh. Status
     /// polling runs fast while a browser transaction is open and slowly
     /// when idle, so restored sessions and runtime expiry reach the UI
     /// without unnecessary runtime polling. Returns whether presentation changed.
@@ -1097,7 +1097,7 @@ fn account_service() -> &'static AccountService {
     SERVICE.get_or_init(|| AccountService::new(AccountServiceConfig::from_environment()))
 }
 
-/// Signs out the shared engine-owned session.
+/// Signs out the shared account-runtime-owned session.
 ///
 /// # Errors
 ///

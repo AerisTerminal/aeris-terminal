@@ -1805,6 +1805,52 @@ mod tests {
     }
 
     #[test]
+    fn stale_history_completion_is_discarded_without_restarting_retired_generation() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let first_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", first_generation)
+            .expect("first provider session begins");
+        coordinator
+            .engine
+            .end_provider_session("rithmic", first_generation)
+            .expect("first provider session ends");
+        let second_generation = ProviderGeneration(nonzero(2));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", second_generation)
+            .expect("second provider session begins");
+        let stale_key = (selected.clone(), first_generation);
+        coordinator.history_inflight.insert(stale_key.clone(), None);
+
+        assert!(
+            coordinator
+                .accept_history_completion(
+                    &selected,
+                    first_generation,
+                    None,
+                    Ok(HistorySnapshot {
+                        price_scale: 2,
+                        quantity_scale: 0,
+                        bars: minute_bars(0, 2),
+                        forming: None,
+                        handoff_boundary_unix_nanos: None,
+                    }),
+                )
+                .is_none()
+        );
+        assert!(!coordinator.history_inflight.contains_key(&stale_key));
+        assert!(
+            !coordinator
+                .history_inflight
+                .contains_key(&(selected.clone(), second_generation))
+        );
+        assert!(coordinator.history_retries.is_empty());
+    }
+
+    #[test]
     fn historical_detach_suppresses_live_tail_and_current_rejoin_restores_it() {
         let DetachedRithmicFixture {
             mut coordinator,
@@ -2926,6 +2972,45 @@ mod tests {
                 .is_err(),
             "a genuinely different viewport range proceeds to provider dispatch"
         );
+        assert!(!coordinator.history_retries.contains_key(&key));
+    }
+
+    #[test]
+    fn empty_ranged_history_completion_records_coverage_without_retry() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let range = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 60_000_000_000,
+        };
+        let key = (selected.clone(), generation);
+        coordinator
+            .history_inflight
+            .insert(key.clone(), Some(range));
+        coordinator
+            .history_retries
+            .insert(key.clone(), (Instant::now(), 1, Some(range)));
+
+        coordinator.history_completed(
+            &selected,
+            generation,
+            Some(range),
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: Vec::new(),
+                forming: None,
+                handoff_boundary_unix_nanos: Some(range.end_unix_nanos),
+            }),
+        );
+
+        assert_eq!(coordinator.history_confirmed_empty.get(&key), Some(&range));
+        assert!(!coordinator.history_inflight.contains_key(&key));
         assert!(!coordinator.history_retries.contains_key(&key));
     }
 

@@ -280,3 +280,8 @@ finally {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
+
+# Expected-failure fixtures intentionally leave the native-process exit code
+# nonzero. Clear it after the complete self-test succeeds so callers (including
+# GitHub Actions) observe the script's actual successful result.
+$global:LASTEXITCODE = 0

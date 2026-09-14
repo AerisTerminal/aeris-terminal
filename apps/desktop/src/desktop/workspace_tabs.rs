@@ -954,7 +954,7 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn cancel_update_restart_after_persistence_failure(&mut self, error: String, cx: &App) {
+    fn cancel_update_restart_after_persistence_failure(&mut self, error: String, _cx: &App) {
         self.update_restart_persistence_pending = false;
         self.workspace_error = Some(error.clone());
         if let Some(cleanup) = self
@@ -962,9 +962,10 @@ impl TerminalApp {
             .as_mut()
             .and_then(|updater| updater.cancel_prepared_restart(error))
         {
-            cx.background_executor()
-                .spawn(async move { drop(cleanup) })
-                .detach();
+            // PreparedRestart::drop only transfers child termination/reaping
+            // to its dedicated cleanup worker, so releasing this UI-owned
+            // handle cannot block GPUI on process shutdown.
+            drop(cleanup);
         }
         if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() {
             let _ = account.request_profile_refresh();

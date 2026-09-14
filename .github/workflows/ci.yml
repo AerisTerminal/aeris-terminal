@@ -28,7 +28,7 @@ jobs:
       # private chart dependency below must be fetched through the git CLI.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Authenticate private chart dependency
         # Job-scoped credential rewrite: the config lives in a per-job temp
         # file exported via GITHUB_ENV, so it applies to every later cargo
@@ -77,7 +77,7 @@ jobs:
       - name: Check local market-data performance
         run: cargo run -p axiusflow_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
       - name: Upload market-data baseline
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: market-data-performance-linux
           path: .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
@@ -96,7 +96,7 @@ jobs:
       # private chart dependency below must be fetched through the git CLI.
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Authenticate private chart dependency
         # Job-scoped credential rewrite: the config lives in a per-job temp
         # file exported via GITHUB_ENV, so it applies to every later cargo
@@ -134,7 +134,7 @@ jobs:
       - name: Check local market-data performance
         run: cargo run -p axiusflow_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
       - name: Upload market-data baseline
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: market-data-performance-windows
           path: .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json

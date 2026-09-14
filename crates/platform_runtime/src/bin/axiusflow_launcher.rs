@@ -7,9 +7,10 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead as _, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -32,7 +33,10 @@ use sysinfo::{ProcessesToUpdate, System};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-const UPDATE_RESTART_READY: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_READY_V1\n";
+const RESTART_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
+const UPDATE_RESTART_READY: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
+const UPDATE_RESTART_COMMIT: &str = "AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
+const MAXIMUM_UPDATE_RESTART_COMMIT_BYTES: usize = 128;
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
 const RELEASE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -614,7 +618,12 @@ fn update_and_restart(
     if !prepared_matches_current_offer(&prepared.signed_release, &current) {
         return Err("prepared Axiusflow update is no longer current and eligible".to_string());
     }
+    // READY reports only that the signed prepared release passed preflight.
+    // The desktop sends COMMIT after account/workspace durability succeeds;
+    // without that second message this helper must never observe exit as
+    // authorization to mutate the installed release.
     announce_update_restart_ready()?;
+    wait_for_update_restart_commit()?;
     wait_for_desktop_stop(&desktop)?;
 
     let update_result = (|| {
@@ -785,6 +794,40 @@ fn announce_update_restart_ready() -> Result<(), String> {
         .write_all(UPDATE_RESTART_READY)
         .and_then(|()| stdout.flush())
         .map_err(|_| "update restart acknowledgement could not be written".to_string())
+}
+
+fn wait_for_update_restart_commit() -> Result<(), String> {
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("axiusflow-update-restart-commit".to_string())
+        .spawn(move || {
+            let stdin = std::io::stdin();
+            let result = read_update_restart_commit(stdin.lock());
+            let _ = result_tx.send(result);
+        })
+        .map_err(|_| "update restart commit could not be monitored".to_string())?;
+    match result_rx.recv_timeout(RESTART_COMMIT_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err("update restart commit timed out".to_string()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("update restart commit failed".to_string())
+        }
+    }
+}
+
+fn read_update_restart_commit(input: impl std::io::BufRead) -> Result<(), String> {
+    let mut line = String::new();
+    let mut bounded = input.take((MAXIMUM_UPDATE_RESTART_COMMIT_BYTES + 1) as u64);
+    let count = bounded
+        .read_line(&mut line)
+        .map_err(|_| "update restart commit could not be read".to_string())?;
+    if count == 0
+        || line.len() > MAXIMUM_UPDATE_RESTART_COMMIT_BYTES
+        || line != UPDATE_RESTART_COMMIT
+    {
+        return Err("update restart was not committed".to_string());
+    }
+    Ok(())
 }
 
 fn wait_for_desktop_stop(desktop: &Path) -> Result<(), String> {
@@ -2652,6 +2695,23 @@ mod tests {
             offer_eligible: true,
         };
         assert!(!prepared_matches_current_offer(&prepared, &superseded));
+    }
+
+    #[test]
+    fn restart_ready_requires_a_separate_exact_commit_before_install() {
+        assert!(
+            read_update_restart_commit(std::io::Cursor::new(UPDATE_RESTART_COMMIT.as_bytes()))
+                .is_ok()
+        );
+        for invalid in [
+            b"".as_slice(),
+            UPDATE_RESTART_READY,
+            b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1".as_slice(),
+            b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\r\n".as_slice(),
+            b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V2\n".as_slice(),
+        ] {
+            assert!(read_update_restart_commit(std::io::Cursor::new(invalid)).is_err());
+        }
     }
 
     #[cfg(target_os = "windows")]

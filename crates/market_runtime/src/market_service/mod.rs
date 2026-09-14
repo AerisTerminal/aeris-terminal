@@ -368,7 +368,7 @@ enum LiveHistoryState {
 /// Unlike the trade-built Rithmic handoff, provider candles arrive whole:
 /// history seeds closed bars plus the open period, and live replacements
 /// merge by candle-open timestamp with exactly one forming candle. Sequence
-/// numbers stay engine-owned so a redelivered update can never look new.
+/// ingestion sequence numbers stay runtime-owned so a redelivered update can never look new.
 struct HyperliquidLiveHandoff {
     series: BarSeriesKey,
     generation: ProviderGeneration,

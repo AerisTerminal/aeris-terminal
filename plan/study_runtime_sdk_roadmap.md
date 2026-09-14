@@ -232,7 +232,7 @@ Completed additions:
 
 The recursive EMA implementation is complete across the local sibling Nucleus and Axiusflow trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Axiusflow wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
 
-The production dependency is pinned to Nucleus `2136b3ff2aceee99363cd67da49fddd1c2eee70c`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Axiusflow.
+The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Axiusflow.
 
 Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Axius.
 
