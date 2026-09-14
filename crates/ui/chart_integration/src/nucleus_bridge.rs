@@ -66,47 +66,10 @@ impl ProductPriceBars {
             }
         }
     }
-
-    pub(super) fn latest_price_change(&self) -> Option<(f64, Option<f64>)> {
-        let last = *self.close.last()?;
-        let change_percent = self.close.iter().rev().nth(1).and_then(|previous| {
-            (*previous != 0.0).then_some((last - previous) / previous * 100.0)
-        });
-        Some((last, change_percent))
-    }
 }
 
 pub(crate) fn chart_data_queue_capacity() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_CHART_DATA_QUEUE_CAPACITY).unwrap_or(NonZeroUsize::MIN)
-}
-
-#[cfg(test)]
-mod latest_price_tests {
-    use super::ProductPriceBars;
-
-    #[test]
-    fn latest_price_change_uses_the_preceding_product_close() {
-        let mut bars = ProductPriceBars::default();
-        bars.update_bar(1.0, [95.0, 105.0, 90.0, 100.0]);
-        bars.update_bar(2.0, [100.0, 112.0, 98.0, 110.0]);
-
-        assert_eq!(bars.latest_price_change(), Some((110.0, Some(10.0))));
-
-        bars.update_bar(2.0, [100.0, 115.0, 98.0, 105.0]);
-        assert_eq!(bars.latest_price_change(), Some((105.0, Some(5.0))));
-    }
-
-    #[test]
-    fn latest_price_change_omits_a_percentage_without_a_valid_baseline() {
-        let mut bars = ProductPriceBars::default();
-        assert_eq!(bars.latest_price_change(), None);
-
-        bars.update_bar(1.0, [0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(bars.latest_price_change(), Some((0.0, None)));
-
-        bars.update_bar(2.0, [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(bars.latest_price_change(), Some((1.0, None)));
-    }
 }
 
 pub(crate) fn replay_price_divisor(replay: &ReplaySnapshot) -> f64 {

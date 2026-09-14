@@ -418,7 +418,7 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
-const WORKSPACE_TAB_WIDTH: f32 = 228.0;
+const WORKSPACE_TAB_WIDTH: f32 = 132.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
@@ -712,7 +712,6 @@ struct WorkspaceSurface {
     restored_chart_state: Option<WorkspaceChartState>,
     chart_persistence_dirty: bool,
     last_chart_user_state_revision: u64,
-    last_chart_market_data_revision: u64,
     price_alerts: Vec<WorkspacePriceAlertState>,
     price_alert_dialog: Option<PriceAlertDialogState>,
     price_alert_message: Option<String>,
@@ -1146,11 +1145,6 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
             if user_state_revision != app.last_chart_user_state_revision {
                 app.last_chart_user_state_revision = user_state_revision;
                 app.chart_persistence_dirty = true;
-                cx.notify();
-            }
-            let market_data_revision = chart.read(cx).market_data_revision();
-            if market_data_revision != app.last_chart_market_data_revision {
-                app.last_chart_market_data_revision = market_data_revision;
                 cx.notify();
             }
             let (activate, request, study_settings_request, study_remove_request) =
