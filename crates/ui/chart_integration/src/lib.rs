@@ -24,6 +24,6 @@ pub use view::{
     ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyOutputDescriptor,
     ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
     ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, DrawingsLockSummary,
-    NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
+    LatestPriceSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

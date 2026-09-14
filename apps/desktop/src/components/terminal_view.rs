@@ -59,7 +59,6 @@ impl TerminalApp {
                 terminal,
                 &WorkspaceTabBarState {
                     workspaces: &self.workspaces,
-                    market_summaries: &self.market_summaries,
                     active: self.active,
                     enabled: self.workspace_factory.is_some(),
                     error: self.workspace_error.as_deref(),
@@ -110,7 +109,6 @@ impl Render for TerminalApp {
         }
         self.track_window_activation(window, cx);
         self.absorb_render_requests(window, cx);
-        self.sync_market_summaries(cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
@@ -238,11 +236,10 @@ impl Render for WorkspaceSplitDrag {
 }
 
 #[derive(Clone, Copy)]
-struct WorkspaceTabRenderState<'a> {
+struct WorkspaceTabRenderState {
     index: usize,
     active: usize,
     workspace_count: usize,
-    market_summaries: &'a BTreeMap<MarketSummaryKey, MarketQuoteEntry>,
     drag_enabled: bool,
     drag_translation: Option<f32>,
     theme: AxiusflowTheme,
@@ -378,35 +375,42 @@ fn workspace_add_button(
 
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
-    market_summaries: &BTreeMap<MarketSummaryKey, MarketQuoteEntry>,
     theme: &AxiusflowTheme,
     cx: &App,
-) -> (String, Div) {
+) -> (String, String, Div) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
     let label = terminal_instrument_label(surface);
-    let summary = surface.product.as_ref().and_then(|instrument| {
-        market_summaries.get(&MarketSummaryKey::from_instrument(instrument))
+    let latest = (!surface.showing_superseded_series())
+        .then(|| {
+            surface
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.read(cx).latest_price_summary())
+        })
+        .flatten();
+    let price = latest.map(|summary| {
+        format!(
+            "{:.precision$}",
+            summary.last,
+            precision = usize::from(summary.precision)
+        )
     });
-    let values = summary.map_or_else(MarketQuoteValues::default, MarketQuoteEntry::values);
-    let price = values.last.map_or_else(
-        || "—".to_string(),
-        |value| {
-            market_quote_price(
-                value,
-                summary.map_or(0, |summary| summary.instrument.price_scale),
-            )
-        },
-    );
-    let change_percent = values
-        .change_percent
-        .map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%"));
-    let change_tone = values
-        .change
-        .map_or(theme.colors.text_muted, |value| match value.cmp(&0) {
-            std::cmp::Ordering::Less => theme.colors.danger,
-            std::cmp::Ordering::Greater => theme.colors.primary,
-            std::cmp::Ordering::Equal => theme.colors.text_secondary,
-        });
+    let change = latest.and_then(|summary| summary.change_percent);
+    let change_label = change.map(|value| format!("{value:+.2}%"));
+    let aria_label = match (&price, &change_label) {
+        (Some(price), Some(change)) => format!("{label}, last {price}, change {change}"),
+        (Some(price), None) => format!("{label}, last {price}"),
+        (None, _) => label.clone(),
+    };
+    let change_color = change.map_or(theme.colors.text_muted, |value| {
+        if value < 0.0 {
+            theme.colors.danger
+        } else if value > 0.0 {
+            theme.colors.primary
+        } else {
+            theme.colors.text_secondary
+        }
+    });
     let exchange = match surface.provider {
         TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
         TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
@@ -422,45 +426,37 @@ fn workspace_tab_content(
             div()
                 .min_w_0()
                 .flex_1()
-                .flex()
-                .flex_col()
                 .overflow_hidden()
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(label.clone()),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_xs()
-                        .whitespace_nowrap()
-                        .text_color(gpui_color(theme.colors.text_secondary))
-                        .child(price)
-                        .child(
-                            div()
-                                .text_color(gpui_color(change_tone))
-                                .child(change_percent),
-                        ),
-                ),
-        );
-    (label, content)
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label.clone()),
+        )
+        .children(price.map(|price| {
+            div()
+                .flex_none()
+                .text_xs()
+                .whitespace_nowrap()
+                .text_color(gpui_color(theme.colors.text_secondary))
+                .child(price)
+        }))
+        .children(change_label.map(|change| {
+            div()
+                .flex_none()
+                .text_xs()
+                .whitespace_nowrap()
+                .text_color(gpui_color(change_color))
+                .child(change)
+        }));
+    (label, aria_label, content)
 }
 
 fn workspace_tab(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
-    state: &WorkspaceTabRenderState<'_>,
+    state: &WorkspaceTabRenderState,
     cx: &App,
 ) -> AnyElement {
-    let (label, content) =
-        workspace_tab_content(workspace, state.market_summaries, &state.theme, cx);
+    let (label, aria_label, content) = workspace_tab_content(workspace, &state.theme, cx);
     let index = state.index;
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
@@ -485,7 +481,7 @@ fn workspace_tab(
         .pr_1()
         .text_sm()
         .track_focus(&tab_focus)
-        .aria_label(label.clone())
+        .aria_label(aria_label)
         .aria_position_in_set(index + 1)
         .aria_size_of_set(state.workspace_count)
         .when_some(state.drag_translation, |tab, translation| {
@@ -543,7 +539,6 @@ pub(super) fn workspace_tab_strip(
                 index,
                 active: state.active,
                 workspace_count: workspaces.len(),
-                market_summaries: state.market_summaries,
                 drag_enabled: enabled && close_drag_enabled,
                 drag_translation: close_drag_enabled
                     .then(|| workspace_drag_translation(state.workspace_drag, workspace.id, index))

@@ -5,15 +5,15 @@ use super::{
     CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
     CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
     ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
-    InstrumentMenuSelection, MarketQuoteEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
-    PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
+    InstrumentMenuSelection, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout,
+    PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
     RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SymbolInputAction,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
     TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
-    WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WindowCommand, WindowMoveGestureEvent,
-    WindowMoveGestureTransition, WorkspaceDragState, active_workspace_after_close,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_status_detail, chart_surface_notice,
+    WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WatchlistEntry, WindowCommand,
+    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
+    active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
+    caption_pointer_owner, catalog_rejection_message, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
@@ -1538,7 +1538,7 @@ fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
         .instrument
         .clone()
         .expect("default watchlist instrument");
-    let mut entry = MarketQuoteEntry::new(instrument, None, None);
+    let mut entry = WatchlistEntry::new(instrument, None, None);
     assert_eq!(entry.resource_class, ConsumerResourceClass::Background);
     entry.set_resource_class(ConsumerResourceClass::Foreground);
     assert_eq!(entry.resource_class, ConsumerResourceClass::Foreground);
@@ -1554,58 +1554,12 @@ fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
     };
 
     entry.apply_bar(bar(1, 100, 10_000));
-    entry.apply_bar(bar(2, 100, 10_100));
+    entry.apply_bar(bar(2, 200, 10_500));
     entry.apply_bar(bar(3, 200, 10_600));
     entry.apply_bar(bar(4, 150, 9_000));
 
-    assert_eq!(entry.previous_close, Some(10_100));
+    assert_eq!(entry.previous_close, Some(10_000));
     assert_eq!(entry.last.expect("current bar").close, 10_600);
-    let quote = entry.values();
-    assert_eq!(quote.last, Some(10_600));
-    assert_eq!(quote.change, Some(500));
-    assert!((quote.change_percent.expect("daily change") - 4.950_495_049_504_950_5).abs() < 1e-12);
-    assert_eq!(
-        super::market_quote_values(entry.last, Some(0)).change_percent,
-        None
-    );
-}
-
-#[test]
-fn tab_and_watchlist_share_one_daily_summary_requirement() {
-    let instrument = super::local_state::default_workspace().watchlist_entries[0]
-        .instrument
-        .clone()
-        .expect("default watchlist instrument");
-
-    let shared = super::workspace_tabs::market_summary_requirements(
-        [instrument.clone(), instrument.clone()],
-        std::slice::from_ref(&instrument),
-        false,
-    );
-    assert_eq!(
-        shared.len(),
-        1,
-        "duplicate tab/watchlist demand must coalesce"
-    );
-    assert!(
-        shared.values().next().expect("shared summary").1,
-        "a visible tab keeps the shared summary foreground even when the watchlist is hidden"
-    );
-
-    let hidden_watchlist_only = super::workspace_tabs::market_summary_requirements(
-        std::iter::empty(),
-        std::slice::from_ref(&instrument),
-        false,
-    );
-    assert_eq!(hidden_watchlist_only.len(), 1);
-    assert!(
-        !hidden_watchlist_only
-            .values()
-            .next()
-            .expect("watchlist summary")
-            .1,
-        "a hidden watchlist alone may release live summary demand"
-    );
 }
 
 #[test]

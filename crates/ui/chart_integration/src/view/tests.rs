@@ -17,6 +17,18 @@ fn interactive_chart() -> NucleusChartView {
     chart
 }
 
+#[test]
+fn latest_price_summary_projects_the_installed_product_tail() {
+    let chart = NucleusChartView::new();
+    let summary = chart
+        .latest_price_summary()
+        .expect("embedded replay has product bars");
+
+    assert!(summary.last.is_finite());
+    assert!(summary.change_percent.is_some_and(f64::is_finite));
+    assert_eq!(summary.precision, chart.instrument_price_precision);
+}
+
 fn series_entry(chart: &NucleusChartView, id: u32) -> &nucleuscharts_engine::SeriesEntry {
     chart
         .engine
@@ -375,6 +387,7 @@ fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
         .expect("embedded replay validates");
     let mut chart = NucleusChartView::with_replay(&replay);
+    let initial_market_revision = chart.market_data_revision();
     let initial_expected = chart
         .expected_replay_sequence()
         .expect("snapshot establishes sequence");
@@ -395,6 +408,10 @@ fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
         .expect("replacement queues");
     chart.layout_dirty = false;
     assert_eq!(chart.apply_pending_data(), SeriesMutation::TailReplace);
+    assert_eq!(
+        chart.market_data_revision(),
+        initial_market_revision.saturating_add(1)
+    );
     assert!(!chart.layout_dirty);
     assert_eq!(chart.expected_replay_sequence(), Some(initial_expected));
     assert_eq!(
@@ -419,6 +436,10 @@ fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
         .try_queue_replay_update(ReplayStreamUpdate::Tail(appended))
         .expect("append queues");
     assert_eq!(chart.apply_pending_data(), SeriesMutation::Append);
+    assert_eq!(
+        chart.market_data_revision(),
+        initial_market_revision.saturating_add(2)
+    );
     assert!(chart.layout_dirty);
     assert_eq!(
         chart.expected_replay_sequence(),

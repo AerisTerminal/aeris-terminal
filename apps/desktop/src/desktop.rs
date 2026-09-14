@@ -417,7 +417,7 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
-const WORKSPACE_TAB_WIDTH: f32 = 160.0;
+const WORKSPACE_TAB_WIDTH: f32 = 240.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
@@ -711,6 +711,7 @@ struct WorkspaceSurface {
     restored_chart_state: Option<WorkspaceChartState>,
     chart_persistence_dirty: bool,
     last_chart_user_state_revision: u64,
+    last_chart_market_data_revision: u64,
     price_alerts: Vec<WorkspacePriceAlertState>,
     price_alert_dialog: Option<PriceAlertDialogState>,
     price_alert_message: Option<String>,
@@ -1146,6 +1147,11 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                 app.chart_persistence_dirty = true;
                 cx.notify();
             }
+            let market_data_revision = chart.read(cx).market_data_revision();
+            if market_data_revision != app.last_chart_market_data_revision {
+                app.last_chart_market_data_revision = market_data_revision;
+                cx.notify();
+            }
             let (activate, request, study_settings_request, study_remove_request) =
                 chart.update(cx, |chart, _| {
                     (
@@ -1404,71 +1410,13 @@ impl SidePanel {
     }
 }
 
-struct MarketQuoteEntry {
+struct WatchlistEntry {
     instrument: InstallProviderInstrument,
     worker: Option<MarketDataWorker>,
     previous_close: Option<i64>,
     last: Option<MarketBar>,
     message: Option<String>,
     resource_class: ConsumerResourceClass,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct MarketSummaryKey {
-    provider: String,
-    instrument_id: String,
-    entitlement_id: String,
-}
-
-impl MarketSummaryKey {
-    fn from_instrument(instrument: &InstallProviderInstrument) -> Self {
-        Self {
-            provider: instrument.provider.clone(),
-            instrument_id: instrument.instrument_id.clone(),
-            entitlement_id: instrument.entitlement_id.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct MarketQuoteValues {
-    last: Option<i64>,
-    change: Option<i64>,
-    change_percent: Option<f64>,
-}
-
-fn market_quote_values(last: Option<MarketBar>, previous_close: Option<i64>) -> MarketQuoteValues {
-    let last = last.map(|bar| bar.close);
-    let change = last
-        .zip(previous_close)
-        .map(|(last, previous)| last - previous);
-    let change_percent = change.zip(previous_close).and_then(|(change, previous)| {
-        (previous != 0)
-            .then(|| change.to_f64().unwrap_or(0.0) / previous.to_f64().unwrap_or(1.0) * 100.0)
-    });
-    MarketQuoteValues {
-        last,
-        change,
-        change_percent,
-    }
-}
-
-fn market_quote_price(value: i64, scale: u32) -> String {
-    let exponent = i32::try_from(scale).unwrap_or(i32::MAX);
-    let divisor = 10_f64.powi(exponent);
-    let value = value.to_f64().unwrap_or(0.0) / divisor;
-    let precision =
-        usize::try_from(scale.min(if value.abs() >= 1_000.0 { 2 } else { 4 })).unwrap_or(4);
-    format!("{value:.precision$}")
-}
-
-fn market_quote_change(value: i64, scale: u32) -> String {
-    let text = market_quote_price(value.abs(), scale);
-    match value.cmp(&0) {
-        std::cmp::Ordering::Greater => format!("+{text}"),
-        std::cmp::Ordering::Less => format!("-{text}"),
-        std::cmp::Ordering::Equal => text,
-    }
 }
 
 #[derive(Clone)]
@@ -1480,7 +1428,7 @@ struct WatchlistRow {
     active: bool,
 }
 
-impl MarketQuoteEntry {
+impl WatchlistEntry {
     fn new(
         instrument: InstallProviderInstrument,
         worker: Option<MarketDataWorker>,
@@ -1562,8 +1510,17 @@ impl MarketQuoteEntry {
         changed
     }
 
-    fn values(&self) -> MarketQuoteValues {
-        market_quote_values(self.last, self.previous_close)
+    fn row(&self, active: Option<&InstallProviderInstrument>) -> WatchlistRow {
+        WatchlistRow {
+            instrument: self.instrument.clone(),
+            previous_close: self.previous_close,
+            last: self.last,
+            message: self.message.clone(),
+            active: active.is_some_and(|active| {
+                active.provider == self.instrument.provider
+                    && active.instrument_id == self.instrument.instrument_id
+            }),
+        }
     }
 }
 
@@ -2601,8 +2558,7 @@ struct TerminalApp {
     chrome_focus: FocusHandle,
     lifecycle: DesktopLifecycle,
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
-    watchlist: Vec<InstallProviderInstrument>,
-    market_summaries: BTreeMap<MarketSummaryKey, MarketQuoteEntry>,
+    watchlist: Vec<WatchlistEntry>,
     persisted_watchlist: Vec<WorkspaceWatchlistEntryState>,
     watchlist_persistence_dirty: bool,
     workspace_persistence: Option<WorkspaceLayoutPersistence>,
