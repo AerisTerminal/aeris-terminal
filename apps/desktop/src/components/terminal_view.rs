@@ -377,9 +377,40 @@ fn workspace_tab_content(
     workspace: &WorkspaceTab,
     theme: &AxiusflowTheme,
     cx: &App,
-) -> (String, Div) {
+) -> (String, String, Div) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
     let label = terminal_instrument_label(surface);
+    let latest = (!surface.showing_superseded_series())
+        .then(|| {
+            surface
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.read(cx).latest_price_summary())
+        })
+        .flatten();
+    let price = latest.map(|summary| {
+        format!(
+            "{:.precision$}",
+            summary.last,
+            precision = usize::from(summary.precision)
+        )
+    });
+    let change = latest.and_then(|summary| summary.change_percent);
+    let change_label = change.map(|value| format!("{value:+.2}%"));
+    let aria_label = match (&price, &change_label) {
+        (Some(price), Some(change)) => format!("{label}, last {price}, change {change}"),
+        (Some(price), None) => format!("{label}, last {price}"),
+        (None, _) => label.clone(),
+    };
+    let change_color = change.map_or(theme.colors.text_muted, |value| {
+        if value < 0.0 {
+            theme.colors.danger
+        } else if value > 0.0 {
+            theme.colors.primary
+        } else {
+            theme.colors.text_secondary
+        }
+    });
     let exchange = match surface.provider {
         TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
         TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
@@ -397,8 +428,22 @@ fn workspace_tab_content(
                 .overflow_hidden()
                 .text_ellipsis()
                 .child(label.clone()),
-        );
-    (label, content)
+        )
+        .children(price.map(|price| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_secondary))
+                .child(price)
+        }))
+        .children(change_label.map(|change| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(gpui_color(change_color))
+                .child(change)
+        }));
+    (label, aria_label, content)
 }
 
 fn workspace_tab(
@@ -407,7 +452,7 @@ fn workspace_tab(
     state: &WorkspaceTabRenderState,
     cx: &App,
 ) -> AnyElement {
-    let (label, content) = workspace_tab_content(workspace, &state.theme, cx);
+    let (label, aria_label, content) = workspace_tab_content(workspace, &state.theme, cx);
     let index = state.index;
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
@@ -432,7 +477,7 @@ fn workspace_tab(
         .pr_1()
         .text_sm()
         .track_focus(&tab_focus)
-        .aria_label(label.clone())
+        .aria_label(aria_label)
         .aria_position_in_set(index + 1)
         .aria_size_of_set(state.workspace_count)
         .when_some(state.drag_translation, |tab, translation| {

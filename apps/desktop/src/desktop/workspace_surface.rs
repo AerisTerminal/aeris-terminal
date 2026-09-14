@@ -1133,6 +1133,7 @@ impl WorkspaceSurface {
             restored_chart_state,
             chart_persistence_dirty: false,
             last_chart_user_state_revision: 0,
+            last_chart_market_data_revision: 0,
             price_alerts,
             price_alert_dialog: None,
             price_alert_message,
@@ -1952,6 +1953,7 @@ impl WorkspaceSurface {
                     });
                 }
                 self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
+                self.last_chart_market_data_revision = chart.read(cx).market_data_revision();
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
                 self.synchronize_runtime_studies(cx);
