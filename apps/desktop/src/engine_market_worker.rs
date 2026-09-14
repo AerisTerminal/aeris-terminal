@@ -62,7 +62,7 @@ pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
 /// polling quantum before the runtime receives it.
 const EVENT_WAIT: Duration = Duration::from_millis(2);
 const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST_ENTRIES
-    + super::MAXIMUM_OPEN_WORKSPACES * super::MAXIMUM_PANES_PER_WORKSPACE;
+    + super::MAXIMUM_OPEN_WORKSPACES * (super::MAXIMUM_PANES_PER_WORKSPACE + 1);
 
 static MARKET_RUNTIME: OnceLock<Result<MarketService, String>> = OnceLock::new();
 
@@ -131,9 +131,35 @@ impl WorkspaceMarketFactory {
         product: InstallProviderInstrument,
         interval: ChartInterval,
     ) -> Result<WorkspaceMarketPane, String> {
+        self.create_endpoint(
+            workspace_id,
+            product,
+            interval,
+            ConsumerResourceClass::Foreground,
+        )
+    }
+
+    pub fn create_summary_worker(
+        &self,
+        workspace_id: u64,
+        product: InstallProviderInstrument,
+        interval: ChartInterval,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<MarketDataWorker, String> {
+        self.create_endpoint(workspace_id, product, interval, resource_class)
+            .map(|endpoint| endpoint.worker)
+    }
+
+    fn create_endpoint(
+        &self,
+        workspace_id: u64,
+        product: InstallProviderInstrument,
+        interval: ChartInterval,
+        resource_class: ConsumerResourceClass,
+    ) -> Result<WorkspaceMarketPane, String> {
         let pane_id = allocate_pane_id(&self.next_pane_id)?;
         let consumer_id = allocate_consumer_id(&self.next_consumer_id)?;
-        let (worker, endpoint) = worker_endpoint(
+        let (worker, mut endpoint) = worker_endpoint(
             workspace_id,
             pane_id,
             product,
@@ -142,6 +168,7 @@ impl WorkspaceMarketFactory {
             None,
             INITIAL_GENERATION,
         );
+        endpoint.endpoint.resource_class = resource_class;
         self.additions
             .try_send(endpoint)
             .map_err(|error| match error {

@@ -40,6 +40,13 @@ pub(super) fn initialize_endpoint(
             transport_rtt_nanos: None,
         });
     market.register_consumer(client_id, record.workspace_id, record.endpoint.consumer_id)?;
+    if record.endpoint.resource_class != ConsumerResourceClass::Foreground {
+        market.set_resource_class(
+            client_id,
+            record.endpoint.consumer_id,
+            record.endpoint.resource_class,
+        )?;
+    }
 
     match market.install_provider_instrument(&record.product) {
         Ok(()) => begin_endpoint_demand(market, client_id, record),

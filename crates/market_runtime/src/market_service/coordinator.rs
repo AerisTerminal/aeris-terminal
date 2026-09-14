@@ -1061,6 +1061,20 @@ impl Coordinator<'_> {
         self.prune_unused_live_series();
         self.prune_history_tracking();
         self.evict_unreferenced_series();
+        let retains_subscription = self
+            .engine
+            .current_demand(waiter.consumer_id)
+            .is_some_and(|demand| demand.resource_class.retains_subscription());
+        if !retains_subscription {
+            // Background/detached consumers retain their requested series identity
+            // but intentionally own no upstream subscription. Park that demand
+            // without starting provider/history work; a later Foreground resource
+            // transition restores the engine subscription and rebuilds realtime
+            // through `handle_resource_class`.
+            self.stop_realtime_if_idle();
+            let _ = reply.send(Ok(()));
+            return;
+        }
         // The live handoff, and the bounded trade buffer inside it, must exist
         // before history starts. A Rithmic history fetch can take tens of
         // seconds; deferring the handoff until it returned dropped every trade
@@ -1337,6 +1351,51 @@ mod tests {
                 true,
             )
             .expect("consumer registers");
+    }
+
+    #[test]
+    fn initial_background_demand_parks_without_realtime_or_history_error() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .engine
+            .set_resource_class(consumer, ConsumerResourceClass::Background)
+            .expect("consumer starts background");
+        coordinator
+            .install_provider_instrument(&instrument())
+            .expect("instrument installs");
+        let selected = series();
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+
+        coordinator.handle_demand(
+            client(1),
+            &selected,
+            StreamRequirements::BARS,
+            DemandWaiter {
+                consumer_id: consumer,
+                generation: generation(1),
+                started_at: Instant::now(),
+            },
+            &reply_tx,
+        );
+
+        assert_eq!(reply_rx.recv().expect("demand reply"), Ok(()));
+        let demand = coordinator
+            .engine
+            .current_demand(consumer)
+            .expect("background demand remains installed");
+        assert_eq!(demand.series.as_ref(), Some(&selected));
+        assert_eq!(demand.resource_class, ConsumerResourceClass::Background);
+        assert!(!coordinator.engine.has_subscription(&selected));
+        assert!(!coordinator.rithmic_live.contains_key(&selected));
+        assert!(!coordinator.pending.contains_key(&selected));
+        assert!(
+            !coordinator
+                .history_inflight
+                .keys()
+                .any(|(series, _)| series == &selected)
+        );
     }
 
     fn minute_bars(start_minute: i64, count: usize) -> Vec<MarketBar> {

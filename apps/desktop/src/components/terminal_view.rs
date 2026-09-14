@@ -59,6 +59,7 @@ impl TerminalApp {
                 terminal,
                 &WorkspaceTabBarState {
                     workspaces: &self.workspaces,
+                    market_summaries: &self.market_summaries,
                     active: self.active,
                     enabled: self.workspace_factory.is_some(),
                     error: self.workspace_error.as_deref(),
@@ -109,6 +110,7 @@ impl Render for TerminalApp {
         }
         self.track_window_activation(window, cx);
         self.absorb_render_requests(window, cx);
+        self.sync_market_summaries(cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
@@ -236,10 +238,11 @@ impl Render for WorkspaceSplitDrag {
 }
 
 #[derive(Clone, Copy)]
-struct WorkspaceTabRenderState {
+struct WorkspaceTabRenderState<'a> {
     index: usize,
     active: usize,
     workspace_count: usize,
+    market_summaries: &'a BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     drag_enabled: bool,
     drag_translation: Option<f32>,
     theme: AxiusflowTheme,
@@ -375,42 +378,39 @@ fn workspace_add_button(
 
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
+    market_summaries: &BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     theme: &AxiusflowTheme,
     cx: &App,
 ) -> (String, String, Div) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
     let label = terminal_instrument_label(surface);
-    let latest = (!surface.showing_superseded_series())
+    let summary = (!surface.showing_superseded_series())
         .then(|| {
-            surface
-                .chart
-                .as_ref()
-                .and_then(|chart| chart.read(cx).latest_price_summary())
+            surface.product.as_ref().and_then(|instrument| {
+                market_summaries.get(&MarketSummaryKey::from_instrument(instrument))
+            })
         })
         .flatten();
-    let price = latest.map(|summary| {
-        format!(
-            "{:.precision$}",
-            summary.last,
-            precision = usize::from(summary.precision)
+    let values = summary.map_or_else(MarketSummaryValues::default, MarketSummaryEntry::values);
+    let price = values.last.map(|value| {
+        market_summary_price(
+            value,
+            summary.map_or(0, |summary| summary.instrument.price_scale),
         )
     });
-    let change = latest.and_then(|summary| summary.change_percent);
-    let change_label = change.map(|value| format!("{value:+.2}%"));
+    let change_label = values.change_percent.map(|value| format!("{value:+.2}%"));
     let aria_label = match (&price, &change_label) {
         (Some(price), Some(change)) => format!("{label}, last {price}, change {change}"),
         (Some(price), None) => format!("{label}, last {price}"),
         (None, _) => label.clone(),
     };
-    let change_color = change.map_or(theme.colors.text_muted, |value| {
-        if value < 0.0 {
-            theme.colors.danger
-        } else if value > 0.0 {
-            theme.colors.primary
-        } else {
-            theme.colors.text_secondary
-        }
-    });
+    let change_color = values
+        .change
+        .map_or(theme.colors.text_muted, |value| match value.cmp(&0) {
+            std::cmp::Ordering::Less => theme.colors.danger,
+            std::cmp::Ordering::Greater => theme.colors.primary,
+            std::cmp::Ordering::Equal => theme.colors.text_secondary,
+        });
     let exchange = match surface.provider {
         TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
         TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
@@ -424,8 +424,9 @@ fn workspace_tab_content(
         .child(exchange_mark(exchange, px(16.0), false, &theme.colors))
         .child(
             div()
+                .flex_initial()
+                .max_w(px(64.0))
                 .min_w_0()
-                .flex_1()
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
@@ -453,10 +454,11 @@ fn workspace_tab_content(
 fn workspace_tab(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
-    state: &WorkspaceTabRenderState,
+    state: &WorkspaceTabRenderState<'_>,
     cx: &App,
 ) -> AnyElement {
-    let (label, aria_label, content) = workspace_tab_content(workspace, &state.theme, cx);
+    let (label, aria_label, content) =
+        workspace_tab_content(workspace, state.market_summaries, &state.theme, cx);
     let index = state.index;
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
@@ -539,6 +541,7 @@ pub(super) fn workspace_tab_strip(
                 index,
                 active: state.active,
                 workspace_count: workspaces.len(),
+                market_summaries: state.market_summaries,
                 drag_enabled: enabled && close_drag_enabled,
                 drag_translation: close_drag_enabled
                     .then(|| workspace_drag_translation(state.workspace_drag, workspace.id, index))

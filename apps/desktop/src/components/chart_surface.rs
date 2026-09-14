@@ -7,7 +7,8 @@ use super::{
     Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
     WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
     chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
-    platform_tabular_numerals, px,
+    market_summary_change, market_summary_price, market_summary_values, platform_tabular_numerals,
+    px,
 };
 use gpui::{AppContext, Stateful};
 
@@ -385,21 +386,14 @@ fn watchlist_row(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let scale = row.instrument.price_scale;
-    let last = row.last.map(|bar| bar.close);
-    let change = last
-        .zip(row.previous_close)
-        .map(|(last, previous)| last - previous);
-    let change_percent = change
-        .zip(row.previous_close)
-        .and_then(|(change, previous)| {
-            (previous != 0)
-                .then(|| change.to_f64().unwrap_or(0.0) / previous.to_f64().unwrap_or(1.0) * 100.0)
+    let values = market_summary_values(row.last, row.previous_close);
+    let tone = values
+        .change
+        .map_or(colors.text_muted, |value| match value.cmp(&0) {
+            std::cmp::Ordering::Less => colors.danger,
+            std::cmp::Ordering::Greater => colors.primary,
+            std::cmp::Ordering::Equal => colors.text_secondary,
         });
-    let tone = change.map_or(colors.text_muted, |value| match value.cmp(&0) {
-        std::cmp::Ordering::Less => colors.danger,
-        std::cmp::Ordering::Greater => colors.primary,
-        std::cmp::Ordering::Equal => colors.text_secondary,
-    });
     let asset_tone = if row.message.is_some() {
         colors.text_muted
     } else {
@@ -453,13 +447,19 @@ fn watchlist_row(
                 ),
         )
         .child(watchlist_cell(
-            last.map_or_else(|| "—".to_string(), |value| watchlist_price(value, scale)),
+            values.last.map_or_else(
+                || "—".to_string(),
+                |value| market_summary_price(value, scale),
+            ),
             WATCHLIST_LAST_WIDTH,
             theme,
         ))
         .child(
             watchlist_cell(
-                change.map_or_else(|| "—".to_string(), |value| watchlist_change(value, scale)),
+                values.change.map_or_else(
+                    || "—".to_string(),
+                    |value| market_summary_change(value, scale),
+                ),
                 WATCHLIST_CHANGE_WIDTH,
                 theme,
             )
@@ -467,7 +467,9 @@ fn watchlist_row(
         )
         .child(
             watchlist_cell(
-                change_percent.map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%")),
+                values
+                    .change_percent
+                    .map_or_else(|| "—".to_string(), |value| format!("{value:+.2}%")),
                 WATCHLIST_CHANGE_PERCENT_WIDTH,
                 theme,
             )
@@ -527,24 +529,6 @@ fn interactive_watchlist_row(
             });
             cx.stop_propagation();
         })
-}
-
-fn watchlist_price(value: i64, scale: u32) -> String {
-    let exponent = i32::try_from(scale).unwrap_or(i32::MAX);
-    let divisor = 10_f64.powi(exponent);
-    let value = value.to_f64().unwrap_or(0.0) / divisor;
-    let precision =
-        usize::try_from(scale.min(if value.abs() >= 1_000.0 { 2 } else { 4 })).unwrap_or(4);
-    format!("{value:.precision$}")
-}
-
-fn watchlist_change(value: i64, scale: u32) -> String {
-    let text = watchlist_price(value.abs(), scale);
-    match value.cmp(&0) {
-        std::cmp::Ordering::Greater => format!("+{text}"),
-        std::cmp::Ordering::Less => format!("-{text}"),
-        std::cmp::Ordering::Equal => text,
-    }
 }
 
 fn compact_watchlist_volume(value: i64, scale: u32) -> String {

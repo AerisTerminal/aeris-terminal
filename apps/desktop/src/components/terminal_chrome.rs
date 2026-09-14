@@ -159,6 +159,7 @@ pub(super) fn terminal_header(
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) workspaces: &'a [WorkspaceTab],
+    pub(super) market_summaries: &'a BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     pub(super) active: usize,
     pub(super) enabled: bool,
     pub(super) error: Option<&'a str>,

@@ -1046,8 +1046,6 @@ pub struct NucleusChartView {
     /// Monotonic revision of stable user-authored chart presentation state.
     /// Market-data updates, hover, cursor and transient gestures never touch it.
     user_state_revision: u64,
-    /// Monotonic presentation revision for accepted product-series mutations.
-    market_data_revision: u64,
     /// The pending one-second self-wake. Held so only one is ever in flight.
     clock_tick: Option<Task<()>>,
     #[cfg(feature = "diagnostics")]
@@ -1058,17 +1056,6 @@ pub struct NucleusChartView {
     live_evidence_rebuilds: u16,
     #[cfg(feature = "diagnostics")]
     live_evidence_mouse_downs: u8,
-}
-
-/// Read-only presentation summary of the newest product bar installed in Nucleus.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LatestPriceSummary {
-    /// Newest close in display units.
-    pub last: f64,
-    /// Percentage change from the preceding displayed bar close, when valid.
-    pub change_percent: Option<f64>,
-    /// Product-aware decimal precision for displaying `last`.
-    pub precision: u8,
 }
 
 impl NucleusChartView {
@@ -1133,7 +1120,6 @@ impl NucleusChartView {
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
             user_state_revision: 0,
-            market_data_revision: 0,
             clock_tick: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
@@ -1234,7 +1220,6 @@ impl NucleusChartView {
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
             user_state_revision: 0,
-            market_data_revision: 1,
             clock_tick: None,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
@@ -1283,7 +1268,6 @@ impl NucleusChartView {
         self.apply_selected_price_format();
         self.invalidate_series_layout();
         self.fitted = false;
-        self.market_data_revision = self.market_data_revision.saturating_add(1);
         #[cfg(feature = "diagnostics")]
         {
             self.last_snapshot_installation_nanos = Some(
@@ -1708,28 +1692,6 @@ impl NucleusChartView {
         self.data_bridge.is_some()
     }
 
-    /// Returns the latest installed product close and change from the preceding displayed bar.
-    ///
-    /// This is a read-only projection of the bounded chart product series. It
-    /// does not create market demand, a worker, or a second market-state owner.
-    #[must_use]
-    pub fn latest_price_summary(&self) -> Option<LatestPriceSummary> {
-        let (last, change_percent) = self.product_bars.latest_price_change()?;
-        Some(LatestPriceSummary {
-            last,
-            change_percent,
-            precision: self
-                .price_precision_override
-                .unwrap_or(self.instrument_price_precision),
-        })
-    }
-
-    /// Returns the revision of the latest product-series mutation installed for display.
-    #[must_use]
-    pub const fn market_data_revision(&self) -> u64 {
-        self.market_data_revision
-    }
-
     /// Marks a load the trader is waiting on, so the symbol legend can carry it.
     ///
     /// Returns whether the surface changed, so a caller polling the host's
@@ -1844,7 +1806,6 @@ impl NucleusChartView {
         self.instrument_price_scale = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
-        self.market_data_revision = self.market_data_revision.saturating_add(1);
         Ok(true)
     }
 
@@ -1942,7 +1903,6 @@ impl NucleusChartView {
                 } else {
                     self.invalidate_series_layout();
                 }
-                self.market_data_revision = self.market_data_revision.saturating_add(1);
                 #[cfg(feature = "diagnostics")]
                 if let Some(started) = snapshot_install_started {
                     self.last_snapshot_installation_nanos =
