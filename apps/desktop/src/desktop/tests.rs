@@ -74,6 +74,7 @@ fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
 
     let result = ProviderInstrumentSummary {
         symbol: "BTC-USD".to_string(),
+        display_symbol: "BTC-USD".to_string(),
         exchange: "rithmic".to_string(),
         name: Some("BTC/USD".to_string()),
         product_code: Some("BTC-USD".to_string()),
@@ -578,7 +579,7 @@ fn saved_workspace_boot_fixture() -> WorkspaceState {
     let first_instrument = first.instrument.as_mut().expect("default instrument");
     first_instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
     first_instrument.provider_symbol = "ETH".to_string();
-    first_instrument.display_symbol = "ETH-PERP".to_string();
+    first_instrument.display_symbol = "ETH-USDC".to_string();
     let first_series = first.series.as_mut().expect("default series");
     first_series.instrument_id = first_instrument.instrument_id.clone();
     first_series.cadence = SeriesCadence::FixedSeconds as i32;
@@ -593,7 +594,7 @@ fn saved_workspace_boot_fixture() -> WorkspaceState {
     let second_instrument = second.instrument.as_mut().expect("second instrument");
     second_instrument.instrument_id = "hyperliquid:perp:SOL".to_string();
     second_instrument.provider_symbol = "SOL".to_string();
-    second_instrument.display_symbol = "SOL-PERP".to_string();
+    second_instrument.display_symbol = "SOL-USDC".to_string();
     let second_instrument_id = second_instrument.instrument_id.clone();
     let second_series = second.series.as_mut().expect("second series");
     second_series.instrument_id = second_instrument_id;
@@ -676,7 +677,7 @@ fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
     assert_eq!(eth.pane_id, 7);
     assert_eq!(eth.consumer_id, 17);
     assert_eq!(eth.instrument.instrument_id, "hyperliquid:perp:ETH");
-    assert_eq!(eth.instrument.display_symbol, "ETH-PERP");
+    assert_eq!(eth.instrument.display_symbol, "ETH-USDC");
     assert_eq!(eth.interval, ChartInterval::Minute5);
     assert_eq!(eth.restored_viewport, Some((100, 200)));
     assert_eq!(eth.generation, 6);
@@ -686,7 +687,7 @@ fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
     assert_eq!(sol.pane_id, 8);
     assert_eq!(sol.consumer_id, 18);
     assert_eq!(sol.instrument.instrument_id, "hyperliquid:perp:SOL");
-    assert_eq!(sol.instrument.display_symbol, "SOL-PERP");
+    assert_eq!(sol.instrument.display_symbol, "SOL-USDC");
     assert_eq!(sol.interval, ChartInterval::Hour1);
     assert_eq!(sol.restored_viewport, Some((300, 400)));
     assert_eq!(sol.generation, 6);
@@ -863,12 +864,12 @@ fn instrument_menu_highlights_only_the_live_market_until_keyboard_moves() {
 fn instrument_menu_index_follows_the_checked_live_market() {
     let entries = [
         InstrumentMenuEntry {
-            symbol: "BTC/USD".into(),
+            label: "BTC/USD".into(),
             checked: false,
             selection: InstrumentMenuSelection::Rithmic(0),
         },
         InstrumentMenuEntry {
-            symbol: "ETH/USD".into(),
+            label: "ETH/USD".into(),
             checked: true,
             selection: InstrumentMenuSelection::Rithmic(1),
         },
@@ -876,7 +877,7 @@ fn instrument_menu_index_follows_the_checked_live_market() {
     assert_eq!(current_instrument_menu_index(&entries), Some(1));
     assert_eq!(
         current_instrument_menu_index(&[InstrumentMenuEntry {
-            symbol: "AAVE/USD".into(),
+            label: "AAVE/USD".into(),
             checked: false,
             selection: InstrumentMenuSelection::Rithmic(0),
         }]),
@@ -955,6 +956,7 @@ fn bridge_recovery_replaces_ready_after_deferred_gap_validation() {
 fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
     let result = |symbol: &str, expiration: &str| ProviderInstrumentSummary {
         symbol: symbol.to_string(),
+        display_symbol: symbol.to_string(),
         exchange: "CME-Delayed".to_string(),
         name: None,
         product_code: Some("MNQ".to_string()),
@@ -968,6 +970,7 @@ fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
         result("MNQU6", "20260918"),
         ProviderInstrumentSummary {
             symbol: "NQ".to_string(),
+            display_symbol: "NQ".to_string(),
             exchange: "CME-Delayed".to_string(),
             name: None,
             product_code: Some("NQ".to_string()),
@@ -1642,6 +1645,21 @@ fn contextual_labels_keep_contract_and_pending_series_truthful() {
     assert_eq!(series_selector_label(ChartInterval::Minute1), "1m");
     assert_eq!(series_selector_label(ChartInterval::Minute5), "5m");
     assert_eq!(series_selector_label(ChartInterval::Hour4), "4h");
+}
+
+#[test]
+fn provider_catalog_keeps_display_symbol_separate_from_wire_symbol() {
+    let instrument = ProviderInstrumentSummary {
+        symbol: "BTC".to_string(),
+        display_symbol: "BTC-USDC".to_string(),
+        exchange: "Hyperliquid".to_string(),
+        name: None,
+        product_code: None,
+        instrument_type: Some("perpetual".to_string()),
+        expiration_date: None,
+    };
+    assert_eq!(instrument.display_symbol, "BTC-USDC");
+    assert_eq!(instrument.symbol, "BTC");
 }
 
 #[test]

@@ -1433,7 +1433,7 @@ impl WorkspaceSurface {
             .iter()
             .enumerate()
             .map(|(index, instrument)| InstrumentMenuEntry {
-                symbol: instrument.symbol.clone(),
+                label: instrument.display_symbol.clone(),
                 checked: self.symbol_browser.selected().is_some_and(|selected| {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange
@@ -1500,7 +1500,7 @@ impl WorkspaceSurface {
                 }
                 self.pending_symbol_selection_target = Some(target);
                 self.market_state.symbol_selection_pending = true;
-                self.symbol_message = format!("Selecting {}", selection.instrument.symbol);
+                self.symbol_message = format!("Selecting {}", selection.instrument.display_symbol);
                 cx.notify();
                 true
             }

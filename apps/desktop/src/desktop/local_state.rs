@@ -258,7 +258,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         selection_generation: 1,
         instrument_id: "hyperliquid:perp:BTC".to_string(),
         provider_symbol: "BTC".to_string(),
-        display_symbol: "BTC-PERP".to_string(),
+        display_symbol: "BTC-USDC".to_string(),
         venue_id: "Hyperliquid".to_string(),
         price_scale: 8,
         quantity_scale: 8,
@@ -290,9 +290,9 @@ pub(super) fn default_workspace() -> WorkspaceState {
     };
     WorkspaceState {
         provider: "hyperliquid".to_string(),
-        market: "BTC-PERP".to_string(),
+        market: "BTC-USDC".to_string(),
         interval_seconds: 60,
-        watchlist: vec!["BTC-PERP".to_string()],
+        watchlist: vec!["BTC-USDC".to_string()],
         workspace_revision: 1,
         schema_revision: 1,
         layout_generation: 1,
@@ -460,6 +460,11 @@ fn sanitize_watchlist(workspace: &mut WorkspaceState) {
 fn rebase_durable_instrument(instrument: &mut InstallProviderInstrument) {
     instrument.session_generation = 1;
     instrument.selection_generation = 1;
+    if let Some(display) =
+        axiusflow_market_runtime::migrate_retained_provider_display_symbol(instrument)
+    {
+        instrument.display_symbol = display;
+    }
 }
 
 fn valid_watchlist_instrument(instrument: &InstallProviderInstrument) -> bool {
@@ -836,7 +841,7 @@ mod tests {
         let instrument = first.instrument.as_mut().expect("default instrument");
         instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
         instrument.provider_symbol = "ETH".to_string();
-        instrument.display_symbol = "ETH-PERP".to_string();
+        instrument.display_symbol = "ETH-USDC".to_string();
         let alert_instrument = instrument.clone();
         first
             .chart
@@ -867,7 +872,7 @@ mod tests {
             .instrument
             .as_mut()
             .expect("second instrument")
-            .display_symbol = "SOL-PERP".to_string();
+            .display_symbol = "SOL-USDC".to_string();
         let second_instrument_id = second
             .instrument
             .as_ref()
@@ -930,7 +935,7 @@ mod tests {
         let sanitized = sanitize_workspace(workspace);
 
         assert_eq!(sanitized.watchlist_entries.len(), 1);
-        assert_eq!(sanitized.watchlist, vec!["BTC-PERP"]);
+        assert_eq!(sanitized.watchlist, vec!["BTC-USDC"]);
         let pane = &sanitized.workspace_tabs[0].panes[0];
         assert_eq!(pane.side_panel_visibility, 3);
         assert_eq!(pane.side_panel_width, 480);
@@ -944,6 +949,7 @@ mod tests {
         let instrument = pane.instrument.as_mut().expect("default pane instrument");
         instrument.session_generation = 3;
         instrument.selection_generation = 6;
+        instrument.display_symbol = "BTC-PERP".to_string();
         let mut alert_instrument = instrument.clone();
         alert_instrument.session_generation = 8;
         alert_instrument.selection_generation = 11;
@@ -959,6 +965,7 @@ mod tests {
             .expect("default watchlist instrument");
         watchlist.session_generation = 5;
         watchlist.selection_generation = 9;
+        watchlist.display_symbol = "BTC-PERP".to_string();
 
         let sanitized = sanitize_workspace(workspace);
 
@@ -966,6 +973,7 @@ mod tests {
         let instrument = pane.instrument.as_ref().expect("pane instrument survives");
         assert_eq!(instrument.session_generation, 1);
         assert_eq!(instrument.selection_generation, 1);
+        assert_eq!(instrument.display_symbol, "BTC-USDC");
         let alert = pane
             .chart
             .as_ref()
@@ -979,12 +987,56 @@ mod tests {
             .expect("alert instrument survives");
         assert_eq!(alert_instrument.session_generation, 1);
         assert_eq!(alert_instrument.selection_generation, 1);
+        assert_eq!(alert_instrument.display_symbol, "BTC-USDC");
         let watchlist = sanitized.watchlist_entries[0]
             .instrument
             .as_ref()
             .expect("watchlist instrument survives");
         assert_eq!(watchlist.session_generation, 1);
         assert_eq!(watchlist.selection_generation, 1);
+        assert_eq!(watchlist.display_symbol, "BTC-USDC");
+    }
+
+    #[test]
+    fn workspace_sanitizer_migrates_retained_builder_display_without_touching_wire_identity() {
+        let mut workspace = default_workspace();
+        let pane = &mut workspace.workspace_tabs[0].panes[0];
+        let instrument = pane.instrument.as_mut().expect("default pane instrument");
+        instrument.instrument_id = "hyperliquid:builder:xyz:XYZ100".to_string();
+        instrument.provider_symbol = "xyz:XYZ100".to_string();
+        instrument.display_symbol = "xyz:XYZ100-PERP".to_string();
+        instrument.venue_id = "xyz".to_string();
+
+        let sanitized = sanitize_workspace(workspace);
+        let instrument = sanitized.workspace_tabs[0].panes[0]
+            .instrument
+            .as_ref()
+            .expect("builder instrument survives");
+        assert_eq!(instrument.provider_symbol, "xyz:XYZ100");
+        assert_eq!(instrument.instrument_id, "hyperliquid:builder:xyz:XYZ100");
+        assert_eq!(instrument.venue_id, "xyz");
+        assert_eq!(instrument.display_symbol, "XYZ100-USDC");
+    }
+
+    #[test]
+    fn workspace_sanitizer_does_not_guess_unknown_builder_collateral() {
+        let mut workspace = default_workspace();
+        let instrument = workspace.workspace_tabs[0].panes[0]
+            .instrument
+            .as_mut()
+            .expect("default pane instrument");
+        instrument.instrument_id = "hyperliquid:builder:flx:BTC".to_string();
+        instrument.provider_symbol = "flx:BTC".to_string();
+        instrument.display_symbol = "flx:BTC-PERP".to_string();
+        instrument.venue_id = "flx".to_string();
+
+        let sanitized = sanitize_workspace(workspace);
+        let instrument = sanitized.workspace_tabs[0].panes[0]
+            .instrument
+            .as_ref()
+            .expect("builder instrument survives");
+        assert_eq!(instrument.display_symbol, "flx:BTC-PERP");
+        assert_eq!(instrument.provider_symbol, "flx:BTC");
     }
 
     #[test]

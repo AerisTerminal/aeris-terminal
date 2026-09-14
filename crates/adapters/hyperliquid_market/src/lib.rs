@@ -44,7 +44,8 @@ pub use http::{
     post_info,
 };
 pub use identity::{
-    HyperliquidInstrument, HyperliquidMarketKind, instrument_id_for, wire_coin_for,
+    HyperliquidInstrument, HyperliquidMarketKind, instrument_id_for, legacy_display_label,
+    wire_coin_for,
 };
 pub use meta::{HyperliquidCatalog, RawMetaBundle, decode_catalog};
 pub use socket::{HyperliquidSocket, HyperliquidSocketShutdown, SocketEvent, is_read_timeout};

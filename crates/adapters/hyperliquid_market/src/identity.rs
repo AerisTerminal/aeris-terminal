@@ -40,7 +40,8 @@ pub struct HyperliquidInstrument {
     pub instrument_id: String,
     /// Exact wire `coin` for info/WebSocket calls (e.g. `BTC`, `@5`, `xyz:BTC`).
     pub wire_coin: String,
-    /// Human display label (e.g. `BTC-PERP`, `BTC/USDC`, `xyz:BTC-PERP`).
+    /// Provider-owned human display label. Perps use `BASE-COLLATERAL` and spot
+    /// uses metadata-derived `BASE/QUOTE` (e.g. `BTC-USDC`, `HYPE/USDC`).
     pub display: String,
     /// Venue label (`Hyperliquid`, `Hyperliquid Spot`, or the DEX name).
     pub venue: String,
@@ -84,6 +85,59 @@ impl HyperliquidInstrument {
     }
 }
 
+const LEGACY_PERP_QUOTE_ASSET: &str = "USDC";
+
+fn perp_display(base: &str, quote_asset: &str) -> String {
+    format!("{base}-{quote_asset}")
+}
+
+fn valid_perp_quote_asset(quote_asset: &str) -> bool {
+    !quote_asset.is_empty()
+        && quote_asset.len() <= 64
+        && !quote_asset.contains(':')
+        && !quote_asset.contains('/')
+        && !quote_asset.contains('-')
+}
+
+/// Migrates display labels written by Axiusflow's legacy Hyperliquid formatter
+/// when the historical quote asset is unambiguous.
+///
+/// This is deliberately narrower than live catalog formatting. HIP-3 permits
+/// arbitrary collateral, so unknown builder DEXes are never guessed here.
+/// Stable identity and exact wire routing remain unchanged.
+#[must_use]
+pub fn legacy_display_label(
+    instrument_id: &str,
+    wire_coin: &str,
+    display_symbol: &str,
+) -> Option<String> {
+    if display_symbol != format!("{wire_coin}-PERP") {
+        return None;
+    }
+    if let Some(base) = instrument_id.strip_prefix("hyperliquid:perp:") {
+        return (!base.is_empty() && base.len() <= 64 && wire_coin == base)
+            .then(|| perp_display(base, LEGACY_PERP_QUOTE_ASSET));
+    }
+
+    if let Some(rest) = instrument_id.strip_prefix("hyperliquid:builder:") {
+        let (dex, base) = rest.split_once(':')?;
+        if dex != "xyz" {
+            return None;
+        }
+        let expected_wire = format!("{dex}:{base}");
+        return (!dex.is_empty()
+            && dex.len() <= 64
+            && !base.is_empty()
+            && base.len() <= 64
+            && !base.contains(':')
+            && !base.contains('/')
+            && wire_coin == expected_wire)
+            .then(|| perp_display(base, LEGACY_PERP_QUOTE_ASSET));
+    }
+
+    None
+}
+
 /// Builds the stable instrument id for a market class and base name.
 #[must_use]
 pub fn instrument_id_for(kind: &HyperliquidMarketKind, base: &str) -> String {
@@ -125,21 +179,21 @@ pub fn wire_coin_for(kind: &HyperliquidMarketKind, base: &str, pair_index: Optio
     }
 }
 
-/// Core perpetual instrument for a coin name (e.g. `BTC`).
-///
-/// # Errors
-///
-/// Returns an error for blank or overlong coins or invalid precision.
-pub fn core_perp(coin: &str, sz_decimals: u32) -> Result<HyperliquidInstrument, String> {
+pub(crate) fn core_perp_with_quote(
+    coin: &str,
+    quote_asset: &str,
+    sz_decimals: u32,
+) -> Result<HyperliquidInstrument, String> {
     let coin = coin.trim();
-    if coin.is_empty() || coin.len() > 64 {
+    let quote_asset = quote_asset.trim();
+    if coin.is_empty() || coin.len() > 64 || !valid_perp_quote_asset(quote_asset) {
         return Err("hyperliquid perp coin is invalid".to_string());
     }
     let kind = HyperliquidMarketKind::CorePerp;
     Ok(HyperliquidInstrument {
         instrument_id: instrument_id_for(&kind, coin),
         wire_coin: coin.to_string(),
-        display: format!("{coin}-PERP"),
+        display: perp_display(coin, quote_asset),
         venue: "Hyperliquid".to_string(),
         kind,
         price_scale: u8::try_from(NORMALIZED_PRICE_SCALE)
@@ -150,24 +204,21 @@ pub fn core_perp(coin: &str, sz_decimals: u32) -> Result<HyperliquidInstrument, 
     })
 }
 
-/// Builder perpetual instrument for a DEX namespace and coin.
-///
-/// Live builder metadata already returns prefixed names such as `xyz:TSLA`;
-/// those pass through unchanged so requests target the intended market.
-/// Unprefixed names gain the DEX prefix.
-///
-/// # Errors
-///
-/// Returns an error for blank or overlong namespaces, mismatched prefixes,
-/// or invalid precision.
-pub fn builder_perp(
+pub(crate) fn builder_perp_with_quote(
     dex: &str,
     coin: &str,
+    quote_asset: &str,
     sz_decimals: u32,
 ) -> Result<HyperliquidInstrument, String> {
     let dex = dex.trim();
     let coin = coin.trim();
-    if dex.is_empty() || dex.len() > 64 || coin.is_empty() || coin.len() > 96 {
+    let quote_asset = quote_asset.trim();
+    if dex.is_empty()
+        || dex.len() > 64
+        || coin.is_empty()
+        || coin.len() > 96
+        || !valid_perp_quote_asset(quote_asset)
+    {
         return Err("hyperliquid builder market is invalid".to_string());
     }
     // Accept the documented live form (`dex:BASE`) without double-prefixing.
@@ -187,7 +238,7 @@ pub fn builder_perp(
     Ok(HyperliquidInstrument {
         instrument_id: instrument_id_for(&kind, base),
         wire_coin: format!("{dex}:{base}"),
-        display: format!("{dex}:{base}-PERP"),
+        display: perp_display(base, quote_asset),
         venue: dex.to_string(),
         kind,
         price_scale: u8::try_from(NORMALIZED_PRICE_SCALE)
@@ -245,14 +296,16 @@ mod tests {
 
     #[test]
     fn core_spot_and_builder_identities_never_collide() {
-        let perp = core_perp("BTC", 5).expect("perp");
+        let perp = core_perp_with_quote("BTC", LEGACY_PERP_QUOTE_ASSET, 5).expect("perp");
         let spot = spot_pair("BTC/USDC", 5, (0, 1), 8).expect("spot");
-        let builder = builder_perp("xyz", "BTC", 5).expect("builder");
+        let builder =
+            builder_perp_with_quote("xyz", "BTC", LEGACY_PERP_QUOTE_ASSET, 5).expect("builder");
         assert_ne!(perp.instrument_id, spot.instrument_id);
         assert_ne!(perp.instrument_id, builder.instrument_id);
         assert_ne!(spot.instrument_id, builder.instrument_id);
         // Identical display bases in different namespaces keep distinct ids.
-        let other_builder = builder_perp("abc", "BTC", 5).expect("other builder");
+        let other_builder = builder_perp_with_quote("abc", "BTC", LEGACY_PERP_QUOTE_ASSET, 5)
+            .expect("other builder");
         assert_ne!(builder.instrument_id, other_builder.instrument_id);
         assert_eq!(perp.wire_coin, "BTC");
         assert_eq!(spot.wire_coin, "@5");
@@ -282,21 +335,57 @@ mod tests {
     #[test]
     fn builder_symbols_keep_live_prefixes_without_doubling() {
         // Live builder metadata already returns `dex:BASE` names.
-        let live = builder_perp("xyz", "xyz:TSLA", 5).expect("live builder");
+        let live = builder_perp_with_quote("xyz", "xyz:TSLA", LEGACY_PERP_QUOTE_ASSET, 5)
+            .expect("live builder");
         assert_eq!(live.wire_coin, "xyz:TSLA");
-        assert_eq!(live.display, "xyz:TSLA-PERP");
+        assert_eq!(live.display, "TSLA-USDC");
         assert_eq!(live.instrument_id, "hyperliquid:builder:xyz:TSLA");
         // Unprefixed names still gain the DEX prefix.
-        let plain = builder_perp("xyz", "BTC", 5).expect("plain builder");
+        let plain = builder_perp_with_quote("xyz", "BTC", LEGACY_PERP_QUOTE_ASSET, 5)
+            .expect("plain builder");
         assert_eq!(plain.wire_coin, "xyz:BTC");
+        assert_eq!(plain.display, "BTC-USDC");
         assert_eq!(plain.instrument_id, "hyperliquid:builder:xyz:BTC");
         // A foreign namespace never silently retargets this DEX.
-        assert!(builder_perp("xyz", "abc:TSLA", 5).is_err());
+        assert!(builder_perp_with_quote("xyz", "abc:TSLA", LEGACY_PERP_QUOTE_ASSET, 5).is_err());
+    }
+
+    #[test]
+    fn legacy_display_migration_changes_only_unambiguous_historical_perp_labels() {
+        assert_eq!(
+            legacy_display_label("hyperliquid:perp:BTC", "BTC", "BTC-PERP").as_deref(),
+            Some("BTC-USDC")
+        );
+        assert_eq!(
+            legacy_display_label(
+                "hyperliquid:builder:xyz:XYZ100",
+                "xyz:XYZ100",
+                "xyz:XYZ100-PERP",
+            )
+            .as_deref(),
+            Some("XYZ100-USDC")
+        );
+        assert_eq!(
+            legacy_display_label("hyperliquid:builder:flx:BTC", "flx:BTC", "flx:BTC-PERP",),
+            None
+        );
+        assert_eq!(
+            legacy_display_label("hyperliquid:perp:BTC", "ETH", "ETH-PERP"),
+            None
+        );
+        assert_eq!(
+            legacy_display_label(
+                "hyperliquid:builder:xyz:XYZ100",
+                "xyz:XYZ100",
+                "XYZ100-USDT",
+            ),
+            None
+        );
     }
 
     #[test]
     fn identity_validation_rejects_blank_and_overlong_fields() {
-        let mut instrument = core_perp("BTC", 5).expect("perp");
+        let mut instrument = core_perp_with_quote("BTC", LEGACY_PERP_QUOTE_ASSET, 5).expect("perp");
         instrument.validate().expect("valid");
         instrument.display.clear();
         assert!(instrument.validate().is_err());

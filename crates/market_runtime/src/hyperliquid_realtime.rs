@@ -349,8 +349,9 @@ fn handle_catalog_search(
         .into_iter()
         .map(|instrument| ProviderInstrumentSummary {
             symbol: instrument.wire_coin.clone(),
+            display_symbol: instrument.display.clone(),
             exchange: instrument.venue.clone(),
-            name: Some(instrument.display.clone()),
+            name: None,
             product_code: None,
             instrument_type: Some(match &instrument.kind {
                 axiusflow_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp => {

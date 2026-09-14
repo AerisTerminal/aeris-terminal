@@ -12,7 +12,9 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::identity::{HyperliquidInstrument, builder_perp, core_perp, spot_pair};
+use crate::identity::{
+    HyperliquidInstrument, builder_perp_with_quote, core_perp_with_quote, spot_pair,
+};
 
 /// One decoded catalog with stable identities for every supported market.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -136,6 +138,8 @@ fn decimal_parts(value: &str) -> (&str, &str) {
 struct PerpMeta {
     #[serde(default)]
     universe: Vec<PerpAsset>,
+    #[serde(default)]
+    collateralToken: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,14 +215,6 @@ pub fn decode_catalog(bundle: &RawMetaBundle) -> Result<HyperliquidCatalog, Stri
     if core.universe.is_empty() || core.universe.len() > 10_000 {
         return Err("hyperliquid perp meta is malformed".to_string());
     }
-    for asset in &core.universe {
-        if asset.name.trim().is_empty() || asset.name.len() > 64 {
-            continue;
-        }
-        let instrument = core_perp(&asset.name, asset.szDecimals)?;
-        insert_checked(&mut instruments, &mut display_collisions, instrument)?;
-    }
-
     let spot: SpotMeta = serde_json::from_value(bundle.spot_meta.clone())
         .map_err(|_| "hyperliquid spot meta is malformed".to_string())?;
     if spot.universe.len() > 10_000 || spot.tokens.len() > 10_000 {
@@ -234,6 +230,15 @@ pub fn decode_catalog(bundle: &RawMetaBundle) -> Result<HyperliquidCatalog, Stri
         .iter()
         .map(|token| (token.index, token.szDecimals))
         .collect();
+    let core_quote = perp_quote_asset(core.collateralToken, &token_names)?;
+    for asset in &core.universe {
+        if asset.name.trim().is_empty() || asset.name.len() > 64 {
+            continue;
+        }
+        let instrument = core_perp_with_quote(&asset.name, core_quote, asset.szDecimals)?;
+        insert_checked(&mut instruments, &mut display_collisions, instrument)?;
+    }
+
     for (position, pair) in spot.universe.iter().enumerate() {
         // Prefer the explicit pair index; universe position is only a
         // fallback for older payloads.
@@ -271,11 +276,13 @@ pub fn decode_catalog(bundle: &RawMetaBundle) -> Result<HyperliquidCatalog, Stri
     for (dex, meta) in &bundle.builder_metas {
         let parsed: PerpMeta = serde_json::from_value(meta.clone())
             .map_err(|_| "hyperliquid builder meta is malformed".to_string())?;
+        let quote_asset = perp_quote_asset(parsed.collateralToken, &token_names)?;
         for asset in &parsed.universe {
             if asset.name.trim().is_empty() || asset.name.len() > 64 {
                 continue;
             }
-            let instrument = builder_perp(dex, &asset.name, asset.szDecimals)?;
+            let instrument =
+                builder_perp_with_quote(dex, &asset.name, quote_asset, asset.szDecimals)?;
             insert_checked(&mut instruments, &mut display_collisions, instrument)?;
         }
     }
@@ -291,6 +298,18 @@ pub fn decode_catalog(bundle: &RawMetaBundle) -> Result<HyperliquidCatalog, Stri
         instruments,
         day_notional_volume: BTreeMap::new(),
     })
+}
+
+fn perp_quote_asset(
+    collateral_token: Option<u32>,
+    token_names: &BTreeMap<u32, String>,
+) -> Result<&str, String> {
+    let token_index = collateral_token.unwrap_or(0);
+    token_names
+        .get(&token_index)
+        .map(String::as_str)
+        .filter(|name| !name.trim().is_empty() && name.len() <= 64)
+        .ok_or_else(|| "hyperliquid perp collateral token is unavailable".to_string())
 }
 
 fn insert_checked(
@@ -342,7 +361,8 @@ mod tests {
     #[test]
     fn discovery_separates_spot_core_and_builder_identities() {
         let catalog = decode_catalog(&bundle()).expect("catalog");
-        assert!(catalog.get("hyperliquid:perp:BTC").is_some());
+        let core = catalog.get("hyperliquid:perp:BTC").expect("core perp");
+        assert_eq!(core.display, "BTC-USDC");
         assert!(catalog.get("hyperliquid:perp:ETH").is_some());
         // Only PURR keeps its pair name on the wire; every other spot
         // market uses `@<index>` with a token-derived display name.
@@ -360,7 +380,40 @@ mod tests {
             .get("hyperliquid:builder:xyz:BTC")
             .expect("builder perp");
         assert_eq!(builder.wire_coin, "xyz:BTC");
-        assert_eq!(builder.display, "xyz:BTC-PERP");
+        assert_eq!(builder.display, "BTC-USDC");
+        assert_eq!(builder.venue, "xyz");
+    }
+
+    #[test]
+    fn perp_display_uses_the_metadata_collateral_token() {
+        let mut alternate = bundle();
+        alternate.core_perp_meta = json!({
+            "universe": [{"name": "BTC", "szDecimals": 5}],
+            "collateralToken": 1,
+        });
+        alternate.builder_metas = vec![(
+            "xyz".to_string(),
+            json!({
+                "universe": [{"name": "xyz:XYZ100", "szDecimals": 4}],
+                "collateralToken": 1,
+            }),
+        )];
+
+        let catalog = decode_catalog(&alternate).expect("catalog");
+        assert_eq!(
+            catalog
+                .get("hyperliquid:perp:BTC")
+                .expect("core perp")
+                .display,
+            "BTC-USDT"
+        );
+        assert_eq!(
+            catalog
+                .get("hyperliquid:builder:xyz:XYZ100")
+                .expect("builder perp")
+                .display,
+            "XYZ100-USDT"
+        );
     }
 
     #[test]
@@ -425,7 +478,7 @@ mod tests {
             .get("hyperliquid:builder:xyz:TSLA")
             .expect("prefixed builder market");
         assert_eq!(instrument.wire_coin, "xyz:TSLA");
-        assert_eq!(instrument.display, "xyz:TSLA-PERP");
+        assert_eq!(instrument.display, "TSLA-USDC");
     }
 
     #[test]

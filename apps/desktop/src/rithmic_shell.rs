@@ -286,6 +286,7 @@ mod tests {
     fn result(symbol: &str) -> ProviderInstrumentSummary {
         ProviderInstrumentSummary {
             symbol: symbol.to_string(),
+            display_symbol: symbol.to_string(),
             exchange: "CME".to_string(),
             name: Some(format!("{symbol} future")),
             product_code: Some("ES".to_string()),

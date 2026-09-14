@@ -14,6 +14,26 @@ pub mod study;
 /// Maximum durable alerts owned by one market consumer.
 pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
 
+/// Returns a safe provider-owned replacement for a legacy durable display
+/// symbol when the old identity carries enough information to migrate it.
+///
+/// Routing identity is never rewritten here. This exists so durable desktop
+/// state can refresh presentation aliases without learning provider-specific
+/// symbol rules.
+#[must_use]
+pub fn migrate_retained_provider_display_symbol(
+    instrument: &axiusflow_contracts::InstallProviderInstrument,
+) -> Option<String> {
+    match instrument.provider.as_str() {
+        "hyperliquid" => axiusflow_hyperliquid_market_adapter::legacy_display_label(
+            &instrument.instrument_id,
+            &instrument.provider_symbol,
+            &instrument.display_symbol,
+        ),
+        _ => None,
+    }
+}
+
 /// One bounded, fixed-point price alert evaluated by the market coordinator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketPriceAlert {

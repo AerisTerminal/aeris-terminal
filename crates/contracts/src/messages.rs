@@ -603,7 +603,11 @@ pub struct SelectProviderInstrument {
 /// Bounded provider-neutral presentation metadata for one search result.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderInstrumentSummary {
+    /// Exact provider routing symbol used for selection requests.
     pub symbol: String,
+    /// Provider-owned human presentation symbol. Consumers must render this
+    /// rather than deriving a label from `symbol`.
+    pub display_symbol: String,
     pub exchange: String,
     pub name: Option<String>,
     pub product_code: Option<String>,

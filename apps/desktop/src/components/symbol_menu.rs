@@ -118,7 +118,7 @@ pub(super) fn instrument_dialog_content(
                 TerminalProvider::Rithmic => "Rithmic Test".to_string(),
                 TerminalProvider::Hyperliquid => "Hyperliquid public feed".to_string(),
             },
-            |instrument| format!("Current stream: {}", instrument.symbol),
+            |instrument| format!("Current stream: {}", instrument.label),
         );
     let mut list = chrome_menu_scroll_body();
     if count == 0 {
@@ -201,7 +201,7 @@ pub(super) fn instrument_dialog_row(
     let target = state.target;
     let mut row = MenuRow::search_result(
         ("instrument_dialog_row", index),
-        instrument.symbol.clone(),
+        instrument.label.clone(),
         theme,
     )
     .highlighted(instrument_row_highlighted(

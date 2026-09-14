@@ -1252,7 +1252,7 @@ fn current_instrument_menu_index(entries: &[InstrumentMenuEntry]) -> Option<usiz
 
 #[derive(Clone)]
 struct InstrumentMenuEntry {
-    symbol: String,
+    label: String,
     checked: bool,
     selection: InstrumentMenuSelection,
 }

@@ -287,7 +287,7 @@ mod tests {
             selection_generation: 1,
             instrument_id: "hyperliquid:perp:BTC".to_string(),
             provider_symbol: "BTC".to_string(),
-            display_symbol: "BTC-PERP".to_string(),
+            display_symbol: "BTC-USDC".to_string(),
             venue_id: "Hyperliquid".to_string(),
             price_scale: 2,
             quantity_scale: 2,

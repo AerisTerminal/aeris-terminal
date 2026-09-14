@@ -481,6 +481,7 @@ fn publish_catalog_callback(
                 .results
                 .into_iter()
                 .map(|result| ProviderInstrumentSummary {
+                    display_symbol: result.symbol.clone(),
                     symbol: result.symbol,
                     exchange: result.exchange,
                     name: result.name,
