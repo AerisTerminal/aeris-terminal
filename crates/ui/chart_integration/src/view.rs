@@ -444,7 +444,6 @@ pub struct ChartAppearanceSettings {
     pub line_width: u8,
     pub line_style: u8,
     pub area_top_color: String,
-    pub area_bottom_color: String,
     pub baseline_top_color: String,
     pub baseline_bottom_color: String,
 }
@@ -473,7 +472,6 @@ impl Default for ChartAppearanceSettings {
             line_width: 2,
             line_style: 0,
             area_top_color: "#089981".to_string(),
-            area_bottom_color: "#101722".to_string(),
             baseline_top_color: "#089981".to_string(),
             baseline_bottom_color: "#f7525f".to_string(),
         }
@@ -2080,7 +2078,6 @@ impl NucleusChartView {
         appearance.border_down_color = color("border_down_color", &appearance.down_color);
         appearance.line_color = color("color", &appearance.line_color);
         appearance.area_top_color = color("area_top_color", &appearance.area_top_color);
-        appearance.area_bottom_color = color("area_bottom_color", &appearance.area_bottom_color);
         appearance.baseline_top_color = color("top_line_color", &appearance.baseline_top_color);
         appearance.baseline_bottom_color =
             color("bottom_line_color", &appearance.baseline_bottom_color);
@@ -2167,7 +2164,6 @@ impl NucleusChartView {
             "line_width": appearance.line_width.clamp(1, 4),
             "line_style": appearance.line_style.min(4),
             "area_top_color": appearance.area_top_color,
-            "area_bottom_color": appearance.area_bottom_color,
             "top_line_color": appearance.baseline_top_color,
             "bottom_line_color": appearance.baseline_bottom_color,
         })

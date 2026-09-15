@@ -1308,24 +1308,12 @@ fn area_series_settings(
             theme,
         ))
         .child(settings_line_controls(terminal, menu, appearance, theme))
-        .child(settings_group_heading(
-            "Fill",
-            "Top and bottom gradient colors",
-            theme,
-        ))
+        .child(settings_group_heading("Fill", "Area fill color", theme))
         .child(settings_color_row(
             terminal,
             menu,
             ChartColorSetting::AreaTop,
             &appearance.area_top_color,
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::AreaBottom,
-            &appearance.area_bottom_color,
             color_picker,
             theme,
         ))

@@ -343,8 +343,6 @@ pub struct WorkspaceChartAppearanceState {
     pub line_style: u32,
     #[prost(string, tag = "20")]
     pub area_top_color: String,
-    #[prost(string, tag = "21")]
-    pub area_bottom_color: String,
     #[prost(string, tag = "22")]
     pub baseline_top_color: String,
     #[prost(string, tag = "23")]

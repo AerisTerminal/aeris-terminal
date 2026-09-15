@@ -512,7 +512,6 @@ fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
         appearance.border_down_color.as_str(),
         appearance.line_color.as_str(),
         appearance.area_top_color.as_str(),
-        appearance.area_bottom_color.as_str(),
         appearance.baseline_top_color.as_str(),
         appearance.baseline_bottom_color.as_str(),
     ]
@@ -800,7 +799,6 @@ mod tests {
                 line_width: 3,
                 line_style: 0,
                 area_top_color: "#2563eb".to_string(),
-                area_bottom_color: "#172554".to_string(),
                 baseline_top_color: "#22c55e".to_string(),
                 baseline_bottom_color: "#ef4444".to_string(),
             }),
@@ -1257,7 +1255,6 @@ mod tests {
             line_width: 2,
             line_style: 0,
             area_top_color: "#2563eb".to_string(),
-            area_bottom_color: "#172554".to_string(),
             baseline_top_color: "#22c55e".to_string(),
             baseline_bottom_color: "#ef4444".to_string(),
         });

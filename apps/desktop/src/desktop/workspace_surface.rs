@@ -69,7 +69,6 @@ pub(super) fn persisted_chart_appearance(
         line_width: u32::from(appearance.line_width),
         line_style: u32::from(appearance.line_style),
         area_top_color: appearance.area_top_color.clone(),
-        area_bottom_color: appearance.area_bottom_color.clone(),
         baseline_top_color: appearance.baseline_top_color.clone(),
         baseline_bottom_color: appearance.baseline_bottom_color.clone(),
     }
@@ -104,7 +103,6 @@ pub(super) fn restored_chart_appearance(
         line_width,
         line_style,
         area_top_color: appearance.area_top_color.clone(),
-        area_bottom_color: appearance.area_bottom_color.clone(),
         baseline_top_color: appearance.baseline_top_color.clone(),
         baseline_bottom_color: appearance.baseline_bottom_color.clone(),
     })

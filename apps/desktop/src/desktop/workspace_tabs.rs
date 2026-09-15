@@ -802,7 +802,6 @@ impl TerminalApp {
             ChartColorSetting::BorderDown => appearance.border_down_color.clone_from(&color),
             ChartColorSetting::Line => appearance.line_color.clone_from(&color),
             ChartColorSetting::AreaTop => appearance.area_top_color.clone_from(&color),
-            ChartColorSetting::AreaBottom => appearance.area_bottom_color.clone_from(&color),
             ChartColorSetting::BaselineTop => {
                 appearance.baseline_top_color.clone_from(&color);
             }

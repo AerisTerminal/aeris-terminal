@@ -1297,13 +1297,20 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
         line_width: 4,
         line_style: 2,
         area_top_color: "#2563EB".to_string(),
-        area_bottom_color: "#172554".to_string(),
         baseline_top_color: "#22C55E".to_string(),
         baseline_bottom_color: "#F43F5E".to_string(),
     };
 
     assert!(chart.set_appearance_settings(&appearance));
     assert_eq!(chart.appearance_settings(), appearance);
+    let series_options = serde_json::from_str::<serde_json::Value>(
+        &chart
+            .engine
+            .series_options_json(0)
+            .expect("primary series options"),
+    )
+    .expect("primary series options are JSON");
+    assert_eq!(series_options["area_bottom_color"], "");
     assert_eq!(chart.user_state_revision(), revision + 1);
     assert!(!chart.set_appearance_settings(&appearance));
     assert_eq!(chart.user_state_revision(), revision + 1);
