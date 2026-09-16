@@ -310,6 +310,10 @@ pub struct ThemeColors {
     pub danger_foreground: ThemeColor,
     pub button_fill: ThemeColor,
     pub ring: ThemeColor,
+    /// Portable chart bullish token. Nucleus remains authoritative for chart rendering.
+    pub bullish: ThemeColor,
+    /// Portable chart bearish token. Nucleus remains authoritative for chart rendering.
+    pub bearish: ThemeColor,
     /// Native market gain text. This is presentation state, not a chart palette token.
     pub market_up: ThemeColor,
     /// Native market loss text. This is presentation state, not a chart palette token.
@@ -368,7 +372,7 @@ impl AxiusflowTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 19] {
+    pub fn color_tokens(self) -> [ColorToken; 21] {
         let colors = self.colors;
         let sources = match self.mode {
             ThemeMode::Light => LIGHT_COLOR_SOURCES,
@@ -394,6 +398,8 @@ impl AxiusflowTheme {
             ColorToken::new("danger-foreground", sources[16], colors.danger_foreground),
             ColorToken::new("button-fill", sources[17], colors.button_fill),
             ColorToken::new("ring", sources[18], colors.ring),
+            ColorToken::new("bullish", sources[19], colors.bullish),
+            ColorToken::new("bearish", sources[20], colors.bearish),
         ]
     }
 }
@@ -412,7 +418,7 @@ fn dark_colors() -> ThemeColors {
     generated_colors(DARK_COLORS)
 }
 
-fn generated_colors(values: [[u8; 4]; 19]) -> ThemeColors {
+fn generated_colors(values: [[u8; 4]; 21]) -> ThemeColors {
     let color = |index: usize| {
         let [red, green, blue, alpha] = values[index];
         ThemeColor::from_rgba8(red, green, blue, alpha)
@@ -437,6 +443,8 @@ fn generated_colors(values: [[u8; 4]; 19]) -> ThemeColors {
         danger_foreground: color(16),
         button_fill: color(17),
         ring: color(18),
+        bullish: color(19),
+        bearish: color(20),
         market_up: ThemeColor::from_rgb8(8, 153, 129),
         market_down: ThemeColor::from_rgb8(247, 82, 95),
     }
@@ -518,7 +526,8 @@ mod tests {
         assert_eq!(dark.border_secondary, dark.border);
         assert_eq!(light.text_primary, ThemeColor::from_rgb8(51, 51, 51));
         assert_eq!(light.text_secondary, ThemeColor::from_rgb8(123, 123, 123));
-        assert_eq!(light.text_muted, ThemeColor::from_rgb8(209, 209, 209));
+        assert_eq!(light.text_muted, ThemeColor::from_rgb8(92, 92, 92));
+        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(163, 163, 163));
         assert_eq!(light.primary, ThemeColor::from_rgb8(22, 142, 247));
         assert_eq!(dark.primary, light.primary);
         assert_eq!(
@@ -527,6 +536,10 @@ mod tests {
         );
         assert_eq!(light.button_fill, ThemeColor::from_rgb8(51, 51, 51));
         assert_eq!(dark.button_fill, ThemeColor::from_rgb8(247, 247, 247));
+        assert_eq!(light.bullish, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(dark.bullish, ThemeColor::from_rgb8(124, 141, 176));
+        assert_eq!(dark.bearish, ThemeColor::from_rgb8(152, 97, 92));
         assert_eq!(light.market_up, ThemeColor::from_rgb8(8, 153, 129));
         assert_eq!(light.market_down, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.market_up, light.market_up);
@@ -566,11 +579,10 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#F7F7F7");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
-        assert!(
-            !light_tokens
-                .iter()
-                .any(|token| matches!(token.canonical_identifier, "bullish" | "bearish"))
-        );
+        assert_eq!(token_source(&light_tokens, "bullish"), "#089981");
+        assert_eq!(token_source(&light_tokens, "bearish"), "#f7525f");
+        assert_eq!(token_source(&dark_tokens, "bullish"), "#7c8db0");
+        assert_eq!(token_source(&dark_tokens, "bearish"), "#98615c");
     }
 
     #[test]
@@ -705,9 +717,9 @@ mod tests {
         assert!(!css.contains("font-weight: 600;"));
         assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
-        assert!(!css.contains("/* Chart */"));
-        assert!(!css.contains("--bullish:"));
-        assert!(!css.contains("--bearish:"));
+        assert!(css.contains("/* Chart */"));
+        assert!(css.contains("--bullish: #089981;"));
+        assert!(css.contains("--bearish: #f7525f;"));
         assert_eq!(platform_font_family(), "HK Grotesk");
         assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
 

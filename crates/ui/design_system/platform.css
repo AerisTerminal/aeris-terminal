@@ -22,11 +22,6 @@
   --font-feature-tabular-numerals: "tnum";
 }
 
-/*
- * Chart-related custom properties are intentionally absent from this stylesheet.
- * Our charting library owns and applies those colors, so defining them here would
- * duplicate its configuration and create a second source of truth.
- */
 :root {
   /* Surfaces */
   --surface: #ffffff;
@@ -42,7 +37,7 @@
   /* Text */
   --text-primary: #333333;
   --text-secondary: #7B7B7B;
-  --text-muted: #D1D1D1;
+  --text-muted: #5C5C5C;
 
   /* Interaction states */
   --hover-bg: #14141409;
@@ -68,6 +63,10 @@
   --radius-default: 8px;
   --radius-small: 4px;
   --radius-large: 999px;
+
+  /* Chart */
+  --bullish: #089981;
+  --bearish: #f7525f;
 }
 
 .dark {
@@ -84,7 +83,7 @@
 
   /* Text */
   --text-primary: #f0f0f0;
-  --text-secondary: #f0f0f0bd;
+  --text-secondary: #A3A3A3;
   --text-muted: #f0f0f05c;
 
   /* Interaction states */
@@ -106,6 +105,10 @@
 
   /* Focus */
   --ring: #f0f0f026;
+
+  /* Chart */
+  --bullish: #7c8db0;
+  --bearish: #98615c;
 }
 
 *,

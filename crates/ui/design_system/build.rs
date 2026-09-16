@@ -4,7 +4,7 @@ mod token_compiler;
 use std::{env, fmt::Write as _, fs, path::PathBuf};
 use token_compiler::{cascade, parse_hex, parse_pixels, parse_theme_blocks, resolve, source};
 
-const COLORS: [&str; 19] = [
+const COLORS: [&str; 21] = [
     "surface",
     "surface-secondary",
     "border",
@@ -24,6 +24,8 @@ const COLORS: [&str; 19] = [
     "danger-foreground",
     "button-fill",
     "ring",
+    "bullish",
+    "bearish",
 ];
 
 fn main() {
