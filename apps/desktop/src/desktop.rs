@@ -418,7 +418,7 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
-const WORKSPACE_TAB_WIDTH: f32 = 232.0;
+const WORKSPACE_TAB_WIDTH: f32 = 176.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);

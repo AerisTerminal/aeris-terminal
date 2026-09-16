@@ -802,8 +802,8 @@ pub(super) fn workspace_tabs_root(
 #[cfg(test)]
 mod tests {
     use super::{
-        MarketSummaryValues, workspace_tab_aria_label, workspace_tab_change_label,
-        workspace_tab_close_drag_enabled,
+        MarketSummaryValues, WORKSPACE_TAB_WIDTH, workspace_tab_aria_label,
+        workspace_tab_change_label, workspace_tab_close_drag_enabled,
     };
 
     #[test]
@@ -826,5 +826,10 @@ mod tests {
             workspace_tab_aria_label("BTC-USD", change.as_deref()),
             "BTC-USD, change +6.00%"
         );
+    }
+
+    #[test]
+    fn workspace_tabs_fit_symbol_percentage_and_close_without_legacy_price_space() {
+        assert!((WORKSPACE_TAB_WIDTH - 176.0).abs() < f32::EPSILON);
     }
 }

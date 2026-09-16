@@ -167,8 +167,10 @@ impl Control {
     /// Applies the canonical secondary treatment used by dialog cancellation.
     pub(crate) fn dialog_secondary(self, theme: &AxiusflowTheme) -> Self {
         self.theme(theme)
-            .resting_fill(theme.colors.surface_secondary)
-            .bg(theme_color(theme.colors.surface_secondary))
+            .resting_fill(theme.colors.input_fill)
+            .bg(theme_color(theme.colors.input_fill))
+            .border_1()
+            .border_color(theme_color(theme.colors.input_border))
             .text_color(theme_color(theme.colors.text_primary))
     }
 
@@ -445,7 +447,7 @@ mod tests {
     use axiusflow_design_system::AxiusflowTheme;
     use gpui::{FontWeight, InteractiveElement, Styled, px};
 
-    use super::{Control, ControlPolicy, control_geometry, control_label_weight};
+    use super::{Control, ControlPolicy, control_geometry, control_label_weight, theme_color};
 
     #[test]
     fn ordinary_control_labels_keep_the_platform_normal_weight() {
@@ -509,6 +511,14 @@ mod tests {
         assert_eq!(primary.theme, Some(theme));
         assert_eq!(primary.resting_fill, Some(theme.colors.button_fill));
         assert_eq!(secondary.theme, Some(theme));
-        assert_eq!(secondary.resting_fill, Some(theme.colors.surface_secondary));
+        assert_eq!(secondary.resting_fill, Some(theme.colors.input_fill));
+        assert!(secondary.style.border_widths.top.is_some());
+        assert!(secondary.style.border_widths.right.is_some());
+        assert!(secondary.style.border_widths.bottom.is_some());
+        assert!(secondary.style.border_widths.left.is_some());
+        assert_eq!(
+            secondary.style.border_color,
+            Some(theme_color(theme.colors.input_border))
+        );
     }
 }
