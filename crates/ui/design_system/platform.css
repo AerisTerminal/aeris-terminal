@@ -35,13 +35,14 @@
   /* Borders */
   --border: #1414140f;
   --border-secondary: var(--border);
+  --border-width: 0.5px;
   --input-fill: var(--surface-secondary);
   --input-border: var(--border-secondary);
 
   /* Text */
-  --text-primary: #141414;
-  --text-secondary: #141414bd;
-  --text-muted: #1414145c;
+  --text-primary: #333333;
+  --text-secondary: #7B7B7B;
+  --text-muted: #D1D1D1;
 
   /* Interaction states */
   --hover-bg: #14141409;
@@ -52,10 +53,13 @@
   --icon-active: #141414;
 
   /* Actions */
-  --primary: #3e63dd;
-  --primary-foreground: #eff6ff;
+  --primary: #168ef7;
+  --primary-foreground: #fff;
   --danger: #fb3748;
   --danger-foreground: #ffffff;
+
+  /* Buttons */
+  --button-fill: #333333;
 
   /* Focus */
   --ring: #14141433;
@@ -74,6 +78,7 @@
   /* Borders */
   --border: #f0f0f014;
   --border-secondary: var(--border);
+  --border-width: 0.5px;
   --input-fill: var(--surface-secondary);
   --input-border: var(--border-secondary);
 
@@ -91,10 +96,13 @@
   --icon-active: #f0f0f0;
 
   /* Actions */
-  --primary: #3e63dd;
-  --primary-foreground: #eff6ff;
+  --primary: #168ef7;
+  --primary-foreground: #fff;
   --danger: #fb3748;
   --danger-foreground: #ffffff;
+
+  /* Buttons */
+  --button-fill: #F7F7F7;
 
   /* Focus */
   --ring: #f0f0f026;

@@ -345,6 +345,7 @@ pub struct ThemeColors {
     pub primary_foreground: ThemeColor,
     pub danger: ThemeColor,
     pub danger_foreground: ThemeColor,
+    pub button_fill: ThemeColor,
     pub ring: ThemeColor,
 }
 
@@ -352,6 +353,7 @@ pub struct ThemeColors {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeDimensions {
     pub app_header_height: f32,
+    pub border_width: f32,
 }
 
 /// A fully resolved Axiusflow theme suitable for a single paint revision.
@@ -374,6 +376,7 @@ impl AxiusflowTheme {
             },
             dimensions: ThemeDimensions {
                 app_header_height: 44.0,
+                border_width: 0.5,
             },
         }
     }
@@ -398,7 +401,7 @@ impl AxiusflowTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 18] {
+    pub fn color_tokens(self) -> [ColorToken; 19] {
         let colors = self.colors;
         let dark = self.mode == ThemeMode::Dark;
         [
@@ -426,7 +429,7 @@ impl AxiusflowTheme {
             ),
             ColorToken::new(
                 "text-primary",
-                mode_source(dark, "#141414", "#f0f0f0"),
+                mode_source(dark, "#333333", "#f0f0f0"),
                 colors.text_primary,
             ),
             ColorToken::new(
@@ -459,10 +462,15 @@ impl AxiusflowTheme {
                 mode_source(dark, "#141414", "#f0f0f0"),
                 colors.icon_active,
             ),
-            ColorToken::new("primary", "#3e63dd", colors.primary),
-            ColorToken::new("primary-foreground", "#eff6ff", colors.primary_foreground),
+            ColorToken::new("primary", "#168ef7", colors.primary),
+            ColorToken::new("primary-foreground", "#fff", colors.primary_foreground),
             ColorToken::new("danger", "#fb3748", colors.danger),
             ColorToken::new("danger-foreground", "#ffffff", colors.danger_foreground),
+            ColorToken::new(
+                "button-fill",
+                mode_source(dark, "#333333", "#F7F7F7"),
+                colors.button_fill,
+            ),
             ColorToken::new(
                 "ring",
                 mode_source(dark, LIGHT_RING, DARK_RING),
@@ -479,8 +487,8 @@ impl Default for AxiusflowTheme {
 }
 
 const LIGHT_BORDER: &str = "#1414140f";
-const LIGHT_TEXT_SECONDARY: &str = "#141414bd";
-const LIGHT_TEXT_MUTED: &str = "#1414145c";
+const LIGHT_TEXT_SECONDARY: &str = "#7B7B7B";
+const LIGHT_TEXT_MUTED: &str = "#D1D1D1";
 const LIGHT_HOVER: &str = "#14141409";
 const LIGHT_ACTIVE: &str = "#1414140d";
 const LIGHT_ICON: &str = "#14141480";
@@ -502,7 +510,7 @@ const fn mode_source(
 }
 
 fn light_colors() -> ThemeColors {
-    let ink = ThemeColor::from_rgb8(20, 20, 20);
+    let ink = ThemeColor::from_rgb8(51, 51, 51);
     let surface = ThemeColor::from_rgb8(255, 255, 255);
     let surface_secondary = ThemeColor::from_rgb8(250, 250, 250);
     let border = ThemeColor::from_rgba8(20, 20, 20, 0x0f);
@@ -514,16 +522,17 @@ fn light_colors() -> ThemeColors {
         input_fill: surface_secondary,
         input_border: border,
         text_primary: ink,
-        text_secondary: ThemeColor::from_rgba8(20, 20, 20, 0xbd),
-        text_muted: ThemeColor::from_rgba8(20, 20, 20, 0x5c),
+        text_secondary: ThemeColor::from_rgb8(123, 123, 123),
+        text_muted: ThemeColor::from_rgb8(209, 209, 209),
         hover_bg: ThemeColor::from_rgba8(20, 20, 20, 0x09),
         active_bg: ThemeColor::from_rgba8(20, 20, 20, 0x0d),
         icon: ThemeColor::from_rgba8(20, 20, 20, 0x80),
         icon_active: ink,
-        primary: ThemeColor::from_rgb8(62, 99, 221),
-        primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
+        primary: ThemeColor::from_rgb8(22, 142, 247),
+        primary_foreground: ThemeColor::from_rgb8(255, 255, 255),
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
+        button_fill: ThemeColor::from_rgb8(51, 51, 51),
         ring: ThemeColor::from_rgba8(20, 20, 20, 0x33),
     }
 }
@@ -546,10 +555,11 @@ fn dark_colors() -> ThemeColors {
         active_bg: ThemeColor::from_rgba8(240, 240, 240, 0x24),
         icon: ThemeColor::from_rgba8(240, 240, 240, 0xa8),
         icon_active: ink,
-        primary: ThemeColor::from_rgb8(62, 99, 221),
-        primary_foreground: ThemeColor::from_rgb8(239, 246, 255),
+        primary: ThemeColor::from_rgb8(22, 142, 247),
+        primary_foreground: ThemeColor::from_rgb8(255, 255, 255),
         danger: ThemeColor::from_rgb8(251, 55, 72),
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
+        button_fill: ThemeColor::from_rgb8(247, 247, 247),
         ring: ThemeColor::from_rgba8(240, 240, 240, 0x26),
     }
 }
@@ -628,8 +638,17 @@ mod tests {
         assert_eq!(dark.input_fill, dark.surface_secondary);
         assert_eq!(dark.input_border, dark.border);
         assert_eq!(dark.border_secondary, dark.border);
-        assert_eq!(light.primary, ThemeColor::from_rgb8(62, 99, 221));
+        assert_eq!(light.text_primary, ThemeColor::from_rgb8(51, 51, 51));
+        assert_eq!(light.text_secondary, ThemeColor::from_rgb8(123, 123, 123));
+        assert_eq!(light.text_muted, ThemeColor::from_rgb8(209, 209, 209));
+        assert_eq!(light.primary, ThemeColor::from_rgb8(22, 142, 247));
         assert_eq!(dark.primary, light.primary);
+        assert_eq!(
+            light.primary_foreground,
+            ThemeColor::from_rgb8(255, 255, 255)
+        );
+        assert_eq!(light.button_fill, ThemeColor::from_rgb8(51, 51, 51));
+        assert_eq!(dark.button_fill, ThemeColor::from_rgb8(247, 247, 247));
         assert_eq!(light.hover_bg, ThemeColor::from_rgba8(20, 20, 20, 0x09));
         assert_eq!(dark.active_bg, ThemeColor::from_rgba8(240, 240, 240, 0x24));
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
@@ -661,7 +680,9 @@ mod tests {
             "var(--surface-secondary)"
         );
         assert_eq!(token_source(&dark_tokens, "danger"), "#fb3748");
-        assert_eq!(token_source(&dark_tokens, "primary"), "#3e63dd");
+        assert_eq!(token_source(&dark_tokens, "primary"), "#168ef7");
+        assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
+        assert_eq!(token_source(&dark_tokens, "button-fill"), "#F7F7F7");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
         assert!(
             !light_tokens
@@ -681,6 +702,14 @@ mod tests {
             "--radius-default"
         );
         assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-large");
+    }
+
+    #[test]
+    fn border_width_matches_the_platform_contract() {
+        let css = include_str!("../platform.css");
+        assert!((AxiusflowTheme::light().dimensions.border_width - 0.5).abs() < f32::EPSILON);
+        assert!((AxiusflowTheme::dark().dimensions.border_width - 0.5).abs() < f32::EPSILON);
+        assert_eq!(css.matches("--border-width: 0.5px;").count(), 2);
     }
 
     #[test]
