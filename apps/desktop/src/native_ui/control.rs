@@ -156,6 +156,22 @@ impl Control {
         self
     }
 
+    /// Applies the canonical filled action treatment used by dialog confirms.
+    pub(crate) fn dialog_primary(self, theme: &AxiusflowTheme) -> Self {
+        self.theme(theme)
+            .resting_fill(theme.colors.button_fill)
+            .bg(theme_color(theme.colors.button_fill))
+            .text_color(theme_color(theme.colors.surface))
+    }
+
+    /// Applies the canonical secondary treatment used by dialog cancellation.
+    pub(crate) fn dialog_secondary(self, theme: &AxiusflowTheme) -> Self {
+        self.theme(theme)
+            .resting_fill(theme.colors.surface_secondary)
+            .bg(theme_color(theme.colors.surface_secondary))
+            .text_color(theme_color(theme.colors.text_primary))
+    }
+
     /// The opaque fill this control rests on; hover/selected states composite
     /// the CSS alpha tokens over it instead of replacing it.
     pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
@@ -426,6 +442,7 @@ fn theme_color(color: ThemeColor) -> Hsla {
 
 #[cfg(test)]
 mod tests {
+    use axiusflow_design_system::AxiusflowTheme;
     use gpui::{FontWeight, InteractiveElement, Styled, px};
 
     use super::{Control, ControlPolicy, control_geometry, control_label_weight};
@@ -481,5 +498,17 @@ mod tests {
     fn caller_hover_style_replaces_the_default_control_hover_slot() {
         let control = Control::new("custom_hover").hover(|style| style.opacity(0.5));
         assert!(control.hover_style.is_some());
+    }
+
+    #[test]
+    fn dialog_actions_use_canonical_primary_and_secondary_fills() {
+        let theme = AxiusflowTheme::dark();
+        let primary = Control::new("primary").dialog_primary(&theme);
+        let secondary = Control::new("secondary").dialog_secondary(&theme);
+
+        assert_eq!(primary.theme, Some(theme));
+        assert_eq!(primary.resting_fill, Some(theme.colors.button_fill));
+        assert_eq!(secondary.theme, Some(theme));
+        assert_eq!(secondary.resting_fill, Some(theme.colors.surface_secondary));
     }
 }

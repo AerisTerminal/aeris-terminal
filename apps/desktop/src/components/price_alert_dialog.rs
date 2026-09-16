@@ -683,8 +683,7 @@ fn price_alert_dialog_footer(
         .border_color(gpui_color(colors.border_secondary))
         .child(
             Button::new("price_alert_cancel")
-                .theme(theme)
-                .resting_fill(colors.surface_secondary)
+                .dialog_secondary(theme)
                 .label("Cancel")
                 .on_click(move |_, _, cx| {
                     cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
@@ -692,8 +691,7 @@ fn price_alert_dialog_footer(
         )
         .child(
             Button::new("price_alert_create")
-                .theme(theme)
-                .resting_fill(colors.surface)
+                .dialog_primary(theme)
                 .icon(header_icon(HugeIcon::AddIcon01))
                 .label("Create alert")
                 .disabled(capacity_reached)

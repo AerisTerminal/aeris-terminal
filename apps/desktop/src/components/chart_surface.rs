@@ -537,8 +537,8 @@ fn watchlist_row_content(row: &WatchlistRow, theme: &AxiusflowTheme) -> Stateful
     let tone = values
         .change
         .map_or(colors.text_muted, |value| match value.cmp(&0) {
-            std::cmp::Ordering::Less => colors.danger,
-            std::cmp::Ordering::Greater => colors.primary,
+            std::cmp::Ordering::Less => colors.market_down,
+            std::cmp::Ordering::Greater => colors.market_up,
             std::cmp::Ordering::Equal => colors.text_secondary,
         });
     div()

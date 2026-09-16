@@ -347,6 +347,10 @@ pub struct ThemeColors {
     pub danger_foreground: ThemeColor,
     pub button_fill: ThemeColor,
     pub ring: ThemeColor,
+    /// Native market gain text. This is presentation state, not a chart palette token.
+    pub market_up: ThemeColor,
+    /// Native market loss text. This is presentation state, not a chart palette token.
+    pub market_down: ThemeColor,
 }
 
 /// Native application dimensions that are not part of the portable CSS token contract.
@@ -534,6 +538,8 @@ fn light_colors() -> ThemeColors {
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
         button_fill: ThemeColor::from_rgb8(51, 51, 51),
         ring: ThemeColor::from_rgba8(20, 20, 20, 0x33),
+        market_up: ThemeColor::from_rgb8(8, 153, 129),
+        market_down: ThemeColor::from_rgb8(247, 82, 95),
     }
 }
 
@@ -561,6 +567,8 @@ fn dark_colors() -> ThemeColors {
         danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
         button_fill: ThemeColor::from_rgb8(247, 247, 247),
         ring: ThemeColor::from_rgba8(240, 240, 240, 0x26),
+        market_up: ThemeColor::from_rgb8(8, 153, 129),
+        market_down: ThemeColor::from_rgb8(247, 82, 95),
     }
 }
 
@@ -649,6 +657,10 @@ mod tests {
         );
         assert_eq!(light.button_fill, ThemeColor::from_rgb8(51, 51, 51));
         assert_eq!(dark.button_fill, ThemeColor::from_rgb8(247, 247, 247));
+        assert_eq!(light.market_up, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(light.market_down, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(dark.market_up, light.market_up);
+        assert_eq!(dark.market_down, light.market_down);
         assert_eq!(light.hover_bg, ThemeColor::from_rgba8(20, 20, 20, 0x09));
         assert_eq!(dark.active_bg, ThemeColor::from_rgba8(240, 240, 240, 0x24));
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();

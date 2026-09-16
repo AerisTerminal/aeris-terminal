@@ -391,23 +391,13 @@ fn workspace_tab_content(
         })
         .flatten();
     let values = summary.map_or_else(MarketSummaryValues::default, MarketSummaryEntry::values);
-    let price = values.last.map(|value| {
-        market_summary_price(
-            value,
-            summary.map_or(0, |summary| summary.instrument.price_scale),
-        )
-    });
-    let change_label = values.change_percent.map(|value| format!("{value:+.2}%"));
-    let aria_label = match (&price, &change_label) {
-        (Some(price), Some(change)) => format!("{label}, last {price}, change {change}"),
-        (Some(price), None) => format!("{label}, last {price}"),
-        (None, _) => label.clone(),
-    };
+    let change_label = workspace_tab_change_label(values);
+    let aria_label = workspace_tab_aria_label(&label, change_label.as_deref());
     let change_color = values
         .change
         .map_or(theme.colors.text_muted, |value| match value.cmp(&0) {
-            std::cmp::Ordering::Less => theme.colors.danger,
-            std::cmp::Ordering::Greater => theme.colors.primary,
+            std::cmp::Ordering::Less => theme.colors.market_down,
+            std::cmp::Ordering::Greater => theme.colors.market_up,
             std::cmp::Ordering::Equal => theme.colors.text_secondary,
         });
     let exchange = match surface.provider {
@@ -431,14 +421,6 @@ fn workspace_tab_content(
                 .whitespace_nowrap()
                 .child(label.clone()),
         )
-        .children(price.map(|price| {
-            div()
-                .flex_none()
-                .text_xs()
-                .whitespace_nowrap()
-                .text_color(gpui_color(theme.colors.text_secondary))
-                .child(price)
-        }))
         .children(change_label.map(|change| {
             div()
                 .flex_none()
@@ -448,6 +430,17 @@ fn workspace_tab_content(
                 .child(change)
         }));
     (label, aria_label, content)
+}
+
+fn workspace_tab_change_label(values: MarketSummaryValues) -> Option<String> {
+    values.change_percent.map(|value| format!("{value:+.2}%"))
+}
+
+fn workspace_tab_aria_label(label: &str, change: Option<&str>) -> String {
+    change.map_or_else(
+        || label.to_string(),
+        |change| format!("{label}, change {change}"),
+    )
 }
 
 fn workspace_tab(
@@ -808,7 +801,10 @@ pub(super) fn workspace_tabs_root(
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_tab_close_drag_enabled;
+    use super::{
+        MarketSummaryValues, workspace_tab_aria_label, workspace_tab_change_label,
+        workspace_tab_close_drag_enabled,
+    };
 
     #[test]
     fn workspace_tab_close_and_drag_require_multiple_tabs() {
@@ -816,5 +812,19 @@ mod tests {
         assert!(!workspace_tab_close_drag_enabled(1));
         assert!(workspace_tab_close_drag_enabled(2));
         assert!(workspace_tab_close_drag_enabled(3));
+    }
+
+    #[test]
+    fn workspace_tab_stat_is_percentage_change_without_last_price() {
+        let change = workspace_tab_change_label(MarketSummaryValues {
+            last: Some(123_456),
+            change: Some(600),
+            change_percent: Some(6.0),
+        });
+        assert_eq!(change.as_deref(), Some("+6.00%"));
+        assert_eq!(
+            workspace_tab_aria_label("BTC-USD", change.as_deref()),
+            "BTC-USD, change +6.00%"
+        );
     }
 }

@@ -374,8 +374,7 @@ fn study_settings_footer(
         .border_color(gpui_color(colors.border_secondary))
         .child(
             Button::new("study_settings_reset")
-                .theme(theme)
-                .resting_fill(colors.surface_secondary)
+                .dialog_secondary(theme)
                 .label("Reset to defaults")
                 .disabled(busy)
                 .on_click(move |_, window, cx| {
@@ -390,8 +389,7 @@ fn study_settings_footer(
                 .gap_2()
                 .child(
                     Button::new("study_settings_cancel")
-                        .theme(theme)
-                        .resting_fill(colors.surface_secondary)
+                        .dialog_secondary(theme)
                         .label("Cancel")
                         .on_click(move |_, _, cx| {
                             cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
@@ -399,8 +397,7 @@ fn study_settings_footer(
                 )
                 .child(
                     Button::new("study_settings_save")
-                        .theme(theme)
-                        .resting_fill(colors.surface)
+                        .dialog_primary(theme)
                         .label(if busy { "Applying…" } else { "Apply" })
                         .loading(busy)
                         .disabled(busy)

@@ -1047,8 +1047,7 @@ fn chart_settings_template_save_dialog(
                         .gap_2()
                         .child(
                             Button::new("chart_template_cancel")
-                                .theme(theme)
-                                .resting_fill(colors.surface)
+                                .dialog_secondary(theme)
                                 .label("Cancel")
                                 .on_click(move |_, _, cx| {
                                     cancel.update(cx, |terminal, terminal_cx| {
@@ -1058,10 +1057,7 @@ fn chart_settings_template_save_dialog(
                         )
                         .child(
                             Button::new("chart_template_confirm")
-                                .theme(theme)
-                                .resting_fill(colors.primary)
-                                .bg(gpui_color(colors.primary))
-                                .text_color(gpui_color(colors.primary_foreground))
+                                .dialog_primary(theme)
                                 .label("Save")
                                 .on_click(move |_, _, cx| {
                                     save.update(cx, |terminal, terminal_cx| {
