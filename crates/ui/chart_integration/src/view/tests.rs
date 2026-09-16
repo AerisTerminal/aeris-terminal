@@ -1423,8 +1423,9 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     chart.set_theme(ChartTheme::Dark);
     assert_eq!(chart.appearance_settings(), custom);
 
-    let reset = ChartAppearanceSettings::default();
-    assert!(chart.set_appearance_settings(&reset));
+    let revision = chart.user_state_revision();
+    chart.reset_appearance_settings();
+    assert_eq!(chart.user_state_revision(), revision + 1);
     let series = series_entry(&chart, 0);
     assert!(series.up_color.is_none());
     assert!(series.down_color.is_none());

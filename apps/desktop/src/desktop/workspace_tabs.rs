@@ -863,17 +863,14 @@ impl TerminalApp {
     }
 
     pub(super) fn reset_chart_settings(&mut self, menu: &ChartContextMenu, cx: &mut Context<Self>) {
-        let template = self.default_chart_settings.clone().unwrap_or_else(|| {
-            WorkspaceChartSettingsTemplateState {
-                name: "Default".to_string(),
-                chart_type: ChartType::Candles.identifier().to_string(),
-                appearance: Some(workspace_surface::persisted_chart_appearance(
-                    &ChartAppearanceSettings::default(),
-                )),
-                crosshair_mode: 0,
-            }
-        });
-        self.apply_chart_settings_template_to_surface(menu, &template, cx);
+        if let Some(surface) = self.chart_settings_surface(menu) {
+            surface.update(cx, |surface, surface_cx| {
+                surface.reset_chart_appearance(surface_cx);
+            });
+        }
+        if let Some(template) = self.default_chart_settings.clone() {
+            self.apply_chart_settings_template_to_surface(menu, &template, cx);
+        }
         self.chart_settings_color_picker = None;
         self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         cx.notify();

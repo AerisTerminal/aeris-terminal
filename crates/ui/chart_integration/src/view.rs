@@ -2176,6 +2176,15 @@ impl NucleusChartView {
         true
     }
 
+    /// Restores Nucleus-owned styling through the chart engine's canonical reset API.
+    /// Market data, viewport state, drawings, indicators, and other semantic state
+    /// remain owned and preserved by Nucleus.
+    pub fn reset_appearance_settings(&mut self) {
+        self.engine.reset_style_to_defaults();
+        self.invalidate_series_layout();
+        self.mark_user_state_changed();
+    }
+
     /// Applies a built-in Nucleus price-series kind without changing market data.
     pub fn set_chart_type(&mut self, chart_type: ChartType) {
         if self.chart_type == chart_type {

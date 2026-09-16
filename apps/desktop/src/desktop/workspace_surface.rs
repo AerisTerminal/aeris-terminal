@@ -3102,6 +3102,18 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn reset_chart_appearance(&mut self, cx: &mut Context<Self>) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        chart.update(cx, |chart, chart_cx| {
+            chart.reset_appearance_settings();
+            chart_cx.notify();
+        });
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
     pub(super) fn set_chart_crosshair_mode(&mut self, mode: u8, cx: &mut Context<Self>) {
         let Some(chart) = &self.chart else {
             return;
