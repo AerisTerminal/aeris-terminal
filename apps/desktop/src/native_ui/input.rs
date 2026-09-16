@@ -1,6 +1,6 @@
 use std::{ops::Range, time::Duration};
 
-use axiusflow_design_system::{RadiusToken, TypographyRole, platform_font_family};
+use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
@@ -11,7 +11,10 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use super::platform_font_weight;
+use super::{
+    platform_font_weight,
+    theme::{gpui_color, input_appearance, platform_border_width},
+};
 
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
@@ -620,6 +623,7 @@ pub(crate) struct Input {
     fill: Option<Hsla>,
     border_color: Option<Hsla>,
     focus_border_color: Option<Hsla>,
+    border_width: Option<Pixels>,
 }
 
 impl Input {
@@ -636,7 +640,17 @@ impl Input {
             fill: None,
             border_color: None,
             focus_border_color: None,
+            border_width: None,
         }
+    }
+
+    pub(crate) fn platform(mut self, theme: &AxiusflowTheme) -> Self {
+        let (fill, border, focus) = input_appearance(theme);
+        self.fill = Some(gpui_color(fill));
+        self.border_color = Some(gpui_color(border));
+        self.focus_border_color = Some(gpui_color(focus));
+        self.border_width = Some(platform_border_width(theme));
+        self
     }
 
     pub(crate) fn appearance(mut self, appearance: bool) -> Self {
@@ -656,21 +670,6 @@ impl Input {
 
     pub(crate) fn thick_border(mut self, thick_border: bool) -> Self {
         self.set_presentation(Self::THICK_BORDER, thick_border);
-        self
-    }
-
-    pub(crate) fn fill(mut self, fill: Hsla) -> Self {
-        self.fill = Some(fill);
-        self
-    }
-
-    pub(crate) fn border_color(mut self, border_color: Hsla) -> Self {
-        self.border_color = Some(border_color);
-        self
-    }
-
-    pub(crate) fn focus_border_color(mut self, focus_border_color: Hsla) -> Self {
-        self.focus_border_color = Some(focus_border_color);
         self
     }
 
@@ -716,10 +715,9 @@ impl RenderOnce for Input {
                         self.has_presentation(Self::THICK_BORDER),
                         gpui::Styled::border_2,
                     )
-                    .when(
-                        !self.has_presentation(Self::THICK_BORDER),
-                        gpui::Styled::border_1,
-                    )
+                    .when(!self.has_presentation(Self::THICK_BORDER), |element| {
+                        element.border(self.border_width.unwrap_or(px(1.0)))
+                    })
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_color(border_color)
             })

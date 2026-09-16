@@ -4,7 +4,10 @@
 //! checked CSS manifest uses generated custom-property names, while painting
 //! code consumes typed values without string lookup.
 
-use std::sync::OnceLock;
+#[cfg(test)]
+mod token_compiler;
+
+include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
@@ -14,43 +17,6 @@ pub static PLATFORM_FONT_BYTES: [&[u8]; 2] = [
     include_bytes!("../assets/fonts/HKGrotesk-Medium.ttf"),
     include_bytes!("../assets/fonts/HKGrotesk-Bold.ttf"),
 ];
-
-static PLATFORM_TYPOGRAPHY: OnceLock<PlatformTypography> = OnceLock::new();
-
-fn css_custom_property_value(declaration: &'static str) -> &'static str {
-    let Some(start) = PLATFORM_CSS.find(declaration) else {
-        panic!("platform.css must declare {declaration}");
-    };
-    let value = &PLATFORM_CSS[start + declaration.len()..];
-    let Some((value, _)) = value.split_once(';') else {
-        panic!("platform.css {declaration} declaration must end with a semicolon");
-    };
-    value.trim()
-}
-
-fn primary_font_family(stack: &'static str, declaration: &'static str) -> &'static str {
-    let Some(quoted) = stack.strip_prefix('"') else {
-        panic!("platform.css {declaration} must begin with a quoted family");
-    };
-    let Some((family, _)) = quoted.split_once('"') else {
-        panic!("platform.css {declaration} must contain a closing quote");
-    };
-    family
-}
-
-fn css_weight(declaration: &'static str) -> u16 {
-    css_custom_property_value(declaration)
-        .parse()
-        .unwrap_or_else(|_| panic!("platform.css {declaration} must be an integer font weight"))
-}
-
-fn quoted_css_value(declaration: &'static str) -> &'static str {
-    let value = css_custom_property_value(declaration);
-    value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or_else(|| panic!("platform.css {declaration} must be a quoted string"))
-}
 
 /// Semantic roles in the canonical platform typography hierarchy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,17 +70,14 @@ impl PlatformTypography {
 /// Returns the canonical typography contract projected from `platform.css`.
 #[must_use]
 pub fn platform_typography() -> PlatformTypography {
-    *PLATFORM_TYPOGRAPHY.get_or_init(|| {
-        let stack = css_custom_property_value("--font-sans:");
-        PlatformTypography {
-            stack,
-            family: primary_font_family(stack, "--font-sans"),
-            normal_weight: css_weight("--font-weight-normal:"),
-            emphasis_weight: css_weight("--font-weight-emphasis:"),
-            strong_weight: css_weight("--font-weight-strong:"),
-            tabular_numerals_feature: quoted_css_value("--font-feature-tabular-numerals:"),
-        }
-    })
+    PlatformTypography {
+        stack: FONT_STACK,
+        family: FONT_FAMILY,
+        normal_weight: FONT_WEIGHT_NORMAL,
+        emphasis_weight: FONT_WEIGHT_EMPHASIS,
+        strong_weight: FONT_WEIGHT_STRONG,
+        tabular_numerals_feature: TABULAR_FEATURE,
+    }
 }
 
 /// Returns the `--font-sans` value from `platform.css`.
@@ -380,7 +343,7 @@ impl AxiusflowTheme {
             },
             dimensions: ThemeDimensions {
                 app_header_height: 44.0,
-                border_width: 0.5,
+                border_width: BORDER_WIDTH,
             },
         }
     }
@@ -407,79 +370,30 @@ impl AxiusflowTheme {
     #[must_use]
     pub fn color_tokens(self) -> [ColorToken; 19] {
         let colors = self.colors;
-        let dark = self.mode == ThemeMode::Dark;
+        let sources = match self.mode {
+            ThemeMode::Light => LIGHT_COLOR_SOURCES,
+            ThemeMode::Dark => DARK_COLOR_SOURCES,
+        };
         [
-            ColorToken::new(
-                "surface",
-                mode_source(dark, "#ffffff", "#141414"),
-                colors.surface,
-            ),
-            ColorToken::new(
-                "surface-secondary",
-                mode_source(dark, "#fafafa", "#181818"),
-                colors.surface_secondary,
-            ),
-            ColorToken::new(
-                "border",
-                mode_source(dark, LIGHT_BORDER, DARK_BORDER),
-                colors.border,
-            ),
-            ColorToken::new("border-secondary", "var(--border)", colors.border_secondary),
-            ColorToken::new("input-fill", "var(--surface-secondary)", colors.input_fill),
-            ColorToken::new(
-                "input-border",
-                "var(--border-secondary)",
-                colors.input_border,
-            ),
-            ColorToken::new(
-                "text-primary",
-                mode_source(dark, "#333333", "#f0f0f0"),
-                colors.text_primary,
-            ),
-            ColorToken::new(
-                "text-secondary",
-                mode_source(dark, LIGHT_TEXT_SECONDARY, DARK_TEXT_SECONDARY),
-                colors.text_secondary,
-            ),
-            ColorToken::new(
-                "text-muted",
-                mode_source(dark, LIGHT_TEXT_MUTED, DARK_TEXT_MUTED),
-                colors.text_muted,
-            ),
-            ColorToken::new(
-                "hover-bg",
-                mode_source(dark, LIGHT_HOVER, DARK_HOVER),
-                colors.hover_bg,
-            ),
-            ColorToken::new(
-                "active-bg",
-                mode_source(dark, LIGHT_ACTIVE, DARK_ACTIVE),
-                colors.active_bg,
-            ),
-            ColorToken::new(
-                "icon",
-                mode_source(dark, LIGHT_ICON, DARK_ICON),
-                colors.icon,
-            ),
-            ColorToken::new(
-                "icon-active",
-                mode_source(dark, "#141414", "#f0f0f0"),
-                colors.icon_active,
-            ),
-            ColorToken::new("primary", "#168ef7", colors.primary),
-            ColorToken::new("primary-foreground", "#fff", colors.primary_foreground),
-            ColorToken::new("danger", "#fb3748", colors.danger),
-            ColorToken::new("danger-foreground", "#ffffff", colors.danger_foreground),
-            ColorToken::new(
-                "button-fill",
-                mode_source(dark, "#333333", "#F7F7F7"),
-                colors.button_fill,
-            ),
-            ColorToken::new(
-                "ring",
-                mode_source(dark, LIGHT_RING, DARK_RING),
-                colors.ring,
-            ),
+            ColorToken::new("surface", sources[0], colors.surface),
+            ColorToken::new("surface-secondary", sources[1], colors.surface_secondary),
+            ColorToken::new("border", sources[2], colors.border),
+            ColorToken::new("border-secondary", sources[3], colors.border_secondary),
+            ColorToken::new("input-fill", sources[4], colors.input_fill),
+            ColorToken::new("input-border", sources[5], colors.input_border),
+            ColorToken::new("text-primary", sources[6], colors.text_primary),
+            ColorToken::new("text-secondary", sources[7], colors.text_secondary),
+            ColorToken::new("text-muted", sources[8], colors.text_muted),
+            ColorToken::new("hover-bg", sources[9], colors.hover_bg),
+            ColorToken::new("active-bg", sources[10], colors.active_bg),
+            ColorToken::new("icon", sources[11], colors.icon),
+            ColorToken::new("icon-active", sources[12], colors.icon_active),
+            ColorToken::new("primary", sources[13], colors.primary),
+            ColorToken::new("primary-foreground", sources[14], colors.primary_foreground),
+            ColorToken::new("danger", sources[15], colors.danger),
+            ColorToken::new("danger-foreground", sources[16], colors.danger_foreground),
+            ColorToken::new("button-fill", sources[17], colors.button_fill),
+            ColorToken::new("ring", sources[18], colors.ring),
         ]
     }
 }
@@ -490,83 +404,39 @@ impl Default for AxiusflowTheme {
     }
 }
 
-const LIGHT_BORDER: &str = "#1414140f";
-const LIGHT_TEXT_SECONDARY: &str = "#7B7B7B";
-const LIGHT_TEXT_MUTED: &str = "#D1D1D1";
-const LIGHT_HOVER: &str = "#14141409";
-const LIGHT_ACTIVE: &str = "#1414140d";
-const LIGHT_ICON: &str = "#14141480";
-const LIGHT_RING: &str = "#14141433";
-const DARK_BORDER: &str = "#f0f0f014";
-const DARK_TEXT_SECONDARY: &str = "#f0f0f0bd";
-const DARK_TEXT_MUTED: &str = "#f0f0f05c";
-const DARK_HOVER: &str = "#f0f0f014";
-const DARK_ACTIVE: &str = "#f0f0f024";
-const DARK_ICON: &str = "#f0f0f0a8";
-const DARK_RING: &str = "#f0f0f026";
-
-const fn mode_source(
-    dark: bool,
-    light_source: &'static str,
-    dark_source: &'static str,
-) -> &'static str {
-    if dark { dark_source } else { light_source }
-}
-
 fn light_colors() -> ThemeColors {
-    let ink = ThemeColor::from_rgb8(51, 51, 51);
-    let surface = ThemeColor::from_rgb8(255, 255, 255);
-    let surface_secondary = ThemeColor::from_rgb8(250, 250, 250);
-    let border = ThemeColor::from_rgba8(20, 20, 20, 0x0f);
-    ThemeColors {
-        surface,
-        surface_secondary,
-        border,
-        border_secondary: border,
-        input_fill: surface_secondary,
-        input_border: border,
-        text_primary: ink,
-        text_secondary: ThemeColor::from_rgb8(123, 123, 123),
-        text_muted: ThemeColor::from_rgb8(209, 209, 209),
-        hover_bg: ThemeColor::from_rgba8(20, 20, 20, 0x09),
-        active_bg: ThemeColor::from_rgba8(20, 20, 20, 0x0d),
-        icon: ThemeColor::from_rgba8(20, 20, 20, 0x80),
-        icon_active: ink,
-        primary: ThemeColor::from_rgb8(22, 142, 247),
-        primary_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        danger: ThemeColor::from_rgb8(251, 55, 72),
-        danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        button_fill: ThemeColor::from_rgb8(51, 51, 51),
-        ring: ThemeColor::from_rgba8(20, 20, 20, 0x33),
-        market_up: ThemeColor::from_rgb8(8, 153, 129),
-        market_down: ThemeColor::from_rgb8(247, 82, 95),
-    }
+    generated_colors(LIGHT_COLORS)
 }
 
 fn dark_colors() -> ThemeColors {
-    let ink = ThemeColor::from_rgb8(240, 240, 240);
-    let surface_secondary = ThemeColor::from_rgb8(24, 24, 24);
-    let border = ThemeColor::from_rgba8(240, 240, 240, 0x14);
+    generated_colors(DARK_COLORS)
+}
+
+fn generated_colors(values: [[u8; 4]; 19]) -> ThemeColors {
+    let color = |index: usize| {
+        let [red, green, blue, alpha] = values[index];
+        ThemeColor::from_rgba8(red, green, blue, alpha)
+    };
     ThemeColors {
-        surface: ThemeColor::from_rgb8(20, 20, 20),
-        surface_secondary,
-        border,
-        border_secondary: border,
-        input_fill: surface_secondary,
-        input_border: border,
-        text_primary: ink,
-        text_secondary: ThemeColor::from_rgba8(240, 240, 240, 0xbd),
-        text_muted: ThemeColor::from_rgba8(240, 240, 240, 0x5c),
-        hover_bg: ThemeColor::from_rgba8(240, 240, 240, 0x14),
-        active_bg: ThemeColor::from_rgba8(240, 240, 240, 0x24),
-        icon: ThemeColor::from_rgba8(240, 240, 240, 0xa8),
-        icon_active: ink,
-        primary: ThemeColor::from_rgb8(22, 142, 247),
-        primary_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        danger: ThemeColor::from_rgb8(251, 55, 72),
-        danger_foreground: ThemeColor::from_rgb8(255, 255, 255),
-        button_fill: ThemeColor::from_rgb8(247, 247, 247),
-        ring: ThemeColor::from_rgba8(240, 240, 240, 0x26),
+        surface: color(0),
+        surface_secondary: color(1),
+        border: color(2),
+        border_secondary: color(3),
+        input_fill: color(4),
+        input_border: color(5),
+        text_primary: color(6),
+        text_secondary: color(7),
+        text_muted: color(8),
+        hover_bg: color(9),
+        active_bg: color(10),
+        icon: color(11),
+        icon_active: color(12),
+        primary: color(13),
+        primary_foreground: color(14),
+        danger: color(15),
+        danger_foreground: color(16),
+        button_fill: color(17),
+        ring: color(18),
         market_up: ThemeColor::from_rgb8(8, 153, 129),
         market_down: ThemeColor::from_rgb8(247, 82, 95),
     }
@@ -601,9 +471,9 @@ impl RadiusToken {
     #[must_use]
     pub const fn logical_pixels(self) -> u16 {
         match self {
-            Self::Sm => 4,
-            Self::Default => 8,
-            Self::Full => 999,
+            Self::Sm => RADIUS_SMALL,
+            Self::Default => RADIUS_DEFAULT,
+            Self::Full => RADIUS_LARGE,
         }
     }
 }

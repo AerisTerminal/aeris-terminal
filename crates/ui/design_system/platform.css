@@ -168,17 +168,17 @@ button,
 }
 
 .button-primary {
-  border: 1px solid transparent;
-  background: var(--primary);
-  color: var(--primary-foreground);
+  border: var(--border-width) solid transparent;
+  background: var(--button-fill);
+  color: var(--surface);
 }
 
 .button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
-  background: color-mix(in srgb, var(--primary) 85%, black);
+  background: color-mix(in srgb, var(--button-fill) 85%, var(--surface));
 }
 
 .button-outline {
-  border: 1px solid var(--border-secondary);
+  border: var(--border-width) solid var(--border-secondary);
   background: var(--surface-secondary);
   color: var(--text-primary);
 }
@@ -192,7 +192,7 @@ button,
 }
 
 .button-ghost {
-  border: 1px solid transparent;
+  border: var(--border-width) solid transparent;
   background: transparent;
   color: var(--text-secondary);
 }
@@ -221,7 +221,7 @@ button:disabled,
 input,
 select,
 textarea {
-  border: 1px solid var(--input-border);
+  border: var(--border-width) solid var(--input-border);
   border-radius: var(--radius-default);
   background: var(--input-fill);
   color: var(--text-primary);

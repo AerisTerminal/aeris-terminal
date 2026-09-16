@@ -4,7 +4,10 @@ use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platf
 use gpui::{App, Context, Entity, Render, Role, Window, div, prelude::*, px};
 
 use crate::desktop::native_ui::platform_font_weight;
-use crate::desktop::terminal_chrome::{brand_mark_sized, gpui_color, onboarding_title_bar};
+use crate::{
+    desktop::native_ui::theme::gpui_color,
+    desktop::terminal_chrome::{brand_mark_sized, onboarding_title_bar},
+};
 
 pub(super) struct OnboardingApp {
     theme: AxiusflowTheme,

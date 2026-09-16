@@ -147,7 +147,7 @@ fn about_update_row(
             AboutAction::Retry => "Retry",
         };
         Button::new("about_update_action")
-            .dialog_primary(theme)
+            .variant(theme, ButtonVariant::Filled)
             .icon(header_icon(HugeIcon::Refresh01Icon))
             .label(label)
             .on_click(move |_, _, cx| {

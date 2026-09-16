@@ -148,6 +148,7 @@ use native_ui::{
     platform_font_weight, platform_tabular_numerals,
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     tab::Tab,
+    theme::{ButtonVariant, gpui_color},
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
@@ -182,9 +183,9 @@ use terminal_chrome::{
 };
 use terminal_chrome::{
     WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, button_activation,
-    chrome_button_style, chrome_tooltip, exchange_mark, fullscreen_escape_command, gpui_color,
-    header_icon, nucleus_chart_theme, series_glyph, terminal_header,
-    window_move_gesture_transition, workspace_title_bar, workspace_title_bar_visible,
+    chrome_button_style, chrome_tooltip, exchange_mark, fullscreen_escape_command, header_icon,
+    nucleus_chart_theme, series_glyph, terminal_header, window_move_gesture_transition,
+    workspace_title_bar, workspace_title_bar_visible,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,

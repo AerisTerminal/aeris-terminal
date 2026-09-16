@@ -1,12 +1,13 @@
-use axiusflow_design_system::{
-    AxiusflowTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
-};
+use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
-    AnyElement, App, Div, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, RenderOnce, Stateful, StyleRefinement, Styled, Window, div, prelude::*, px,
+    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
+    RenderOnce, Stateful, StyleRefinement, Styled, Window, div, prelude::*, px,
 };
 
-use super::platform_font_weight;
+use super::{
+    platform_font_weight,
+    theme::{gpui_color, platform_border_width},
+};
 
 fn tab_radius() -> gpui::Pixels {
     px(f32::from(RadiusToken::Full.logical_pixels()))
@@ -91,8 +92,8 @@ impl RenderOnce for Tab {
             .role(gpui::Role::Tab)
             .aria_selected(self.selected)
             .rounded(tab_radius())
-            .border_1()
-            .border_color(theme_color(if self.selected {
+            .border(platform_border_width(&self.theme))
+            .border_color(gpui_color(if self.selected {
                 if self.segmented {
                     resting_border
                 } else {
@@ -101,12 +102,12 @@ impl RenderOnce for Tab {
             } else {
                 resting_border
             }))
-            .bg(theme_color(if self.selected {
+            .bg(gpui_color(if self.selected {
                 selected_fill
             } else {
                 resting_fill
             }))
-            .text_color(theme_color(if self.selected {
+            .text_color(gpui_color(if self.selected {
                 colors.text_primary
             } else {
                 colors.text_secondary
@@ -116,22 +117,17 @@ impl RenderOnce for Tab {
             .cursor_pointer()
             .when(!self.selected, |tab| {
                 tab.hover(move |tab| {
-                    tab.bg(theme_color(colors.hover_bg.over(resting_fill)))
-                        .text_color(theme_color(colors.text_primary))
+                    tab.bg(gpui_color(colors.hover_bg.over(resting_fill)))
+                        .text_color(gpui_color(colors.text_primary))
                 })
             })
-            .focus_visible(move |tab| tab.border_color(theme_color(colors.ring)).border_2())
+            .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2())
             .children(self.children);
         tab.style().refine(&self.style);
         // Radius is component-owned: callers can size/layout a tab, but every
         // semantic tab remains the canonical 999px pill from platform.css.
         tab.rounded(tab_radius())
     }
-}
-
-fn theme_color(color: ThemeColor) -> Hsla {
-    let (h, s, l, a) = color.hsla_components();
-    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

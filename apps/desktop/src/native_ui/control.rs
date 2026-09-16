@@ -7,16 +7,17 @@ use gpui::{
     StyleRefinement, Styled, Window, div, prelude::*, px,
 };
 
-use super::{icon::Icon, loader::Loader, platform_font_weight, tooltip::TooltipSpec};
+use super::{
+    icon::Icon,
+    loader::Loader,
+    platform_font_weight,
+    theme::{
+        ButtonAppearance, ButtonVariant, button_appearance, gpui_color, platform_border_width,
+    },
+    tooltip::TooltipSpec,
+};
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ControlSurface {
-    fill: ThemeColor,
-    foreground: ThemeColor,
-    border: Option<ThemeColor>,
-}
 
 const DEFAULT_CONTROL_SIZE: Pixels = px(32.0);
 const DEFAULT_ICON_SIZE: Pixels = px(16.0);
@@ -60,13 +61,19 @@ fn with_pointer_states(
         )
 }
 
-fn with_control_surface(control: Stateful<Div>, surface: Option<ControlSurface>) -> Stateful<Div> {
+fn with_control_surface(
+    control: Stateful<Div>,
+    surface: Option<ButtonAppearance>,
+    theme: Option<&AxiusflowTheme>,
+) -> Stateful<Div> {
     control.when_some(surface, |control, surface| {
         control
-            .bg(theme_color(surface.fill))
-            .text_color(theme_color(surface.foreground))
+            .bg(gpui_color(surface.fill))
+            .text_color(gpui_color(surface.foreground))
             .when_some(surface.border, |control, border| {
-                control.border_1().border_color(theme_color(border))
+                control
+                    .border(theme.map_or(px(1.0), platform_border_width))
+                    .border_color(gpui_color(border))
             })
     })
 }
@@ -129,7 +136,7 @@ pub(crate) struct Control {
     loading_icon: Option<Icon>,
     children: Vec<AnyElement>,
     theme: Option<AxiusflowTheme>,
-    surface: Option<ControlSurface>,
+    surface: Option<ButtonAppearance>,
     resting_fill: Option<ThemeColor>,
     tooltip: Option<TooltipSpec>,
     activation: Option<Activation>,
@@ -176,27 +183,11 @@ impl Control {
         self
     }
 
-    /// Applies the canonical filled action treatment used by dialog confirms.
-    pub(crate) fn dialog_primary(mut self, theme: &AxiusflowTheme) -> Self {
+    pub(crate) fn variant(mut self, theme: &AxiusflowTheme, variant: ButtonVariant) -> Self {
         self.theme = Some(*theme);
-        self.resting_fill = Some(theme.colors.button_fill);
-        self.surface = Some(ControlSurface {
-            fill: theme.colors.button_fill,
-            foreground: theme.colors.surface,
-            border: None,
-        });
-        self
-    }
-
-    /// Applies the canonical secondary treatment used by dialog cancellation.
-    pub(crate) fn dialog_secondary(mut self, theme: &AxiusflowTheme) -> Self {
-        self.theme = Some(*theme);
-        self.resting_fill = Some(theme.colors.surface_secondary);
-        self.surface = Some(ControlSurface {
-            fill: theme.colors.surface_secondary,
-            foreground: theme.colors.text_primary,
-            border: Some(theme.colors.border_secondary),
-        });
+        let appearance = button_appearance(theme, variant);
+        self.resting_fill = Some(appearance.fill);
+        self.surface = Some(appearance);
         self
     }
 
@@ -324,13 +315,20 @@ impl Control {
     }
 
     fn state_colors(&self) -> (Option<Hsla>, Option<Hsla>) {
+        if let Some(appearance) = self.surface {
+            return (
+                Some(gpui_color(appearance.hover)),
+                Some(gpui_color(appearance.active)),
+            );
+        }
         let Some(theme) = self.theme else {
             return (None, None);
         };
-        let backdrop = self.resting_fill.unwrap_or(theme.colors.surface);
+        let ghost = button_appearance(&theme, ButtonVariant::Ghost);
+        let backdrop = self.resting_fill.unwrap_or(ghost.fill);
         (
-            Some(theme_color(theme.colors.hover_bg.over(backdrop))),
-            Some(theme_color(theme.colors.active_bg.over(backdrop))),
+            Some(gpui_color(theme.colors.hover_bg.over(backdrop))),
+            Some(gpui_color(theme.colors.active_bg.over(backdrop))),
         )
     }
 }
@@ -370,10 +368,10 @@ impl RenderOnce for Control {
         );
         let focus_color = self.theme.map_or_else(
             || window.text_style().color,
-            |theme| theme_color(theme.colors.ring),
+            |theme| gpui_color(theme.colors.ring),
         );
         let (hover_color, selected_color) = self.state_colors();
-        let disabled_color = self.theme.map(|theme| theme_color(theme.colors.text_muted));
+        let disabled_color = self.theme.map(|theme| gpui_color(theme.colors.text_muted));
         // `with_size` is the control-size contract used by the desktop shell.
         // A custom-sized icon is painted at 75% of that square, preserving the
         // established 32 px control / 24 px glyph geometry.
@@ -410,7 +408,7 @@ impl RenderOnce for Control {
             .when(has_text, |this| this.font_weight(control_label_weight()))
             .when(has_text, |this| this.px(padding))
             .when(!has_text, |this| this.size(control_size));
-        let control = with_control_surface(control, surface)
+        let control = with_control_surface(control, surface, self.theme.as_ref())
             .when(policy.accepts_input(), gpui::Styled::cursor_pointer)
             .when(!policy.accepts_input(), gpui::Styled::cursor_default);
         let mut control = with_pointer_states(
@@ -465,17 +463,13 @@ impl RenderOnce for Control {
     }
 }
 
-fn theme_color(color: ThemeColor) -> Hsla {
-    let (h, s, l, a) = color.hsla_components();
-    Hsla { h, s, l, a }
-}
-
 #[cfg(test)]
 mod tests {
     use axiusflow_design_system::AxiusflowTheme;
     use gpui::{FontWeight, InteractiveElement, Styled, px};
 
-    use super::{Control, ControlPolicy, ControlSurface, control_geometry, control_label_weight};
+    use super::super::theme::{ButtonVariant, button_appearance};
+    use super::{Control, ControlPolicy, control_geometry, control_label_weight};
 
     #[test]
     fn ordinary_control_labels_keep_the_platform_normal_weight() {
@@ -533,27 +527,19 @@ mod tests {
     #[test]
     fn dialog_actions_use_canonical_primary_and_secondary_fills() {
         let theme = AxiusflowTheme::dark();
-        let primary = Control::new("primary").dialog_primary(&theme);
-        let secondary = Control::new("secondary").dialog_secondary(&theme);
+        let primary = Control::new("primary").variant(&theme, ButtonVariant::Filled);
+        let secondary = Control::new("secondary").variant(&theme, ButtonVariant::Secondary);
 
         assert_eq!(primary.theme, Some(theme));
         assert_eq!(
             primary.surface,
-            Some(ControlSurface {
-                fill: theme.colors.button_fill,
-                foreground: theme.colors.surface,
-                border: None,
-            })
+            Some(button_appearance(&theme, ButtonVariant::Filled))
         );
         assert_eq!(primary.resting_fill, Some(theme.colors.button_fill));
         assert_eq!(secondary.theme, Some(theme));
         assert_eq!(
             secondary.surface,
-            Some(ControlSurface {
-                fill: theme.colors.surface_secondary,
-                foreground: theme.colors.text_primary,
-                border: Some(theme.colors.border_secondary),
-            })
+            Some(button_appearance(&theme, ButtonVariant::Secondary))
         );
         assert_eq!(secondary.resting_fill, Some(theme.colors.surface_secondary));
     }

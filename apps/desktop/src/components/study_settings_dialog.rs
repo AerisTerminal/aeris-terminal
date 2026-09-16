@@ -138,13 +138,7 @@ fn text_control(
             div()
                 .h(px(32.0))
                 .opacity(if enabled { 1.0 } else { 0.55 })
-                .child(
-                    Input::new(input)
-                        .fill(gpui_color(colors.surface_secondary))
-                        .border_color(gpui_color(colors.border))
-                        .focus_border_color(gpui_color(colors.ring))
-                        .flex_1(),
-                )
+                .child(Input::new(input).platform(theme).flex_1())
                 .into_any_element()
         },
     )
@@ -374,7 +368,7 @@ fn study_settings_footer(
         .border_color(gpui_color(colors.border_secondary))
         .child(
             Button::new("study_settings_reset")
-                .dialog_secondary(theme)
+                .variant(theme, ButtonVariant::Destructive)
                 .label("Reset to defaults")
                 .disabled(busy)
                 .on_click(move |_, window, cx| {
@@ -389,7 +383,7 @@ fn study_settings_footer(
                 .gap_2()
                 .child(
                     Button::new("study_settings_cancel")
-                        .dialog_secondary(theme)
+                        .variant(theme, ButtonVariant::Secondary)
                         .label("Cancel")
                         .on_click(move |_, _, cx| {
                             cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
@@ -397,7 +391,7 @@ fn study_settings_footer(
                 )
                 .child(
                     Button::new("study_settings_save")
-                        .dialog_primary(theme)
+                        .variant(theme, ButtonVariant::Filled)
                         .label(if busy { "Applying…" } else { "Apply" })
                         .loading(busy)
                         .disabled(busy)

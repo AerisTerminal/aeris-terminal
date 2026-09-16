@@ -1,14 +1,15 @@
 use std::time::Duration;
 
-use axiusflow_design_system::{
-    AxiusflowTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
-};
+use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
-    AnyView, App, Context, ElementId, Hsla, IntoElement, Render, SharedString, Window, div,
-    prelude::*, px,
+    AnyView, App, Context, ElementId, IntoElement, Render, SharedString, Window, div, prelude::*,
+    px,
 };
 
-use super::platform_font_weight;
+use super::{
+    platform_font_weight,
+    theme::{gpui_color, platform_border_width},
+};
 
 /// Data needed to build a native GPUI tooltip without process-global theme
 /// state.
@@ -64,13 +65,13 @@ impl Render for TooltipView {
                 .px_2()
                 .py_1()
                 .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .border_1()
-                .border_color(theme_color(colors.border))
-                .bg(theme_color(colors.surface))
+                .border(platform_border_width(&self.theme))
+                .border_color(gpui_color(colors.border))
+                .bg(gpui_color(colors.surface))
                 .font_family(platform_font_family())
                 .font_weight(platform_font_weight(TypographyRole::Normal))
                 .text_xs()
-                .text_color(theme_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_primary))
                 .child(self.label.clone()),
         )
     }
@@ -90,11 +91,6 @@ pub(crate) fn with_tooltip(
         .child(trigger)
         .tooltip(spec.builder())
         .tooltip_show_delay(delay)
-}
-
-fn theme_color(color: ThemeColor) -> Hsla {
-    let (h, s, l, a) = color.hsla_components();
-    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

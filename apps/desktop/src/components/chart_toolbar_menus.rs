@@ -539,7 +539,6 @@ pub(super) fn quick_timeframe_overlay_content(
     input: &Entity<InputState>,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     div()
         .w(px(QUICK_TIMEFRAME_POPUP_WIDTH))
         .flex()
@@ -566,9 +565,7 @@ pub(super) fn quick_timeframe_overlay_content(
                         .bordered(true)
                         .focus_bordered(true)
                         .thick_border(true)
-                        .fill(gpui_color(colors.input_fill))
-                        .border_color(gpui_color(colors.input_border))
-                        .focus_border_color(gpui_color(colors.ring))
+                        .platform(theme)
                         .flex_1(),
                 ),
         )

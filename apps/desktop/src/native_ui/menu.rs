@@ -4,11 +4,14 @@ use axiusflow_design_system::{
     AxiusflowTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, Pixels, Point, RenderOnce,
+    AnyElement, App, ClickEvent, Div, ElementId, IntoElement, Pixels, Point, RenderOnce,
     SharedString, Stateful, Window, div, prelude::*, px,
 };
 
-use super::platform_font_weight;
+use super::{
+    platform_font_weight,
+    theme::{gpui_color, platform_border_width},
+};
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type Hover = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
@@ -218,7 +221,7 @@ impl RenderOnce for MenuRow {
             .flex_1()
             .min_w_0()
             .truncate()
-            .text_color(theme_color(label_color))
+            .text_color(gpui_color(label_color))
             .child(self.label.clone());
 
         div()
@@ -237,7 +240,7 @@ impl RenderOnce for MenuRow {
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_sm()
-            .text_color(theme_color(label_color))
+            .text_color(gpui_color(label_color))
             .when(rounded, |row| {
                 row.rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             })
@@ -248,8 +251,8 @@ impl RenderOnce for MenuRow {
                 row.rounded_bl(inner_radius).rounded_br(inner_radius)
             })
             .when(self.behavior.highlighted, |row| {
-                row.bg(theme_color(highlighted_fill))
-                    .text_color(theme_color(label_color))
+                row.bg(gpui_color(highlighted_fill))
+                    .text_color(gpui_color(label_color))
                     .when(round_top, |row| {
                         row.rounded_tl(inner_radius).rounded_tr(inner_radius)
                     })
@@ -260,8 +263,8 @@ impl RenderOnce for MenuRow {
             .when(enabled, |row| {
                 row.cursor_pointer().hover(|style| {
                     let mut style = style
-                        .bg(theme_color(hover_fill))
-                        .text_color(theme_color(label_color));
+                        .bg(gpui_color(hover_fill))
+                        .text_color(gpui_color(label_color));
                     if round_top {
                         style = style.rounded_tl(inner_radius).rounded_tr(inner_radius);
                     }
@@ -303,13 +306,13 @@ fn compact_menu_panel_with_elevation(
         .w(width)
         .occlude()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(theme_color(colors.border_secondary))
-        .bg(theme_color(colors.surface_secondary))
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
         .when(elevated, gpui::Styled::shadow_md)
         .font_family(platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
-        .text_color(theme_color(colors.text_primary))
+        .text_color(gpui_color(colors.text_primary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
@@ -339,13 +342,8 @@ pub(crate) fn menu_separator(theme: &AxiusflowTheme) -> Div {
         div()
             .h_px()
             .w_full()
-            .bg(theme_color(theme.colors.border_secondary)),
+            .bg(gpui_color(theme.colors.border_secondary)),
     )
-}
-
-fn theme_color(color: ThemeColor) -> Hsla {
-    let (h, s, l, a) = color.hsla_components();
-    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

@@ -1028,12 +1028,7 @@ fn chart_settings_template_save_dialog(
                         .font_weight(platform_font_weight(TypographyRole::Strong))
                         .child("Save chart template"),
                 )
-                .children(input.map(|input| {
-                    Input::new(input)
-                        .fill(gpui_color(colors.surface_secondary))
-                        .border_color(gpui_color(colors.input_border))
-                        .focus_border_color(gpui_color(colors.ring))
-                }))
+                .children(input.map(|input| Input::new(input).platform(theme)))
                 .children(error.map(|error| {
                     div()
                         .text_xs()
@@ -1047,7 +1042,7 @@ fn chart_settings_template_save_dialog(
                         .gap_2()
                         .child(
                             Button::new("chart_template_cancel")
-                                .dialog_secondary(theme)
+                                .variant(theme, ButtonVariant::Secondary)
                                 .label("Cancel")
                                 .on_click(move |_, _, cx| {
                                     cancel.update(cx, |terminal, terminal_cx| {
@@ -1057,7 +1052,7 @@ fn chart_settings_template_save_dialog(
                         )
                         .child(
                             Button::new("chart_template_confirm")
-                                .dialog_primary(theme)
+                                .variant(theme, ButtonVariant::Filled)
                                 .label("Save")
                                 .on_click(move |_, _, cx| {
                                     save.update(cx, |terminal, terminal_cx| {

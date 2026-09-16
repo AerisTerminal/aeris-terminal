@@ -11,6 +11,7 @@ use super::{
     control::Button,
     input::{Input, InputState},
     platform_font_weight,
+    theme::{gpui_color, platform_border_width},
 };
 
 type SelectionHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
@@ -97,9 +98,9 @@ impl RenderOnce for ColorPicker {
             .flex_col()
             .gap_3()
             .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .border_1()
-            .border_color(theme_color(colors.border_secondary))
-            .bg(theme_color(colors.surface))
+            .border(platform_border_width(&self.theme))
+            .border_color(gpui_color(colors.border_secondary))
+            .bg(gpui_color(colors.surface))
             .occlude()
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .child(field)
@@ -113,16 +114,10 @@ impl RenderOnce for ColorPicker {
                         div()
                             .text_xs()
                             .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                            .text_color(theme_color(colors.text_secondary))
+                            .text_color(gpui_color(colors.text_secondary))
                             .child("HEX"),
                     )
-                    .child(
-                        Input::new(&self.input)
-                            .fill(theme_color(colors.surface_secondary))
-                            .border_color(theme_color(colors.input_border))
-                            .focus_border_color(theme_color(colors.ring))
-                            .flex_1(),
-                    )
+                    .child(Input::new(&self.input).platform(&self.theme).flex_1())
                     .child(
                         Button::new("native_color_apply")
                             .theme(&self.theme)
@@ -139,7 +134,7 @@ impl RenderOnce for ColorPicker {
             .children(self.error.map(|error| {
                 div()
                     .text_xs()
-                    .text_color(theme_color(colors.danger))
+                    .text_color(gpui_color(colors.danger))
                     .child(error)
             }))
     }
@@ -205,14 +200,14 @@ fn color_cell(
         .size(px(17.0))
         .p(px(if selected { 2.0 } else { 1.0 }))
         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .border_1()
-        .border_color(theme_color(if selected {
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(if selected {
             colors.primary
         } else {
             colors.input_border
         }))
         .cursor_pointer()
-        .hover(move |cell| cell.border_color(theme_color(colors.ring)))
+        .hover(move |cell| cell.border_color(gpui_color(colors.ring)))
         .on_click(move |_, window, cx| {
             if let Some(handler) = &handler {
                 handler(hex.clone(), window, cx);
@@ -252,11 +247,6 @@ fn hsla_hex(color: Hsla) -> String {
         channel(rgb.g),
         channel(rgb.b)
     )
-}
-
-fn theme_color(color: axiusflow_design_system::ThemeColor) -> Hsla {
-    let (h, s, l, a) = color.hsla_components();
-    Hsla { h, s, l, a }
 }
 
 #[cfg(test)]

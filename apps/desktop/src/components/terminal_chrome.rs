@@ -1280,8 +1280,3 @@ pub(super) const fn nucleus_chart_theme(mode: ThemeMode) -> NucleusChartTheme {
         ThemeMode::Dark => NucleusChartTheme::Dark,
     }
 }
-
-pub(super) fn gpui_color(color: ThemeColor) -> Hsla {
-    let (h, s, l, a) = color.hsla_components();
-    Hsla { h, s, l, a }
-}
