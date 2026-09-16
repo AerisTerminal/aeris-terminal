@@ -46,7 +46,7 @@ pub(crate) fn input_appearance(theme: &AxiusflowTheme) -> (ThemeColor, ThemeColo
     (
         theme.colors.input_fill,
         theme.colors.input_border,
-        theme.colors.primary,
+        theme.colors.ring,
     )
 }
 
@@ -83,7 +83,7 @@ mod tests {
             let (input_fill, input_border, focus) = input_appearance(&theme);
             assert_eq!(input_fill, secondary.fill);
             assert_eq!(input_border, secondary.border.unwrap());
-            assert_eq!(focus, theme.colors.primary);
+            assert_eq!(focus, theme.colors.ring);
         }
     }
 }

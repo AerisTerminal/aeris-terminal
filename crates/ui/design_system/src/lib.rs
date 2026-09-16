@@ -694,6 +694,8 @@ mod tests {
             "transition: background-color 150ms ease, color 150ms ease;",
             "outline: 2px solid var(--ring);",
             "outline-offset: 2px;",
+            "input:focus-visible",
+            "outline-color: var(--ring);",
             "cursor: not-allowed;",
             "@media (prefers-reduced-motion: reduce)",
         ] {
@@ -701,6 +703,7 @@ mod tests {
         }
         assert!(!css.contains("HKGrotesk-SemiBold.ttf"));
         assert!(!css.contains("font-weight: 600;"));
+        assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
         assert!(!css.contains("/* Chart */"));
         assert!(!css.contains("--bullish:"));

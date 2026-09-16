@@ -2,12 +2,12 @@ use std::{ops::Range, time::Duration};
 
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, Role, ShapedLine, SharedString,
-    Style, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, div,
-    fill, point, prelude::*, px, relative, size,
+    App, Bounds, BoxShadow, ClipboardItem, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, RenderOnce, Role, ShapedLine,
+    SharedString, Style, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -622,7 +622,7 @@ pub(crate) struct Input {
     presentation: u8,
     fill: Option<Hsla>,
     border_color: Option<Hsla>,
-    focus_border_color: Option<Hsla>,
+    focus_ring_color: Option<Hsla>,
     border_width: Option<Pixels>,
 }
 
@@ -639,7 +639,7 @@ impl Input {
             presentation: Self::APPEARANCE | Self::BORDERED | Self::FOCUS_BORDERED,
             fill: None,
             border_color: None,
-            focus_border_color: None,
+            focus_ring_color: None,
             border_width: None,
         }
     }
@@ -648,7 +648,7 @@ impl Input {
         let (fill, border, focus) = input_appearance(theme);
         self.fill = Some(gpui_color(fill));
         self.border_color = Some(gpui_color(border));
-        self.focus_border_color = Some(gpui_color(focus));
+        self.focus_ring_color = Some(gpui_color(focus));
         self.border_width = Some(platform_border_width(theme));
         self
     }
@@ -696,9 +696,7 @@ impl RenderOnce for Input {
         let focused = self.state.read(cx).focus_handle.is_focused(window);
         let color = window.text_style().color;
         let border_color = self.border_color.unwrap_or_else(|| color.opacity(0.25));
-        let focus_border_color = self
-            .focus_border_color
-            .unwrap_or_else(|| color.opacity(0.65));
+        let focus_ring_color = self.focus_ring_color.unwrap_or_else(|| color.opacity(0.65));
         div()
             .h_full()
             .min_w(px(0.0))
@@ -723,7 +721,11 @@ impl RenderOnce for Input {
             })
             .when(
                 self.has_presentation(Self::FOCUS_BORDERED) && focused,
-                |element| element.border_color(focus_border_color),
+                |element| {
+                    element.shadow(vec![
+                        BoxShadow::new(px(0.0), px(0.0), focus_ring_color).spread_radius(px(2.0)),
+                    ])
+                },
             )
             .child(self.state)
     }

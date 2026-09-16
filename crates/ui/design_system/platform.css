@@ -235,8 +235,7 @@ textarea::placeholder {
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  border-color: var(--primary);
-  outline-color: color-mix(in srgb, var(--primary) 25%, transparent);
+  outline-color: var(--ring);
 }
 
 * {
