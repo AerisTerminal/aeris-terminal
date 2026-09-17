@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop::native_ui::theme::platform_border_width;
 
 // The refresh artwork spans 18/24 of its SVG viewbox while the close artwork spans
 // 14/24. Scale the refresh canvas so both header actions have the same optical size.
@@ -1668,10 +1669,17 @@ fn settings_color_row(
                 .child(
                     div()
                         .id(("chart_color_picker", setting as usize))
+                        .h(px(30.0))
+                        .px_2()
                         .flex()
                         .items_center()
                         .gap_2()
+                        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                        .border(platform_border_width(theme))
+                        .border_color(gpui_color(colors.border_secondary))
+                        .bg(gpui_color(colors.surface_secondary))
                         .cursor_pointer()
+                        .hover(|button| button.bg(gpui_color(colors.hover_bg)))
                         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                         .on_click(move |_, window, cx| {
                             terminal_for_toggle.update(cx, |terminal, terminal_cx| {
@@ -1684,14 +1692,7 @@ fn settings_color_row(
                             });
                             cx.stop_propagation();
                         })
-                        .child(
-                            div()
-                                .size(px(22.0))
-                                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                                .border_1()
-                                .border_color(gpui_color(colors.input_border))
-                                .bg(color),
-                        )
+                        .child(div().size(px(16.0)).rounded_full().bg(color))
                         .child(
                             div()
                                 .w(px(62.0))
@@ -1846,11 +1847,19 @@ fn settings_choice_row(
 }
 
 fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
-    value
-        .strip_prefix('#')
-        .filter(|hex| hex.len() == 6)
-        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-        .map_or_else(|| gpui_color(fallback), |hex| gpui::rgb(hex).into())
+    let Some(hex) = value.strip_prefix('#') else {
+        return gpui_color(fallback);
+    };
+    let parsed = match hex.len() {
+        6 => u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|rgb| gpui::rgba((rgb << 8) | 0xFF).into()),
+        8 => u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|rgba| gpui::rgba(rgba).into()),
+        _ => None,
+    };
+    parsed.unwrap_or_else(|| gpui_color(fallback))
 }
 /// Circular account avatar for the header toolbar. Signed-out sessions keep
 /// the asset-free muted person glyph; signed-in sessions render verified
@@ -2368,6 +2377,16 @@ mod tests {
             chart_settings_centered_origin(viewport, panel_size),
             point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
         );
+    }
+
+    #[test]
+    fn chart_color_trigger_preserves_picker_alpha() {
+        let rgba =
+            chart_css_color("#335CFF80", AxiusflowTheme::dark().colors.text_secondary).to_rgb();
+        assert!((rgba.r - f32::from(0x33_u8) / 255.0).abs() < 0.001);
+        assert!((rgba.g - f32::from(0x5C_u8) / 255.0).abs() < 0.001);
+        assert!((rgba.b - 1.0).abs() < 0.001);
+        assert!((rgba.a - f32::from(0x80_u8) / 255.0).abs() < 0.001);
     }
 
     #[test]

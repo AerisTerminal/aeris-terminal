@@ -782,7 +782,7 @@ impl TerminalApp {
             if let Some(picker) = &mut self.chart_settings_color_picker
                 && picker.setting == setting
             {
-                picker.error = Some("Enter a hex color such as #2962FF.".to_string());
+                picker.error = Some("Enter a hex color such as #2962FF or #2962FF80.".to_string());
             }
             cx.notify();
             return;
@@ -814,7 +814,11 @@ impl TerminalApp {
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_appearance(&appearance, surface_cx);
         });
-        self.chart_settings_color_picker = None;
+        if let Some(picker) = &mut self.chart_settings_color_picker
+            && picker.setting == setting
+        {
+            picker.error = None;
+        }
         cx.notify();
     }
 
