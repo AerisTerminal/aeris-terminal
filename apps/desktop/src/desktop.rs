@@ -1458,13 +1458,30 @@ fn market_summary_values(
     }
 }
 
+pub(crate) fn market_price_text(value: i64, scale: u32) -> String {
+    let scale = scale.min(18);
+    if scale == 0 {
+        return value.to_string();
+    }
+
+    let factor = 10_i128.pow(scale);
+    let magnitude = i128::from(value).abs();
+    let whole = magnitude / factor;
+    let fraction = magnitude % factor;
+    let minimum_precision = usize::try_from(scale.min(2)).unwrap_or(2);
+    let mut fraction = format!(
+        "{fraction:0width$}",
+        width = usize::try_from(scale).unwrap_or(18)
+    );
+    while fraction.len() > minimum_precision && fraction.ends_with('0') {
+        fraction.pop();
+    }
+    let sign = if value < 0 { "-" } else { "" };
+    format!("{sign}{whole}.{fraction}")
+}
+
 fn market_summary_price(value: i64, scale: u32) -> String {
-    let exponent = i32::try_from(scale).unwrap_or(i32::MAX);
-    let divisor = 10_f64.powi(exponent);
-    let value = value.to_f64().unwrap_or(0.0) / divisor;
-    let precision =
-        usize::try_from(scale.min(if value.abs() >= 1_000.0 { 2 } else { 4 })).unwrap_or(4);
-    format!("{value:.precision$}")
+    market_price_text(value, scale)
 }
 
 fn market_summary_change(value: i64, scale: u32) -> String {

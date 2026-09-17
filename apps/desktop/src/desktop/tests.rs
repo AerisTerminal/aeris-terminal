@@ -1581,6 +1581,16 @@ fn closing_the_symbol_menu_preserves_a_pending_watchlist_selection() {
 }
 
 #[test]
+fn market_price_presentation_trims_storage_padding_without_losing_precision() {
+    assert_eq!(super::market_price_text(13_100_000_000, 8), "131.00");
+    assert_eq!(super::market_price_text(7_654_500_000_000, 8), "76545.00");
+    assert_eq!(super::market_price_text(9_881_800_000, 8), "98.818");
+    assert_eq!(super::market_price_text(-16_500_000, 8), "-0.165");
+    assert_eq!(super::market_price_text(123, 0), "123");
+    assert_eq!(super::market_summary_change(13_100_000_000, 8), "+131.00");
+}
+
+#[test]
 fn watchlist_tracks_current_and_previous_daily_closes_in_timestamp_order() {
     let instrument = super::local_state::default_workspace().watchlist_entries[0]
         .instrument

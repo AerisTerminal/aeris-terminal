@@ -120,22 +120,6 @@ fn scaled_price(price: f64, scale: u32) -> Option<i64> {
         .to_i64()
 }
 
-fn fixed_price_text(value: i64, scale: u32) -> String {
-    let scale = scale.min(18);
-    if scale == 0 {
-        return value.to_string();
-    }
-    let factor = 10_i128.pow(scale);
-    let magnitude = i128::from(value).abs();
-    let whole = magnitude / factor;
-    let fraction = magnitude % factor;
-    let sign = if value < 0 { "-" } else { "" };
-    format!(
-        "{sign}{whole}.{fraction:0width$}",
-        width = usize::try_from(scale).unwrap_or(18)
-    )
-}
-
 fn random_alert_id() -> Result<String, String> {
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random).map_err(|_| "system CSPRNG is unavailable".to_string())?;
@@ -353,7 +337,7 @@ impl WorkspaceSurface {
             self.price_alert_message = Some(format!(
                 "{} alert triggered at {}",
                 trigger.instrument.display_symbol,
-                fixed_price_text(trigger.observed_price, trigger.instrument.price_scale)
+                market_price_text(trigger.observed_price, trigger.instrument.price_scale)
             ));
             replace_chart_price_alert_lines(
                 self.chart.as_ref(),
@@ -570,7 +554,7 @@ fn price_alert_existing_rows(
             PriceAlertCondition::try_from(alert.condition).map_or("Alert", condition_label);
         let alert_price = alert.instrument.as_ref().map_or_else(
             || "Unavailable".to_string(),
-            |value| fixed_price_text(alert.price, value.price_scale),
+            |value| market_price_text(alert.price, value.price_scale),
         );
         rows = rows.child(
             div()
@@ -793,7 +777,7 @@ pub(super) fn price_alert_dialog_layer(
     let symbol = dialog.instrument.display_symbol.as_str();
     let price = scaled_price(dialog.request.price, dialog.instrument.price_scale).map_or_else(
         || "Unavailable".to_string(),
-        |price| fixed_price_text(price, dialog.instrument.price_scale),
+        |price| market_price_text(price, dialog.instrument.price_scale),
     );
     let existing = alerts_for_instrument(alerts, &dialog.instrument);
 
@@ -846,12 +830,6 @@ pub(super) fn price_alert_dialog_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fixed_price_formatting_preserves_scale_and_negative_values() {
-        assert_eq!(fixed_price_text(6_700_075_000_000, 8), "67000.75000000");
-        assert_eq!(fixed_price_text(-125, 2), "-1.25");
-    }
 
     #[test]
     fn chart_and_persisted_conditions_round_trip() {

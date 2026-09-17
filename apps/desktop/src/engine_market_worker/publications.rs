@@ -177,8 +177,8 @@ pub(super) fn apply_pushed_event(
 
 fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
     let scale = trigger.instrument.price_scale;
-    let threshold = fixed_price_text(trigger.threshold_price, scale);
-    let observed = fixed_price_text(trigger.observed_price, scale);
+    let threshold = crate::desktop::market_price_text(trigger.threshold_price, scale);
+    let observed = crate::desktop::market_price_text(trigger.observed_price, scale);
     let body = format!(
         "{} {} {}. Last trade: {}.",
         trigger.instrument.display_symbol,
@@ -204,22 +204,6 @@ const fn price_alert_condition_phrase(
         axiusflow_contracts::PriceAlertCondition::GreaterThan => "moved above",
         axiusflow_contracts::PriceAlertCondition::LessThan => "moved below",
     }
-}
-
-fn fixed_price_text(value: i64, scale: u32) -> String {
-    let scale = scale.min(18);
-    if scale == 0 {
-        return value.to_string();
-    }
-    let factor = 10_i128.pow(scale);
-    let magnitude = i128::from(value).abs();
-    let whole = magnitude / factor;
-    let fraction = magnitude % factor;
-    let sign = if value < 0 { "-" } else { "" };
-    format!(
-        "{sign}{whole}.{fraction:0width$}",
-        width = usize::try_from(scale).unwrap_or(18)
-    )
 }
 
 fn apply_realtime_snapshot(
