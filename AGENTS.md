@@ -151,6 +151,11 @@ independent baseline failures precisely.
 
 Only publish/install when the maintainer asks for a release or end-to-end installed validation.
 
+- Before release, signer-provisioning, or release-tooling work, read the maintainer-machine checkpoint in
+  the `Readme` update-pipeline section. It records the current self-hosted runner identities, protected
+  tool paths, recovered trust root, missing production trust material, and the exact rule for when a trust
+  reset is allowed. Verify volatile runner/tool state against the machine before acting, and update that
+  checkpoint when provisioning materially changes.
 - Release from a clean, pushed `main` worktree only.
 - Read the current public stable channel first and choose the next install generation.
 - Production publication is CI-authoritative: dispatch `.github/workflows/release.yml` from `main`. Both
