@@ -1844,12 +1844,25 @@ mod tests {
             "ValueName: \"Axiusflow Engine\"; Flags: deletevalue",
             "RollbackCompatibilityPath",
             "DestName: \"rollback-compatibility.json\"",
+            "function PrepareToInstall(var NeedsRestart: Boolean): String;",
+            "{localappdata}\\Programs\\.Axiusflow-lifecycle\\uninstall.json",
+            "Finishing the previous Axiusflow uninstall...",
         ] {
             assert!(
                 setup.contains(contract),
                 "Windows installer lost {contract}"
             );
         }
+        let pending_cleanup = setup
+            .find("function PrepareToInstall")
+            .expect("pending uninstall preflight");
+        let install_files = setup
+            .find("procedure CurStepChanged")
+            .expect("signed release installation hook");
+        assert!(
+            pending_cleanup < install_files,
+            "pending uninstall cleanup must run before the bundled release installation hook"
+        );
         assert!(!setup.contains("EnginePath"));
         let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
         assert!(

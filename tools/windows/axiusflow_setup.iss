@@ -113,6 +113,37 @@ begin
   end;
 end;
 
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  Launcher: String;
+  UninstallMarker: String;
+begin
+  Result := '';
+  UninstallMarker := ExpandConstant('{localappdata}\Programs\.Axiusflow-lifecycle\uninstall.json');
+  if not FileExists(UninstallMarker) then
+    exit;
+
+  { Releases before the fail-closed uninstaller fix could leave a durable
+    cleanup journal behind. Finish that explicitly requested transaction
+    before [Files] replaces the old launcher; the relocated launcher removes
+    its original install tree and returns only after the cleanup audit passes. }
+  Launcher := ExpandConstant('{localappdata}\Programs\Axiusflow\axiusflow_launcher.exe');
+  WizardForm.StatusLabel.Caption := 'Finishing the previous Axiusflow uninstall...';
+  if (not FileExists(Launcher)) or
+     (not Exec(
+       Launcher,
+       '--remove-all-local-data',
+       ExpandConstant('{localappdata}\Programs\Axiusflow'),
+       SW_HIDE,
+       ewWaitUntilTerminated,
+       ResultCode)) or
+     (ResultCode <> 0) then
+  begin
+    Result := 'Axiusflow could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.';
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ResultCode: Integer;
