@@ -184,7 +184,6 @@ impl TerminalApp {
             chart_settings_template_name: None,
             chart_settings_template_error: None,
             chart_settings_templates: init.chart_settings_templates,
-            default_chart_settings: init.default_chart_settings,
             chart_settings_persistence_dirty: false,
             account_menu_open: false,
             account_menu_anchor: None,
@@ -872,9 +871,6 @@ impl TerminalApp {
                 surface.reset_chart_appearance(surface_cx);
             });
         }
-        if let Some(template) = self.default_chart_settings.clone() {
-            self.apply_chart_settings_template_to_surface(menu, &template, cx);
-        }
         self.chart_settings_color_picker = None;
         self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         cx.notify();
@@ -996,19 +992,6 @@ impl TerminalApp {
         self.chart_settings_template_name = None;
         self.chart_settings_template_error = None;
         self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Menu;
-        self.chart_settings_persistence_dirty = true;
-        self.persist_workspace_layout_if_changed(cx);
-        cx.notify();
-    }
-
-    pub(super) fn set_current_chart_settings_as_default(
-        &mut self,
-        menu: &ChartContextMenu,
-        cx: &mut Context<Self>,
-    ) {
-        self.default_chart_settings =
-            self.current_chart_settings_template(menu, "Default".to_string(), cx);
-        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         self.chart_settings_persistence_dirty = true;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();
@@ -1526,7 +1509,6 @@ impl TerminalApp {
             active_workspace_id,
             layout.clone(),
             self.chart_settings_templates.clone(),
-            self.default_chart_settings.clone(),
             watchlist.clone(),
         ) {
             self.workspace_error = Some(error);

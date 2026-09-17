@@ -644,7 +644,6 @@ pub(super) fn terminal_root(
             workspace_shell: WorkspaceShellKind::Window,
             chart_chrome,
             chart_settings_templates: Vec::new(),
-            default_chart_settings: None,
             watchlist_entries: Vec::new(),
         },
         lifecycle,
@@ -662,7 +661,6 @@ pub(super) struct TerminalShellInit {
     pub(super) workspace_shell: WorkspaceShellKind,
     pub(super) chart_chrome: chart_chrome::ChartChromePreferences,
     pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
-    pub(super) default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
     pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
 }
 
@@ -790,7 +788,6 @@ pub(super) fn workspace_tabs_root(
             workspace_shell: WorkspaceShellKind::Tabs,
             chart_chrome,
             chart_settings_templates: restored.chart_settings_templates.clone(),
-            default_chart_settings: restored.default_chart_settings.clone(),
             watchlist_entries: restored.watchlist_entries.clone(),
         },
         lifecycle,

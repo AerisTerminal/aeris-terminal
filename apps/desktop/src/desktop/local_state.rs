@@ -348,13 +348,9 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     workspace
         .chart_settings_templates
         .truncate(MAXIMUM_CHART_SETTINGS_TEMPLATES);
-    if workspace
-        .default_chart_settings
-        .as_ref()
-        .is_some_and(|template| !valid_chart_settings_template(template))
-    {
-        workspace.default_chart_settings = None;
-    }
+    // Nucleus owns the canonical style defaults. Retire the legacy host-side
+    // default template so reset cannot be overwritten after the engine API runs.
+    workspace.default_chart_settings = None;
     sanitize_watchlist(&mut workspace);
     for pane in workspace
         .workspace_tabs
@@ -1296,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_file_round_trip_preserves_chart_settings_templates_and_default() {
+    fn workspace_file_round_trip_preserves_templates_and_retires_host_default() {
         let path = temporary_workspace_path();
         let mut workspace = default_workspace();
         let saved = chart_settings_template("Scalping");
@@ -1308,7 +1304,7 @@ mod tests {
         let restored = load_workspace_from_path(&path).expect("workspace reloads");
 
         assert_eq!(restored.chart_settings_templates, vec![saved]);
-        assert_eq!(restored.default_chart_settings, Some(default));
+        assert_eq!(restored.default_chart_settings, None);
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace cleanup");
     }

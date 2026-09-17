@@ -9,7 +9,6 @@ struct WorkspaceLayoutRequest {
     active_workspace_id: u64,
     workspace_tabs: Vec<WorkspaceTabState>,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
-    default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
     watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
 }
 
@@ -138,7 +137,6 @@ impl WorkspaceLayoutPersistence {
         active_workspace_id: u64,
         workspace_tabs: Vec<WorkspaceTabState>,
         chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
-        default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
         watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     ) -> Result<(), String> {
         let Some(generation) = self.layout_generation.get().checked_add(1) else {
@@ -154,7 +152,6 @@ impl WorkspaceLayoutPersistence {
             active_workspace_id,
             workspace_tabs,
             chart_settings_templates,
-            default_chart_settings,
             watchlist_entries,
         });
         match self.wake.try_send(()) {
@@ -189,7 +186,6 @@ impl WorkspaceLayoutPersistence {
             active_workspace_id,
             workspace_tabs,
             Vec::new(),
-            None,
             Vec::new(),
         )
     }
@@ -283,7 +279,7 @@ fn run_workspace_layout_persistence(
         current.active_workspace_id = request.active_workspace_id;
         current.workspace_tabs = request.workspace_tabs;
         current.chart_settings_templates = request.chart_settings_templates;
-        current.default_chart_settings = request.default_chart_settings;
+        current.default_chart_settings = None;
         current.watchlist = request
             .watchlist_entries
             .iter()
@@ -406,15 +402,13 @@ mod tests {
                 7,
                 vec![],
                 vec![template.clone()],
-                Some(template.clone()),
                 vec![watchlist_entry.clone()],
             )
             .expect("request");
 
         let latest = state.latest.lock().expect("latest");
         let request = latest.as_ref().expect("request remains coalesced");
-        assert_eq!(request.chart_settings_templates, vec![template.clone()]);
-        assert_eq!(request.default_chart_settings, Some(template));
+        assert_eq!(request.chart_settings_templates, vec![template]);
         assert_eq!(request.watchlist_entries, vec![watchlist_entry]);
     }
 

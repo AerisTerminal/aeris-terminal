@@ -925,8 +925,6 @@ fn chart_settings_template_control(
         );
     if state.overlay == ChartSettingsTemplateOverlay::Menu {
         let save = terminal.clone();
-        let set_default = terminal.clone();
-        let default_menu = menu.clone();
         let apply_all = terminal.clone();
         let apply_all_menu = menu.clone();
         let mut popup = div()
@@ -948,16 +946,6 @@ fn chart_settings_template_control(
                     move |_, window, cx| {
                         save.update(cx, |terminal, terminal_cx| {
                             terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
-                        });
-                    },
-                ),
-            )
-            .child(
-                MenuRow::compact_inset("chart_template_default", "Set as default", theme).on_click(
-                    move |_, _, cx| {
-                        set_default.update(cx, |terminal, terminal_cx| {
-                            terminal
-                                .set_current_chart_settings_as_default(&default_menu, terminal_cx);
                         });
                     },
                 ),

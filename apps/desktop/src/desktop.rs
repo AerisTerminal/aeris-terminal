@@ -2651,7 +2651,6 @@ struct TerminalApp {
     chart_settings_template_name: Option<Entity<InputState>>,
     chart_settings_template_error: Option<String>,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
-    default_chart_settings: Option<WorkspaceChartSettingsTemplateState>,
     chart_settings_persistence_dirty: bool,
     account_menu_open: bool,
     account_menu_anchor: Option<gpui::Point<Pixels>>,

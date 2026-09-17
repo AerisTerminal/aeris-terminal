@@ -1396,7 +1396,8 @@ fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
 #[test]
 fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     let mut chart = NucleusChartView::empty_with_theme(ChartTheme::Dark);
-    let mut custom = chart.appearance_settings();
+    let nucleus_defaults = chart.appearance_settings();
+    let mut custom = nucleus_defaults.clone();
     custom.up_color = "#112233".to_string();
     custom.down_color = "#445566".to_string();
     custom.wick_up_color = "#778899".to_string();
@@ -1404,6 +1405,10 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     custom.border_up_color = "#123456".to_string();
     custom.border_down_color = "#654321".to_string();
     custom.crosshair_color = "#ABCDEF".to_string();
+    custom.grid_visible = false;
+    custom.grid_style = 2;
+    custom.line_width = 4;
+    custom.line_style = 2;
 
     assert!(chart.set_appearance_settings(&custom));
     chart.set_theme(ChartTheme::Light);
@@ -1433,6 +1438,7 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     assert!(series.wick_down_color.is_none());
     assert!(series.border_up_color.is_none());
     assert!(series.border_down_color.is_none());
+    assert_eq!(chart.appearance_settings(), nucleus_defaults);
     let defaults = nucleus_theme_appearance_defaults(ChartTheme::Dark);
     let effective = chart.appearance_settings();
     assert_eq!(effective.up_color, defaults.bullish);
