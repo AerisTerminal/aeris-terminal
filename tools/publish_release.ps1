@@ -97,10 +97,10 @@ if (-not $PackageOnly -and -not $PrebuildOnly) {
         $env:GITHUB_WORKFLOW -eq "Production release" -and
         $env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and
         $env:GITHUB_REF -eq "refs/heads/main" -and
-        $env:AXIUSFLOW_RELEASE_ENVIRONMENT -eq "production-release"
+        $env:AXIUSFLOW_RELEASE_ENVIRONMENT -eq "self-hosted-release-station"
     )
     if (-not $expectedReleaseContext) {
-        throw "Production publication is CI-authoritative and must run from the protected Production release workflow. Use -PackageOnly for local qualification without R2/channel mutation."
+        throw "Production publication is CI-authoritative and must run from the self-hosted Production release workflow. Use -PackageOnly for local qualification without R2/channel mutation."
     }
 }
 

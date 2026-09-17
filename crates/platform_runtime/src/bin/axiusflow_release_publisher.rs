@@ -313,11 +313,14 @@ fn verify_production_publication_context(
         ("GITHUB_WORKFLOW", "Production release"),
         ("GITHUB_EVENT_NAME", "workflow_dispatch"),
         ("GITHUB_REF", "refs/heads/main"),
-        ("AXIUSFLOW_RELEASE_ENVIRONMENT", "production-release"),
+        (
+            "AXIUSFLOW_RELEASE_ENVIRONMENT",
+            "self-hosted-release-station",
+        ),
     ] {
         if environment(name).as_deref() != Some(std::ffi::OsStr::new(expected)) {
             return Err(
-                "R2 publication is restricted to the protected Production release GitHub Actions workflow"
+                "R2 publication is restricted to the self-hosted Production release GitHub Actions workflow"
                     .to_string(),
             );
         }
@@ -3126,7 +3129,7 @@ mod tests {
     }
 
     #[test]
-    fn production_publication_requires_protected_ci_context() {
+    fn production_publication_requires_self_hosted_release_context() {
         assert!(verify_production_publication_context(None, |_| None).is_ok());
         assert!(
             verify_production_publication_context(Some("axiusflow-releases"), |_| None).is_err()
@@ -3136,7 +3139,10 @@ mod tests {
             ("GITHUB_WORKFLOW", "Production release"),
             ("GITHUB_EVENT_NAME", "workflow_dispatch"),
             ("GITHUB_REF", "refs/heads/main"),
-            ("AXIUSFLOW_RELEASE_ENVIRONMENT", "production-release"),
+            (
+                "AXIUSFLOW_RELEASE_ENVIRONMENT",
+                "self-hosted-release-station",
+            ),
         ];
         assert!(
             verify_production_publication_context(Some("axiusflow-releases"), |name| {

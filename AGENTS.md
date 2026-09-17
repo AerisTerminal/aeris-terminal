@@ -153,14 +153,20 @@ Only publish/install when the maintainer asks for a release or end-to-end instal
 
 - Release from a clean, pushed `main` worktree only.
 - Read the current public stable channel first and choose the next install generation.
-- Production publication is CI-authoritative: dispatch `.github/workflows/release.yml` from `main` and
-  let its unprivileged `release-build` job qualify/prebuild candidate code before approving the protected
-  `production-release` signing job. The `release-signing` runner must use an independently provisioned,
-  protected-digest release publisher and must not rebuild candidate/dependency code after Ed25519,
-  Authenticode, or R2 credentials become available. Do not publish the stable channel from
-  a workstation or invoke the release publisher with production R2 credentials outside that workflow.
+- Production publication is CI-authoritative: dispatch `.github/workflows/release.yml` from `main`. Both
+  release jobs run on maintainer-owned Windows runners on the maintainer's machine; GitHub is the
+  trigger/audit layer and no GitHub-hosted runner, protected environment, or Actions binary artifact is
+  part of the release path. The `release-build` identity owns qualification only. A distinct
+  `release-signing` Windows identity owns the production Authenticode certificate, Ed25519 key file, and
+  authenticated Wrangler session; production signing/deployment secrets are not stored in GitHub. The
+  signer receives candidate binaries only after their hashes have been frozen and handed across the local shared directory. The
+  signing job must use an independently provisioned publisher whose SHA-256 is anchored outside the build
+  runner, and every external signing/deployment tool must be pinned by SHA-256 and live outside build-runner
+  write authority. Do not publish the stable channel from an ordinary shell or invoke the release publisher
+  outside that workflow.
 - `tools/publish_release.ps1 -Generation <N> -PackageOnly ...` is the local qualification/package path.
-  The production workflow uses `-PrebuildOnly` before secrets exist and then a prebuilt publisher with
+  The production workflow uses `-PrebuildOnly` on the build runner, validates the locally handed-off binaries
+  against GitHub-controlled qualification hashes, and then uses the independently provisioned publisher with
   `-SkipQualification -SkipBuild -PublisherPath -PublisherSha256`; do not bypass qualification,
   trusted-publisher digest verification, public-key binding, Authenticode/RFC 3161 signing,
   manifest/provenance signing, immutable upload, rollout policy, or public-channel verification.

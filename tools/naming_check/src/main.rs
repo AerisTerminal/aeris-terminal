@@ -1633,45 +1633,42 @@ mod tests {
         let release_workflow = manifest(".github/workflows/release.yml");
         for contract in [
             "workflow_dispatch:",
-            "preflight-release-environment:",
-            "actions: read",
-            "required_reviewers",
-            "deployment_branch_policy",
-            "qualify-windows:",
-            "release-build",
-            "needs: qualify-windows",
-            "environment: production-release",
+            "runs-on: [self-hosted, axiusflow, windows, release-build]",
+            "runs-on: [self-hosted, axiusflow, windows, release-signing]",
             "cancel-in-progress: false",
             "persist-credentials: false",
             "ref: ${{ github.sha }}",
             "refs/heads/main",
             "git checkout -B main $env:GITHUB_SHA",
             "git rev-parse origin/main",
-            "release-signing",
             "health_gate_approved:",
             "rollout_cohort:",
             "rollout_percentage:",
-            "AXIUSFLOW_RELEASE_ENVIRONMENT: production-release",
+            "AXIUSFLOW_RELEASE_ENVIRONMENT: self-hosted-release-station",
             "RELEASE_VERIFYING_KEY_B64URL",
-            "qualified-release-binaries-",
-            "qualified_artifact_id",
-            "cleanup-qualified-artifact:",
-            "needs: [qualify-windows, release-windows]",
-            "actions: write",
-            "Delete qualified release artifact",
-            "actions/artifacts/",
-            "qualified-metadata",
+            "AxiusflowReleaseHandoff",
+            "needs.qualify-windows.outputs.launcher_sha256",
+            "needs.qualify-windows.outputs.desktop_sha256",
+            "QUALIFIED_RELEASE_VERIFYING_KEY",
+            "QUALIFIED_AUTHENTICODE_CERTIFICATE_SHA1",
+            "QUALIFIED_AUTHENTICODE_TIMESTAMP_URL",
+            "signer-authoritative repository value",
             "Get-FileHash",
-            "needs.qualify-windows.outputs.release_verifying_key",
-            "needs.qualify-windows.outputs.authenticode_certificate_sha1",
             "RELEASE_PUBLISHER_PATH",
             "RELEASE_PUBLISHER_SHA256",
-            "needs.qualify-windows.outputs.release_version",
+            "RELEASE_SIGNING_KEY_FILE",
+            "AUTHENTICODE_TOOL_SHA256",
+            "WRANGLER_SHA256",
+            "ISCC_SHA256",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "whoami --json",
+            "FileAttributes]::ReparsePoint",
             "-SkipQualification",
             "-SkipBuild",
             "-PublisherPath",
             "-PublisherSha256",
-            "Remove job-scoped release secrets",
+            "Remove build-runner release material",
+            "Remove signing-runner release material",
             "target\\release-publish",
         ] {
             assert!(
@@ -1679,17 +1676,24 @@ mod tests {
                 "protected release workflow lost {contract}"
             );
         }
-        let qualifier_start = release_workflow
-            .find("qualify-windows:")
-            .expect("release qualification job");
-        let signer_start = release_workflow
-            .find("release-windows:")
-            .expect("protected signing job");
-        let qualifier = &release_workflow[qualifier_start..signer_start];
         assert!(
-            !qualifier.contains("axiusflow_release_publisher.exe")
-                && !qualifier.contains("publisher_sha256"),
-            "unprivileged qualification must not supply executable publisher authority to the signing job"
+            !release_workflow.contains("runs-on: ubuntu-latest")
+                && !release_workflow.contains("runs-on: windows-latest")
+                && !release_workflow.contains("environment: production-release")
+                && !release_workflow.contains("actions/upload-artifact")
+                && !release_workflow.contains("actions/download-artifact")
+                && !release_workflow.contains("secrets.RELEASE_SIGNING_KEY_B64URL")
+                && !release_workflow.contains("secrets.CLOUDFLARE_ACCOUNT_ID")
+                && !release_workflow.contains("secrets.CLOUDFLARE_API_TOKEN"),
+            "production release must stay on zero-cost self-hosted runners without a paid environment, Actions binary artifact handoff, or GitHub-held publication authority"
+        );
+        let cleanup_workflow = manifest(".github/workflows/release_handoff_cleanup.yml");
+        assert!(
+            cleanup_workflow.contains("runs-on: [self-hosted, axiusflow, windows, release-build]")
+                && cleanup_workflow.contains("AddHours(-24)")
+                && !cleanup_workflow.contains("runs-on: ubuntu-latest")
+                && !cleanup_workflow.contains("runs-on: windows-latest"),
+            "release handoff cleanup must stay bounded and self-hosted"
         );
         let release_script = manifest("tools/publish_release.ps1");
         let prebuild_start = release_script
