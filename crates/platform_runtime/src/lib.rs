@@ -2,6 +2,7 @@
 //!
 //! Consumers depend on capabilities rather than branching on operating-system names.
 
+mod atomic_file;
 pub mod browser;
 mod capability;
 mod credential_vault;
@@ -17,6 +18,7 @@ mod rollout;
 mod session_shutdown;
 mod user_notifications;
 
+pub use atomic_file::replace_file_atomically;
 pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;
 pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};

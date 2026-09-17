@@ -1984,10 +1984,9 @@ fn set_executable(_path: &Path, _executable: bool) {
 
 // Durability guarantee per platform: on Unix, directory `fsync` ensures the
 // staged file inventory and atomic pointer rename survive a crash. Windows
-// cannot open a directory with `File::open` and offers no directory `fsync`;
-// durability there rests on per-file `sync_all` plus an atomic same-directory
-// rename, which NTFS orders before the handle closes. Keep this a typed
-// no-op so no caller can mistake it for a synced Unix directory.
+// uses MoveFileExW with REPLACE_EXISTING + WRITE_THROUGH after syncing the
+// staged file. Keep directory sync as a typed no-op there because Windows
+// does not expose the same directory-fsync contract through std.
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
     File::open(path)
@@ -2034,21 +2033,9 @@ fn write_json_atomic<T: Serialize>(
 
 /// Replaces a small lifecycle record without exposing a partially written file.
 ///
-/// POSIX rename replaces an existing destination atomically. Windows does not
-/// expose that guarantee through `std::fs`; its destination must be removed
-/// before rename, so callers still hold the lifecycle lock across this short
-/// platform-specific replacement window.
-#[cfg(unix)]
 fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), LifecycleError> {
-    fs::rename(temporary, destination).map_err(|_| LifecycleError::StagingFailed)
-}
-
-#[cfg(not(unix))]
-fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), LifecycleError> {
-    if destination.exists() {
-        remove_file_if_present(destination).map_err(|_| LifecycleError::StagingFailed)?;
-    }
-    fs::rename(temporary, destination).map_err(|_| LifecycleError::StagingFailed)
+    crate::replace_file_atomically(temporary, destination)
+        .map_err(|_| LifecycleError::StagingFailed)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LifecycleError> {

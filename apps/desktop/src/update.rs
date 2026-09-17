@@ -21,6 +21,9 @@ use serde::Deserialize;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const PREPARE_TIMEOUT: Duration = Duration::from_mins(30);
+const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_mins(30);
+const CHECK_RETRY_INITIAL: Duration = Duration::from_mins(1);
+const CHECK_RETRY_MAXIMUM: Duration = Duration::from_mins(30);
 const MAXIMUM_CHECK_OUTPUT_BYTES: usize = 16 * 1024;
 const RESTART_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const RESTART_CHILD_STABILITY_WINDOW: Duration = Duration::from_millis(150);
@@ -96,6 +99,8 @@ pub struct DesktopUpdater {
     presentation: UpdatePresentation,
     request_pending: bool,
     prepared_restart: Option<PreparedRestart>,
+    next_check_at: Instant,
+    check_retry_delay: Duration,
 }
 
 impl DesktopUpdater {
@@ -115,6 +120,8 @@ impl DesktopUpdater {
             },
             request_pending: false,
             prepared_restart: None,
+            next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+            check_retry_delay: CHECK_RETRY_INITIAL,
         };
         updater.request_check()?;
         Ok(updater)
@@ -137,6 +144,7 @@ impl DesktopUpdater {
             })?;
         self.request_pending = true;
         self.presentation.state = UpdateState::Checking;
+        self.next_check_at = Instant::now() + PERIODIC_CHECK_INTERVAL;
         Ok(())
     }
 
@@ -159,9 +167,16 @@ impl DesktopUpdater {
     }
 
     pub fn poll(&mut self) -> UpdatePoll {
+        let now = Instant::now();
+        let scheduled = self.request_periodic_check_if_due(now);
         let result = match self.results.try_recv() {
             Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return UpdatePoll::default(),
+            Err(mpsc::TryRecvError::Empty) => {
+                return UpdatePoll {
+                    changed: scheduled,
+                    restart_prepared: false,
+                };
+            }
             Err(mpsc::TryRecvError::Disconnected) => {
                 if self.request_pending {
                     self.request_pending = false;
@@ -190,10 +205,12 @@ impl DesktopUpdater {
                     }
                     Ok(_) => {
                         self.request_pending = false;
+                        self.record_check_success(now);
                         UpdateState::Current
                     }
                     Err(error) => {
                         self.request_pending = false;
+                        self.record_check_failure(now);
                         UpdateState::Error(error)
                     }
                 };
@@ -208,8 +225,14 @@ impl DesktopUpdater {
                     Ok(report) if report.update_available => UpdateState::ReadyToRestart {
                         latest_version: report.latest_version,
                     },
-                    Ok(_) => UpdateState::Current,
-                    Err(error) => UpdateState::Error(error),
+                    Ok(_) => {
+                        self.record_check_success(now);
+                        UpdateState::Current
+                    }
+                    Err(error) => {
+                        self.record_check_failure(now);
+                        UpdateState::Error(error)
+                    }
                 };
                 UpdatePoll {
                     changed: true,
@@ -260,6 +283,49 @@ impl DesktopUpdater {
         self.request_pending = false;
         self.presentation.state = UpdateState::Error(error);
         self.prepared_restart.take()
+    }
+
+    fn request_periodic_check_if_due(&mut self, now: Instant) -> bool {
+        if self.request_pending
+            || self.prepared_restart.is_some()
+            || now < self.next_check_at
+            || matches!(
+                self.presentation.state,
+                UpdateState::Downloading { .. }
+                    | UpdateState::ReadyToRestart { .. }
+                    | UpdateState::PreparingRestart
+            )
+        {
+            return false;
+        }
+        match self.requests.try_send(UpdateRequest::Check) {
+            Ok(()) => {
+                self.request_pending = true;
+                self.presentation.state = UpdateState::Checking;
+                self.next_check_at = now + PERIODIC_CHECK_INTERVAL;
+                true
+            }
+            Err(mpsc::TrySendError::Full(_)) => false,
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.presentation.state =
+                    UpdateState::Error("update client is unavailable".to_string());
+                self.record_check_failure(now);
+                true
+            }
+        }
+    }
+
+    fn record_check_success(&mut self, now: Instant) {
+        self.check_retry_delay = CHECK_RETRY_INITIAL;
+        self.next_check_at = now + PERIODIC_CHECK_INTERVAL;
+    }
+
+    fn record_check_failure(&mut self, now: Instant) {
+        self.next_check_at = now + self.check_retry_delay;
+        self.check_retry_delay = self
+            .check_retry_delay
+            .saturating_mul(2)
+            .min(CHECK_RETRY_MAXIMUM);
     }
 }
 
@@ -763,12 +829,13 @@ mod tests {
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        DesktopUpdater, LauncherUpdateCheck, PreparedRestart, RestartSlot, UpdatePresentation,
-        UpdateRequest, UpdateResult, UpdateState, claim_restart_slot, launcher_files_match,
+        CHECK_RETRY_INITIAL, CHECK_RETRY_MAXIMUM, DesktopUpdater, LauncherUpdateCheck,
+        PERIODIC_CHECK_INTERVAL, PreparedRestart, RestartSlot, UpdatePresentation, UpdateRequest,
+        UpdateResult, UpdateState, claim_restart_slot, launcher_files_match,
         launcher_is_trusted_with, release_restart_slot, send_restart_commit,
         validate_launcher_report, validate_restart_acknowledgement, wait_for_restart_ready,
     };
@@ -879,6 +946,8 @@ mod tests {
             },
             request_pending: true,
             prepared_restart: None,
+            next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+            check_retry_delay: CHECK_RETRY_INITIAL,
         };
         let report = update_report(true);
 
@@ -934,6 +1003,8 @@ mod tests {
             },
             request_pending: true,
             prepared_restart: None,
+            next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+            check_retry_delay: CHECK_RETRY_INITIAL,
         };
         result_tx
             .send(UpdateResult::Prepared(Ok(update_report(false))))
@@ -943,6 +1014,47 @@ mod tests {
         assert_eq!(updater.presentation.state, UpdateState::Current);
         assert!(!updater.request_pending);
         assert!(updater.request_restart().is_err());
+    }
+
+    #[test]
+    fn periodic_check_uses_existing_worker_and_failure_backoff_is_bounded() {
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let mut updater = DesktopUpdater {
+            requests: request_tx,
+            results: result_rx,
+            presentation: UpdatePresentation {
+                system_version: "Windows".to_string(),
+                state: UpdateState::Current,
+            },
+            request_pending: false,
+            prepared_restart: None,
+            next_check_at: Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .expect("one second is representable"),
+            check_retry_delay: CHECK_RETRY_INITIAL,
+        };
+
+        let scheduled = updater.poll();
+        assert!(scheduled.changed);
+        assert!(updater.request_pending);
+        assert_eq!(updater.presentation.state, UpdateState::Checking);
+        assert!(matches!(
+            request_rx.try_recv().expect("periodic check queues"),
+            UpdateRequest::Check
+        ));
+
+        result_tx
+            .send(UpdateResult::Checked {
+                system_version: "Windows".to_string(),
+                result: Err("temporary channel failure".to_string()),
+            })
+            .expect("failed check result queues");
+        assert!(updater.poll().changed);
+        assert!(!updater.request_pending);
+        assert_eq!(updater.check_retry_delay, CHECK_RETRY_INITIAL * 2);
+        assert!(updater.check_retry_delay <= CHECK_RETRY_MAXIMUM);
+        assert!(updater.next_check_at > Instant::now());
     }
 
     #[test]
@@ -1078,6 +1190,8 @@ mod tests {
             },
             request_pending: true,
             prepared_restart: None,
+            next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+            check_retry_delay: CHECK_RETRY_INITIAL,
         };
         result_tx
             .send(UpdateResult::RestartPrepared(Ok(PreparedRestart {
@@ -1124,6 +1238,8 @@ mod tests {
                 slot: Some(RestartSlot::claim(&SLOT).expect("slot claims")),
                 committed: false,
             }),
+            next_check_at: Instant::now() + PERIODIC_CHECK_INTERVAL,
+            check_retry_delay: CHECK_RETRY_INITIAL,
         };
 
         let cleanup = updater

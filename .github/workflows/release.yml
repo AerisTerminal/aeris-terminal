@@ -36,7 +36,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight-release-environment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require protected production release environment
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/environments/production-release"
+          try {
+            $environment = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+          } catch {
+            throw 'The protected production-release environment must exist before a production release is dispatched.'
+          }
+          $reviewRule = @($environment.protection_rules | Where-Object { $_.type -eq 'required_reviewers' }) | Select-Object -First 1
+          if ($null -eq $reviewRule -or @($reviewRule.reviewers).Count -lt 1) {
+            throw 'The production-release environment must require at least one reviewer.'
+          }
+          $branchPolicy = $environment.deployment_branch_policy
+          if ($null -eq $branchPolicy -or (-not $branchPolicy.protected_branches -and -not $branchPolicy.custom_branch_policies)) {
+            throw 'The production-release environment must enforce a deployment branch policy.'
+          }
+
   qualify-windows:
+    needs: preflight-release-environment
     # Candidate and dependency build code runs only on the ordinary Windows
     # build runner. Production signing keys, R2 credentials, and the signing
     # runner are not available in this job.
@@ -50,6 +83,7 @@ jobs:
       authenticode_timestamp_url: ${{ steps.qualified-metadata.outputs.authenticode_timestamp_url }}
       launcher_sha256: ${{ steps.qualified-metadata.outputs.launcher_sha256 }}
       desktop_sha256: ${{ steps.qualified-metadata.outputs.desktop_sha256 }}
+      qualified_artifact_id: ${{ steps.upload-qualified.outputs.artifact-id }}
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       AUTHENTICODE_CERTIFICATE_SHA1: ${{ vars.AUTHENTICODE_CERTIFICATE_SHA1 }}
@@ -191,6 +225,7 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "desktop_sha256=$((Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash.ToLowerInvariant())"
 
       - name: Upload qualified release binaries
+        id: upload-qualified
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qualified-release-binaries-${{ github.run_id }}-${{ github.run_attempt }}
@@ -203,7 +238,10 @@ jobs:
       - name: Remove job-scoped chart credential
         if: always()
         shell: pwsh
-        run: Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'axiusflow-release-gitconfig') -Force -ErrorAction SilentlyContinue
+        run: |
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'axiusflow-release-gitconfig') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $PWD 'target\release') -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $PWD 'target\release-publish') -Recurse -Force -ErrorAction SilentlyContinue
 
   release-windows:
     needs: qualify-windows
@@ -212,6 +250,8 @@ jobs:
     environment: production-release
     runs-on: [self-hosted, axiusflow, windows, release-signing]
     timeout-minutes: 60
+    permissions:
+      contents: read
     env:
       AXIUSFLOW_RELEASE_ENVIRONMENT: production-release
       AUTHENTICODE_CERTIFICATE_SHA1: ${{ needs.qualify-windows.outputs.authenticode_certificate_sha1 }}
@@ -370,3 +410,31 @@ jobs:
         run: |
           $keyPath = Join-Path $env:RUNNER_TEMP "axiusflow-release-signing-key-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.b64"
           Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $PWD 'target\release') -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $PWD 'target\release-publish') -Recurse -Force -ErrorAction SilentlyContinue
+
+  cleanup-qualified-artifact:
+    if: ${{ always() && needs.qualify-windows.outputs.qualified_artifact_id != '' }}
+    needs: [qualify-windows, release-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Delete qualified release artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFIED_ARTIFACT_ID: ${{ needs.qualify-windows.outputs.qualified_artifact_id }}
+        run: |
+          if ($env:QUALIFIED_ARTIFACT_ID -notmatch '^\d+$') {
+            throw 'Qualified release artifact ID is invalid.'
+          }
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:QUALIFIED_ARTIFACT_ID"
+          Invoke-WebRequest -Method Delete -Uri $uri -Headers $headers -ErrorAction Stop | Out-Null

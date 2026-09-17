@@ -1614,6 +1614,10 @@ mod tests {
             "TimeStamperCertificate",
             "verify_authenticode_file(config, downloaded)",
             "verify_public_object(config, &release.channel_object)",
+            "verify_current_installer_alias",
+            "retire_predecessor_release",
+            "RELEASE_RETIREMENT_FILENAME",
+            "wrangler_delete",
             "AXIUSFLOW_RELEASE_PROVENANCE_V1\\0",
             "provenance.json",
             "requires_provenance_signature",
@@ -1629,6 +1633,10 @@ mod tests {
         let release_workflow = manifest(".github/workflows/release.yml");
         for contract in [
             "workflow_dispatch:",
+            "preflight-release-environment:",
+            "actions: read",
+            "required_reviewers",
+            "deployment_branch_policy",
             "qualify-windows:",
             "release-build",
             "needs: qualify-windows",
@@ -1646,6 +1654,12 @@ mod tests {
             "AXIUSFLOW_RELEASE_ENVIRONMENT: production-release",
             "RELEASE_VERIFYING_KEY_B64URL",
             "qualified-release-binaries-",
+            "qualified_artifact_id",
+            "cleanup-qualified-artifact:",
+            "needs: [qualify-windows, release-windows]",
+            "actions: write",
+            "Delete qualified release artifact",
+            "actions/artifacts/",
             "qualified-metadata",
             "Get-FileHash",
             "needs.qualify-windows.outputs.release_verifying_key",
@@ -1658,6 +1672,7 @@ mod tests {
             "-PublisherPath",
             "-PublisherSha256",
             "Remove job-scoped release secrets",
+            "target\\release-publish",
         ] {
             assert!(
                 release_workflow.contains(contract),
@@ -1730,7 +1745,18 @@ mod tests {
                 && update.contains("UpdateState::Downloading")
                 && update.contains("UpdateState::ReadyToRestart")
                 && update.contains("updater.request_check()?")
+                && update.contains("PERIODIC_CHECK_INTERVAL")
+                && update.contains("CHECK_RETRY_MAXIMUM")
                 && !update.contains("ReleaseInstaller")
+        );
+        assert!(
+            !repository_root()
+                .join("tools/build_clean_break_installer.ps1")
+                .exists()
+                && !repository_root()
+                    .join("tools/windows/axiusflow_clean_break_setup.iss")
+                    .exists(),
+            "obsolete clean-break installer path must stay retired"
         );
         assert!(
             !update.contains("report.current_version != env!(\"CARGO_PKG_VERSION\")"),

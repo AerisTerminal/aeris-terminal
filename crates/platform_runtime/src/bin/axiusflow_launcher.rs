@@ -21,7 +21,7 @@ use axiusflow_platform_runtime::{
     RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer, ReleaseFile, ReleaseInstaller,
     ReleasePolicy, SignedBlockPlan, SignedReleaseManifest, VaultEntry, current_release_identity,
     decode_and_verify_block_plan, native_install_root, native_installation_inventory,
-    rollout_eligible, verify_release_file, verify_release_manifest,
+    replace_file_atomically, rollout_eligible, verify_release_file, verify_release_manifest,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::VerifyingKey;
@@ -438,7 +438,7 @@ fn prepare_remote_update(
     verifying_key: &VerifyingKey,
     install_root: &Path,
 ) -> Result<(), String> {
-    let checked = checked_release_channel(installer, verifying_key, install_root)?;
+    let mut checked = checked_release_channel(installer, verifying_key, install_root)?;
     let active = checked
         .active
         .as_ref()
@@ -453,13 +453,40 @@ fn prepare_remote_update(
         return Ok(());
     }
 
-    let (downloads_root, bundle_root) = download_release_bundle(
+    let (downloads_root, bundle_root) = match download_release_bundle(
         installer,
         checked.active.as_ref(),
         verifying_key,
         install_root,
         &checked.channel.signed_release,
-    )?;
+    ) {
+        Ok(downloaded) => downloaded,
+        Err(first_error) => {
+            let refreshed = checked_release_channel(installer, verifying_key, install_root)?;
+            if !release_channel_target_changed(&checked.channel, &refreshed.channel) {
+                return Err(first_error);
+            }
+            if refreshed.channel.install_generation == current_generation
+                || !refreshed.offer_eligible
+            {
+                print_update_check_report(&channel_update_check_report(
+                    current_generation,
+                    &refreshed.channel,
+                    refreshed.offer_eligible,
+                ))?;
+                return Ok(());
+            }
+            let downloaded = download_release_bundle(
+                installer,
+                refreshed.active.as_ref(),
+                verifying_key,
+                install_root,
+                &refreshed.channel.signed_release,
+            )?;
+            checked = refreshed;
+            downloaded
+        }
+    };
     write_prepared_update(&downloads_root, &checked.channel)?;
     cleanup_stale_downloads(&downloads_root, &bundle_root)?;
     print_update_check_report(&update_check_report(
@@ -467,6 +494,15 @@ fn prepare_remote_update(
         checked.channel.install_generation,
         &checked.channel.version,
     ))
+}
+
+fn release_channel_target_changed(
+    original: &ReleaseChannelPointer,
+    refreshed: &ReleaseChannelPointer,
+) -> bool {
+    original.install_generation != refreshed.install_generation
+        || original.release_identity != refreshed.release_identity
+        || original.signed_release != refreshed.signed_release
 }
 
 fn download_release_bundle(
@@ -553,12 +589,7 @@ fn write_prepared_update(
         .and_then(|()| file.sync_all())
         .map_err(|_| "prepared update metadata could not be committed".to_string())?;
     drop(file);
-    match fs::remove_file(&prepared) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("previous prepared update metadata could not be replaced".to_string()),
-    }
-    fs::rename(&next, &prepared)
+    replace_file_atomically(&next, &prepared)
         .map_err(|_| "prepared update metadata could not be activated".to_string())
 }
 
@@ -908,14 +939,7 @@ fn write_quarantined_release(install_root: &Path, failed: &ActiveRelease) -> Res
         .and_then(|()| file.sync_all())
         .map_err(|_| "release quarantine metadata could not be committed".to_string())?;
     drop(file);
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => {
-            return Err("previous release quarantine metadata could not be replaced".to_string());
-        }
-    }
-    fs::rename(&next, &path)
+    replace_file_atomically(&next, &path)
         .map_err(|_| "release quarantine metadata could not be activated".to_string())
 }
 
@@ -2315,6 +2339,22 @@ mod tests {
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
             source_offset,
         }
+    }
+
+    #[test]
+    fn preparation_retry_only_follows_a_changed_authenticated_target() {
+        let (_, original) = prepared_channel_fixture(7, b"original");
+        assert!(!release_channel_target_changed(&original, &original));
+
+        let (_, newer) = prepared_channel_fixture(8, b"newer");
+        assert!(release_channel_target_changed(&original, &newer));
+
+        let mut changed_same_generation = original.clone();
+        changed_same_generation.signed_release = newer.signed_release;
+        assert!(release_channel_target_changed(
+            &original,
+            &changed_same_generation
+        ));
     }
 
     #[test]

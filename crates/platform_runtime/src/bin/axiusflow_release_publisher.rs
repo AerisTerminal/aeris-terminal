@@ -19,8 +19,8 @@ use axiusflow_platform_runtime::{
     RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION,
     ROLLBACK_COMPATIBILITY_FILENAME, ReleaseChannelPointer, ReleaseFile, ReleaseFileRole,
     ReleaseInstallerMetadata, ReleaseManifest, ReleasePolicy, RollbackCompatibilityMetadata,
-    RolloutMetadata, SignedReleaseManifest, decode_and_verify_block_plan, sign_block_plan,
-    sign_release_manifest, verify_release_file, verify_release_manifest,
+    RolloutMetadata, SignedReleaseManifest, decode_and_verify_block_plan, replace_file_atomically,
+    sign_block_plan, sign_release_manifest, verify_release_file, verify_release_manifest,
     verify_release_manifest_signature,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -34,6 +34,10 @@ const WRANGLER_MAXIMUM_OBJECT_BYTES: u64 = 315 * 1024 * 1024;
 const MAXIMUM_CHANNEL_BYTES: u64 = 1024 * 1024;
 const RELEASE_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_SIGNATURE_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_PROVENANCE_V1\0";
+const RELEASE_RETIREMENT_SCHEMA_VERSION: u32 = 1;
+const RELEASE_RETIREMENT_FILENAME: &str = "retirement.json";
+const RELEASE_RETIREMENT_SIGNATURE_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_RETIREMENT_V1\0";
+const MAXIMUM_RETIREMENT_BYTES: u64 = 2 * 1024 * 1024;
 const PUBLIC_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
 const VERIFY_AUTHENTICODE_METADATA: &str = r"$signature = Get-AuthenticodeSignature -LiteralPath $env:AXIUSFLOW_AUTHENTICODE_PATH; if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ine $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -or $null -eq $signature.TimeStamperCertificate) { exit 1 }";
 
@@ -271,8 +275,18 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     let binaries = release_binary_paths(&repository);
     let published = package_release(&repository, &config, &signing_key, &binaries)?;
     print_release_summary(&published);
-    if let Some(bucket) = config.r2_bucket.as_deref() {
-        upload_release(&config, bucket, &published, &signing_key, &verifying_key)?;
+    if let Some(bucket) = config.r2_bucket.as_deref()
+        && let Err(first_error) =
+            upload_release(&config, bucket, &published, &signing_key, &verifying_key)
+    {
+        eprintln!("Axiusflow release publisher retrying publication after: {first_error}");
+        upload_release(&config, bucket, &published, &signing_key, &verifying_key).map_err(
+            |second_error| {
+                format!(
+                    "publication failed after one bounded retry: {second_error}; first attempt: {first_error}"
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -604,6 +618,22 @@ struct SignedReleaseProvenance {
     signature_b64url: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseRetirement {
+    schema_version: u32,
+    target_release_identity: String,
+    target_install_generation: u64,
+    predecessor: Option<SignedReleaseManifest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedReleaseRetirement {
+    retirement: ReleaseRetirement,
+    signature_b64url: String,
+}
+
 #[derive(Debug)]
 struct PublishedRelease {
     release_directory: PathBuf,
@@ -611,6 +641,14 @@ struct PublishedRelease {
     channel_path: PathBuf,
     immutable_objects: Vec<UploadObject>,
     channel_object: UploadObject,
+}
+
+#[derive(Debug)]
+enum RemoteChannelProgression {
+    Empty,
+    Predecessor(ReleaseChannelPointer),
+    Current(ReleaseChannelPointer),
+    CommittedGenerationMismatch(ReleaseChannelPointer),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -911,6 +949,74 @@ fn verify_release_provenance_file(path: &Path, key: &VerifyingKey) -> Result<(),
         .map_err(|_| "release provenance signature verification failed".to_string())
 }
 
+fn sign_release_retirement(
+    retirement: ReleaseRetirement,
+    key: &SigningKey,
+) -> Result<SignedReleaseRetirement, String> {
+    let canonical = canonical_release_retirement(&retirement)?;
+    let mut message =
+        Vec::with_capacity(RELEASE_RETIREMENT_SIGNATURE_DOMAIN.len() + canonical.len());
+    message.extend_from_slice(RELEASE_RETIREMENT_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&canonical);
+    Ok(SignedReleaseRetirement {
+        retirement,
+        signature_b64url: URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes()),
+    })
+}
+
+fn verify_release_retirement(
+    signed: &SignedReleaseRetirement,
+    target: &ReleaseManifest,
+    key: &VerifyingKey,
+) -> Result<(), String> {
+    let canonical = canonical_release_retirement(&signed.retirement)?;
+    let mut message =
+        Vec::with_capacity(RELEASE_RETIREMENT_SIGNATURE_DOMAIN.len() + canonical.len());
+    message.extend_from_slice(RELEASE_RETIREMENT_SIGNATURE_DOMAIN);
+    message.extend_from_slice(&canonical);
+    let signature = URL_SAFE_NO_PAD
+        .decode(&signed.signature_b64url)
+        .map_err(|_| "release retirement signature is invalid".to_string())?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| "release retirement signature is invalid".to_string())?;
+    key.verify(&message, &signature)
+        .map_err(|_| "release retirement signature verification failed".to_string())?;
+    if signed.retirement.target_release_identity != target.release_identity
+        || signed.retirement.target_install_generation != target.install_generation
+    {
+        return Err("release retirement target does not match the published release".to_string());
+    }
+    if let Some(predecessor) = &signed.retirement.predecessor {
+        verify_release_manifest_signature(predecessor, key)
+            .map_err(|_| "release retirement predecessor signature is invalid".to_string())?;
+        validate_predecessor_manifest_shape(&predecessor.manifest)?;
+        if predecessor.manifest.install_generation >= target.install_generation
+            || predecessor.manifest.release_identity == target.release_identity
+            || predecessor.manifest.channel != target.channel
+            || predecessor.manifest.platform != target.platform
+            || predecessor.manifest.architecture != target.architecture
+        {
+            return Err("release retirement predecessor is inconsistent".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn canonical_release_retirement(retirement: &ReleaseRetirement) -> Result<Vec<u8>, String> {
+    if retirement.schema_version != RELEASE_RETIREMENT_SCHEMA_VERSION
+        || !valid_release_identity(&retirement.target_release_identity)
+        || retirement.target_install_generation == 0
+    {
+        return Err("release retirement shape is invalid".to_string());
+    }
+    let canonical = serde_json::to_vec(retirement)
+        .map_err(|_| "release retirement could not be serialized".to_string())?;
+    if canonical.len() as u64 > MAXIMUM_RETIREMENT_BYTES {
+        return Err("release retirement exceeds the size bound".to_string());
+    }
+    Ok(canonical)
+}
+
 fn validate_release_provenance(provenance: &ReleaseProvenance) -> Result<(), String> {
     if provenance.schema_version != RELEASE_PROVENANCE_SCHEMA_VERSION
         || !valid_release_identity(&provenance.release_identity)
@@ -1127,6 +1233,12 @@ fn write_json_new(path: &Path, value: &impl serde::Serialize) -> Result<(), Stri
         .map_err(|_| "release metadata could not be committed".to_string())
 }
 
+fn write_json_new_or_exact(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|_| "release metadata could not be serialized".to_string())?;
+    write_bytes_new_or_exact(path, &bytes)
+}
+
 fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
     let parent = path
         .parent()
@@ -1146,11 +1258,8 @@ fn write_json_atomic(path: &Path, value: &impl serde::Serialize) -> Result<(), S
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
         .map_err(|_| "channel staging file could not be committed".to_string())?;
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|_| "previous channel metadata could not be replaced".to_string())?;
-    }
-    fs::rename(staging, path).map_err(|_| "channel metadata could not be committed".to_string())
+    replace_file_atomically(&staging, path)
+        .map_err(|_| "channel metadata could not be committed".to_string())
 }
 
 fn print_release_summary(release: &PublishedRelease) {
@@ -1177,8 +1286,47 @@ fn upload_release(
     let verify_root = config.output_root.join(".r2-verify");
     fs::create_dir_all(&verify_root)
         .map_err(|_| "R2 verification directory could not be created".to_string())?;
-    let predecessor =
+    let progression =
         verify_remote_channel_progression(config, bucket, release, verifying_key, &verify_root)?;
+    if matches!(
+        progression,
+        RemoteChannelProgression::Current(_)
+            | RemoteChannelProgression::CommittedGenerationMismatch(_)
+    ) {
+        let (current, exact_candidate) = match progression {
+            RemoteChannelProgression::Current(current) => (current, true),
+            RemoteChannelProgression::CommittedGenerationMismatch(current) => (current, false),
+            _ => unreachable!(),
+        };
+        verify_public_channel_pointer(config, &current)?;
+        verify_current_installer_alias(config, &current)?;
+        let retirement = fetch_remote_release_retirement(
+            config,
+            bucket,
+            &current.signed_release.manifest,
+            verifying_key,
+            &verify_root,
+        )?;
+        if let Some(predecessor) = retirement.retirement.predecessor.as_ref() {
+            retire_predecessor_release(config, bucket, predecessor, &verify_root)?;
+        }
+        let _ = fs::remove_dir(&verify_root);
+        if exact_candidate {
+            return Ok(());
+        }
+        return Err(
+            "stable channel already committed this generation with a different signed candidate"
+                .to_string(),
+        );
+    }
+    let predecessor = match progression {
+        RemoteChannelProgression::Empty => None,
+        RemoteChannelProgression::Predecessor(predecessor) => Some(predecessor),
+        RemoteChannelProgression::Current(_)
+        | RemoteChannelProgression::CommittedGenerationMismatch(_) => unreachable!(),
+    };
+    let retirement_object =
+        build_release_retirement_object(release, predecessor.as_ref(), signing_key, verifying_key)?;
     let block_plan_object = if let Some(predecessor) = predecessor.as_ref() {
         build_optional_block_plan_object(
             config,
@@ -1191,28 +1339,41 @@ fn upload_release(
     } else {
         None
     };
-    for object in release
-        .immutable_objects
-        .iter()
-        .chain(block_plan_object.iter())
-    {
-        ensure_wrangler_size(object)?;
-        match wrangler_get(config, bucket, &object.object_key, &verify_root)? {
-            RemoteObject::Missing => {}
-            RemoteObject::Downloaded(path) => {
-                let _ = fs::remove_file(path);
-                return Err(format!(
-                    "immutable R2 object already exists: {}",
-                    object.object_key
-                ));
-            }
-        }
+    if block_plan_object.is_none() {
+        let target: SignedReleaseManifest = serde_json::from_slice(
+            &fs::read(&release.manifest_path)
+                .map_err(|_| "candidate signed manifest could not be read".to_string())?,
+        )
+        .map_err(|_| "candidate signed manifest is malformed".to_string())?;
+        let stale_block_plan = format!(
+            "{}/{}",
+            release_object_root(&target.manifest),
+            BLOCK_PLAN_FILENAME
+        );
+        remove_remote_object_and_verify_absent(config, bucket, &stale_block_plan, &verify_root)?;
+        verify_public_object_absent(config, &stale_block_plan)?;
     }
     for object in release
         .immutable_objects
         .iter()
         .chain(block_plan_object.iter())
+        .chain(std::iter::once(&retirement_object))
     {
+        ensure_wrangler_size(object)?;
+        if let RemoteObject::Downloaded(downloaded) =
+            wrangler_get(config, bucket, &object.object_key, &verify_root)?
+        {
+            let exact = verify_uploaded_object(config, object, &downloaded, verifying_key).is_ok();
+            let _ = fs::remove_file(downloaded);
+            if exact {
+                verify_public_object(config, object)?;
+                continue;
+            }
+            return Err(format!(
+                "immutable R2 object already exists with different content: {}",
+                object.object_key
+            ));
+        }
         wrangler_put(
             config,
             bucket,
@@ -1228,6 +1389,12 @@ fn upload_release(
             ));
         };
         verify_uploaded_object(config, object, &downloaded, verifying_key)?;
+        if object
+            .object_key
+            .ends_with(&format!("/{RELEASE_RETIREMENT_FILENAME}"))
+        {
+            verify_release_retirement_file(&downloaded, &release.manifest_path, verifying_key)?;
+        }
         if object
             .object_key
             .ends_with(&format!("/{BLOCK_PLAN_FILENAME}"))
@@ -1274,6 +1441,15 @@ fn upload_release(
     fs::remove_file(downloaded_channel)
         .map_err(|_| "stable channel verification artifact could not be removed".to_string())?;
     verify_public_object(config, &release.channel_object)?;
+    let published_channel: ReleaseChannelPointer = serde_json::from_slice(
+        &fs::read(&release.channel_path)
+            .map_err(|_| "candidate channel metadata could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate channel metadata is malformed".to_string())?;
+    verify_current_installer_alias(config, &published_channel)?;
+    if let Some(predecessor) = predecessor.as_ref() {
+        retire_predecessor_release(config, bucket, &predecessor.signed_release, &verify_root)?;
+    }
     let _ = fs::remove_dir(verify_root);
     Ok(())
 }
@@ -1284,7 +1460,12 @@ fn verify_remote_channel_progression(
     release: &PublishedRelease,
     verifying_key: &VerifyingKey,
     verify_root: &Path,
-) -> Result<Option<ReleaseChannelPointer>, String> {
+) -> Result<RemoteChannelProgression, String> {
+    let candidate: ReleaseChannelPointer = serde_json::from_slice(
+        &fs::read(&release.channel_path)
+            .map_err(|_| "candidate channel metadata could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate channel metadata is malformed".to_string())?;
     let remote = wrangler_get(
         config,
         bucket,
@@ -1292,7 +1473,7 @@ fn verify_remote_channel_progression(
         verify_root,
     )?;
     let RemoteObject::Downloaded(path) = remote else {
-        return Ok(None);
+        return Ok(RemoteChannelProgression::Empty);
     };
     let result = (|| {
         let metadata = fs::metadata(&path)
@@ -1306,13 +1487,7 @@ fn verify_remote_channel_progression(
         )
         .map_err(|_| "existing stable channel is malformed".to_string())?;
         validate_predecessor_channel(config, &channel, verifying_key)?;
-        if channel.install_generation >= config.generation {
-            return Err(format!(
-                "stable channel generation {} is not older than candidate generation {}; rollout hold or promotion must use a newer generation",
-                channel.install_generation, config.generation
-            ));
-        }
-        Ok(Some(channel))
+        classify_remote_channel_progression(config, channel, &candidate)
     })();
     let _ = fs::remove_file(path);
     result
@@ -1357,6 +1532,26 @@ fn validate_predecessor_channel(
     if channel.manifest_url != expected_manifest_url {
         return Err("existing stable channel manifest URL is inconsistent".to_string());
     }
+    let expected_installer_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+    let expected_installer_url = format!(
+        "{}/{}/{}/{}-{}/{}",
+        config.base_url,
+        manifest.platform,
+        manifest.architecture,
+        manifest.install_generation,
+        manifest.release_identity,
+        expected_installer_name
+    );
+    let installer_digest = URL_SAFE_NO_PAD
+        .decode(&channel.installer.sha256_b64url)
+        .map_err(|_| "existing stable channel installer hash is invalid".to_string())?;
+    if channel.installer.filename != expected_installer_name
+        || channel.installer.url != expected_installer_url
+        || channel.installer.size == 0
+        || installer_digest.len() != 32
+    {
+        return Err("existing stable channel installer metadata is inconsistent".to_string());
+    }
     Ok(())
 }
 
@@ -1392,6 +1587,350 @@ fn validate_predecessor_manifest_shape(manifest: &ReleaseManifest) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn release_object_root(manifest: &ReleaseManifest) -> String {
+    format!(
+        "releases/{}/{}/{}-{}",
+        manifest.platform,
+        manifest.architecture,
+        manifest.install_generation,
+        manifest.release_identity
+    )
+}
+
+fn build_release_retirement_object(
+    release: &PublishedRelease,
+    predecessor: Option<&ReleaseChannelPointer>,
+    signing_key: &SigningKey,
+    verifying_key: &VerifyingKey,
+) -> Result<UploadObject, String> {
+    let target: SignedReleaseManifest = serde_json::from_slice(
+        &fs::read(&release.manifest_path)
+            .map_err(|_| "candidate signed manifest could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate signed manifest is malformed".to_string())?;
+    let signed = sign_release_retirement(
+        ReleaseRetirement {
+            schema_version: RELEASE_RETIREMENT_SCHEMA_VERSION,
+            target_release_identity: target.manifest.release_identity.clone(),
+            target_install_generation: target.manifest.install_generation,
+            predecessor: predecessor.map(|channel| channel.signed_release.clone()),
+        },
+        signing_key,
+    )?;
+    verify_release_retirement(&signed, &target.manifest, verifying_key)?;
+    let path = release.release_directory.join(RELEASE_RETIREMENT_FILENAME);
+    write_json_new_or_exact(&path, &signed)?;
+    Ok(UploadObject {
+        local_path: path,
+        object_key: format!(
+            "{}/{}",
+            release_object_root(&target.manifest),
+            RELEASE_RETIREMENT_FILENAME
+        ),
+        content_type: "application/json",
+        requires_authenticode: false,
+        requires_provenance_signature: false,
+    })
+}
+
+fn verify_release_retirement_file(
+    path: &Path,
+    target_manifest_path: &Path,
+    verifying_key: &VerifyingKey,
+) -> Result<SignedReleaseRetirement, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|_| "signed release retirement metadata is unavailable".to_string())?;
+    if metadata.len() == 0 || metadata.len() > MAXIMUM_RETIREMENT_BYTES {
+        return Err("signed release retirement size is invalid".to_string());
+    }
+    let target: SignedReleaseManifest = serde_json::from_slice(
+        &fs::read(target_manifest_path)
+            .map_err(|_| "candidate signed manifest could not be read".to_string())?,
+    )
+    .map_err(|_| "candidate signed manifest is malformed".to_string())?;
+    let signed: SignedReleaseRetirement = serde_json::from_slice(
+        &fs::read(path).map_err(|_| "signed release retirement could not be read".to_string())?,
+    )
+    .map_err(|_| "signed release retirement is malformed".to_string())?;
+    verify_release_retirement(&signed, &target.manifest, verifying_key)?;
+    Ok(signed)
+}
+
+fn fetch_remote_release_retirement(
+    config: &PublisherConfig,
+    bucket: &str,
+    target: &ReleaseManifest,
+    verifying_key: &VerifyingKey,
+    verify_root: &Path,
+) -> Result<SignedReleaseRetirement, String> {
+    let object_key = format!(
+        "{}/{}",
+        release_object_root(target),
+        RELEASE_RETIREMENT_FILENAME
+    );
+    let RemoteObject::Downloaded(path) = wrangler_get(config, bucket, &object_key, verify_root)?
+    else {
+        return Err("published release retirement record is missing".to_string());
+    };
+    let result = (|| {
+        let metadata = fs::metadata(&path)
+            .map_err(|_| "signed release retirement metadata is unavailable".to_string())?;
+        if metadata.len() == 0 || metadata.len() > MAXIMUM_RETIREMENT_BYTES {
+            return Err("signed release retirement size is invalid".to_string());
+        }
+        let signed: SignedReleaseRetirement = serde_json::from_slice(
+            &fs::read(&path)
+                .map_err(|_| "signed release retirement could not be read".to_string())?,
+        )
+        .map_err(|_| "signed release retirement is malformed".to_string())?;
+        verify_release_retirement(&signed, target, verifying_key)?;
+        Ok(signed)
+    })();
+    let _ = fs::remove_file(path);
+    result
+}
+
+fn classify_remote_channel_progression(
+    config: &PublisherConfig,
+    channel: ReleaseChannelPointer,
+    candidate: &ReleaseChannelPointer,
+) -> Result<RemoteChannelProgression, String> {
+    if channel.install_generation > config.generation {
+        return Err(format!(
+            "stable channel generation {} is newer than candidate generation {}; publication must use a newer generation",
+            channel.install_generation, config.generation
+        ));
+    }
+    if channel.install_generation == config.generation {
+        let manifest = &channel.signed_release.manifest;
+        if channel.release_identity != config.release_identity
+            || channel.version != config.release_version
+            || manifest.minimum_version != config.minimum_version
+            || manifest.rollout.cohort != config.rollout_cohort
+            || manifest.rollout.percentage != config.rollout_percentage
+        {
+            return Err(
+                "stable channel already uses the candidate generation for different release metadata"
+                    .to_string(),
+            );
+        }
+        let exact_candidate = channel.schema_version == candidate.schema_version
+            && channel.channel == candidate.channel
+            && channel.platform == candidate.platform
+            && channel.architecture == candidate.architecture
+            && channel.release_identity == candidate.release_identity
+            && channel.install_generation == candidate.install_generation
+            && channel.version == candidate.version
+            && channel.manifest_url == candidate.manifest_url
+            && channel.signed_release == candidate.signed_release
+            && channel.installer == candidate.installer;
+        if !exact_candidate {
+            return Ok(RemoteChannelProgression::CommittedGenerationMismatch(
+                channel,
+            ));
+        }
+        return Ok(RemoteChannelProgression::Current(channel));
+    }
+    Ok(RemoteChannelProgression::Predecessor(channel))
+}
+
+fn predecessor_release_object_keys(predecessor: &SignedReleaseManifest) -> Vec<String> {
+    let root = release_object_root(&predecessor.manifest);
+    let mut keys = BTreeSet::new();
+    for file in &predecessor.manifest.files {
+        keys.insert(format!("{root}/{}", file.path));
+    }
+    keys.insert(format!(
+        "{root}/Axiusflow-Setup{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    keys.insert(format!("{root}/provenance.json"));
+    keys.insert(format!("{root}/{BLOCK_PLAN_FILENAME}"));
+    keys.insert(format!("{root}/{RELEASE_RETIREMENT_FILENAME}"));
+    keys.remove(&format!("{root}/manifest.json"));
+    keys.into_iter().collect()
+}
+
+fn retire_predecessor_release(
+    config: &PublisherConfig,
+    bucket: &str,
+    predecessor: &SignedReleaseManifest,
+    verify_root: &Path,
+) -> Result<(), String> {
+    let manifest = &predecessor.manifest;
+    validate_predecessor_manifest_shape(manifest)?;
+    for object_key in predecessor_release_object_keys(predecessor) {
+        remove_remote_object_and_verify_absent(config, bucket, &object_key, verify_root)?;
+        verify_public_object_absent(config, &object_key)?;
+    }
+    let manifest_key = format!("{}/manifest.json", release_object_root(manifest));
+    // Keep the signed predecessor manifest available until every other object
+    // is absent. A failed cleanup can then be retried without guessing which
+    // release the stable channel previously referenced.
+    remove_remote_object_and_verify_absent(config, bucket, &manifest_key, verify_root)?;
+    verify_public_object_absent(config, &manifest_key)
+}
+
+fn remove_remote_object_and_verify_absent(
+    config: &PublisherConfig,
+    bucket: &str,
+    object_key: &str,
+    verify_root: &Path,
+) -> Result<(), String> {
+    if let RemoteObject::Downloaded(path) = wrangler_get(config, bucket, object_key, verify_root)? {
+        let _ = fs::remove_file(path);
+        wrangler_delete(config, bucket, object_key)?;
+    }
+    match wrangler_get(config, bucket, object_key, verify_root)? {
+        RemoteObject::Missing => Ok(()),
+        RemoteObject::Downloaded(path) => {
+            let _ = fs::remove_file(path);
+            Err(format!(
+                "retired R2 object remains after deletion: {object_key}"
+            ))
+        }
+    }
+}
+
+fn verify_public_channel_pointer(
+    config: &PublisherConfig,
+    expected: &ReleaseChannelPointer,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/channels/{}/{}/{}.json",
+        config.base_url, expected.channel, expected.platform, expected.architecture
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(3)
+        .max_idle_connections(1)
+        .max_idle_connections_per_host(1)
+        .timeout_global(Some(PUBLIC_VERIFY_TIMEOUT))
+        .build()
+        .into();
+    let mut response = agent
+        .get(&url)
+        .call()
+        .map_err(|_| "public stable channel verification request failed".to_string())?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAXIMUM_CHANNEL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "public stable channel verification read failed".to_string())?;
+    if bytes.len() as u64 > MAXIMUM_CHANNEL_BYTES {
+        return Err("public stable channel exceeds the size bound".to_string());
+    }
+    let actual: ReleaseChannelPointer = serde_json::from_slice(&bytes)
+        .map_err(|_| "public stable channel is malformed".to_string())?;
+    if &actual != expected {
+        return Err("public stable channel does not match R2".to_string());
+    }
+    Ok(())
+}
+
+fn verify_current_installer_alias(
+    config: &PublisherConfig,
+    channel: &ReleaseChannelPointer,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/{}/{}/current/{}",
+        config.base_url, channel.platform, channel.architecture, channel.installer.filename
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(0)
+        .max_idle_connections(1)
+        .max_idle_connections_per_host(1)
+        .timeout_global(Some(PUBLIC_VERIFY_TIMEOUT))
+        .build()
+        .into();
+    let mut response = agent
+        .get(&url)
+        .call()
+        .map_err(|_| "current installer alias verification request failed".to_string())?;
+    if response.status().as_u16() != 200 {
+        return Err("current installer alias did not return HTTP 200".to_string());
+    }
+    let cache_control = response
+        .headers()
+        .get("Cache-Control")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "current installer alias omitted Cache-Control".to_string())?;
+    if !cache_control
+        .split(',')
+        .map(str::trim)
+        .any(|token| token.eq_ignore_ascii_case("no-store"))
+    {
+        return Err("current installer alias must use Cache-Control: no-store".to_string());
+    }
+    let content_length = response
+        .headers()
+        .get("Content-Length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "current installer alias omitted a valid Content-Length".to_string())?;
+    if content_length != channel.installer.size {
+        return Err("current installer alias Content-Length is stale".to_string());
+    }
+    let mut reader = response
+        .body_mut()
+        .as_reader()
+        .take(channel.installer.size.saturating_add(1));
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut total = 0_u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|_| "current installer alias could not be read".to_string())?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| "current installer alias size overflowed".to_string())?;
+        digest.update(&buffer[..count]);
+    }
+    if total != channel.installer.size
+        || URL_SAFE_NO_PAD.encode(digest.finalize()) != channel.installer.sha256_b64url
+    {
+        return Err(
+            "current installer alias does not match the stable channel installer".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_public_object_absent(config: &PublisherConfig, object_key: &str) -> Result<(), String> {
+    let Some(public_key) = object_key.strip_prefix("releases/") else {
+        return Err("retired R2 object is outside the public release namespace".to_string());
+    };
+    let url = format!("{}/{public_key}", config.base_url);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(0)
+        .max_idle_connections(1)
+        .max_idle_connections_per_host(1)
+        .timeout_global(Some(PUBLIC_VERIFY_TIMEOUT))
+        .build()
+        .into();
+    match agent.get(&url).call() {
+        Err(ureq::Error::StatusCode(status)) if public_status_is_retired(status) => Ok(()),
+        Ok(_) => Err(format!(
+            "retired public release object remains available: {object_key}"
+        )),
+        Err(_) => Err(format!(
+            "retired public release object absence could not be verified: {object_key}"
+        )),
+    }
+}
+
+fn public_status_is_retired(status: u16) -> bool {
+    matches!(status, 404 | 410)
 }
 
 fn verify_block_plan_readback(
@@ -1478,7 +2017,7 @@ fn build_optional_block_plan_object(
     decode_and_verify_block_plan(&encoded, source, target, &signing_key.verifying_key())
         .map_err(|error| format!("release block plan verification failed: {error}"))?;
     let path = release.release_directory.join(BLOCK_PLAN_FILENAME);
-    write_bytes_new(&path, &encoded)?;
+    write_bytes_new_or_exact(&path, &encoded)?;
     Ok(Some(UploadObject {
         local_path: path,
         object_key: format!(
@@ -1694,15 +2233,23 @@ fn read_exact_block(file: &mut File, buffer: &mut [u8]) -> Result<usize, String>
     Ok(total)
 }
 
-fn write_bytes_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| "immutable release metadata already exists".to_string())?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| "release metadata could not be committed".to_string())
+fn write_bytes_new_or_exact(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => file
+            .write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| "release metadata could not be committed".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path)
+                .map_err(|_| "existing immutable release metadata could not be read".to_string())?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err("immutable release metadata already exists with different content".to_string())
+            }
+        }
+        Err(_) => Err("immutable release metadata could not be created".to_string()),
+    }
 }
 
 fn ensure_wrangler_size(object: &UploadObject) -> Result<(), String> {
@@ -1747,6 +2294,22 @@ fn wrangler_put(
             "Wrangler R2 upload failed for {}",
             object.object_key
         ))
+    }
+}
+
+fn wrangler_delete(config: &PublisherConfig, bucket: &str, object_key: &str) -> Result<(), String> {
+    let target = format!("{bucket}/{object_key}");
+    let status = Command::new(&config.wrangler)
+        .args(["r2", "object", "delete"])
+        .arg(target)
+        .arg("--remote")
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|_| "Wrangler R2 delete could not be started".to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Wrangler R2 delete failed for {object_key}"))
     }
 }
 
@@ -1941,6 +2504,163 @@ mod tests {
         }
     }
 
+    fn channel_fixture(
+        config: &PublisherConfig,
+        key: &SigningKey,
+        generation: u64,
+        identity: &str,
+    ) -> ReleaseChannelPointer {
+        let file_path = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
+        let file = ReleaseFile {
+            url: format!(
+                "{}/{}/{}/{}-{identity}/{file_path}",
+                config.base_url,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                generation
+            ),
+            ..release_file_fixture(&file_path, b"desktop")
+        };
+        let signed_release = sign_release_manifest(
+            ReleaseManifest {
+                schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
+                release_identity: identity.to_string(),
+                install_generation: generation,
+                channel: config.channel.clone(),
+                minimum_version: config.minimum_version.clone(),
+                platform: std::env::consts::OS.to_string(),
+                architecture: std::env::consts::ARCH.to_string(),
+                files: vec![file],
+                rollout: RolloutMetadata {
+                    cohort: config.rollout_cohort.clone(),
+                    percentage: config.rollout_percentage,
+                },
+            },
+            key,
+        )
+        .expect("release signs");
+        let installer_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+        ReleaseChannelPointer {
+            schema_version: RELEASE_CHANNEL_SCHEMA_VERSION,
+            channel: config.channel.clone(),
+            platform: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            release_identity: identity.to_string(),
+            install_generation: generation,
+            version: config.release_version.clone(),
+            published_at: config.published_at.clone(),
+            manifest_url: format!(
+                "{}/{}/{}/{}-{identity}/manifest.json",
+                config.base_url,
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                generation
+            ),
+            signed_release,
+            installer: ReleaseInstallerMetadata {
+                filename: installer_name.clone(),
+                url: format!(
+                    "{}/{}/{}/{}-{identity}/{installer_name}",
+                    config.base_url,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                    generation
+                ),
+                size: 1,
+                sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
+            },
+        }
+    }
+
+    #[test]
+    fn release_retry_contracts_cover_partial_upload_and_post_channel_cleanup() {
+        let root = temporary_root("release-retry");
+        let config = publisher_config_fixture(&root, 8);
+        let key = SigningKey::from_bytes(&[10; 32]);
+        let current = channel_fixture(&config, &key, 8, &config.release_identity);
+        validate_predecessor_channel(&config, &current, &key.verifying_key())
+            .expect("current channel validates");
+        assert!(matches!(
+            classify_remote_channel_progression(&config, current.clone(), &current)
+                .expect("same generation is retryable"),
+            RemoteChannelProgression::Current(_)
+        ));
+        let mut different_candidate = current.clone();
+        different_candidate.installer.size += 1;
+        assert!(matches!(
+            classify_remote_channel_progression(&config, current.clone(), &different_candidate)
+                .expect("committed generation remains identifiable"),
+            RemoteChannelProgression::CommittedGenerationMismatch(_)
+        ));
+
+        let predecessor =
+            channel_fixture(&config, &key, 7, "fedcba9876543210fedcba9876543210fedcba98");
+        let signed_retirement = sign_release_retirement(
+            ReleaseRetirement {
+                schema_version: RELEASE_RETIREMENT_SCHEMA_VERSION,
+                target_release_identity: current.release_identity.clone(),
+                target_install_generation: current.install_generation,
+                predecessor: Some(predecessor.signed_release.clone()),
+            },
+            &key,
+        )
+        .expect("retirement signs");
+        verify_release_retirement(
+            &signed_retirement,
+            &current.signed_release.manifest,
+            &key.verifying_key(),
+        )
+        .expect("post-channel retry has an authenticated predecessor");
+        let retired_keys = predecessor_release_object_keys(&predecessor.signed_release);
+        assert!(
+            retired_keys
+                .iter()
+                .any(|key| key.ends_with("provenance.json"))
+        );
+        assert!(
+            retired_keys
+                .iter()
+                .any(|key| key.ends_with(BLOCK_PLAN_FILENAME))
+        );
+        assert!(
+            retired_keys
+                .iter()
+                .any(|key| key.ends_with(RELEASE_RETIREMENT_FILENAME))
+        );
+        assert!(
+            !retired_keys
+                .iter()
+                .any(|key| key.ends_with("manifest.json"))
+        );
+
+        let local = root.join("candidate.json");
+        let downloaded = root.join("downloaded.json");
+        fs::write(&local, b"candidate").expect("local candidate");
+        fs::write(&downloaded, b"candidate").expect("downloaded candidate");
+        let object = UploadObject {
+            local_path: local,
+            object_key: "releases/windows/x86_64/8-test/candidate.json".to_string(),
+            content_type: "application/json",
+            requires_authenticode: false,
+            requires_provenance_signature: false,
+        };
+        verify_uploaded_object(&config, &object, &downloaded, &key.verifying_key())
+            .expect("exact partial upload is reusable");
+        fs::write(&downloaded, b"different").expect("mismatched remote candidate");
+        assert!(
+            verify_uploaded_object(&config, &object, &downloaded, &key.verifying_key()).is_err()
+        );
+
+        assert!(public_status_is_retired(404));
+        assert!(public_status_is_retired(410));
+        assert!(!public_status_is_retired(200));
+        let sidecar = root.join("retry-sidecar.json");
+        write_bytes_new_or_exact(&sidecar, b"same").expect("first sidecar write");
+        write_bytes_new_or_exact(&sidecar, b"same").expect("exact retry reuses sidecar");
+        assert!(write_bytes_new_or_exact(&sidecar, b"different").is_err());
+        fs::remove_dir_all(root).expect("remove retry fixture");
+    }
+
     #[test]
     fn predecessor_channel_cross_binding_and_manifest_shape_fail_closed() {
         let root = temporary_root("predecessor-validation");
@@ -1988,8 +2708,14 @@ mod tests {
             ),
             signed_release,
             installer: ReleaseInstallerMetadata {
-                filename: "Axiusflow-Setup.exe".to_string(),
-                url: "https://auth.axiusflow.test/releases/setup.exe".to_string(),
+                filename: format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX),
+                url: format!(
+                    "{}/{}/{}/7-{identity}/Axiusflow-Setup{}",
+                    config.base_url,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                    std::env::consts::EXE_SUFFIX
+                ),
                 size: 1,
                 sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
             },
