@@ -69,6 +69,14 @@ struct PublisherConfig {
     authenticode_tool: OsString,
     authenticode_certificate_sha1: Option<String>,
     authenticode_timestamp_url: Option<String>,
+    allow_unsigned_windows_release: bool,
+    trust_reset_from: Option<TrustResetSource>,
+}
+
+#[derive(Debug)]
+struct TrustResetSource {
+    generation: u64,
+    release_identity: String,
 }
 
 impl PublisherConfig {
@@ -93,6 +101,9 @@ impl PublisherConfig {
         let mut authenticode_tool = OsString::from("signtool.exe");
         let mut authenticode_certificate_sha1 = None;
         let mut authenticode_timestamp_url = None;
+        let mut allow_unsigned_windows_release = false;
+        let mut trust_reset_generation = None;
+        let mut trust_reset_release_identity = None;
         let mut arguments = arguments;
         while let Some(flag) = arguments.next() {
             let flag = flag
@@ -164,9 +175,42 @@ impl PublisherConfig {
                 "--authenticode-timestamp-url" => {
                     authenticode_timestamp_url = Some(required_argument(&mut arguments, &flag)?);
                 }
+                "--allow-unsigned-windows-release" => allow_unsigned_windows_release = true,
+                "--trust-reset-from-generation" => {
+                    let raw = required_argument(&mut arguments, &flag)?;
+                    trust_reset_generation = Some(
+                        raw.parse::<u64>()
+                            .ok()
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                "trust-reset source generation must be a positive integer"
+                                    .to_string()
+                            })?,
+                    );
+                }
+                "--trust-reset-from-release-identity" => {
+                    trust_reset_release_identity = Some(required_argument(&mut arguments, &flag)?);
+                }
                 _ => return Err(usage()),
             }
         }
+        let trust_reset_from = match (trust_reset_generation, trust_reset_release_identity) {
+            (None, None) => None,
+            (Some(generation), Some(release_identity))
+                if valid_release_identity(&release_identity) =>
+            {
+                Some(TrustResetSource {
+                    generation,
+                    release_identity,
+                })
+            }
+            _ => {
+                return Err(
+                    "trust reset requires both a valid source generation and exact source release identity"
+                        .to_string(),
+                );
+            }
+        };
         let config = Self {
             signing_key_file: signing_key_file.ok_or_else(usage)?,
             expected_verifying_key,
@@ -187,6 +231,8 @@ impl PublisherConfig {
             authenticode_tool,
             authenticode_certificate_sha1,
             authenticode_timestamp_url,
+            allow_unsigned_windows_release,
+            trust_reset_from,
         };
         if !valid_release_identity(&config.release_identity)
             || !valid_identifier(&config.channel, 32)
@@ -201,32 +247,45 @@ impl PublisherConfig {
             );
         }
         if cfg!(target_os = "windows") {
-            let certificate = config
-                .authenticode_certificate_sha1
-                .as_deref()
-                .ok_or_else(|| {
-                    "Windows publishing requires an Authenticode certificate SHA-1 thumbprint"
-                        .to_string()
-                })?;
-            let timestamp_url = config
-                .authenticode_timestamp_url
-                .as_deref()
-                .ok_or_else(|| {
-                    "Windows publishing requires an RFC 3161 timestamp URL".to_string()
-                })?;
-            if !valid_certificate_sha1(certificate) || !valid_timestamp_url(timestamp_url) {
-                return Err(
-                    "Windows Authenticode certificate thumbprint or timestamp URL is invalid"
-                        .to_string(),
-                );
+            match (
+                config.authenticode_certificate_sha1.as_deref(),
+                config.authenticode_timestamp_url.as_deref(),
+                config.allow_unsigned_windows_release,
+            ) {
+                (Some(certificate), Some(timestamp_url), false)
+                    if valid_certificate_sha1(certificate)
+                        && valid_timestamp_url(timestamp_url) => {}
+                (None, None, true) => {}
+                (Some(_), Some(_), true) => {
+                    return Err(
+                        "unsigned Windows release approval cannot be combined with Authenticode configuration"
+                            .to_string(),
+                    );
+                }
+                (None, None, false) => {
+                    return Err(
+                        "Windows publishing requires Authenticode configuration or explicit unsigned-release approval"
+                            .to_string(),
+                    );
+                }
+                _ => {
+                    return Err(
+                        "Windows Authenticode certificate thumbprint or timestamp URL is invalid or incomplete"
+                            .to_string(),
+                    );
+                }
             }
         }
         Ok(config)
     }
+
+    fn uses_authenticode(&self) -> bool {
+        cfg!(target_os = "windows") && self.authenticode_certificate_sha1.is_some()
+    }
 }
 
 fn usage() -> String {
-    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> [--expected-verifying-key <base64url-public-key>] [--skip-build] --release-identity <git-head> --generation <n> --release-version <candidate-semver> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--rollout-cohort all] [--rollout-percentage 100] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>] [--authenticode-tool <signtool>] --authenticode-certificate-sha1 <40-hex-thumbprint> --authenticode-timestamp-url <RFC3161-url>".to_string()
+    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> [--expected-verifying-key <base64url-public-key>] [--skip-build] --release-identity <git-head> --generation <n> --release-version <candidate-semver> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--rollout-cohort all] [--rollout-percentage 100] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>] ([--authenticode-tool <signtool>] --authenticode-certificate-sha1 <40-hex-thumbprint> --authenticode-timestamp-url <RFC3161-url> | --allow-unsigned-windows-release) [--trust-reset-from-generation <n> --trust-reset-from-release-identity <identity>]".to_string()
 }
 
 fn required_argument(
@@ -649,6 +708,7 @@ struct PublishedRelease {
 #[derive(Debug)]
 enum RemoteChannelProgression {
     Empty,
+    TrustResetPredecessor,
     Predecessor(ReleaseChannelPointer),
     Current(ReleaseChannelPointer),
     CommittedGenerationMismatch(ReleaseChannelPointer),
@@ -683,7 +743,8 @@ fn package_release(
     let rollback_compatibility_path = release_directory.join(rollback_compatibility_name);
     copy_release_binary(&binaries.launcher, &launcher_path)?;
     copy_release_binary(&binaries.desktop, &desktop_path)?;
-    if cfg!(target_os = "windows") && !cfg!(test) {
+    let uses_authenticode = config.uses_authenticode();
+    if uses_authenticode && !cfg!(test) {
         sign_authenticode_file(config, &launcher_path)?;
         sign_authenticode_file(config, &desktop_path)?;
     }
@@ -754,7 +815,9 @@ fn package_release(
                 &rollback_compatibility_path,
                 &setup_path,
             )?;
-            sign_authenticode_file(config, &setup_path)?;
+            if uses_authenticode {
+                sign_authenticode_file(config, &setup_path)?;
+            }
         }
     } else {
         // The public native installer is currently a Windows product. Keep
@@ -824,21 +887,21 @@ fn package_release(
             local_path: setup_path,
             object_key: format!("{release_object_root}/{setup_name}"),
             content_type: executable_content_type,
-            requires_authenticode: cfg!(target_os = "windows"),
+            requires_authenticode: uses_authenticode,
             requires_provenance_signature: false,
         },
         UploadObject {
             local_path: launcher_path,
             object_key: format!("{release_object_root}/{launcher_name}"),
             content_type: executable_content_type,
-            requires_authenticode: cfg!(target_os = "windows"),
+            requires_authenticode: uses_authenticode,
             requires_provenance_signature: false,
         },
         UploadObject {
             local_path: desktop_path,
             object_key: format!("{release_object_root}/{desktop_name}"),
             content_type: executable_content_type,
-            requires_authenticode: cfg!(target_os = "windows"),
+            requires_authenticode: uses_authenticode,
             requires_provenance_signature: false,
         },
         UploadObject {
@@ -1323,7 +1386,7 @@ fn upload_release(
         );
     }
     let predecessor = match progression {
-        RemoteChannelProgression::Empty => None,
+        RemoteChannelProgression::Empty | RemoteChannelProgression::TrustResetPredecessor => None,
         RemoteChannelProgression::Predecessor(predecessor) => Some(predecessor),
         RemoteChannelProgression::Current(_)
         | RemoteChannelProgression::CommittedGenerationMismatch(_) => unreachable!(),
@@ -1489,11 +1552,42 @@ fn verify_remote_channel_progression(
                 .map_err(|_| "existing stable channel could not be read".to_string())?,
         )
         .map_err(|_| "existing stable channel is malformed".to_string())?;
-        validate_predecessor_channel(config, &channel, verifying_key)?;
-        classify_remote_channel_progression(config, channel, &candidate)
+        classify_authenticated_or_reset_channel(config, channel, &candidate, verifying_key)
     })();
     let _ = fs::remove_file(path);
     result
+}
+
+fn classify_authenticated_or_reset_channel(
+    config: &PublisherConfig,
+    channel: ReleaseChannelPointer,
+    candidate: &ReleaseChannelPointer,
+    verifying_key: &VerifyingKey,
+) -> Result<RemoteChannelProgression, String> {
+    match validate_predecessor_channel(config, &channel, verifying_key) {
+        Ok(()) => classify_remote_channel_progression(config, channel, candidate),
+        Err(authentication_error) => {
+            let Some(reset) = config.trust_reset_from.as_ref() else {
+                return Err(authentication_error);
+            };
+            validate_predecessor_channel_shape(config, &channel)?;
+            if channel.install_generation != reset.generation
+                || channel.release_identity != reset.release_identity
+            {
+                return Err(
+                    "existing stable channel does not match the explicitly approved trust-reset source"
+                        .to_string(),
+                );
+            }
+            if channel.install_generation >= config.generation {
+                return Err(
+                    "trust-reset publication requires a generation newer than the approved source"
+                        .to_string(),
+                );
+            }
+            Ok(RemoteChannelProgression::TrustResetPredecessor)
+        }
+    }
 }
 
 fn validate_predecessor_channel(
@@ -1507,6 +1601,13 @@ fn validate_predecessor_channel(
     // policy has retired those shapes.
     verify_release_manifest_signature(&channel.signed_release, verifying_key)
         .map_err(|_| "existing stable channel signed manifest is invalid".to_string())?;
+    validate_predecessor_channel_shape(config, channel)
+}
+
+fn validate_predecessor_channel_shape(
+    config: &PublisherConfig,
+    channel: &ReleaseChannelPointer,
+) -> Result<(), String> {
     let manifest = &channel.signed_release.manifest;
     validate_predecessor_manifest_shape(manifest)?;
     if channel.schema_version != RELEASE_CHANNEL_SCHEMA_VERSION
@@ -2493,6 +2594,8 @@ mod tests {
                 "0123456789abcdef0123456789abcdef01234567".to_string(),
             ),
             authenticode_timestamp_url: Some("https://timestamp.example.test".to_string()),
+            allow_unsigned_windows_release: false,
+            trust_reset_from: None,
         }
     }
 
@@ -2662,6 +2765,47 @@ mod tests {
         write_bytes_new_or_exact(&sidecar, b"same").expect("exact retry reuses sidecar");
         assert!(write_bytes_new_or_exact(&sidecar, b"different").is_err());
         fs::remove_dir_all(root).expect("remove retry fixture");
+    }
+
+    #[test]
+    fn trust_reset_is_bound_to_exact_older_channel_without_reusing_it() {
+        let root = temporary_root("trust-reset");
+        let mut config = publisher_config_fixture(&root, 24);
+        let old_identity = "fedcba9876543210fedcba9876543210fedcba98";
+        config.trust_reset_from = Some(TrustResetSource {
+            generation: 23,
+            release_identity: old_identity.to_string(),
+        });
+        let old_key = SigningKey::from_bytes(&[21; 32]);
+        let new_key = SigningKey::from_bytes(&[22; 32]);
+        let predecessor = channel_fixture(&config, &old_key, 23, old_identity);
+        let candidate = channel_fixture(&config, &new_key, 24, &config.release_identity);
+
+        assert!(matches!(
+            classify_authenticated_or_reset_channel(
+                &config,
+                predecessor.clone(),
+                &candidate,
+                &new_key.verifying_key(),
+            )
+            .expect("exact approved trust-reset source is accepted"),
+            RemoteChannelProgression::TrustResetPredecessor
+        ));
+
+        config.trust_reset_from = Some(TrustResetSource {
+            generation: 23,
+            release_identity: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        });
+        assert!(
+            classify_authenticated_or_reset_channel(
+                &config,
+                predecessor,
+                &candidate,
+                &new_key.verifying_key(),
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(root).expect("remove trust-reset fixture");
     }
 
     #[test]
@@ -2969,6 +3113,8 @@ mod tests {
                 "0123456789abcdef0123456789abcdef01234567".to_string(),
             ),
             authenticode_timestamp_url: Some("https://timestamp.example.test".to_string()),
+            allow_unsigned_windows_release: false,
+            trust_reset_from: None,
         };
         let key = SigningKey::from_bytes(&[7; 32]);
         let published = package_release(&root, &config, &key, &binaries).expect("package release");
@@ -3188,6 +3334,48 @@ mod tests {
         assert_eq!(held.rollout_percentage, 0);
         assert!(PublisherConfig::parse(arguments("100").into_iter()).is_ok());
         assert!(PublisherConfig::parse(arguments("101").into_iter()).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publisher_requires_one_explicit_signing_mode() {
+        let base_arguments = || {
+            vec![
+                OsString::from("--signing-key-file"),
+                OsString::from("unused-key"),
+                OsString::from("--release-identity"),
+                OsString::from("0123456789abcdef0123456789abcdef01234567"),
+                OsString::from("--generation"),
+                OsString::from("42"),
+                OsString::from("--release-version"),
+                OsString::from("0.2.3"),
+                OsString::from("--minimum-version"),
+                OsString::from("0.2.0"),
+                OsString::from("--base-url"),
+                OsString::from("https://auth.axiusflow.test/releases"),
+                OsString::from("--published-at"),
+                OsString::from("2026-09-17T00:00:00Z"),
+            ]
+        };
+
+        assert!(PublisherConfig::parse(base_arguments().into_iter()).is_err());
+
+        let mut unsigned = base_arguments();
+        unsigned.push(OsString::from("--allow-unsigned-windows-release"));
+        let unsigned = PublisherConfig::parse(unsigned.into_iter())
+            .expect("explicit unsigned Windows release is accepted");
+        assert!(unsigned.allow_unsigned_windows_release);
+        assert!(!unsigned.uses_authenticode());
+
+        let mut conflicting = base_arguments();
+        conflicting.extend([
+            OsString::from("--allow-unsigned-windows-release"),
+            OsString::from("--authenticode-certificate-sha1"),
+            OsString::from("0123456789abcdef0123456789abcdef01234567"),
+            OsString::from("--authenticode-timestamp-url"),
+            OsString::from("https://timestamp.example.test"),
+        ]);
+        assert!(PublisherConfig::parse(conflicting.into_iter()).is_err());
     }
 
     #[test]

@@ -1,4 +1,6 @@
 /target/
+/third_party/gpui_base/target/
+/third_party/gpui_base/Cargo.lock
 /financial-charts/
 /.cache/
 /.reference/

@@ -27,6 +27,21 @@ on:
         required: true
         default: false
         type: boolean
+      allow_unsigned_windows_release:
+        description: Explicitly publish without Authenticode; Windows will show Unknown publisher
+        required: true
+        default: false
+        type: boolean
+      trust_reset_from_generation:
+        description: Exact current stable generation when intentionally rotating a lost release-signing key; otherwise leave blank
+        required: false
+        default: ""
+        type: string
+      trust_reset_from_release_identity:
+        description: Exact current stable release identity for an intentional signing-key reset; otherwise leave blank
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -45,8 +60,7 @@ jobs:
       release_sha: ${{ steps.qualified-metadata.outputs.release_sha }}
       release_version: ${{ steps.qualified-metadata.outputs.release_version }}
       release_verifying_key: ${{ steps.qualified-metadata.outputs.release_verifying_key }}
-      authenticode_certificate_sha1: ${{ steps.qualified-metadata.outputs.authenticode_certificate_sha1 }}
-      authenticode_timestamp_url: ${{ steps.qualified-metadata.outputs.authenticode_timestamp_url }}
+      windows_signing_mode: ${{ steps.qualified-metadata.outputs.windows_signing_mode }}
       launcher_sha256: ${{ steps.qualified-metadata.outputs.launcher_sha256 }}
       desktop_sha256: ${{ steps.qualified-metadata.outputs.desktop_sha256 }}
     env:
@@ -97,14 +111,13 @@ jobs:
         env:
           RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
           HEALTH_GATE_APPROVED: ${{ inputs.health_gate_approved }}
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ inputs.allow_unsigned_windows_release }}
           RELEASE_ROLLOUT_COHORT: ${{ inputs.rollout_cohort }}
           RELEASE_ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+          TRUST_RESET_FROM_GENERATION: ${{ inputs.trust_reset_from_generation }}
+          TRUST_RESET_FROM_RELEASE_IDENTITY: ${{ inputs.trust_reset_from_release_identity }}
         run: |
-          foreach ($required in @(
-              'RELEASE_VERIFYING_KEY_B64URL',
-              'AUTHENTICODE_CERTIFICATE_SHA1',
-              'AUTHENTICODE_TIMESTAMP_URL'
-          )) {
+          foreach ($required in @('RELEASE_VERIFYING_KEY_B64URL')) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($required))) {
               throw "Release configuration '$required' is missing."
             }
@@ -112,14 +125,34 @@ jobs:
           if ($env:RELEASE_VERIFYING_KEY_B64URL -notmatch '^[A-Za-z0-9_-]{43}$') {
             throw 'RELEASE_VERIFYING_KEY_B64URL must be the 32-byte Ed25519 public key in base64url form.'
           }
-          if ($env:AUTHENTICODE_CERTIFICATE_SHA1 -notmatch '^[0-9A-Fa-f]{40}$') {
-            throw 'AUTHENTICODE_CERTIFICATE_SHA1 must be a 40-hex certificate thumbprint.'
-          }
-          if ($env:AUTHENTICODE_TIMESTAMP_URL -notmatch '^https?://[^\s#]+$') {
-            throw 'AUTHENTICODE_TIMESTAMP_URL must name an HTTP(S) RFC 3161 endpoint.'
+          if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -ne 'true') {
+            if ($env:AUTHENTICODE_CERTIFICATE_SHA1 -notmatch '^[0-9A-Fa-f]{40}$') {
+              throw 'AUTHENTICODE_CERTIFICATE_SHA1 must be a 40-hex certificate thumbprint unless unsigned publication is explicitly approved.'
+            }
+            if ($env:AUTHENTICODE_TIMESTAMP_URL -notmatch '^https?://[^\s#]+$') {
+              throw 'AUTHENTICODE_TIMESTAMP_URL must name an HTTP(S) RFC 3161 endpoint unless unsigned publication is explicitly approved.'
+            }
           }
           if ($env:HEALTH_GATE_APPROVED -ne 'true') {
             throw 'Production release promotion requires explicit health-gate approval.'
+          }
+          $trustResetGenerationSet = -not [string]::IsNullOrWhiteSpace($env:TRUST_RESET_FROM_GENERATION)
+          $trustResetIdentitySet = -not [string]::IsNullOrWhiteSpace($env:TRUST_RESET_FROM_RELEASE_IDENTITY)
+          if ($trustResetGenerationSet -ne $trustResetIdentitySet) {
+            throw 'Trust reset requires both the source generation and exact source release identity.'
+          }
+          if ($trustResetGenerationSet) {
+            [UInt64]$sourceGeneration = 0
+            [UInt64]$candidateGeneration = 0
+            if (-not [UInt64]::TryParse($env:TRUST_RESET_FROM_GENERATION, [ref]$sourceGeneration) -or $sourceGeneration -eq 0) {
+              throw 'Trust-reset source generation must be a positive integer.'
+            }
+            if (-not [UInt64]::TryParse('${{ inputs.generation }}', [ref]$candidateGeneration) -or $candidateGeneration -le $sourceGeneration) {
+              throw 'Release generation must be newer than the trust-reset source generation.'
+            }
+            if ($env:TRUST_RESET_FROM_RELEASE_IDENTITY -notmatch '^[A-Za-z0-9_-]{16,128}$') {
+              throw 'Trust-reset source release identity is invalid.'
+            }
           }
           if ($env:RELEASE_ROLLOUT_COHORT -notmatch '^[A-Za-z0-9._-]{1,64}$') {
             throw 'Release rollout cohort is invalid.'
@@ -151,22 +184,30 @@ jobs:
           RELEASE_ROLLOUT_COHORT: ${{ inputs.rollout_cohort }}
           RELEASE_ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
           RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ inputs.allow_unsigned_windows_release }}
         run: |
-          tools/publish_release.ps1 `
-            -Generation $env:RELEASE_GENERATION `
-            -MinimumLauncherVersion $env:MINIMUM_LAUNCHER_VERSION `
-            -AuthenticodeCertificateSha1 $env:AUTHENTICODE_CERTIFICATE_SHA1 `
-            -AuthenticodeTimestampUrl $env:AUTHENTICODE_TIMESTAMP_URL `
-            -ReleaseVerifyingKey $env:RELEASE_VERIFYING_KEY_B64URL `
-            -RolloutCohort $env:RELEASE_ROLLOUT_COHORT `
-            -RolloutPercentage ([byte]$env:RELEASE_ROLLOUT_PERCENTAGE) `
-            -PrebuildOnly
+          $releaseArgs = @{
+            Generation = [UInt64]$env:RELEASE_GENERATION
+            MinimumLauncherVersion = $env:MINIMUM_LAUNCHER_VERSION
+            ReleaseVerifyingKey = $env:RELEASE_VERIFYING_KEY_B64URL
+            RolloutCohort = $env:RELEASE_ROLLOUT_COHORT
+            RolloutPercentage = [byte]$env:RELEASE_ROLLOUT_PERCENTAGE
+            PrebuildOnly = $true
+          }
+          if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -eq 'true') {
+            $releaseArgs.AllowUnsignedWindowsRelease = $true
+          } else {
+            $releaseArgs.AuthenticodeCertificateSha1 = $env:AUTHENTICODE_CERTIFICATE_SHA1
+            $releaseArgs.AuthenticodeTimestampUrl = $env:AUTHENTICODE_TIMESTAMP_URL
+          }
+          tools/publish_release.ps1 @releaseArgs
 
       - name: Freeze qualified release and stage local handoff
         id: qualified-metadata
         shell: pwsh
         env:
           RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ inputs.allow_unsigned_windows_release }}
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve qualified workspace package metadata.' }
@@ -211,8 +252,8 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_sha=$env:GITHUB_SHA"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_version=$releaseVersion"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_verifying_key=$env:RELEASE_VERIFYING_KEY_B64URL"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "authenticode_certificate_sha1=$env:AUTHENTICODE_CERTIFICATE_SHA1"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "authenticode_timestamp_url=$env:AUTHENTICODE_TIMESTAMP_URL"
+          $signingMode = if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -eq 'true') { 'unsigned' } else { 'authenticode' }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "windows_signing_mode=$signingMode"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "launcher_sha256=$launcherHash"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "desktop_sha256=$desktopHash"
 
@@ -313,8 +354,8 @@ jobs:
           QUALIFIED_RELEASE_SHA: ${{ needs.qualify-windows.outputs.release_sha }}
           QUALIFIED_RELEASE_VERSION: ${{ needs.qualify-windows.outputs.release_version }}
           QUALIFIED_RELEASE_VERIFYING_KEY: ${{ needs.qualify-windows.outputs.release_verifying_key }}
-          QUALIFIED_AUTHENTICODE_CERTIFICATE_SHA1: ${{ needs.qualify-windows.outputs.authenticode_certificate_sha1 }}
-          QUALIFIED_AUTHENTICODE_TIMESTAMP_URL: ${{ needs.qualify-windows.outputs.authenticode_timestamp_url }}
+          QUALIFIED_WINDOWS_SIGNING_MODE: ${{ needs.qualify-windows.outputs.windows_signing_mode }}
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ inputs.allow_unsigned_windows_release }}
           EXPECTED_LAUNCHER_SHA256: ${{ needs.qualify-windows.outputs.launcher_sha256 }}
           EXPECTED_DESKTOP_SHA256: ${{ needs.qualify-windows.outputs.desktop_sha256 }}
         run: |
@@ -324,11 +365,9 @@ jobs:
           if ($env:QUALIFIED_RELEASE_VERIFYING_KEY -ne $env:RELEASE_VERIFYING_KEY_B64URL) {
             throw 'Qualified release verifying key does not match the signer-authoritative repository value.'
           }
-          if ($env:QUALIFIED_AUTHENTICODE_CERTIFICATE_SHA1 -ne $env:AUTHENTICODE_CERTIFICATE_SHA1) {
-            throw 'Qualified Authenticode certificate does not match the signer-authoritative repository value.'
-          }
-          if ($env:QUALIFIED_AUTHENTICODE_TIMESTAMP_URL -ne $env:AUTHENTICODE_TIMESTAMP_URL) {
-            throw 'Qualified Authenticode timestamp URL does not match the signer-authoritative repository value.'
+          $expectedSigningMode = if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -eq 'true') { 'unsigned' } else { 'authenticode' }
+          if ($env:QUALIFIED_WINDOWS_SIGNING_MODE -ne $expectedSigningMode) {
+            throw 'Qualified Windows signing mode does not match the dispatched release policy.'
           }
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve signing-checkout package metadata.' }
@@ -366,18 +405,25 @@ jobs:
 
       - name: Validate signing-station tools and certificate
         shell: pwsh
+        env:
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ inputs.allow_unsigned_windows_release }}
         run: |
-          $certificate = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
-            Where-Object { $_.Thumbprint -eq $env:AUTHENTICODE_CERTIFICATE_SHA1 -and $_.HasPrivateKey } |
-            Select-Object -First 1
-          if ($null -eq $certificate) {
-            throw 'The configured Authenticode certificate with its private key is unavailable to the release-signing account.'
+          if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -ne 'true') {
+            $certificate = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
+              Where-Object { $_.Thumbprint -eq $env:AUTHENTICODE_CERTIFICATE_SHA1 -and $_.HasPrivateKey } |
+              Select-Object -First 1
+            if ($null -eq $certificate) {
+              throw 'The configured Authenticode certificate with its private key is unavailable to the release-signing account.'
+            }
           }
-          foreach ($tool in @(
-            @{ Name = 'AUTHENTICODE_TOOL'; Path = $env:AUTHENTICODE_TOOL; Hash = $env:AUTHENTICODE_TOOL_SHA256 },
+          $tools = @(
             @{ Name = 'WRANGLER_PATH'; Path = $env:WRANGLER_PATH; Hash = $env:WRANGLER_SHA256 },
             @{ Name = 'ISCC_PATH'; Path = $env:ISCC_PATH; Hash = $env:ISCC_SHA256 }
-          )) {
+          )
+          if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -ne 'true') {
+            $tools += @{ Name = 'AUTHENTICODE_TOOL'; Path = $env:AUTHENTICODE_TOOL; Hash = $env:AUTHENTICODE_TOOL_SHA256 }
+          }
+          foreach ($tool in $tools) {
             if ($tool.Hash -notmatch '^[0-9A-Fa-f]{64}$') {
               throw "$($tool.Name)_SHA256 must pin the exact signing-station tool bytes."
             }
@@ -437,35 +483,51 @@ jobs:
           MINIMUM_LAUNCHER_VERSION: ${{ inputs.minimum_launcher_version }}
           RELEASE_ROLLOUT_COHORT: ${{ inputs.rollout_cohort }}
           RELEASE_ROLLOUT_PERCENTAGE: ${{ inputs.rollout_percentage }}
+          ALLOW_UNSIGNED_WINDOWS_RELEASE: ${{ inputs.allow_unsigned_windows_release }}
+          TRUST_RESET_FROM_GENERATION: ${{ inputs.trust_reset_from_generation }}
+          TRUST_RESET_FROM_RELEASE_IDENTITY: ${{ inputs.trust_reset_from_release_identity }}
         run: |
-          foreach ($tool in @(
-            @{ Name = 'AUTHENTICODE_TOOL'; Path = $env:AUTHENTICODE_TOOL; Hash = $env:AUTHENTICODE_TOOL_SHA256 },
+          $tools = @(
             @{ Name = 'WRANGLER_PATH'; Path = $env:WRANGLER_PATH; Hash = $env:WRANGLER_SHA256 },
             @{ Name = 'ISCC_PATH'; Path = $env:ISCC_PATH; Hash = $env:ISCC_SHA256 }
-          )) {
+          )
+          if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -ne 'true') {
+            $tools += @{ Name = 'AUTHENTICODE_TOOL'; Path = $env:AUTHENTICODE_TOOL; Hash = $env:AUTHENTICODE_TOOL_SHA256 }
+          }
+          foreach ($tool in $tools) {
             $actual = (Get-FileHash -LiteralPath $tool.Path -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($actual -ne $tool.Hash.ToLowerInvariant()) {
               throw "Signing-station tool '$($tool.Name)' changed after validation."
             }
           }
-          tools/publish_release.ps1 `
-            -Generation $env:RELEASE_GENERATION `
-            -ReleaseVersion $env:RELEASE_VERSION `
-            -MinimumLauncherVersion $env:MINIMUM_LAUNCHER_VERSION `
-            -SigningKeyFile $env:RELEASE_SIGNING_KEY_FILE `
-            -AuthenticodeCertificateSha1 $env:AUTHENTICODE_CERTIFICATE_SHA1 `
-            -AuthenticodeTimestampUrl $env:AUTHENTICODE_TIMESTAMP_URL `
-            -AuthenticodeTool $env:AUTHENTICODE_TOOL `
-            -WranglerPath $env:WRANGLER_PATH `
-            -IsccPath $env:ISCC_PATH `
-            -ReleaseVerifyingKey $env:RELEASE_VERIFYING_KEY_B64URL `
-            -RolloutCohort $env:RELEASE_ROLLOUT_COHORT `
-            -RolloutPercentage ([byte]$env:RELEASE_ROLLOUT_PERCENTAGE) `
-            -SkipQualification `
-            -SkipBuild `
-            -PublisherPath $env:RELEASE_PUBLISHER_PATH `
-            -PublisherSha256 $env:RELEASE_PUBLISHER_SHA256 `
-            -Channel stable
+          $releaseArgs = @{
+            Generation = [UInt64]$env:RELEASE_GENERATION
+            ReleaseVersion = $env:RELEASE_VERSION
+            MinimumLauncherVersion = $env:MINIMUM_LAUNCHER_VERSION
+            SigningKeyFile = $env:RELEASE_SIGNING_KEY_FILE
+            WranglerPath = $env:WRANGLER_PATH
+            IsccPath = $env:ISCC_PATH
+            ReleaseVerifyingKey = $env:RELEASE_VERIFYING_KEY_B64URL
+            RolloutCohort = $env:RELEASE_ROLLOUT_COHORT
+            RolloutPercentage = [byte]$env:RELEASE_ROLLOUT_PERCENTAGE
+            SkipQualification = $true
+            SkipBuild = $true
+            PublisherPath = $env:RELEASE_PUBLISHER_PATH
+            PublisherSha256 = $env:RELEASE_PUBLISHER_SHA256
+            Channel = 'stable'
+          }
+          if ($env:ALLOW_UNSIGNED_WINDOWS_RELEASE -eq 'true') {
+            $releaseArgs.AllowUnsignedWindowsRelease = $true
+          } else {
+            $releaseArgs.AuthenticodeCertificateSha1 = $env:AUTHENTICODE_CERTIFICATE_SHA1
+            $releaseArgs.AuthenticodeTimestampUrl = $env:AUTHENTICODE_TIMESTAMP_URL
+            $releaseArgs.AuthenticodeTool = $env:AUTHENTICODE_TOOL
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:TRUST_RESET_FROM_GENERATION)) {
+            $releaseArgs.TrustResetFromGeneration = [UInt64]$env:TRUST_RESET_FROM_GENERATION
+            $releaseArgs.TrustResetFromReleaseIdentity = $env:TRUST_RESET_FROM_RELEASE_IDENTITY
+          }
+          tools/publish_release.ps1 @releaseArgs
 
       - name: Remove signing-runner release material
         if: always()

@@ -162,8 +162,9 @@ Only publish/install when the maintainer asks for a release or end-to-end instal
   release jobs run on maintainer-owned Windows runners on the maintainer's machine; GitHub is the
   trigger/audit layer and no GitHub-hosted runner, protected environment, or Actions binary artifact is
   part of the release path. The `release-build` identity owns qualification only. A distinct
-  `release-signing` Windows identity owns the production Authenticode certificate, Ed25519 key file, and
-  authenticated Wrangler session; production signing/deployment secrets are not stored in GitHub. The
+  `release-signing` Windows identity owns the Ed25519 key file and authenticated Wrangler session; any
+  future production Authenticode certificate also belongs only to that identity. Production
+  signing/deployment secrets are not stored in GitHub. The
   signer receives candidate binaries only after their hashes have been frozen and handed across the local shared directory. The
   signing job must use an independently provisioned publisher whose SHA-256 is anchored outside the build
   runner, and every external signing/deployment tool must be pinned by SHA-256 and live outside build-runner
@@ -173,13 +174,21 @@ Only publish/install when the maintainer asks for a release or end-to-end instal
   The production workflow uses `-PrebuildOnly` on the build runner, validates the locally handed-off binaries
   against GitHub-controlled qualification hashes, and then uses the independently provisioned publisher with
   `-SkipQualification -SkipBuild -PublisherPath -PublisherSha256`; do not bypass qualification,
-  trusted-publisher digest verification, public-key binding, Authenticode/RFC 3161 signing,
-  manifest/provenance signing, immutable upload, rollout policy, or public-channel verification.
+  trusted-publisher digest verification, public-key binding, manifest/provenance signing, immutable
+  upload, rollout policy, or public-channel verification. Windows publication must select exactly one
+  explicit mode: Authenticode plus RFC 3161 timestamping, or the maintainer-approved unsigned mode that
+  omits the embedded publisher thumbprint and truthfully accepts Windows `Unknown publisher` UX.
+- A signing-key trust reset must be explicitly bound to the exact public predecessor generation and
+  release identity and must publish a strictly newer generation. Treat that predecessor as
+  unauthenticated: do not use it for block reuse, retirement, or a claimed continuity chain. Existing
+  installations require a one-time reinstall unless an already-trusted rotation path exists.
 - After publishing, verify the live stable channel and installer hash before installing.
 - For installed-app validation, verify the active lifecycle pointer, signed manifest, installed binary
-  hashes and Authenticode publisher/timestamp, rollback-compatibility asset, stable/versioned launcher byte
-  equality, and that the running desktop path points at the intended immutable generation with no secondary
-  market process or retired market autostart registration.
+  hashes, rollback-compatibility asset, stable/versioned launcher byte equality, and that the running
+  desktop path points at the intended immutable generation with no secondary market process or retired
+  market autostart registration. In Authenticode mode also verify publisher/timestamp; in explicit unsigned
+  mode verify that all shipped executables are actually unsigned and that the website does not claim a
+  trusted Windows publisher.
 - Never claim live provider, account, or visual behavior was tested unless that exact path was exercised.
 
 ## Rust and documentation conventions

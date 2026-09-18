@@ -9,15 +9,21 @@ param(
 
     [string]$SigningKeyFile = (Join-Path $env:LOCALAPPDATA "Axiusflow\release-signing-key.b64"),
 
-    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9A-Fa-f]{40}$')]
     [string]$AuthenticodeCertificateSha1,
 
-    [Parameter(Mandatory = $true)]
     [ValidatePattern('^https?://[^\s#]+$')]
     [string]$AuthenticodeTimestampUrl,
 
     [string]$AuthenticodeTool = "signtool.exe",
+
+    [switch]$AllowUnsignedWindowsRelease,
+
+    [ValidateRange(1, [UInt64]::MaxValue)]
+    [UInt64]$TrustResetFromGeneration,
+
+    [ValidatePattern('^[A-Za-z0-9_-]{16,128}$')]
+    [string]$TrustResetFromReleaseIdentity,
 
     [string]$WranglerPath = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "axiusflow-website\node_modules\.bin\wrangler.cmd"),
 
@@ -68,6 +74,35 @@ $repo = Split-Path -Parent $PSScriptRoot
 $baseUrl = "https://auth.axiusflow.com/releases"
 $bucket = "axiusflow-releases"
 $wrangler = $null
+$trustResetConfigured = (
+    $TrustResetFromGeneration -gt 0 -and
+    -not [string]::IsNullOrWhiteSpace($TrustResetFromReleaseIdentity)
+)
+if ($trustResetConfigured -and $Generation -le $TrustResetFromGeneration) {
+    throw "Trust-reset publication generation must be newer than its source generation."
+}
+if (-not $trustResetConfigured -and (
+    $TrustResetFromGeneration -gt 0 -or
+    -not [string]::IsNullOrWhiteSpace($TrustResetFromReleaseIdentity)
+)) {
+    throw "Trust reset requires both -TrustResetFromGeneration and -TrustResetFromReleaseIdentity."
+}
+$authenticodeConfigured = (
+    -not [string]::IsNullOrWhiteSpace($AuthenticodeCertificateSha1) -and
+    -not [string]::IsNullOrWhiteSpace($AuthenticodeTimestampUrl)
+)
+if ($AllowUnsignedWindowsRelease -and $authenticodeConfigured) {
+    throw "-AllowUnsignedWindowsRelease cannot be combined with Authenticode configuration."
+}
+if (-not $AllowUnsignedWindowsRelease -and -not $authenticodeConfigured) {
+    throw "Windows release packaging requires Authenticode configuration or -AllowUnsignedWindowsRelease."
+}
+if (-not $authenticodeConfigured -and (
+    -not [string]::IsNullOrWhiteSpace($AuthenticodeCertificateSha1) -or
+    -not [string]::IsNullOrWhiteSpace($AuthenticodeTimestampUrl)
+)) {
+    throw "Authenticode certificate and timestamp configuration must be supplied together."
+}
 
 if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
     $workspaceManifest = Get-Content -LiteralPath (Join-Path $repo 'Cargo.toml')
@@ -87,7 +122,7 @@ if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
     }
 }
 
-if ($PrebuildOnly -and ($PackageOnly -or $SkipQualification -or $SkipBuild -or $PublisherPath -or $PublisherSha256)) {
+if ($PrebuildOnly -and ($PackageOnly -or $SkipQualification -or $SkipBuild -or $PublisherPath -or $PublisherSha256 -or $trustResetConfigured)) {
     throw "-PrebuildOnly cannot be combined with package/publish skip or publisher-path options."
 }
 
@@ -108,7 +143,9 @@ $iscc = $null
 $authenticodeToolPath = $null
 if (-not $PrebuildOnly) {
     $iscc = Resolve-RequiredCommandPath $IsccPath "Inno Setup 6"
-    $authenticodeToolPath = Resolve-RequiredCommandPath $AuthenticodeTool "Windows SignTool"
+    if ($authenticodeConfigured) {
+        $authenticodeToolPath = Resolve-RequiredCommandPath $AuthenticodeTool "Windows SignTool"
+    }
 }
 if (-not $PackageOnly -and -not $PrebuildOnly) {
     $wrangler = Resolve-RequiredCommandPath $WranglerPath "Wrangler"
@@ -195,7 +232,11 @@ try {
             $env:AXIUSFLOW_BOOTSTRAP_MIN_GENERATION = [string]$Generation
             $env:AXIUSFLOW_RELEASE_IDENTITY = $identity
             $env:AXIUSFLOW_INSTALL_GENERATION = [string]$Generation
-            $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 = $AuthenticodeCertificateSha1
+            if ($authenticodeConfigured) {
+                $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 = $AuthenticodeCertificateSha1
+            } else {
+                Remove-Item Env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -ErrorAction SilentlyContinue
+            }
 
             & cargo build --locked --release -p axiusflow_platform_runtime --bin axiusflow_launcher
             if ($LASTEXITCODE -ne 0) { throw "release launcher prebuild failed." }
@@ -233,13 +274,25 @@ try {
         "--rollout-cohort", $RolloutCohort,
         "--rollout-percentage", $RolloutPercentage,
         "--output", $output,
-        "--iscc", $iscc,
-        "--authenticode-tool", $authenticodeToolPath,
-        "--authenticode-certificate-sha1", $AuthenticodeCertificateSha1,
-        "--authenticode-timestamp-url", $AuthenticodeTimestampUrl
+        "--iscc", $iscc
     )
+    if ($authenticodeConfigured) {
+        $publisherArgs += @(
+            "--authenticode-tool", $authenticodeToolPath,
+            "--authenticode-certificate-sha1", $AuthenticodeCertificateSha1,
+            "--authenticode-timestamp-url", $AuthenticodeTimestampUrl
+        )
+    } else {
+        $publisherArgs += "--allow-unsigned-windows-release"
+    }
     if ($SkipBuild) {
         $publisherArgs += @("--skip-build", "--expected-verifying-key", $ReleaseVerifyingKey)
+    }
+    if ($trustResetConfigured) {
+        $publisherArgs += @(
+            "--trust-reset-from-generation", $TrustResetFromGeneration,
+            "--trust-reset-from-release-identity", $TrustResetFromReleaseIdentity
+        )
     }
     if (-not $PackageOnly) {
         $publisherArgs += @("--r2-bucket", $bucket, "--wrangler", $wrangler)
