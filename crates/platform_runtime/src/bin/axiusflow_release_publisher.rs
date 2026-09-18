@@ -598,6 +598,11 @@ fn configure_release_build(
         .env("AXIUSFLOW_RELEASE_IDENTITY", &config.release_identity)
         .env("AXIUSFLOW_INSTALL_GENERATION", generation)
         .stdin(Stdio::null());
+    if config.r2_bucket.is_none() {
+        command.env("AXIUSFLOW_LOCAL_PACKAGE", "1");
+    } else {
+        command.env_remove("AXIUSFLOW_LOCAL_PACKAGE");
+    }
     if let Some(certificate) = config.authenticode_certificate_sha1.as_deref() {
         command.env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", certificate);
     }
@@ -2597,6 +2602,44 @@ mod tests {
             allow_unsigned_windows_release: false,
             trust_reset_from: None,
         }
+    }
+
+    #[test]
+    fn release_build_environment_marks_only_local_packages() {
+        let root = temporary_root("local-package-build-env");
+        let config = publisher_config_fixture(&root, 23);
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let verifying_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
+        let generation = config.generation.to_string();
+
+        let mut local = Command::new("cargo");
+        configure_release_build(&mut local, &root, &config, &verifying_key, &generation);
+        assert_eq!(
+            local
+                .get_envs()
+                .find(|(name, _)| *name == "AXIUSFLOW_LOCAL_PACKAGE")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("1"))
+        );
+
+        let mut production_config = publisher_config_fixture(&root, 23);
+        production_config.r2_bucket = Some("axiusflow-releases".to_string());
+        let mut production = Command::new("cargo");
+        configure_release_build(
+            &mut production,
+            &root,
+            &production_config,
+            &verifying_key,
+            &generation,
+        );
+        assert_eq!(
+            production
+                .get_envs()
+                .find(|(name, _)| *name == "AXIUSFLOW_LOCAL_PACKAGE")
+                .map(|(_, value)| value),
+            Some(None)
+        );
+        fs::remove_dir_all(root).expect("remove local-package build fixture");
     }
 
     fn release_file_fixture(path: &str, bytes: &[u8]) -> ReleaseFile {

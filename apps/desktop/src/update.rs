@@ -33,6 +33,7 @@ const UPDATE_RESTART_READY: &str = "AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
 const UPDATE_RESTART_COMMIT: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
 
 static UPDATE_RESTART_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+const LOCAL_PACKAGE_BUILD: bool = option_env!("AXIUSFLOW_LOCAL_PACKAGE").is_some();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UpdateState {
@@ -105,6 +106,9 @@ pub struct DesktopUpdater {
 
 impl DesktopUpdater {
     pub fn new() -> Result<Self, String> {
+        if LOCAL_PACKAGE_BUILD {
+            return Err("update checking is unavailable for local package builds".to_string());
+        }
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);
         thread::Builder::new()

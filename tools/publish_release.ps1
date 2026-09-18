@@ -125,6 +125,15 @@ if ([string]::IsNullOrWhiteSpace($ReleaseVersion)) {
 if ($PrebuildOnly -and ($PackageOnly -or $SkipQualification -or $SkipBuild -or $PublisherPath -or $PublisherSha256 -or $trustResetConfigured)) {
     throw "-PrebuildOnly cannot be combined with package/publish skip or publisher-path options."
 }
+if ($PackageOnly -and $SkipBuild) {
+    throw "-PackageOnly cannot use -SkipBuild because local packages must rebuild the desktop with self-update disabled."
+}
+if ($PackageOnly -and (
+    -not [string]::IsNullOrWhiteSpace($PublisherPath) -or
+    -not [string]::IsNullOrWhiteSpace($PublisherSha256)
+)) {
+    throw "-PackageOnly must use the repository release publisher so the local-package build contract is current."
+}
 
 if (-not $PackageOnly -and -not $PrebuildOnly) {
     $expectedReleaseContext = (
@@ -222,7 +231,8 @@ try {
             'AXIUSFLOW_BOOTSTRAP_MIN_GENERATION',
             'AXIUSFLOW_RELEASE_IDENTITY',
             'AXIUSFLOW_INSTALL_GENERATION',
-            'AXIUSFLOW_AUTHENTICODE_CERT_SHA1'
+            'AXIUSFLOW_AUTHENTICODE_CERT_SHA1',
+            'AXIUSFLOW_LOCAL_PACKAGE'
         )) {
             $saved[$name] = [Environment]::GetEnvironmentVariable($name)
         }
@@ -237,6 +247,7 @@ try {
             } else {
                 Remove-Item Env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -ErrorAction SilentlyContinue
             }
+            Remove-Item Env:AXIUSFLOW_LOCAL_PACKAGE -ErrorAction SilentlyContinue
 
             & cargo build --locked --release -p axiusflow_platform_runtime --bin axiusflow_launcher
             if ($LASTEXITCODE -ne 0) { throw "release launcher prebuild failed." }

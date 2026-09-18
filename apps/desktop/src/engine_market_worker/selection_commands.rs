@@ -4,10 +4,29 @@ use super::{
     ChartState, ConsumerResourceClass, EndpointRecord, FeedConnectionState,
     InstallProviderInstrument, MarketPriceAlert, MarketRuntimeEvent, MarketService,
     MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
-    RITHMIC_CATALOG_READY_MESSAGE, STARTUP_CATALOG_COMMAND_GENERATION, SearchProviderInstruments,
-    SelectProviderInstrument, StartupResolution, WorkerEndpoint, cancel_pending_recovery,
-    chart_streams, provider_display_name, retire_endpoint, send_recovery, series_key,
+    RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, STARTUP_CATALOG_COMMAND_GENERATION,
+    SearchProviderInstruments, SelectProviderInstrument, StartupResolution, WorkerEndpoint,
+    cancel_pending_recovery, chart_streams, provider_display_name, retire_endpoint, send_recovery,
+    series_key,
 };
+
+pub(super) fn fence_recovery_command(
+    endpoint: &WorkerEndpoint,
+    selection_generation: Option<u64>,
+    command: ReplayRecoveryCommand,
+) -> Result<Option<ReplayRecoveryCommand>, String> {
+    if selection_generation.is_none_or(|generation| generation == endpoint.active_generation) {
+        return Ok(Some(command));
+    }
+    endpoint
+        .messages
+        .send(MarketWorkerMessage::Recovery {
+            request_id: command.request_id,
+            result: Err("market recovery was superseded by a newer market selection".to_string()),
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(None)
+}
 
 pub(super) fn initialize_catalog_endpoint(
     market: &MarketService,
@@ -285,7 +304,14 @@ pub(super) fn process_command(
             startup_resolution,
             &request,
         ),
-        MarketWorkerCommand::Recovery(command) => {
+        MarketWorkerCommand::Recovery {
+            selection_generation,
+            command,
+        } => {
+            let Some(command) = fence_recovery_command(endpoint, selection_generation, command)?
+            else {
+                return Ok(());
+            };
             send_recovery(market, client_id, product, *interval, endpoint, command)
         }
         MarketWorkerCommand::ChartViewport(viewport) => {

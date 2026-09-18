@@ -699,9 +699,9 @@ impl MarketEngine {
 
     /// Applies a resource-class transition without recreating provider state.
     ///
-    /// Background consumers retain shared upstream demand without UI publication.
-    /// Warm and detached consumers also release the upstream subscription. Re-entering
-    /// foreground publishes a cached covering snapshot immediately.
+    /// Background and detached consumers release upstream demand while retaining
+    /// their cached series reference. Re-entering foreground publishes a cached
+    /// covering snapshot immediately.
     ///
     /// # Errors
     /// Returns an error for an unknown consumer or publication generation overflow.

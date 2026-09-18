@@ -406,11 +406,20 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) -> Result<(), &'static str> {
-        match self.enqueue_history(series, generation) {
+        self.enqueue_history_request_with_capacity_retry(series, generation, None)
+    }
+
+    pub(super) fn enqueue_history_request_with_capacity_retry(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+    ) -> Result<(), &'static str> {
+        match self.enqueue_history_request(series, generation, range) {
             Err(HISTORY_CAPACITY_EXHAUSTED) => {
                 self.history_retries
                     .entry((series.clone(), generation))
-                    .or_insert((Instant::now() + HISTORY_RETRY_DELAY, 0, None));
+                    .or_insert((Instant::now() + HISTORY_RETRY_DELAY, 0, range));
                 Ok(())
             }
             result => result,
@@ -458,8 +467,7 @@ impl Coordinator<'_> {
         if !first {
             return;
         }
-        let history = self.enqueue_history_recovery(series, provider_generation);
-        if let Err(detail) = history
+        if let Err(detail) = self.enqueue_history_recovery(series, provider_generation)
             && let Some(waiters) = self.pending.remove(series)
         {
             fail_waiters(
@@ -659,15 +667,21 @@ impl Coordinator<'_> {
         match plan {
             ViewportRefillPlan::Current => {
                 self.begin_live_history_reseed(&series);
-                let result = self.enqueue_history(&series, provider_generation);
+                let result = self.enqueue_history_request_with_capacity_retry(
+                    &series,
+                    provider_generation,
+                    None,
+                );
                 if result.is_err() {
                     let _ = self.cancel_live_history_reseed(&series);
                 }
                 result
             }
-            ViewportRefillPlan::Range(range) => {
-                self.enqueue_history_request(&series, provider_generation, Some(range))
-            }
+            ViewportRefillPlan::Range(range) => self.enqueue_history_request_with_capacity_retry(
+                &series,
+                provider_generation,
+                Some(range),
+            ),
         }
         .map_err(str::to_string)
     }
@@ -736,15 +750,15 @@ impl Coordinator<'_> {
             return Err("provider does not support historical bars");
         }
         let key = (series.clone(), generation);
-        if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied()
-            && attempts > MAXIMUM_HISTORY_RETRIES
-        {
+        if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied() {
             if failed_range == range && Instant::now() < retry_at {
                 return Ok(());
             }
-            // The failed cooldown expired, or the user moved to a genuinely
-            // different range. Start that request with a fresh retry budget.
-            self.history_retries.remove(&key);
+            if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
+                // The failed cooldown expired, or the user moved to a genuinely
+                // different range. Start that request with a fresh retry budget.
+                self.history_retries.remove(&key);
+            }
         }
         let range = if let Some(requested) = range {
             if let Some(confirmed_empty) = self.history_confirmed_empty.get(&key).copied() {
@@ -846,6 +860,8 @@ impl Coordinator<'_> {
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
         if current != Some(generation) {
+            self.history_deferred.remove(&key);
+            self.history_retries.remove(&key);
             return None;
         }
         match result {
@@ -1016,7 +1032,7 @@ impl Coordinator<'_> {
             DeferredHistoryRequest::Full => None,
             DeferredHistoryRequest::Range(range) => Some(range),
         };
-        let _ = self.enqueue_history_request(series, generation, range);
+        let _ = self.enqueue_history_request_with_capacity_retry(series, generation, range);
     }
     fn install_completed_history(
         &mut self,
@@ -1423,13 +1439,23 @@ impl Coordinator<'_> {
         // Timeframe/symbol changes supersede the old series immediately. Cancel
         // its queued/in-flight provider work so one user rapidly changing the
         // chart cannot occupy the bounded history queue with obsolete fetches.
-        for ((series, _), stop) in &self.history_cancellations {
-            if !self.engine.has_subscription(series) {
+        for ((series, generation), stop) in &self.history_cancellations {
+            let current_generation = self
+                .engine
+                .provider_status(&series.provider_id)
+                .and_then(|status| status.generation);
+            if !self.engine.has_subscription(series) || current_generation != Some(*generation) {
                 stop.store(true, Ordering::Release);
             }
         }
-        self.history_deferred
-            .retain(|(series, _), _| self.engine.has_subscription(series));
+        self.history_deferred.retain(|(series, generation), _| {
+            self.engine.has_subscription(series)
+                && self
+                    .engine
+                    .provider_status(&series.provider_id)
+                    .and_then(|status| status.generation)
+                    == Some(*generation)
+        });
         let demanded_series = self
             .engine
             .demanded_series()

@@ -22,7 +22,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_account::{AccountId, PlanId};
+use axiusflow_account::{
+    AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
+    MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
+};
 use axiusflow_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
@@ -47,7 +50,20 @@ const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
 const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
 const DEVICE_VAULT_KEY: &str = "account-device-key-v1";
+const PROFILE_VAULT_KEY: &str = "account-profile-v1";
 const REJECTED_RESTORE_MARKER_FILE: &str = "account-restore-rejected-v1";
+const PROFILE_VAULT_SCHEMA_VERSION: u32 = 1;
+const MAXIMUM_PROFILE_VAULT_BYTES: usize = 4096;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CachedAccountProfile {
+    schema_version: u32,
+    account_id: String,
+    display_name: String,
+    email: String,
+    photo_url: String,
+}
 
 /// Local startup readiness of the production saved-session restore path.
 ///
@@ -542,12 +558,14 @@ impl AccountService {
             }
             return;
         };
-        let Some((account_id, tokens)) = self.apply_online_restore_tokens(tokens, |tokens| {
-            let endpoints = endpoints.as_ref().map_err(Clone::clone)?;
-            self.retry_restore_lookup(|| {
-                link_subject(endpoints, &agent, &tokens.id_token, &tokens.subject)
+        let Some((account_id, tokens)) =
+            self.apply_online_restore_tokens(&vault, tokens, |tokens| {
+                let endpoints = endpoints.as_ref().map_err(Clone::clone)?;
+                self.retry_restore_lookup(|| {
+                    link_subject(endpoints, &agent, &tokens.id_token, &tokens.subject)
+                })
             })
-        }) else {
+        else {
             if self
                 .state
                 .lock()
@@ -705,6 +723,12 @@ impl AccountService {
         if claims.expires_at().saturating_sub(now) > LEASE_OFFLINE_VALIDITY_SECONDS {
             return Ok(None);
         }
+        let Some(profile) = load_profile_material(vault, &account_id)? else {
+            // A cached lease is entitlement authority, not a complete desktop
+            // identity. Older/incomplete saved sessions must finish verified
+            // online restore before they can skip onboarding.
+            return Ok(None);
+        };
         let Ok(mut state) = self.state.lock() else {
             return Err(());
         };
@@ -722,9 +746,9 @@ impl AccountService {
             plan_id: claims.plan().as_str().to_string(),
             detail: "signed in with cached access; reconnecting to refresh".to_string(),
             request_generation: 0,
-            display_name: String::new(),
-            email: String::new(),
-            photo_url: String::new(),
+            display_name: profile.display_name,
+            email: profile.email,
+            photo_url: profile.photo_url,
         };
         state.lease_expires_at = Some(claims.expires_at());
         Ok(Some(claims.expires_at()))
@@ -773,7 +797,7 @@ impl AccountService {
         V::Error: std::fmt::Display,
     {
         let tokens = self.accept_online_restore_refresh(vault, outcome)?;
-        self.apply_online_restore_tokens(tokens, link)
+        self.apply_online_restore_tokens(vault, tokens, link)
     }
 
     fn accept_online_restore_refresh<V>(
@@ -832,11 +856,16 @@ impl AccountService {
         Some(tokens)
     }
 
-    fn apply_online_restore_tokens(
+    fn apply_online_restore_tokens<V>(
         &self,
+        vault: &V,
         tokens: oidc::VerifiedTokens,
         link: impl FnOnce(&oidc::VerifiedTokens) -> Result<(AccountId, PlanId, AccountProfile), String>,
-    ) -> Option<(AccountId, oidc::VerifiedTokens)> {
+    ) -> Option<(AccountId, oidc::VerifiedTokens)>
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
         let Ok((account_id, plan, profile)) = link(&tokens) else {
             self.complete_restore_without_session(
                 AccountSessionState::TerminalError,
@@ -848,6 +877,17 @@ impl AccountService {
             return None;
         };
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
+            return None;
+        }
+        if store_profile_material(vault, &account_id, &profile).is_err() {
+            let _ = self.retire_unusable_vault_material(vault);
+            state.restore_allowed = false;
+            state.lease_expires_at = None;
+            state.view = cleared_view(
+                AccountSessionState::TerminalError,
+                0,
+                "credential storage is unavailable; retry sign-in",
+            );
             return None;
         }
         state.restore_allowed = false;
@@ -957,6 +997,7 @@ impl AccountService {
         // cached lease look authoritative again on the next process start.
         let marker_persisted = self.persist_rejected_restore_marker().is_ok();
         let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
+        let profile_deleted = vault.delete(PROFILE_VAULT_KEY).is_ok();
         let lease_retired = if lease_deleted {
             true
         } else {
@@ -982,13 +1023,13 @@ impl AccountService {
         // preserves the authoritative rejection evidence for a later retry.
         let refresh_deleted =
             (lease_retired || marker_persisted) && vault.delete(REFRESH_VAULT_KEY).is_ok();
-        let direct_cleanup = lease_deleted && refresh_deleted;
-        let marker_cleared = if direct_cleanup && marker_persisted {
+        let authentication_cleanup = lease_deleted && refresh_deleted;
+        let marker_cleared = if authentication_cleanup && marker_persisted {
             self.clear_rejected_restore_marker().is_ok()
         } else {
             !marker_persisted
         };
-        direct_cleanup && marker_cleared
+        authentication_cleanup && profile_deleted && marker_cleared
     }
 
     fn complete_restore_without_session(&self, target: AccountSessionState, detail: &str) -> bool {
@@ -1034,18 +1075,33 @@ impl AccountService {
     }
 
     /// Returns whether a verified online or cached-offline session is installed.
+    ///
+    /// `None` means the account lifecycle state is momentarily busy. Callers
+    /// that own an already-authoritative presentation snapshot may retain that
+    /// snapshot for the current frame instead of rendering a false sign-out.
+    /// Poisoned state remains an authoritative failure and returns `Some(false)`.
+    #[must_use]
+    pub fn try_is_authenticated(&self) -> Option<bool> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(_)) => return Some(false),
+        };
+        expire_lease_if_needed(&mut state, unix_now());
+        Some(matches!(
+            state.view.state,
+            AccountSessionState::Active | AccountSessionState::OfflineLease
+        ))
+    }
+
+    /// Returns whether a verified online or cached-offline session is installed.
+    ///
+    /// This hard authorization probe fails closed when the lifecycle state is
+    /// momentarily busy. Presentation code that must avoid a false logout frame
+    /// uses [`Self::try_is_authenticated`] and its last authoritative snapshot.
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        // Desktop authorization checks run on the GPUI thread. Fail closed
-        // instead of waiting behind background credential/network work that
-        // may currently own the lifecycle lock.
-        self.state.try_lock().is_ok_and(|mut state| {
-            expire_lease_if_needed(&mut state, unix_now());
-            matches!(
-                state.view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            )
-        })
+        self.try_is_authenticated().unwrap_or(false)
     }
 
     /// Resolves cached OIDC endpoints, refreshing them from discovery once.
@@ -1263,6 +1319,7 @@ impl AccountService {
         }
         let lease_deleted = vault.delete(LEASE_VAULT_KEY).is_ok();
         let refresh_deleted = vault.delete(REFRESH_VAULT_KEY).is_ok();
+        let profile_deleted = vault.delete(PROFILE_VAULT_KEY).is_ok();
         // Revocation reuses already-cached endpoints only: sign-out never
         // performs discovery on the coordinator path.
         let cached = self
@@ -1271,7 +1328,7 @@ impl AccountService {
             .map(|cached| cached.clone())
             .unwrap_or_default();
         let revocation = cached.zip(token.and_then(|token| String::from_utf8(token).ok()));
-        let deleted = lease_deleted && refresh_deleted;
+        let deleted = lease_deleted && refresh_deleted && profile_deleted;
         let view = {
             let Ok(mut state) = self.state.lock() else {
                 return Err("account state is unavailable".to_string());
@@ -1503,7 +1560,11 @@ impl AccountService {
         {
             return false;
         }
-        let stored = store_refresh_material(vault, refresh_token).is_ok();
+        let stored = store_refresh_material(vault, refresh_token).is_ok()
+            && store_profile_material(vault, account_id, profile).is_ok();
+        if !stored {
+            let _ = self.retire_unusable_vault_material(vault);
+        }
         let marker_cleared = stored && self.clear_rejected_restore_marker().is_ok();
         if !marker_cleared {
             let generation = state.last_generation;
@@ -1651,13 +1712,18 @@ impl AccountService {
         self.apply_profile_refresh_outcome(generation, outcome);
     }
 
-    fn apply_linked_profile(
+    fn apply_linked_profile<V>(
         &self,
+        vault: &V,
         generation: u64,
         expected_account: &AccountId,
         linked_account: &AccountId,
         profile: AccountProfile,
-    ) -> bool {
+    ) -> bool
+    where
+        V: CredentialVault,
+        V::Error: std::fmt::Display,
+    {
         if linked_account != expected_account {
             return false;
         }
@@ -1671,6 +1737,9 @@ impl AccountService {
                 AccountSessionState::Active | AccountSessionState::OfflineLease
             )
         {
+            return false;
+        }
+        if store_profile_material(vault, expected_account, &profile).is_err() {
             return false;
         }
         state.view.display_name = profile.display_name;
@@ -2442,7 +2511,13 @@ where
         &tokens.id_token,
         &tokens.subject,
     ) {
-        let _ = service.apply_linked_profile(generation, &session.account_id, &account_id, profile);
+        let _ = service.apply_linked_profile(
+            vault,
+            generation,
+            &session.account_id,
+            &account_id,
+            profile,
+        );
     }
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
@@ -2555,6 +2630,64 @@ where
             .map_err(|_| "credential storage is unavailable".to_string())?;
     }
     Ok(())
+}
+
+fn store_profile_material<V>(
+    vault: &V,
+    account_id: &AccountId,
+    profile: &AccountProfile,
+) -> Result<(), String>
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let encoded = serde_json::to_vec(&CachedAccountProfile {
+        schema_version: PROFILE_VAULT_SCHEMA_VERSION,
+        account_id: account_id.as_str().to_string(),
+        display_name: profile.display_name.clone(),
+        email: profile.email.clone(),
+        photo_url: profile.photo_url.clone(),
+    })
+    .map_err(|_| "credential storage is unavailable".to_string())?;
+    if encoded.len() > MAXIMUM_PROFILE_VAULT_BYTES {
+        return Err("credential storage is unavailable".to_string());
+    }
+    let encoded = Zeroizing::new(encoded);
+    vault
+        .store(PROFILE_VAULT_KEY, encoded.as_slice())
+        .map_err(|_| "credential storage is unavailable".to_string())
+}
+
+fn load_profile_material<V>(
+    vault: &V,
+    expected_account: &AccountId,
+) -> Result<Option<AccountProfile>, ()>
+where
+    V: CredentialVault,
+    V::Error: std::fmt::Display,
+{
+    let Some(encoded) = vault.load(PROFILE_VAULT_KEY).map_err(|_| ())? else {
+        return Ok(None);
+    };
+    if encoded.is_empty() || encoded.len() > MAXIMUM_PROFILE_VAULT_BYTES {
+        return Ok(None);
+    }
+    let Ok(cached) = serde_json::from_slice::<CachedAccountProfile>(&encoded) else {
+        return Ok(None);
+    };
+    if cached.schema_version != PROFILE_VAULT_SCHEMA_VERSION
+        || cached.account_id != expected_account.as_str()
+        || cached.display_name.len() > MAXIMUM_PROFILE_NAME_BYTES
+        || cached.email.len() > MAXIMUM_PROFILE_EMAIL_BYTES
+        || cached.photo_url.len() > MAXIMUM_PROFILE_PHOTO_URL_BYTES
+    {
+        return Ok(None);
+    }
+    Ok(Some(AccountProfile {
+        display_name: cached.display_name,
+        email: cached.email,
+        photo_url: cached.photo_url,
+    }))
 }
 
 fn ensure_device_key<V>(vault: &V) -> Result<(), String>
@@ -2958,7 +3091,7 @@ mod tests {
         )
     }
 
-    fn seed_current_cached_lease(vault: &MemoryVault, expires_at: u64) {
+    fn seed_current_cached_lease_without_profile(vault: &MemoryVault, expires_at: u64) {
         let device_key = b"cached-lease-device-key";
         let (compact, key) = signed_lease_fixture(
             [9_u8; 32],
@@ -2983,6 +3116,20 @@ mod tests {
                 &serde_json::to_vec(&directory).expect("directory fixture encodes"),
             )
             .expect("directory fixture stores");
+    }
+
+    fn seed_cached_profile(vault: &MemoryVault, account_id: &str, name: &str, email: &str) {
+        super::store_profile_material(
+            vault,
+            &AccountId::try_new(account_id).expect("profile account fixture builds"),
+            &profile(name, email),
+        )
+        .expect("profile fixture stores");
+    }
+
+    fn seed_current_cached_lease(vault: &MemoryVault, expires_at: u64) {
+        seed_current_cached_lease_without_profile(vault, expires_at);
+        seed_cached_profile(vault, "acct_cached", "Ada Trader", "ada@example.test");
     }
 
     #[test]
@@ -3043,7 +3190,31 @@ mod tests {
             service.account_status().state,
             AccountSessionState::OfflineLease
         );
+        assert_eq!(service.account_status().display_name, "Ada Trader");
         assert!(service.is_authenticated());
+    }
+
+    #[test]
+    fn cached_lease_without_profile_cannot_authenticate_startup() {
+        let service = restoring_service();
+        let vault = MemoryVault::default();
+        seed_current_cached_lease_without_profile(&vault, super::unix_now().saturating_add(60));
+        vault
+            .store(REFRESH_VAULT_KEY, b"cached-refresh")
+            .expect("refresh fixture stores");
+
+        assert!(matches!(
+            service.restore_local_session(&vault),
+            LocalRestore::ContinueOnline {
+                cached_expiry: None
+            }
+        ));
+        assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
+        assert_eq!(
+            service.account_status().state,
+            AccountSessionState::Authorizing
+        );
+        assert!(!service.is_authenticated());
     }
 
     #[test]
@@ -3168,6 +3339,7 @@ mod tests {
         vault
             .store(REFRESH_VAULT_KEY, b"cached-refresh")
             .expect("refresh fixture stores");
+        seed_cached_profile(&vault, "acct_cached", "Ada Trader", "ada@example.test");
         assert!(matches!(
             service.restore_local_session(&vault),
             LocalRestore::ContinueOnline { .. }
@@ -3199,6 +3371,7 @@ mod tests {
         vault
             .store(REFRESH_VAULT_KEY, b"cached-refresh")
             .expect("refresh fixture stores");
+        seed_cached_profile(&vault, "acct_cached", "Ada Trader", "ada@example.test");
         assert!(matches!(
             service.restore_local_session(&vault),
             LocalRestore::ContinueOnline { .. }
@@ -3631,6 +3804,7 @@ mod tests {
         vault
             .store(REFRESH_VAULT_KEY, b"cached-refresh")
             .expect("refresh fixture stores");
+        seed_cached_profile(&vault, "acct_cached", "Ada Trader", "ada@example.test");
         assert!(matches!(
             service.restore_local_session(&vault),
             LocalRestore::ContinueOnline { .. }
@@ -4102,6 +4276,7 @@ mod tests {
     #[test]
     fn linked_profile_refresh_is_account_and_generation_fenced() {
         let service = service();
+        let vault = MemoryVault::default();
         let account = AccountId::try_new("acct_01").expect("account builds");
         {
             let mut state = service.state.lock().expect("state locks");
@@ -4120,6 +4295,7 @@ mod tests {
         }
 
         assert!(service.apply_linked_profile(
+            &vault,
             9,
             &account,
             &account,
@@ -4131,12 +4307,14 @@ mod tests {
 
         let other = AccountId::try_new("acct_02").expect("other account builds");
         assert!(!service.apply_linked_profile(
+            &vault,
             9,
             &account,
             &other,
             profile("wrong", "wrong@example.test"),
         ));
         assert!(!service.apply_linked_profile(
+            &vault,
             8,
             &account,
             &account,
@@ -4148,6 +4326,7 @@ mod tests {
 
         service.state.lock().expect("state locks").view.state = AccountSessionState::SignedOut;
         assert!(!service.apply_linked_profile(
+            &vault,
             9,
             &account,
             &account,
@@ -4358,6 +4537,11 @@ mod tests {
         }
 
         let _busy = service.state.lock().expect("state locks");
+        assert_eq!(
+            service.try_is_authenticated(),
+            None,
+            "the nonblocking presentation probe distinguishes lifecycle contention from signed-out state"
+        );
         assert!(
             !service.is_authenticated(),
             "the GPUI hard-auth check must fail closed instead of waiting on the runtime lifecycle lock"
@@ -5359,7 +5543,7 @@ mod tests {
 
     #[test]
     fn sign_out_clears_state_and_deletes_vault_material() {
-        use super::{DEVICE_VAULT_KEY, LEASE_VAULT_KEY, REFRESH_VAULT_KEY};
+        use super::{DEVICE_VAULT_KEY, LEASE_VAULT_KEY, PROFILE_VAULT_KEY, REFRESH_VAULT_KEY};
         use axiusflow_platform_runtime::CredentialVault as _;
 
         let service = service();
@@ -5375,6 +5559,7 @@ mod tests {
         );
         assert_eq!(service.account_status().state, AccountSessionState::Active);
         assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_some());
+        assert!(vault.load(PROFILE_VAULT_KEY).expect("load reads").is_some());
         assert!(vault.load(DEVICE_VAULT_KEY).expect("load reads").is_some());
         // Drop the cached endpoints so no revocation worker touches the
         // network during the test.
@@ -5397,6 +5582,7 @@ mod tests {
         // complete uninstall to remove.
         assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_none());
         assert!(vault.load(LEASE_VAULT_KEY).expect("load reads").is_none());
+        assert!(vault.load(PROFILE_VAULT_KEY).expect("load reads").is_none());
         assert!(vault.load(DEVICE_VAULT_KEY).expect("load reads").is_some());
         assert_eq!(
             service.account_status().state,

@@ -457,14 +457,20 @@ impl DesktopAccount {
     #[must_use]
     pub fn authenticated(&self) -> bool {
         if let Some(runtime) = &self.authoritative_runtime {
-            return runtime.is_authenticated();
+            let presentation = self
+                .shared
+                .view
+                .lock()
+                .map_or_else(|_| signed_out_view(), |view| view.clone());
+            return resolve_authoritative_authentication(
+                runtime.try_is_authenticated(),
+                &presentation,
+            );
         }
-        self.shared.view.lock().is_ok_and(|view| {
-            matches!(
-                view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            )
-        })
+        self.shared
+            .view
+            .lock()
+            .is_ok_and(|view| account_view_authenticated(&view))
     }
 
     /// Whether startup is still waiting for the account runtime's first
@@ -842,6 +848,17 @@ impl DesktopAccount {
     }
 }
 
+fn resolve_authoritative_authentication(probe: Option<bool>, presentation: &AccountView) -> bool {
+    probe.unwrap_or_else(|| account_view_authenticated(presentation))
+}
+
+fn account_view_authenticated(view: &AccountView) -> bool {
+    matches!(
+        view.state,
+        AccountSessionState::Active | AccountSessionState::OfflineLease
+    )
+}
+
 fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
     match response {
         AccountResponse::Authorized(authorization) => {
@@ -890,10 +907,7 @@ fn apply_account_response(shared: &AccountShared, response: AccountResponse) {
                     url.take();
                 }
             }
-            let authenticated = matches!(
-                view.state,
-                AccountSessionState::Active | AccountSessionState::OfflineLease
-            );
+            let authenticated = account_view_authenticated(&view);
             if let Ok(mut current) = shared.view.lock() {
                 *current = view;
             }
@@ -1110,7 +1124,8 @@ pub fn sign_out(service: &AccountService) -> Result<AccountView, String> {
 mod tests {
     use super::{
         AccountRequest, AccountResponse, DesktopAccount, MANAGE_PROFILE_URL, account_action_label,
-        account_state_label, open_login_browser_with, sanitized_plan_label, unavailable_menu_state,
+        account_state_label, open_login_browser_with, resolve_authoritative_authentication,
+        sanitized_plan_label, unavailable_menu_state,
     };
     use axiusflow_account_runtime::{AccountService, AccountServiceConfig};
     use axiusflow_contracts::{AccountSessionState, AccountView};
@@ -1675,6 +1690,22 @@ mod tests {
             !session.authenticated(),
             "hard authorization must use the current in-process runtime, not the 30s presentation cache"
         );
+    }
+
+    #[test]
+    fn busy_authoritative_runtime_retains_only_the_last_verified_authentication() {
+        let active = view(AccountSessionState::Active);
+        let signed_out = view(AccountSessionState::SignedOut);
+        assert!(resolve_authoritative_authentication(None, &active));
+        assert!(!resolve_authoritative_authentication(Some(false), &active));
+        assert!(
+            !resolve_authoritative_authentication(None, &signed_out),
+            "a busy runtime may reuse only the desktop's existing presentation snapshot"
+        );
+        assert!(resolve_authoritative_authentication(
+            Some(true),
+            &signed_out
+        ));
     }
 
     #[test]

@@ -1110,9 +1110,10 @@ impl Coordinator<'_> {
 mod tests {
     use super::*;
     use crate::market_service::{
-        FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_SERIES_HIGH_WATERMARK,
-        HISTORY_SERIES_TARGET_BARS, HistorySnapshot, INITIAL_HISTORY_BARS, LiveHistoryState,
-        MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
+        FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
+        HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistorySnapshot,
+        INITIAL_HISTORY_BARS, LiveHistoryState, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
+        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderRealtimeDispatch,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -1883,6 +1884,13 @@ mod tests {
             .expect("second provider session begins");
         let stale_key = (selected.clone(), first_generation);
         coordinator.history_inflight.insert(stale_key.clone(), None);
+        coordinator.history_deferred.insert(
+            stale_key.clone(),
+            DeferredHistoryRequest::Range(HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 60_000_000_000,
+            }),
+        );
 
         assert!(
             coordinator
@@ -1901,12 +1909,58 @@ mod tests {
                 .is_none()
         );
         assert!(!coordinator.history_inflight.contains_key(&stale_key));
+        assert!(!coordinator.history_deferred.contains_key(&stale_key));
         assert!(
             !coordinator
                 .history_inflight
                 .contains_key(&(selected.clone(), second_generation))
         );
         assert!(coordinator.history_retries.is_empty());
+    }
+
+    #[test]
+    fn history_tracking_cancels_and_prunes_stale_provider_generation() {
+        let mut coordinator = coordinator();
+        let consumer_id = consumer(1);
+        register(&mut coordinator, consumer_id);
+        let selected = series();
+        let first_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", first_generation)
+            .expect("first provider session begins");
+        coordinator
+            .engine
+            .set_series_demand(consumer_id, generation(1), &selected)
+            .expect("foreground demand subscribes");
+        let stale_key = (selected.clone(), first_generation);
+        let stop = Arc::new(AtomicBool::new(false));
+        coordinator
+            .history_cancellations
+            .insert(stale_key.clone(), Arc::clone(&stop));
+        coordinator.history_deferred.insert(
+            stale_key.clone(),
+            DeferredHistoryRequest::Range(HistoryRange {
+                start_unix_nanos: 0,
+                end_unix_nanos: 60_000_000_000,
+            }),
+        );
+
+        coordinator
+            .engine
+            .end_provider_session("rithmic", first_generation)
+            .expect("first provider session ends");
+        let second_generation = ProviderGeneration(nonzero(2));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", second_generation)
+            .expect("second provider session begins");
+        assert!(coordinator.engine.has_subscription(&selected));
+
+        coordinator.prune_history_tracking();
+
+        assert!(stop.load(Ordering::Acquire));
+        assert!(!coordinator.history_deferred.contains_key(&stale_key));
     }
 
     #[test]
@@ -3032,6 +3086,81 @@ mod tests {
             "a genuinely different viewport range proceeds to provider dispatch"
         );
         assert!(!coordinator.history_retries.contains_key(&key));
+    }
+
+    #[test]
+    fn ranged_history_retry_backoff_blocks_duplicate_dispatch_before_deadline() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let failed = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 60_000_000_000,
+        };
+        let key = (selected.clone(), generation);
+        coordinator.history_retries.insert(
+            key.clone(),
+            (Instant::now() + HISTORY_RETRY_DELAY, 1, Some(failed)),
+        );
+
+        assert!(
+            coordinator
+                .enqueue_history_request(&selected, generation, Some(failed))
+                .is_ok(),
+            "duplicate range remains parked until its retry deadline"
+        );
+        assert_eq!(
+            coordinator
+                .history_retries
+                .get(&key)
+                .map(|(_, attempts, range)| (*attempts, *range)),
+            Some((1, Some(failed)))
+        );
+        assert!(coordinator.history_inflight.is_empty());
+    }
+
+    #[test]
+    fn ranged_history_queue_pressure_retains_one_retry() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let range = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 60_000_000_000,
+        };
+        let (history_tx, _history_rx) = std::sync::mpsc::sync_channel(0);
+        let history_tx = Box::leak(Box::new(history_tx));
+        coordinator.providers.records.insert(
+            "rithmic",
+            ProviderDispatchRecord {
+                history: history_tx,
+                lifecycle: None,
+                realtime: ProviderRealtimeDispatch::Disabled,
+                catalog: ProviderCatalogDispatch::Disabled,
+            },
+        );
+
+        assert!(
+            coordinator
+                .enqueue_history_request_with_capacity_retry(&selected, generation, Some(range))
+                .is_ok(),
+            "bounded queue pressure is converted into coordinator-owned retry state"
+        );
+        assert_eq!(
+            coordinator
+                .history_retries
+                .get(&(selected, generation))
+                .map(|(_, attempts, queued_range)| (*attempts, *queued_range)),
+            Some((0, Some(range)))
+        );
     }
 
     #[test]

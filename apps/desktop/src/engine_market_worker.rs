@@ -324,15 +324,16 @@ fn restored_workspace_pane_specs(
             if WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart) {
                 continue;
             }
+            let instrument = pane
+                .instrument
+                .clone()
+                .ok_or_else(|| "workspace chart instrument is missing".to_string())?;
             panes.push(RestoredWorkspacePaneSpec {
                 workspace_id: tab.workspace_id,
                 pane_id: pane.pane_id,
                 consumer_id: pane.consumer_id,
-                instrument: pane
-                    .instrument
-                    .clone()
-                    .ok_or_else(|| "workspace chart instrument is missing".to_string())?,
-                interval: pane_interval(pane.series.as_ref())?,
+                interval: pane_interval(pane.series.as_ref(), &instrument.provider)?,
+                instrument,
                 restored_viewport: pane
                     .viewport_start_unix_nanos
                     .zip(pane.viewport_end_unix_nanos),
@@ -368,8 +369,14 @@ fn workspace_identity_high_watermarks(workspace: &WorkspaceState) -> (u64, u64, 
     )
 }
 
-fn pane_interval(series: Option<&SeriesKey>) -> Result<ChartInterval, String> {
+fn pane_interval(series: Option<&SeriesKey>, provider: &str) -> Result<ChartInterval, String> {
     let series = series.ok_or_else(|| "workspace chart series is missing".to_string())?;
+    let unsupported = || {
+        format!(
+            "workspace chart cadence is unsupported by {}",
+            provider_display_name(provider)
+        )
+    };
     match SeriesCadence::try_from(series.cadence) {
         Ok(SeriesCadence::FixedSeconds) => match series.cadence_value {
             60 => Ok(ChartInterval::Minute1),
@@ -383,11 +390,16 @@ fn pane_interval(series: Option<&SeriesKey>) -> Result<ChartInterval, String> {
             28_800 => Ok(ChartInterval::Hour8),
             43_200 => Ok(ChartInterval::Hour12),
             86_400 => Ok(ChartInterval::Day1),
-            _ => Err("workspace chart cadence is unsupported by Rithmic".to_string()),
+            _ => Err(unsupported()),
         },
+        Ok(SeriesCadence::SessionDays)
+            if series.cadence_value == 3 && provider == "hyperliquid" =>
+        {
+            Ok(ChartInterval::Day3)
+        }
         Ok(SeriesCadence::CalendarWeeks) if series.cadence_value == 1 => Ok(ChartInterval::Week1),
         Ok(SeriesCadence::CalendarMonths) if series.cadence_value == 1 => Ok(ChartInterval::Month1),
-        _ => Err("workspace chart cadence is unsupported by Rithmic".to_string()),
+        _ => Err(unsupported()),
     }
 }
 
@@ -1037,6 +1049,24 @@ mod tests {
     }
 
     #[test]
+    fn restored_hyperliquid_day3_pane_keeps_its_native_interval() {
+        let series = SeriesKey {
+            cadence: SeriesCadence::SessionDays as i32,
+            cadence_value: 3,
+            ..SeriesKey::default()
+        };
+
+        assert_eq!(
+            pane_interval(Some(&series), "hyperliquid"),
+            Ok(ChartInterval::Day3)
+        );
+        assert_eq!(
+            pane_interval(Some(&series), "rithmic"),
+            Err("workspace chart cadence is unsupported by Rithmic".to_string())
+        );
+    }
+
+    #[test]
     fn runtime_snapshot_preserves_precision_exact_time_generation_and_engine_provenance() {
         let publication = runtime_snapshot(
             1,
@@ -1388,6 +1418,78 @@ mod tests {
                 result: Err(error),
             }] if error == "market recovery was superseded by a new market selection"
         ));
+    }
+
+    #[test]
+    fn queued_recovery_from_previous_generation_is_rejected_after_selection_advances() {
+        let product = default_hyperliquid_product();
+        let (mut pane, mut record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 7);
+        pane.worker
+            .try_send_recovery(ReplayRecoveryCommand {
+                request_id: 10,
+                reason: axiusflow_application::ResnapshotReason::QueueOverflow,
+            })
+            .expect("recovery queues under generation seven");
+        assert_eq!(
+            pane.worker
+                .try_select_engine(product, ChartInterval::Minute5)
+                .expect("new selection enters the foreground slot"),
+            8
+        );
+        let pending = record
+            .endpoint
+            .pending_engine_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("newer selection is processed before the ordinary command lane");
+        record.endpoint.active_generation = pending.sequence;
+        let queued_recovery = record
+            .endpoint
+            .commands
+            .try_recv()
+            .expect("older recovery remains queued in the ordinary lane");
+        let MarketWorkerCommand::Recovery {
+            selection_generation,
+            command,
+        } = queued_recovery
+        else {
+            panic!("expected queued recovery command");
+        };
+        assert_eq!(selection_generation, Some(7));
+
+        let fenced = selection_commands::fence_recovery_command(
+            &record.endpoint,
+            selection_generation,
+            command,
+        )
+        .expect("stale recovery is handled without touching runtime demand");
+
+        assert!(fenced.is_none());
+        assert!(record.endpoint.pending_recovery.is_none());
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::Recovery {
+                request_id: 10,
+                result: Err(error),
+            }] if error == "market recovery was superseded by a newer market selection"
+        ));
+
+        let current = ReplayRecoveryCommand {
+            request_id: 11,
+            reason: axiusflow_application::ResnapshotReason::QueueOverflow,
+        };
+        assert_eq!(
+            selection_commands::fence_recovery_command(&record.endpoint, Some(8), current)
+                .expect("current recovery passes the selection fence"),
+            Some(current)
+        );
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        assert!(messages.is_empty());
     }
 
     #[test]

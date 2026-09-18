@@ -652,7 +652,10 @@ pub fn market_worker_channel(capacity: NonZeroUsize) -> (MarketWorkerSender, Mar
 }
 
 pub enum MarketWorkerCommand {
-    Recovery(ReplayRecoveryCommand),
+    Recovery {
+        selection_generation: Option<u64>,
+        command: ReplayRecoveryCommand,
+    },
     ProviderSearch(SearchProviderInstruments),
     ProviderSelect(SelectProviderInstrument),
     EngineSelect(Box<EngineSelectionRequest>),
@@ -1307,13 +1310,20 @@ impl MarketDataWorker {
         let Some(commands) = self.commands.as_ref() else {
             return Err(TrySendError::Disconnected(command));
         };
+        let selection_generation = self
+            .engine_selection_sequence
+            .as_ref()
+            .map(|generation| generation.load(Ordering::Acquire));
         commands
-            .try_send(MarketWorkerCommand::Recovery(command))
+            .try_send(MarketWorkerCommand::Recovery {
+                selection_generation,
+                command,
+            })
             .map_err(|error| match error {
-                TrySendError::Full(MarketWorkerCommand::Recovery(command)) => {
+                TrySendError::Full(MarketWorkerCommand::Recovery { command, .. }) => {
                     TrySendError::Full(command)
                 }
-                TrySendError::Disconnected(MarketWorkerCommand::Recovery(command)) => {
+                TrySendError::Disconnected(MarketWorkerCommand::Recovery { command, .. }) => {
                     TrySendError::Disconnected(command)
                 }
                 TrySendError::Full(
@@ -1442,9 +1452,13 @@ impl MarketDataWorker {
 
 impl Drop for MarketDataWorker {
     fn drop(&mut self) {
-        if let Some(retirement) = self.begin_retirement() {
-            let _ = retirement.wait();
-        }
+        // GPUI owns these handles. An implicit drop can therefore happen on the
+        // UI thread, where waiting for a worker acknowledgement would freeze the
+        // application for the shutdown timeout. Normal pane/window retirement
+        // hands the acknowledgement to DesktopLifecycle, which waits for it on
+        // the background executor. An unexpected drop still requests shutdown
+        // and releases the receiver; it simply does not block its caller.
+        let _ = self.begin_retirement();
     }
 }
 
@@ -1592,7 +1606,7 @@ mod tests {
     use std::{
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, AtomicU64, Ordering},
+            atomic::{AtomicU64, Ordering},
             mpsc,
         },
         thread,
@@ -1639,32 +1653,36 @@ mod tests {
     }
 
     #[test]
-    fn dropping_worker_waits_for_shutdown_acknowledgement() {
+    fn dropping_worker_requests_shutdown_without_waiting_for_acknowledgement() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
-        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let acknowledged = Arc::new(AtomicBool::new(false));
-        let worker_acknowledged = Arc::clone(&acknowledged);
+        let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
         let worker_thread = thread::spawn(move || {
             assert!(matches!(
                 command_rx.recv(),
                 Ok(MarketWorkerCommand::Shutdown)
             ));
-            worker_acknowledged.store(true, Ordering::Release);
-            shutdown_tx
-                .send(())
-                .expect("shutdown acknowledgement sends");
+            observed_tx.send(()).expect("shutdown request is observed");
+            release_rx.recv().expect("test releases acknowledgement");
+        });
+        let worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
+        let (dropped_tx, dropped_rx) = mpsc::sync_channel(1);
+        let drop_thread = thread::spawn(move || {
+            drop(worker);
+            dropped_tx.send(()).expect("drop completion reports");
         });
 
-        drop(MarketDataWorker::from_channels(
-            command_tx,
-            message_rx,
-            shutdown_rx,
-            None,
-            None,
-        ));
-
-        assert!(acknowledged.load(Ordering::Acquire));
+        observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drop requests shutdown promptly");
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drop does not wait for the worker acknowledgement");
+        release_tx.send(()).expect("release worker acknowledgement");
+        drop_thread.join().expect("drop caller exits");
         worker_thread.join().expect("worker exits");
     }
 
@@ -2990,7 +3008,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(2);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let worker =
+        let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
         let search = SearchProviderInstruments {
             consumer_id: 0,
@@ -3031,7 +3049,10 @@ mod tests {
                 .send(())
                 .expect("shutdown acknowledgement sends");
         });
-        drop(worker);
+        let retirement = worker
+            .begin_retirement()
+            .expect("active worker begins explicit retirement");
+        assert!(retirement.wait());
         shutdown.join().expect("shutdown observer exits");
     }
 

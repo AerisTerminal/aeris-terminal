@@ -1612,6 +1612,10 @@ pub fn native_installation_inventory(
                 service: "com.axiusflow.account".to_string(),
                 key: "account-device-key-v1".to_string(),
             },
+            VaultEntry {
+                service: "com.axiusflow.account".to_string(),
+                key: "account-profile-v1".to_string(),
+            },
         ],
         registrations,
     })
@@ -3865,6 +3869,7 @@ mod tests {
             "account-entitlement-lease-v1",
             "account-entitlement-directory-v1",
             "account-device-key-v1",
+            "account-profile-v1",
         ] {
             assert!(
                 inventory

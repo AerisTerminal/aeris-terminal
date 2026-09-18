@@ -1603,6 +1603,8 @@ mod tests {
             "--trust-reset-from-release-identity",
             "--rollout-cohort",
             "--rollout-percentage",
+            "if ($PackageOnly -and $SkipBuild)",
+            "-PackageOnly must use the repository release publisher",
         ] {
             assert!(
                 release_script.contains(contract),
@@ -1720,6 +1722,22 @@ mod tests {
             !release_script[prebuild_start..prebuild_end]
                 .contains("--bin axiusflow_release_publisher"),
             "unprivileged prebuild must not manufacture the trusted release publisher"
+        );
+        assert!(
+            release_script[prebuild_start..prebuild_end]
+                .contains("Remove-Item Env:AXIUSFLOW_LOCAL_PACKAGE"),
+            "production prebuild must clear the local-package updater-disable marker"
+        );
+
+        let desktop_update = manifest("apps/desktop/src/update.rs");
+        assert!(
+            desktop_update.contains("option_env!(\"AXIUSFLOW_LOCAL_PACKAGE\")"),
+            "desktop updater must honor the compile-time local-package marker"
+        );
+        assert!(
+            publisher.contains("command.env(\"AXIUSFLOW_LOCAL_PACKAGE\", \"1\")")
+                && publisher.contains("command.env_remove(\"AXIUSFLOW_LOCAL_PACKAGE\")"),
+            "release publisher must mark local package builds and clear inherited markers from production builds"
         );
 
         let desktop = manifest("apps/desktop/src/desktop.rs");

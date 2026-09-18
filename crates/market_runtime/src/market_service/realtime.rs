@@ -822,6 +822,23 @@ impl HyperliquidLiveHandoff {
 }
 
 impl Coordinator<'_> {
+    fn cancel_inflight_history_for_live_recovery(
+        &self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        let key = (series.clone(), generation);
+        if self.history_inflight.contains_key(&key)
+            && let Some(stop) = self.history_cancellations.get(&key)
+        {
+            // The buffered live seam is about to be discarded. Any covering
+            // history already in flight may end before those discarded events,
+            // so its completion can no longer safely seed continuity. The
+            // normal cancelled-completion path schedules a fresh covering read.
+            stop.store(true, Ordering::Release);
+        }
+    }
+
     fn publish_non_bar_study_change(
         &mut self,
         provider_id: &str,
@@ -1500,6 +1517,7 @@ impl Coordinator<'_> {
         _stage: FailureStage,
         detail: &str,
     ) {
+        self.cancel_inflight_history_for_live_recovery(series, generation);
         if let Some(live) = self.hyperliquid_live.get_mut(series) {
             live.history_state = LiveHistoryState::AwaitingHistory;
             live.dirty = false;
