@@ -1391,6 +1391,7 @@ fn chrome_menus_shrink_to_fit_a_small_viewport() {
         size(px(1920.0), px(1200.0)),
         chrome_height,
         CHROME_MENU_SEARCH_HEIGHT,
+        CHROME_MENU_FOOTER_HEIGHT,
     );
     assert!((roomy.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
     assert!((roomy.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
@@ -1399,6 +1400,7 @@ fn chrome_menus_shrink_to_fit_a_small_viewport() {
         size(px(800.0), px(600.0)),
         chrome_height,
         CHROME_MENU_SEARCH_HEIGHT,
+        CHROME_MENU_FOOTER_HEIGHT,
     );
     assert!(cramped.width < CHROME_MENU_WIDTH);
     assert!(cramped.width + OVERLAY_EDGE_MARGIN * 2.0 <= 800.0);
@@ -1410,12 +1412,34 @@ fn chrome_menus_shrink_to_fit_a_small_viewport() {
 
 #[test]
 fn chrome_menus_never_exceed_a_tiny_viewport() {
-    let tiny = chrome_menu_extent(size(px(240.0), px(180.0)), 44.0, CHROME_MENU_SEARCH_HEIGHT);
+    let tiny = chrome_menu_extent(
+        size(px(240.0), px(180.0)),
+        44.0,
+        CHROME_MENU_SEARCH_HEIGHT,
+        CHROME_MENU_FOOTER_HEIGHT,
+    );
     assert!(tiny.width <= 240.0);
     assert!(tiny.list_height >= 0.0);
     assert!(
         CHROME_MENU_SEARCH_HEIGHT + tiny.list_height + CHROME_MENU_FOOTER_HEIGHT <= 180.0 - 44.0
     );
+}
+
+#[test]
+fn symbol_menu_does_not_reserve_removed_footer_space() {
+    let with_footer = chrome_menu_extent(
+        size(px(800.0), px(600.0)),
+        44.0,
+        CHROME_MENU_SEARCH_HEIGHT,
+        CHROME_MENU_FOOTER_HEIGHT,
+    );
+    let without_footer = chrome_menu_extent(
+        size(px(800.0), px(600.0)),
+        44.0,
+        CHROME_MENU_SEARCH_HEIGHT,
+        0.0,
+    );
+    assert!(without_footer.list_height > with_footer.list_height);
 }
 
 #[test]

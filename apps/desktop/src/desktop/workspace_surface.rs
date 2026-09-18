@@ -1111,7 +1111,6 @@ impl WorkspaceSurface {
             chart_type_trigger_bounds: None,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
-            instrument_exchange: initial_instrument_exchange(provider),
             provider,
             product,
             rithmic_switch: RithmicSwitchState::Idle,
@@ -1574,10 +1573,6 @@ impl WorkspaceSurface {
         };
         match overlay {
             ChromeOverlay::Instrument => {
-                self.instrument_exchange = InstrumentExchangeUi::Idle(match self.provider {
-                    TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
-                    TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
-                });
                 if let Some(input) = &self.symbol_input {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
@@ -1664,24 +1659,6 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    pub(super) fn toggle_instrument_exchange_menu(&mut self, cx: &mut Context<Self>) {
-        self.instrument_exchange = match self.instrument_exchange {
-            InstrumentExchangeUi::Idle(exchange) => InstrumentExchangeUi::Menu(exchange),
-            InstrumentExchangeUi::Menu(exchange) => InstrumentExchangeUi::Idle(exchange),
-        };
-        cx.notify();
-    }
-
-    pub(super) fn set_instrument_catalog_exchange(
-        &mut self,
-        exchange: assets::ExchangeLogo,
-        cx: &mut Context<Self>,
-    ) {
-        self.instrument_exchange = InstrumentExchangeUi::Idle(exchange);
-        self.chrome_selection = 0;
-        cx.notify();
-    }
-
     pub(super) fn on_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -1703,10 +1680,7 @@ impl WorkspaceSurface {
         }
         match event.keystroke.key.as_str() {
             "escape" => {
-                if let InstrumentExchangeUi::Menu(exchange) = self.instrument_exchange {
-                    self.instrument_exchange = InstrumentExchangeUi::Idle(exchange);
-                    cx.notify();
-                } else if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
+                if self.chrome_overlay == Some(ChromeOverlay::Timeframe)
                     && self.timeframe_menu_flyout.is_some()
                 {
                     self.close_timeframe_flyout(cx);
@@ -2768,7 +2742,6 @@ impl WorkspaceSurface {
             let provider = terminal_provider_from_id(&product.provider);
             if provider != self.provider {
                 self.provider = provider;
-                self.instrument_exchange = initial_instrument_exchange(provider);
                 self.symbol_browser = initial_symbol_browser();
                 self.symbol_message = initial_symbol_message(provider);
             }

@@ -249,15 +249,6 @@ impl ExchangeLogo {
     pub const ALL: [Self; 3] = [Self::Rithmic, Self::Hyperliquid, Self::Binance];
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Binance => "Binance",
-            Self::Rithmic => "Rithmic",
-            Self::Hyperliquid => "Hyperliquid",
-        }
-    }
-
-    #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::Binance => "binance.svg",

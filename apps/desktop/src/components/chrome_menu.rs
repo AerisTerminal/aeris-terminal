@@ -19,12 +19,13 @@ pub(super) struct ChromeMenuExtent {
 
 /// Size the symbol and indicator menus to the surface they open over rather than to a fixed
 /// design width. Both keep the 896x704 ceiling on a roomy window and shrink from there, so a
-/// narrow or short viewport gets a smaller menu instead of a clipped one: the search header and
-/// the footer are fixed chrome, so the scrolling list absorbs whatever height is left.
+/// narrow or short viewport gets a smaller menu instead of a clipped one. Fixed chrome is passed
+/// explicitly so menus without a footer do not reserve dead space for one.
 pub(super) fn chrome_menu_extent(
     viewport: gpui::Size<Pixels>,
     chrome_height: f32,
     search_height: f32,
+    footer_height: f32,
 ) -> ChromeMenuExtent {
     let viewport_width = f32::from(viewport.width).max(0.0);
     let width = (viewport_width - OVERLAY_EDGE_MARGIN * 2.0)
@@ -32,9 +33,8 @@ pub(super) fn chrome_menu_extent(
         .min(viewport_width);
     let available =
         (f32::from(viewport.height) - chrome_height - OVERLAY_EDGE_MARGIN * 2.0).max(0.0);
-    let list_height =
-        (available.min(CHROME_MENU_MAX_HEIGHT) - search_height - CHROME_MENU_FOOTER_HEIGHT)
-            .clamp(0.0, CHROME_MENU_LIST_HEIGHT);
+    let list_height = (available.min(CHROME_MENU_MAX_HEIGHT) - search_height - footer_height)
+        .clamp(0.0, CHROME_MENU_LIST_HEIGHT);
     ChromeMenuExtent { width, list_height }
 }
 

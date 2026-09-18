@@ -555,9 +555,7 @@ pub(super) fn header_controls(
                     enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 },
                 provider: state.provider,
-                catalog_exchange: assets::ExchangeLogo::Rithmic,
                 menu: InstrumentSelectorMenu {
-                    exchange_open: false,
                     keyboard_selection: 0,
                     keyboard_active: false,
                 },

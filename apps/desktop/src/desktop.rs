@@ -118,14 +118,12 @@ use chart_toolbar_menus::{
     timeframe_flyout_offset, timeframe_flyout_row_is_active, timeframe_menu_row_label,
     timeframe_overlay_extent, timeframe_overlay_left,
 };
+use chrome_menu::{
+    CHROME_MENU_FOOTER_HEIGHT, CHROME_MENU_INDICATOR_SEARCH_HEIGHT, CHROME_MENU_SEARCH_HEIGHT,
+    ChromeIconButtonTone, chrome_close_button, chrome_icon_button, chrome_menu_extent,
+};
 #[cfg(test)]
-use chrome_menu::{
-    CHROME_MENU_FOOTER_HEIGHT, CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_WIDTH,
-};
-use chrome_menu::{
-    CHROME_MENU_INDICATOR_SEARCH_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, ChromeIconButtonTone,
-    chrome_close_button, chrome_icon_button, chrome_menu_extent,
-};
+use chrome_menu::{CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_WIDTH};
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
@@ -693,7 +691,6 @@ struct WorkspaceSurface {
     chart_type_trigger_bounds: Option<Bounds<Pixels>>,
     chrome_selection: usize,
     chrome_focus: FocusHandle,
-    instrument_exchange: InstrumentExchangeUi,
     provider: TerminalProvider,
     product: Option<InstallProviderInstrument>,
     rithmic_switch: RithmicSwitchState,
@@ -1052,24 +1049,6 @@ impl TimeframeMenuGroup {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InstrumentExchangeUi {
-    Idle(assets::ExchangeLogo),
-    Menu(assets::ExchangeLogo),
-}
-
-impl InstrumentExchangeUi {
-    const fn exchange(self) -> assets::ExchangeLogo {
-        match self {
-            Self::Idle(exchange) | Self::Menu(exchange) => exchange,
-        }
-    }
-
-    const fn is_open(self) -> bool {
-        matches!(self, Self::Menu(_))
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ChromeOverlayPhase {
     #[default]
@@ -1366,13 +1345,6 @@ const fn instrument_target_after_close(
     } else {
         SymbolSelectionTarget::Chart
     }
-}
-
-const fn initial_instrument_exchange(provider: TerminalProvider) -> InstrumentExchangeUi {
-    InstrumentExchangeUi::Idle(match provider {
-        TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
-        TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
-    })
 }
 
 fn clamped_side_panel_width(width: f32) -> f32 {
@@ -2158,18 +2130,11 @@ fn run_desktop_endurance_command(
 }
 
 fn symbol_input_for_startup(
-    startup: &MarketWorkerStartup,
+    _startup: &MarketWorkerStartup,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<InputState> {
-    match startup {
-        MarketWorkerStartup::Rithmic => {
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic symbols"))
-        }
-        MarketWorkerStartup::Loading(_) => {
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search Rithmic spot markets"))
-        }
-    }
+    cx.new(|cx| InputState::new(window, cx).placeholder("Search markets"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

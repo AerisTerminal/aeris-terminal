@@ -178,7 +178,7 @@ pub(super) fn chrome_overlay_content(
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
-            chrome_menu_extent(viewport, chrome_height, CHROME_MENU_SEARCH_HEIGHT),
+            chrome_menu_extent(viewport, chrome_height, CHROME_MENU_SEARCH_HEIGHT, 0.0),
             &InstrumentSelectorState {
                 label: terminal_instrument_label(app_state),
                 instruments: app_state.instrument_entries(cx),
@@ -188,9 +188,7 @@ pub(super) fn chrome_overlay_content(
                     enabled: true,
                 },
                 provider: app_state.provider,
-                catalog_exchange: app_state.instrument_exchange.exchange(),
                 menu: InstrumentSelectorMenu {
-                    exchange_open: app_state.instrument_exchange.is_open(),
                     keyboard_selection: app_state.chrome_selection,
                     keyboard_active: app_state.menu_state.chrome_list_keyboard,
                 },
@@ -207,6 +205,7 @@ pub(super) fn chrome_overlay_content(
                     viewport,
                     chrome_height,
                     CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
+                    CHROME_MENU_FOOTER_HEIGHT,
                 ),
                 input: &app_state.indicator_input,
                 message: app_state.indicator_message.as_deref(),
