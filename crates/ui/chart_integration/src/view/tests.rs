@@ -1330,6 +1330,77 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
 }
 
 #[test]
+fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
+    let mut chart = interactive_chart();
+    let mut series = chart.appearance_settings();
+    series.up_color = "#10B981".to_string();
+    series.down_color = "#EF4444".to_string();
+    series.line_color = "#3B82F6".to_string();
+    series.area_top_color = "#2563EB80".to_string();
+    assert!(chart.set_series_appearance_settings(&series));
+
+    let before = chart
+        .engine
+        .series_options_json(0)
+        .expect("primary series options");
+    let mut canvas = chart.appearance_settings();
+    canvas.grid_visible = !canvas.grid_visible;
+    canvas.grid_style = 1;
+    canvas.crosshair_width = 3;
+    assert!(chart.set_canvas_appearance_settings(&canvas));
+
+    assert_eq!(
+        chart
+            .engine
+            .series_options_json(0)
+            .expect("primary series options"),
+        before
+    );
+    assert_eq!(chart.appearance_settings().area_top_color, "#2563EB80");
+}
+
+#[test]
+fn series_appearance_updates_do_not_rewrite_canvas_options() {
+    let mut chart = interactive_chart();
+    let mut canvas = chart.appearance_settings();
+    canvas.grid_visible = false;
+    canvas.grid_color = "#334155".to_string();
+    canvas.grid_style = 1;
+    canvas.crosshair_color = "#94A3B8".to_string();
+    canvas.crosshair_width = 3;
+    canvas.crosshair_style = 0;
+    assert!(chart.set_canvas_appearance_settings(&canvas));
+
+    let before = {
+        let options = chart.engine.options.get();
+        (
+            options.grid.vert_lines.visible,
+            options.grid.vert_lines.color.clone(),
+            options.grid.vert_lines.style,
+            options.crosshair.vert_line.color.clone(),
+            options.crosshair.vert_line.width,
+            options.crosshair.vert_line.style,
+        )
+    };
+    let mut series = chart.appearance_settings();
+    series.area_top_color = "#2563EB80".to_string();
+    series.line_width = 4;
+    assert!(chart.set_series_appearance_settings(&series));
+    let options = chart.engine.options.get();
+    assert_eq!(
+        (
+            options.grid.vert_lines.visible,
+            options.grid.vert_lines.color.clone(),
+            options.grid.vert_lines.style,
+            options.crosshair.vert_line.color.clone(),
+            options.crosshair.vert_line.width,
+            options.crosshair.vert_line.style,
+        ),
+        before
+    );
+}
+
+#[test]
 fn nucleus_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
     let mut chart = interactive_chart();
     assert_eq!(

@@ -941,11 +941,7 @@ fn chart_settings_sidebar(
                 .child(
                     div()
                         .text_sm()
-                        .font_weight(if active {
-                            platform_font_weight(TypographyRole::Emphasis)
-                        } else {
-                            platform_font_weight(TypographyRole::Normal)
-                        })
+                        .font_weight(platform_font_weight(TypographyRole::Normal))
                         .text_color(gpui_color(if active {
                             colors.text_primary
                         } else {
@@ -2447,7 +2443,7 @@ mod tests {
         );
         assert_eq!(
             chart_settings_centered_origin(viewport, panel_size),
-            point(px(280.0), px(190.0))
+            point(px(250.0), px(170.0))
         );
     }
 

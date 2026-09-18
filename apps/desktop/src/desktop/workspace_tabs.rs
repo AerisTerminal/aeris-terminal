@@ -805,8 +805,11 @@ impl TerminalApp {
             ChartColorSetting::Grid => appearance.grid_color.clone_from(&color),
             ChartColorSetting::Crosshair => appearance.crosshair_color = color,
         }
-        surface.update(cx, |surface, surface_cx| {
-            surface.set_chart_appearance(&appearance, surface_cx);
+        surface.update(cx, |surface, surface_cx| match setting {
+            ChartColorSetting::Grid | ChartColorSetting::Crosshair => {
+                surface.set_chart_canvas_appearance(&appearance, surface_cx);
+            }
+            _ => surface.set_chart_series_appearance(&appearance, surface_cx),
         });
         if let Some(picker) = &mut self.chart_settings_color_picker
             && picker.setting == setting
@@ -854,8 +857,22 @@ impl TerminalApp {
             ChartSettingsAction::LineWidth(width) => appearance.line_width = width.clamp(1, 4),
             ChartSettingsAction::LineStyle(style) => appearance.line_style = style.min(4),
         }
-        surface.update(cx, |surface, surface_cx| {
-            surface.set_chart_appearance(&appearance, surface_cx);
+        surface.update(cx, |surface, surface_cx| match action {
+            ChartSettingsAction::ToggleGrid
+            | ChartSettingsAction::GridStyle(_)
+            | ChartSettingsAction::CrosshairWidth(_)
+            | ChartSettingsAction::CrosshairStyle(_) => {
+                surface.set_chart_canvas_appearance(&appearance, surface_cx);
+            }
+            ChartSettingsAction::ToggleWicks
+            | ChartSettingsAction::ToggleBorders
+            | ChartSettingsAction::ToggleOpen
+            | ChartSettingsAction::ToggleThinBars
+            | ChartSettingsAction::LineWidth(_)
+            | ChartSettingsAction::LineStyle(_) => {
+                surface.set_chart_series_appearance(&appearance, surface_cx);
+            }
+            ChartSettingsAction::CrosshairMode(_) => unreachable!(),
         });
         cx.notify();
     }

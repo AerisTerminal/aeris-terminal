@@ -3097,6 +3097,46 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn set_chart_canvas_appearance(
+        &mut self,
+        appearance: &ChartAppearanceSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_canvas_appearance_settings(appearance);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        }) {
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_chart_series_appearance(
+        &mut self,
+        appearance: &ChartAppearanceSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_series_appearance_settings(appearance);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        }) {
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
+    }
+
     pub(super) fn reset_chart_appearance(&mut self, cx: &mut Context<Self>) {
         let Some(chart) = &self.chart else {
             return;

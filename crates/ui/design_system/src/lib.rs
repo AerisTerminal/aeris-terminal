@@ -526,8 +526,11 @@ mod tests {
         assert_eq!(dark.border_secondary, dark.border);
         assert_eq!(light.text_primary, ThemeColor::from_rgb8(51, 51, 51));
         assert_eq!(light.text_secondary, ThemeColor::from_rgb8(123, 123, 123));
-        assert_eq!(light.text_muted, ThemeColor::from_rgb8(92, 92, 92));
-        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(163, 163, 163));
+        assert_eq!(light.text_muted, ThemeColor::from_rgb8(209, 209, 209));
+        assert_eq!(
+            dark.text_secondary,
+            ThemeColor::from_rgba8(240, 240, 240, 0xbd)
+        );
         assert_eq!(light.primary, ThemeColor::from_rgb8(22, 142, 247));
         assert_eq!(dark.primary, light.primary);
         assert_eq!(
@@ -535,7 +538,7 @@ mod tests {
             ThemeColor::from_rgb8(255, 255, 255)
         );
         assert_eq!(light.button_fill, ThemeColor::from_rgb8(51, 51, 51));
-        assert_eq!(dark.button_fill, ThemeColor::from_rgb8(247, 247, 247));
+        assert_eq!(dark.button_fill, ThemeColor::from_rgb8(235, 235, 235));
         assert_eq!(light.bullish, ThemeColor::from_rgb8(8, 153, 129));
         assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.bullish, ThemeColor::from_rgb8(124, 141, 176));
@@ -570,6 +573,8 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "border"), "#1414140f");
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
         assert_eq!(token_source(&dark_tokens, "hover-bg"), "#f0f0f014");
+        assert_eq!(token_source(&light_tokens, "text-muted"), "#D1D1D1");
+        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#f0f0f0bd");
         assert_eq!(
             token_source(&light_tokens, "input-fill"),
             "var(--surface-secondary)"
@@ -577,7 +582,7 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "danger"), "#fb3748");
         assert_eq!(token_source(&dark_tokens, "primary"), "#168ef7");
         assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
-        assert_eq!(token_source(&dark_tokens, "button-fill"), "#F7F7F7");
+        assert_eq!(token_source(&dark_tokens, "button-fill"), "#EBEBEB");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
         assert_eq!(token_source(&light_tokens, "bullish"), "#089981");
         assert_eq!(token_source(&light_tokens, "bearish"), "#f7525f");

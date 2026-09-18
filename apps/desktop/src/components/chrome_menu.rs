@@ -1,12 +1,12 @@
 use super::*;
 
-pub(super) const CHROME_MENU_WIDTH: f32 = 896.0;
+pub(super) const CHROME_MENU_WIDTH: f32 = 960.0;
 pub(super) const CHROME_MENU_MIN_WIDTH: f32 = 320.0;
 pub(super) const CHROME_MENU_SEARCH_HEIGHT: f32 = 44.0;
 pub(super) const CHROME_MENU_INDICATOR_SEARCH_HEIGHT: f32 = 40.0;
-pub(super) const CHROME_MENU_LIST_HEIGHT: f32 = 480.0;
+pub(super) const CHROME_MENU_LIST_HEIGHT: f32 = 520.0;
 pub(super) const CHROME_MENU_FOOTER_HEIGHT: f32 = 40.0;
-pub(super) const CHROME_MENU_MAX_HEIGHT: f32 = 704.0;
+pub(super) const CHROME_MENU_MAX_HEIGHT: f32 = 744.0;
 pub(super) const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
 pub(super) const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
 

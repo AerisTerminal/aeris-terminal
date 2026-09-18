@@ -2112,12 +2112,58 @@ impl NucleusChartView {
     /// Applies host-authored series/canvas presentation in place. Market data,
     /// viewport state and provider ownership are untouched.
     pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        let (appearance, tracking) = normalize_nucleus_appearance(self.theme, appearance);
-        let current = self.appearance_settings();
-        let primary_series_requires_unpin =
-            primary_series_requires_theme_unpin(&self.engine, tracking);
-        if current == appearance && !primary_series_requires_unpin {
+        let Ok(canvas_changed) = self.apply_canvas_appearance_settings(appearance) else {
             return false;
+        };
+        let Ok(series_changed) = self.apply_series_appearance_settings(appearance) else {
+            return false;
+        };
+        if !canvas_changed && !series_changed {
+            return false;
+        }
+        self.mark_user_state_changed();
+        true
+    }
+
+    /// Applies only chart-canvas presentation. Primary-series options are left
+    /// byte-for-byte untouched so a grid/crosshair edit cannot perturb price
+    /// series styling such as area fills, candle colors, or line appearance.
+    pub fn set_canvas_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
+        match self.apply_canvas_appearance_settings(appearance) {
+            Ok(true) => {
+                self.mark_user_state_changed();
+                true
+            }
+            Ok(false) | Err(()) => false,
+        }
+    }
+
+    /// Applies only primary-series presentation. Canvas options are left
+    /// untouched so series edits cannot rewrite grid or crosshair styling.
+    pub fn set_series_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
+        match self.apply_series_appearance_settings(appearance) {
+            Ok(true) => {
+                self.mark_user_state_changed();
+                true
+            }
+            Ok(false) | Err(()) => false,
+        }
+    }
+
+    fn apply_canvas_appearance_settings(
+        &mut self,
+        appearance: &ChartAppearanceSettings,
+    ) -> Result<bool, ()> {
+        let (appearance, _) = normalize_nucleus_appearance(self.theme, appearance);
+        let current = self.appearance_settings();
+        if current.grid_visible == appearance.grid_visible
+            && current.grid_color == appearance.grid_color
+            && current.grid_style == appearance.grid_style
+            && current.crosshair_color == appearance.crosshair_color
+            && current.crosshair_width == appearance.crosshair_width
+            && current.crosshair_style == appearance.crosshair_style
+        {
+            return Ok(false);
         }
         let chart_patch = serde_json::json!({
             "grid": {
@@ -2147,7 +2193,39 @@ impl NucleusChartView {
         })
         .to_string();
         if self.engine.apply_options(&chart_patch).is_err() {
-            return false;
+            return Err(());
+        }
+        self.invalidate_series_frame();
+        Ok(true)
+    }
+
+    fn apply_series_appearance_settings(
+        &mut self,
+        appearance: &ChartAppearanceSettings,
+    ) -> Result<bool, ()> {
+        let (appearance, tracking) = normalize_nucleus_appearance(self.theme, appearance);
+        let current = self.appearance_settings();
+        let primary_series_requires_unpin =
+            primary_series_requires_theme_unpin(&self.engine, tracking);
+        if current.up_color == appearance.up_color
+            && current.down_color == appearance.down_color
+            && current.wick_up_color == appearance.wick_up_color
+            && current.wick_down_color == appearance.wick_down_color
+            && current.border_up_color == appearance.border_up_color
+            && current.border_down_color == appearance.border_down_color
+            && current.wick_visible == appearance.wick_visible
+            && current.border_visible == appearance.border_visible
+            && current.open_visible == appearance.open_visible
+            && current.thin_bars == appearance.thin_bars
+            && current.line_color == appearance.line_color
+            && current.line_width == appearance.line_width
+            && current.line_style == appearance.line_style
+            && current.area_top_color == appearance.area_top_color
+            && current.baseline_top_color == appearance.baseline_top_color
+            && current.baseline_bottom_color == appearance.baseline_bottom_color
+            && !primary_series_requires_unpin
+        {
+            return Ok(false);
         }
         let series_patch = serde_json::json!({
             "up_color": if tracking[TRACK_UP] { "" } else { appearance.up_color.as_str() },
@@ -2169,11 +2247,10 @@ impl NucleusChartView {
         })
         .to_string();
         if !self.engine.series_apply_options_json(0, &series_patch) {
-            return false;
+            return Err(());
         }
         self.invalidate_series_frame();
-        self.mark_user_state_changed();
-        true
+        Ok(true)
     }
 
     /// Restores Nucleus-owned styling through the chart engine's canonical reset API.
