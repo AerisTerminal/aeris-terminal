@@ -222,7 +222,7 @@ fn drawing_toolbar_actions(
             DrawingActionSpec::new(
                 "drawing_delete_selected",
                 "Delete selected chart object",
-                HugeIcon::DeleteIcon02,
+                HugeIcon::Delete,
                 24.0,
                 false,
                 state.selection != DrawingToolbarSelection::None,
@@ -277,7 +277,7 @@ fn drawing_toolbar_collapse(
     let height = drawing_toolbar_toggle_height(time_axis_height);
     drawing_toolbar_toggle_hit(
         "drawing_toolbar_collapse",
-        HugeIcon::LayoutAlignLeftIcon,
+        HugeIcon::SidebarLeft,
         "Collapse drawing toolbar",
         theme,
         move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),
@@ -351,7 +351,7 @@ pub(super) fn drawing_toolbar_expander(
     let height = drawing_toolbar_toggle_height(time_axis_height);
     drawing_toolbar_toggle_hit(
         "drawing_toolbar_expand",
-        HugeIcon::LayoutAlignLeftIcon,
+        HugeIcon::SidebarLeft,
         "Expand drawing toolbar",
         theme,
         move |_, cx| terminal.update(cx, TerminalApp::toggle_drawing_toolbar),

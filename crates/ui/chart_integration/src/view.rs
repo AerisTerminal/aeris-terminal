@@ -926,8 +926,8 @@ struct LegendPalette {
 
 const LEGEND_VIEW_ICON: &str = "axiusflow/icons/ui/view.svg";
 const LEGEND_VIEW_OFF_ICON: &str = "axiusflow/icons/ui/view-off.svg";
-const LEGEND_SETTINGS_ICON: &str = "axiusflow/icons/ui/settings-01.svg";
-const LEGEND_REMOVE_ICON: &str = "axiusflow/icons/ui/cancel-01.svg";
+const LEGEND_SETTINGS_ICON: &str = "axiusflow/icons/ui/settings.svg";
+const LEGEND_REMOVE_ICON: &str = "axiusflow/icons/ui/close.svg";
 const LEGEND_LOADING_ICON: &str = "axiusflow/icons/ui/loader.svg";
 /// One rotation of the legend's loading glyph.
 const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);

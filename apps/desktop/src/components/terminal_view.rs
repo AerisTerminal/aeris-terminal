@@ -254,7 +254,6 @@ const fn workspace_tab_close_drag_enabled(workspace_count: usize) -> bool {
 fn workspace_tab_close_button(
     terminal: Entity<TerminalApp>,
     tab_id: u64,
-    index: usize,
     label: &str,
     theme: &AxiusflowTheme,
 ) -> Stateful<Div> {
@@ -273,7 +272,7 @@ fn workspace_tab_close_button(
         .cursor_pointer()
         .role(Role::Button)
         .aria_label(format!("Close {label}"))
-        .tab_index(isize::try_from(index.saturating_mul(2).saturating_add(1)).unwrap_or(isize::MAX))
+        .tab_index(0)
         .hover(move |close| {
             close
                 .bg(gpui_color(colors.danger))
@@ -294,7 +293,7 @@ fn workspace_tab_close_button(
                 cx.stop_propagation();
             }
         })
-        .child(header_icon(HugeIcon::CancelIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
+        .child(header_icon(HugeIcon::Close).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
 fn handle_workspace_tab_key(
@@ -350,7 +349,7 @@ fn workspace_add_button(
         }))
         .role(Role::Button)
         .aria_label("Create workspace")
-        .tab_index(isize::MAX)
+        .tab_index(0)
         .tab_stop(enabled)
         .when(enabled, |button| {
             button
@@ -372,7 +371,7 @@ fn workspace_add_button(
                     }
                 })
         })
-        .child(header_icon(HugeIcon::AddIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
+        .child(header_icon(HugeIcon::Add).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
 fn workspace_tab_content(
@@ -426,6 +425,7 @@ fn workspace_tab_content(
                 .flex_none()
                 .text_xs()
                 .whitespace_nowrap()
+                .font_features(platform_tabular_numerals())
                 .text_color(gpui_color(change_color))
                 .child(change)
         }));
@@ -508,9 +508,8 @@ fn workspace_tab(
         })
         .child(content)
         .children(
-            workspace_tab_close_drag_enabled(state.workspace_count).then(|| {
-                workspace_tab_close_button(terminal.clone(), tab_id, index, &label, &theme)
-            }),
+            workspace_tab_close_drag_enabled(state.workspace_count)
+                .then(|| workspace_tab_close_button(terminal.clone(), tab_id, &label, &theme)),
         )
         .into_any_element()
 }

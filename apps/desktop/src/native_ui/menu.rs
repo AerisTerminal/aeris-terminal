@@ -4,9 +4,12 @@ use axiusflow_design_system::{
     AxiusflowTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, IntoElement, Pixels, Point, RenderOnce,
-    SharedString, Stateful, Window, div, prelude::*, px,
+    Animation, AnimationElement, AnimationExt, AnyElement, App, Bounds, ClickEvent, Div, ElementId,
+    IntoElement, Pixels, Point, RenderOnce, SharedString, Stateful, Window, div, ease_out_quint,
+    point, prelude::*, px,
 };
+use gpui_base::Button as BaseButton;
+use std::time::Duration;
 
 use super::{
     platform_font_weight,
@@ -19,18 +22,94 @@ type Hover = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 const COMPACT_ROW_HEIGHT: Pixels = px(32.0);
 const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
 const SEPARATOR_HEIGHT: Pixels = px(1.0);
+const POPUP_ENTER_DURATION: Duration = Duration::from_millis(130);
+const POPUP_ENTER_TRAVEL: f32 = 6.0;
+
+/// Normalized origin used to make native menu motion come from its trigger.
+///
+/// GPUI 0.2 does not expose a general affine transform for element trees, so
+/// Axiusflow uses the equivalent native presentation available at this layer:
+/// a short fade/translation whose direction is derived from the same origin a
+/// CSS `transform-origin` would use. The trigger-facing edge therefore stays
+/// visually pinned instead of every popup drifting from its center.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PopupAnimationOrigin {
+    x: f32,
+    y: f32,
+}
+
+impl PopupAnimationOrigin {
+    pub(crate) const TOP_LEFT: Self = Self { x: 0.0, y: 0.0 };
+    pub(crate) const TOP_RIGHT: Self = Self { x: 1.0, y: 0.0 };
+    pub(crate) const BOTTOM_LEFT: Self = Self { x: 0.0, y: 1.0 };
+
+    pub(crate) fn new(x: f32, y: f32) -> Self {
+        Self {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        }
+    }
+
+    pub(crate) fn from_trigger(trigger: Point<Pixels>, popup: Bounds<Pixels>) -> Self {
+        let width: f32 = popup.size.width.into();
+        let height: f32 = popup.size.height.into();
+        let left: f32 = popup.origin.x.into();
+        let top: f32 = popup.origin.y.into();
+        let trigger_x: f32 = trigger.x.into();
+        let trigger_y: f32 = trigger.y.into();
+        Self::new(
+            if width > 0.0 {
+                (trigger_x - left) / width
+            } else {
+                0.5
+            },
+            if height > 0.0 {
+                (trigger_y - top) / height
+            } else {
+                0.5
+            },
+        )
+    }
+
+    pub(crate) fn enter_offset(self) -> Point<f32> {
+        point(
+            (self.x - 0.5) * 2.0 * POPUP_ENTER_TRAVEL,
+            (self.y - 0.5) * 2.0 * POPUP_ENTER_TRAVEL,
+        )
+    }
+}
+
+/// Applies the shared trigger-origin entry motion to an Axiusflow popup.
+/// `with_animation` automatically collapses to its final frame for reduced
+/// motion, so every caller gets the accessibility behavior for free.
+pub(crate) fn animate_popup_from_origin(
+    panel: Stateful<Div>,
+    id: impl Into<ElementId>,
+    origin: PopupAnimationOrigin,
+) -> AnimationElement<Stateful<Div>> {
+    let offset = origin.enter_offset();
+    panel.with_animation(
+        id,
+        Animation::new(POPUP_ENTER_DURATION).with_easing(ease_out_quint()),
+        move |panel, progress| {
+            let remaining = 1.0 - progress;
+            panel
+                .opacity(progress)
+                .ml(px(offset.x * remaining))
+                .mt(px(offset.y * remaining))
+        },
+    )
+}
 
 #[derive(Clone, Copy)]
 enum RowKind {
     Compact,
-    CompactInset,
     SearchResult,
 }
 
 fn row_geometry(kind: RowKind) -> (Pixels, Pixels, bool) {
     match kind {
         RowKind::Compact => (COMPACT_ROW_HEIGHT, px(12.0), false),
-        RowKind::CompactInset => (COMPACT_ROW_HEIGHT, px(8.0), true),
         RowKind::SearchResult => (SEARCH_ROW_HEIGHT, px(8.0), true),
     }
 }
@@ -69,6 +148,18 @@ struct MenuRowEdges {
     fill_width: bool,
 }
 
+#[derive(Clone, Copy)]
+struct MenuRowPresentation {
+    enabled: bool,
+    label_color: ThemeColor,
+    highlighted_fill: ThemeColor,
+    hover_fill: ThemeColor,
+    height: Pixels,
+    horizontal_padding: Pixels,
+    rounded: bool,
+    inner_radius: Pixels,
+}
+
 impl MenuRow {
     pub(crate) fn compact(
         id: impl Into<ElementId>,
@@ -86,14 +177,6 @@ impl MenuRow {
         let mut row = Self::new(id, label, theme, RowKind::SearchResult);
         row.resting_fill = theme.colors.surface;
         row
-    }
-
-    pub(crate) fn compact_inset(
-        id: impl Into<ElementId>,
-        label: impl Into<SharedString>,
-        theme: &AxiusflowTheme,
-    ) -> Self {
-        Self::new(id, label, theme, RowKind::CompactInset)
     }
 
     fn new(
@@ -177,10 +260,8 @@ impl MenuRow {
         self.hover = Some(Rc::new(handler));
         self
     }
-}
 
-impl RenderOnce for MenuRow {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn presentation(&self) -> MenuRowPresentation {
         let colors = self.theme.colors;
         let enabled = accepts_input(self.behavior.disabled, self.activation.is_some());
         let destructive = self.behavior.destructive;
@@ -199,7 +280,7 @@ impl RenderOnce for MenuRow {
             colors.danger.with_alpha(0.10).over(self.resting_fill)
         } else {
             match self.kind {
-                RowKind::Compact | RowKind::CompactInset => colors.hover_bg,
+                RowKind::Compact => colors.hover_bg,
                 RowKind::SearchResult => colors.active_bg,
             }
             .over(self.resting_fill)
@@ -210,10 +291,27 @@ impl RenderOnce for MenuRow {
             colors.hover_bg.over(self.resting_fill)
         };
         let (height, horizontal_padding, rounded) = row_geometry(self.kind);
+        let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels())
+            - self.theme.dimensions.border_width)
+            .max(0.0));
+        MenuRowPresentation {
+            enabled,
+            label_color,
+            highlighted_fill,
+            hover_fill,
+            height,
+            horizontal_padding,
+            rounded,
+            inner_radius,
+        }
+    }
+}
+
+impl RenderOnce for MenuRow {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let colors = self.theme.colors;
+        let presentation = self.presentation();
         let hover = self.hover;
-        // Inner path of a 6px panel with a 1px border. Matching the outer radius
-        // on the content box pulls the hover off the corners and leaves gaps.
-        let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels()) - 1.0).max(0.0));
         let round_top = self.edges.round_top;
         let round_bottom = self.edges.round_bottom;
         let fill_width = self.edges.fill_width;
@@ -221,66 +319,79 @@ impl RenderOnce for MenuRow {
             .flex_1()
             .min_w_0()
             .truncate()
-            .text_color(gpui_color(label_color))
+            .text_color(gpui_color(presentation.label_color))
             .child(self.label.clone());
 
-        div()
-            .id(self.id)
+        BaseButton::new(self.id)
+            .disabled(!presentation.enabled)
+            .accessibility_label(self.label.clone())
             .block_mouse_except_scroll()
             .when_some(hover, |row, hover| {
                 row.on_hover(move |hovered, window, cx| hover(hovered, window, cx))
             })
             .when(fill_width, gpui::Styled::w_full)
-            .h(height)
+            .h(presentation.height)
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
-            .px(horizontal_padding)
+            .px(presentation.horizontal_padding)
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_sm()
-            .text_color(gpui_color(label_color))
-            .when(rounded, |row| {
+            .text_color(gpui_color(presentation.label_color))
+            .when(presentation.rounded, |row| {
                 row.rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             })
             .when(round_top, |row| {
-                row.rounded_tl(inner_radius).rounded_tr(inner_radius)
+                row.rounded_tl(presentation.inner_radius)
+                    .rounded_tr(presentation.inner_radius)
             })
             .when(round_bottom, |row| {
-                row.rounded_bl(inner_radius).rounded_br(inner_radius)
+                row.rounded_bl(presentation.inner_radius)
+                    .rounded_br(presentation.inner_radius)
             })
             .when(self.behavior.highlighted, |row| {
-                row.bg(gpui_color(highlighted_fill))
-                    .text_color(gpui_color(label_color))
+                row.bg(gpui_color(presentation.highlighted_fill))
+                    .text_color(gpui_color(presentation.label_color))
                     .when(round_top, |row| {
-                        row.rounded_tl(inner_radius).rounded_tr(inner_radius)
+                        row.rounded_tl(presentation.inner_radius)
+                            .rounded_tr(presentation.inner_radius)
                     })
                     .when(round_bottom, |row| {
-                        row.rounded_bl(inner_radius).rounded_br(inner_radius)
+                        row.rounded_bl(presentation.inner_radius)
+                            .rounded_br(presentation.inner_radius)
                     })
             })
-            .when(enabled, |row| {
+            .when(presentation.enabled, |row| {
                 row.cursor_pointer().hover(|style| {
                     let mut style = style
-                        .bg(gpui_color(hover_fill))
-                        .text_color(gpui_color(label_color));
+                        .bg(gpui_color(presentation.hover_fill))
+                        .text_color(gpui_color(presentation.label_color));
                     if round_top {
-                        style = style.rounded_tl(inner_radius).rounded_tr(inner_radius);
+                        style = style
+                            .rounded_tl(presentation.inner_radius)
+                            .rounded_tr(presentation.inner_radius);
                     }
                     if round_bottom {
-                        style = style.rounded_bl(inner_radius).rounded_br(inner_radius);
+                        style = style
+                            .rounded_bl(presentation.inner_radius)
+                            .rounded_br(presentation.inner_radius);
                     }
                     style
                 })
             })
-            .when(!enabled, gpui::Styled::cursor_not_allowed)
-            .when_some(self.activation.filter(|_| enabled), |row, activation| {
-                row.on_click(move |event, window, cx| {
-                    activation(event, window, cx);
-                    cx.stop_propagation();
-                })
-            })
+            .when(!presentation.enabled, gpui::Styled::cursor_not_allowed)
+            .focus_visible(move |row| row.border_2().border_color(gpui_color(colors.ring)))
+            .when_some(
+                self.activation.filter(|_| presentation.enabled),
+                |row, activation| {
+                    row.on_click(move |event, window, cx| {
+                        activation(event, window, cx);
+                        cx.stop_propagation();
+                    })
+                },
+            )
             .children(self.leading)
             .child(label)
             .children(self.trailing)
@@ -348,9 +459,12 @@ pub(crate) fn menu_separator(theme: &AxiusflowTheme) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use gpui::px;
+    use gpui::{Bounds, point, px, size};
 
-    use super::{COMPACT_ROW_HEIGHT, RowKind, SEARCH_ROW_HEIGHT, accepts_input, row_geometry};
+    use super::{
+        COMPACT_ROW_HEIGHT, POPUP_ENTER_TRAVEL, PopupAnimationOrigin, RowKind, SEARCH_ROW_HEIGHT,
+        accepts_input, row_geometry,
+    };
 
     #[test]
     fn disabled_rows_never_accept_activation() {
@@ -366,12 +480,42 @@ mod tests {
             (COMPACT_ROW_HEIGHT, px(12.0), false)
         );
         assert_eq!(
-            row_geometry(RowKind::CompactInset),
-            (COMPACT_ROW_HEIGHT, px(8.0), true)
-        );
-        assert_eq!(
             row_geometry(RowKind::SearchResult),
             (SEARCH_ROW_HEIGHT, px(8.0), true)
+        );
+    }
+
+    #[test]
+    fn popup_origin_tracks_and_clamps_the_trigger_inside_popup_bounds() {
+        let popup = Bounds::new(point(px(100.0), px(50.0)), size(px(200.0), px(100.0)));
+
+        assert_eq!(
+            PopupAnimationOrigin::from_trigger(point(px(100.0), px(50.0)), popup),
+            PopupAnimationOrigin::TOP_LEFT
+        );
+        assert_eq!(
+            PopupAnimationOrigin::from_trigger(point(px(300.0), px(50.0)), popup),
+            PopupAnimationOrigin::TOP_RIGHT
+        );
+        assert_eq!(
+            PopupAnimationOrigin::from_trigger(point(px(0.0), px(500.0)), popup),
+            PopupAnimationOrigin::BOTTOM_LEFT
+        );
+    }
+
+    #[test]
+    fn popup_entry_offset_points_back_toward_the_trigger_origin() {
+        assert_eq!(
+            PopupAnimationOrigin::TOP_LEFT.enter_offset(),
+            point(-POPUP_ENTER_TRAVEL, -POPUP_ENTER_TRAVEL)
+        );
+        assert_eq!(
+            PopupAnimationOrigin::TOP_RIGHT.enter_offset(),
+            point(POPUP_ENTER_TRAVEL, -POPUP_ENTER_TRAVEL)
+        );
+        assert_eq!(
+            PopupAnimationOrigin::BOTTOM_LEFT.enter_offset(),
+            point(-POPUP_ENTER_TRAVEL, POPUP_ENTER_TRAVEL)
         );
     }
 }

@@ -1,7 +1,11 @@
 use std::time::Duration;
 
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
-use gpui::{App, Context, Entity, Render, Role, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, Entity, IntoElement, MouseButton, Render, RenderOnce, Role, Window, div,
+    prelude::*, px, relative,
+};
+use gpui_base::{Easing, Transition, transition};
 
 use crate::desktop::native_ui::platform_font_weight;
 use crate::{
@@ -150,6 +154,106 @@ impl OnboardingApp {
     }
 }
 
+const ONBOARDING_BUTTON_HEIGHT: f32 = 40.0;
+const ONBOARDING_BUTTON_PRESSED_SCALE: f32 = 0.97;
+const ONBOARDING_BUTTON_PRESS_DURATION: Duration = Duration::from_millis(200);
+
+#[derive(IntoElement)]
+struct OnboardingButton {
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    pending: bool,
+    theme: AxiusflowTheme,
+}
+
+impl RenderOnce for OnboardingButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let colors = self.theme.colors;
+        let fill = if self.primary {
+            colors.primary
+        } else {
+            colors.surface_secondary
+        };
+        let foreground = if self.primary {
+            colors.primary_foreground
+        } else {
+            colors.text_primary
+        };
+        let pressed_state =
+            window.use_keyed_state((gpui::ElementId::from(self.id), "press"), cx, |_, _| false);
+        let pressed = *pressed_state.read(cx);
+        let scale = transition(
+            (self.id, "press-scale"),
+            if pressed {
+                ONBOARDING_BUTTON_PRESSED_SCALE
+            } else {
+                1.0
+            },
+            Transition::new(ONBOARDING_BUTTON_PRESS_DURATION).easing(Easing::EaseOut),
+            window,
+            cx,
+        );
+        let press_state = pressed_state.clone();
+        let release_state = pressed_state.clone();
+        let release_out_state = pressed_state;
+
+        div()
+            .w_full()
+            .h(px(ONBOARDING_BUTTON_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id(self.id)
+                    .relative()
+                    .w(relative(scale))
+                    .h(px(ONBOARDING_BUTTON_HEIGHT * scale))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels()) * scale))
+                    .border_1()
+                    .border_color(gpui_color(if self.primary {
+                        colors.primary
+                    } else {
+                        colors.border
+                    }))
+                    .bg(gpui_color(fill))
+                    .text_color(gpui_color(foreground))
+                    .text_size(px(14.0 * scale))
+                    .font_weight(platform_font_weight(TypographyRole::Normal))
+                    .when(!self.pending, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(move |button| button.bg(gpui_color(colors.active_bg.over(fill))))
+                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                press_state.update(cx, |pressed, cx| {
+                                    *pressed = true;
+                                    cx.notify();
+                                });
+                            })
+                            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                                release_state.update(cx, |pressed, cx| {
+                                    *pressed = false;
+                                    cx.notify();
+                                });
+                            })
+                            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                                release_out_state.update(cx, |pressed, cx| {
+                                    *pressed = false;
+                                    cx.notify();
+                                });
+                            })
+                            .on_click(|_, _, cx| OnboardingApp::begin_sign_in(cx))
+                    })
+                    .when(self.pending, gpui::Styled::cursor_not_allowed)
+                    .child(self.label),
+            )
+    }
+}
+
 fn onboarding_button(
     id: &'static str,
     label: &'static str,
@@ -157,50 +261,13 @@ fn onboarding_button(
     pending: bool,
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
-    let fill = if primary {
-        colors.primary
-    } else {
-        colors.surface_secondary
-    };
-    let foreground = if primary {
-        colors.primary_foreground
-    } else {
-        colors.text_primary
-    };
-    div()
-        .id(id)
-        .relative()
-        .w_full()
-        .h(px(40.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(if primary {
-            colors.primary
-        } else {
-            colors.border
-        }))
-        .bg(gpui_color(fill))
-        .text_color(gpui_color(foreground))
-        .text_sm()
-        .font_weight(platform_font_weight(TypographyRole::Normal))
-        .when(!pending, |button| {
-            button
-                .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(colors.active_bg.over(fill))))
-                .active(move |button| {
-                    button
-                        .top(px(1.0))
-                        .bg(gpui_color(colors.active_bg.over(fill)))
-                        .opacity(0.94)
-                })
-                .on_click(|_, _, cx| OnboardingApp::begin_sign_in(cx))
-        })
-        .when(pending, gpui::Styled::cursor_not_allowed)
-        .child(label)
+    OnboardingButton {
+        id,
+        label,
+        primary,
+        pending,
+        theme: *theme,
+    }
 }
 
 impl Render for OnboardingApp {

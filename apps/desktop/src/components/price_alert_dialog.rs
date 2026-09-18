@@ -465,7 +465,11 @@ fn condition_dropdown(
                 }),
             );
         }
-        field = field.child(gpui::deferred(menu));
+        field = field.child(gpui::deferred(animate_popup_from_origin(
+            menu,
+            "price_alert_condition_menu_enter",
+            PopupAnimationOrigin::TOP_LEFT,
+        )));
     }
     field
 }
@@ -518,7 +522,11 @@ fn frequency_dropdown(
                 }),
             );
         }
-        field = field.child(gpui::deferred(menu));
+        field = field.child(gpui::deferred(animate_popup_from_origin(
+            menu,
+            "price_alert_frequency_menu_enter",
+            PopupAnimationOrigin::TOP_LEFT,
+        )));
     }
     field
 }
@@ -587,7 +595,7 @@ fn price_alert_existing_rows(
                         .theme(theme)
                         .with_size(px(28.0))
                         .resting_fill(colors.surface)
-                        .icon(header_icon(HugeIcon::DeleteIcon02))
+                        .icon(header_icon(HugeIcon::Delete))
                         .aria_label("Delete price alert")
                         .on_click(move |_, _, cx| {
                             remove.update(cx, |surface, surface_cx| {
@@ -676,7 +684,7 @@ fn price_alert_dialog_footer(
         .child(
             Button::new("price_alert_create")
                 .variant(theme, ButtonVariant::Filled)
-                .icon(header_icon(HugeIcon::AddIcon01))
+                .icon(header_icon(HugeIcon::Add))
                 .label("Create alert")
                 .disabled(capacity_reached)
                 .on_click(move |_, _, cx| {
@@ -792,6 +800,7 @@ pub(super) fn price_alert_dialog_layer(
         .flex()
         .items_center()
         .justify_center()
+        .p_4()
         .bg(gpui_color(colors.surface.with_alpha(0.72)))
         .on_any_mouse_down(move |_, _, cx| {
             dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
@@ -801,7 +810,9 @@ pub(super) fn price_alert_dialog_layer(
             div()
                 .id("price_alert_dialog")
                 .w(px(460.0))
+                .max_w(relative(1.0))
                 .max_h(px(600.0))
+                .max_h(relative(1.0))
                 .flex()
                 .flex_col()
                 .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))

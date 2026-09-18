@@ -1,11 +1,14 @@
 use std::{rc::Rc, sync::Arc};
 
-use axiusflow_design_system::{AxiusflowTheme, ThemeColor, TypographyRole, platform_font_family};
-use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
-    Interactivity, IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
-    StyleRefinement, Styled, Window, div, prelude::*, px,
+use axiusflow_design_system::{
+    AxiusflowTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
+use gpui::{
+    AnyElement, App, ClickEvent, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement,
+    ParentElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled, Window, div,
+    prelude::*, px,
+};
+use gpui_base::Button as BaseButton;
 
 use super::{
     icon::Icon,
@@ -34,12 +37,12 @@ fn control_label_weight() -> gpui::FontWeight {
 }
 
 fn with_pointer_states(
-    control: Stateful<Div>,
+    control: BaseButton,
     policy: ControlPolicy,
     caller_hover_style: Option<StyleRefinement>,
     hover_color: Option<Hsla>,
     active_color: Option<Hsla>,
-) -> Stateful<Div> {
+) -> BaseButton {
     let has_caller_hover_style = caller_hover_style.is_some();
     control
         .when_some(
@@ -62,10 +65,10 @@ fn with_pointer_states(
 }
 
 fn with_control_surface(
-    control: Stateful<Div>,
+    control: BaseButton,
     surface: Option<ButtonAppearance>,
     theme: Option<&AxiusflowTheme>,
-) -> Stateful<Div> {
+) -> BaseButton {
     control.when_some(surface, |control, surface| {
         control
             .bg(gpui_color(surface.fill))
@@ -119,15 +122,15 @@ impl ControlPolicy {
 }
 
 /// A narrow Axiusflow-owned push/toggle control built directly on GPUI's
-/// click, focus, accessibility, and styling primitives.
+/// styling primitives and `gpui-base`'s press, focus, and accessibility model.
 ///
-/// GPUI owns press/release pairing and keyboard click synthesis. This control
-/// deliberately registers one click listener and no parallel mouse-down or
-/// key-down activation path.
+/// Base owns press/release pairing and keyboard click synthesis. This control
+/// deliberately registers one activation listener and no parallel mouse-down
+/// or key-down activation path.
 #[derive(IntoElement)]
 pub(crate) struct Control {
     id: ElementId,
-    base: Stateful<Div>,
+    base: BaseButton,
     style: StyleRefinement,
     icon: Option<Icon>,
     leading: Option<AnyElement>,
@@ -140,7 +143,6 @@ pub(crate) struct Control {
     resting_fill: Option<ThemeColor>,
     tooltip: Option<TooltipSpec>,
     activation: Option<Activation>,
-    focus_handle: Option<FocusHandle>,
     aria_label: Option<SharedString>,
     hover_style: Option<StyleRefinement>,
     flags: ControlFlags,
@@ -155,7 +157,7 @@ impl Control {
     pub(crate) fn new(id: impl Into<ElementId>) -> Self {
         let id = id.into();
         Self {
-            base: div().id(id.clone()),
+            base: BaseButton::new(id.clone()),
             id,
             style: StyleRefinement::default(),
             icon: None,
@@ -169,7 +171,6 @@ impl Control {
             resting_fill: None,
             tooltip: None,
             activation: None,
-            focus_handle: None,
             aria_label: None,
             hover_style: None,
             flags: ControlFlags::new(),
@@ -188,7 +189,8 @@ impl Control {
         let appearance = button_appearance(theme, variant);
         self.resting_fill = Some(appearance.fill);
         self.surface = Some(appearance);
-        self
+        self.h(DEFAULT_CONTROL_SIZE)
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
     }
 
     /// The opaque fill this control rests on; hover/selected states composite
@@ -288,15 +290,6 @@ impl Control {
         ElementId::NamedChild(Arc::new(self.id.clone()), "loader".into())
     }
 
-    fn resolved_focus_handle(&self, window: &mut Window, cx: &mut App) -> FocusHandle {
-        self.focus_handle.clone().unwrap_or_else(|| {
-            window
-                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
-                .read(cx)
-                .clone()
-        })
-    }
-
     fn leading_element(&mut self, loader_id: ElementId, icon_size: Pixels) -> Option<AnyElement> {
         if self.flags.contains(ControlFlags::LOADING) {
             self.loading_icon
@@ -358,14 +351,9 @@ impl InteractiveElement for Control {
 }
 
 impl RenderOnce for Control {
-    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let policy = self.policy();
         let loader_id = self.loader_id();
-        let focus_handle = self.resolved_focus_handle(window, cx);
-        let focus_handle = focus_handle.tab_index(self.tab_index).tab_stop(
-            self.flags.contains(ControlFlags::TAB_STOP)
-                && !self.flags.contains(ControlFlags::DISABLED),
-        );
         let focus_color = self.theme.map_or_else(
             || window.text_style().color,
             |theme| gpui_color(theme.colors.ring),
@@ -393,10 +381,15 @@ impl RenderOnce for Control {
 
         let control = base
             .occlude()
-            .role(Role::Button)
-            .when_some(aria_label, StatefulInteractiveElement::aria_label)
+            .when_some(aria_label, BaseButton::accessibility_label)
+            .selected(self.flags.contains(ControlFlags::SELECTED))
+            .disabled(self.flags.contains(ControlFlags::DISABLED))
+            .tab_index(self.tab_index)
+            .tab_stop(
+                self.flags.contains(ControlFlags::TAB_STOP)
+                    && !self.flags.contains(ControlFlags::DISABLED),
+            )
             .aria_selected(self.flags.contains(ControlFlags::SELECTED))
-            .track_focus(&focus_handle)
             .flex()
             .flex_shrink_0()
             .relative()
@@ -406,7 +399,7 @@ impl RenderOnce for Control {
             .rounded(px(4.0))
             .font_family(platform_font_family())
             .when(has_text, |this| this.font_weight(control_label_weight()))
-            .when(has_text, |this| this.px(padding))
+            .when(has_text, |this| this.h(control_size).px(padding))
             .when(!has_text, |this| this.size(control_size));
         let control = with_control_surface(control, surface, self.theme.as_ref())
             .when(policy.accepts_input(), gpui::Styled::cursor_pointer)

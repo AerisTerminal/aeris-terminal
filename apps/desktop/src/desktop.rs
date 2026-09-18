@@ -144,11 +144,14 @@ use native_ui::{
     icon::Icon,
     input::{Input, InputEvent, InputState},
     loader::Loader,
-    menu::{MenuRow, compact_menu_panel, flat_compact_menu_panel, menu_separator},
+    menu::{
+        MenuRow, PopupAnimationOrigin, animate_popup_from_origin, compact_menu_panel,
+        flat_compact_menu_panel, menu_separator,
+    },
     platform_font_weight, platform_tabular_numerals,
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     tab::Tab,
-    theme::{ButtonVariant, gpui_color},
+    theme::{ButtonVariant, base_theme, gpui_color},
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
@@ -183,9 +186,9 @@ use terminal_chrome::{
 };
 use terminal_chrome::{
     WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, button_activation,
-    chrome_button_style, chrome_tooltip, exchange_mark, fullscreen_escape_command, header_icon,
-    nucleus_chart_theme, series_glyph, terminal_header, window_move_gesture_transition,
-    workspace_title_bar, workspace_title_bar_visible,
+    button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
+    fullscreen_escape_command, header_icon, nucleus_chart_theme, series_glyph, terminal_header,
+    window_move_gesture_transition, workspace_title_bar, workspace_title_bar_visible,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
@@ -424,7 +427,8 @@ const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
-const CHROME_OVERLAY_TRANSITION_OFFSET: f32 = 5.0;
+const COPY_PRICE_FEEDBACK_DURATION: Duration = Duration::from_millis(600);
+const COPY_PRICE_SUCCESS_ANIMATION_DURATION: Duration = Duration::from_millis(180);
 
 mod lifecycle;
 use lifecycle::DesktopLifecycle;
@@ -681,6 +685,7 @@ struct WorkspaceSurface {
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
+    chrome_overlay_trigger_position: Option<gpui::Point<Pixels>>,
     timeframe_menu_flyout: Option<TimeframeMenuGroup>,
     timeframe_flyout_close_token: u64,
     timeframe_hover_regions: u32,
@@ -2365,10 +2370,9 @@ fn workspace_surface_entity(
     let indicator_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Search native indicators"));
     let indicator_search_input = indicator_input.clone();
-    let timeframe_input = cx.new(|cx| {
-        InputState::new(window, cx)
-            .placeholder("1m, 5, 1H, 1D")
-            .centered()
+    let timeframe_input = cx.new(|cx| InputState::new(window, cx).placeholder("1m, 5, 1H, 1D"));
+    timeframe_input.update(cx, |input, cx| {
+        input.set_text_align(gpui::TextAlign::Center, cx);
     });
     let timeframe_search_input = timeframe_input.clone();
     let workspace_lifecycle = lifecycle.clone();
@@ -2520,6 +2524,7 @@ struct ChartContextMenu {
     kind: ChartContextKind,
     flyout: PriceAxisMenuFlyout,
     copy_price: Option<SharedString>,
+    copy_feedback_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2644,6 +2649,7 @@ struct TerminalApp {
     watchlist_drag: Option<WatchlistDragState>,
     watchlist_scroll: ScrollHandle,
     chart_context_menu: Option<ChartContextMenu>,
+    chart_context_copy_feedback_generation: u64,
     chart_settings_menu: Option<ChartContextMenu>,
     chart_settings_section: ChartSettingsSection,
     chart_settings_color_picker: Option<ChartColorPickerState>,
@@ -3129,6 +3135,8 @@ fn run_onboarding() {
         .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            gpui_base::init(cx);
+            cx.set_global(base_theme(&AxiusflowTheme::dark()));
             install_platform_http_client(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()
@@ -3165,6 +3173,8 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
         .with_assets(assets::AxiusflowAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            gpui_base::init(cx);
+            cx.set_global(base_theme(&AxiusflowTheme::dark()));
             install_platform_http_client(cx);
             cx.set_app_identity("com.axiusflow.desktop", "Axiusflow");
             cx.text_system()

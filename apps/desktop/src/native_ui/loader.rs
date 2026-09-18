@@ -48,18 +48,22 @@ impl Loader {
 }
 
 impl RenderOnce for Loader {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let animation_id = self.animation_id();
-        div().flex_none().child(
-            self.icon
-                .with_size(self.size)
-                .when_some(self.color, Icon::color)
-                .with_animation(
-                    animation_id,
-                    Animation::new(self.period).repeat(),
-                    Icon::rotate,
-                ),
-        )
+        let icon = self
+            .icon
+            .with_size(self.size)
+            .when_some(self.color, Icon::color);
+        div().flex_none().child(if cx.reduce_motion() {
+            icon.into_any_element()
+        } else {
+            icon.with_animation(
+                animation_id,
+                Animation::new(self.period).repeat(),
+                Icon::rotate,
+            )
+            .into_any_element()
+        })
     }
 }
 

@@ -122,7 +122,7 @@ pub(super) fn chrome_menu_search_header(
         .border_color(gpui_color(colors.border))
         .text_sm()
         .text_color(gpui_color(colors.text_primary))
-        .child(header_icon(HugeIcon::SearchIcon01).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
+        .child(header_icon(HugeIcon::Search).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
         .child(
             Input::new(input)
                 .appearance(false)
@@ -195,7 +195,7 @@ pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
 ) -> impl IntoElement + use<F> {
     chrome_icon_button(
         id,
-        HugeIcon::CancelIcon01,
+        HugeIcon::Close,
         WORKSPACE_TAB_ICON_GLYPH,
         "Close",
         ChromeIconButtonTone::Destructive,
@@ -214,6 +214,29 @@ pub(super) fn chrome_menu_close_button(
             app.close_chrome_overlay(window, app_cx);
         });
     })
+}
+
+/// Compact add action used at the trailing edge of searchable menu rows.
+///
+/// Keep this geometry shared between the symbol and indicator pickers: the
+/// row action is a 24px square with the platform 8px radius, while the larger
+/// watchlist header add control remains a circular/full-radius chrome action.
+pub(super) fn compact_menu_add_button(
+    id: impl Into<gpui::ElementId>,
+    theme: &AxiusflowTheme,
+) -> Button {
+    Button::new(id)
+        .icon(header_icon(HugeIcon::Add).with_size(px(14.0)))
+        .theme(theme)
+        .resting_fill(theme.colors.surface)
+        .w(px(24.0))
+        .h(px(24.0))
+        .compact()
+        .border_1()
+        .border_color(gpui_color(theme.colors.border))
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .cursor_pointer()
+        .tab_stop(false)
 }
 
 pub(super) fn chrome_menu_shortcut(

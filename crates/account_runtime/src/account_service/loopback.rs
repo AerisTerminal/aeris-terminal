@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 /// Maximum HTTP callback request bytes read from the loopback socket.
 pub const MAXIMUM_CALLBACK_BYTES: usize = 8192;
 /// Maximum authorization code length accepted from the callback query.
@@ -19,7 +21,13 @@ pub const MAXIMUM_CODE_BYTES: usize = 2048;
 pub const MAXIMUM_STATE_BYTES: usize = 256;
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
-const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var t=q.matches?'dark':'light';document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
+const PLATFORM_MEDIUM_FONT: &[u8] =
+    include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Medium.ttf");
+const PLATFORM_BOLD_FONT: &[u8] =
+    include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Bold.ttf");
+const BRAND_MARK: &str =
+    include_str!("../../../../apps/desktop/assets/brand_assets/axiusflow_logo.svg");
+const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var d=q.matches;document.documentElement.classList.toggle('dark',d);document.documentElement.dataset.theme=d?'dark':'light';document.documentElement.style.colorScheme=d?'dark':'light'}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
 
 /// One bound loopback listener awaiting a single callback.
 pub struct LoopbackListener {
@@ -186,7 +194,7 @@ fn respond(stream: &mut std::net::TcpStream, status: u16, body: &str) {
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes());
@@ -197,6 +205,14 @@ fn browser_platform_styles() -> &'static str {
     PLATFORM_STYLESHEET
         .find(":root")
         .map_or(PLATFORM_STYLESHEET, |start| &PLATFORM_STYLESHEET[start..])
+}
+
+fn browser_font_faces() -> String {
+    let medium = STANDARD.encode(PLATFORM_MEDIUM_FONT);
+    let bold = STANDARD.encode(PLATFORM_BOLD_FONT);
+    format!(
+        r#"@font-face{{font-family:"HK Grotesk";src:url("data:font/ttf;base64,{medium}") format("truetype");font-style:normal;font-weight:500;font-display:swap}}@font-face{{font-family:"HK Grotesk";src:url("data:font/ttf;base64,{bold}") format("truetype");font-style:normal;font-weight:700;font-display:swap}}"#
+    )
 }
 
 fn outcome_page(success: bool, detail: &str) -> String {
@@ -222,11 +238,14 @@ fn outcome_page(success: bool, detail: &str) -> String {
     };
     let state = if success { "success" } else { "failure" };
     let platform = browser_platform_styles();
+    let fonts = browser_font_faces();
+    let brand_mark = BRAND_MARK;
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>{title}</title>{SYSTEM_THEME_BOOTSTRAP}<style>
+{fonts}
 {platform}
-html,body{{margin:0;min-height:100%}}body{{min-height:100vh;display:grid;place-items:center;background:var(--surface);color:var(--text-primary);padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{margin-bottom:38px;color:var(--text-secondary);font-size:11px;font-weight:700;letter-spacing:.2em}}.mark{{width:64px;height:64px;margin:0 auto 24px;display:grid;place-items:center;border:1px solid var(--border);border-radius:var(--radius-large);background:var(--surface-secondary);font-size:27px;font-weight:700;animation:arrive .34s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{color:var(--primary)}}.failure .mark{{color:var(--danger)}}svg{{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .4s .18s ease-out forwards}}h1{{margin:0 0 9px;font-size:24px;font-weight:700;letter-spacing:-.025em}}p{{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.55}}.detail{{margin:16px auto 0;max-width:360px;color:var(--danger);font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,svg path{{animation:none}}svg path{{stroke-dashoffset:0}}}}
-</style></head><body><main class="{state}"><div class="brand">AXIUSFLOW</div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
+html,body{{margin:0;min-height:100%}}body{{min-height:100vh;display:grid;place-items:center;background:var(--surface);color:var(--text-primary);padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:40px;color:var(--text-primary);font-size:17px;font-weight:700;letter-spacing:-.02em}}.brand-mark{{width:40px;height:40px;display:block;flex:none}}.brand-mark>svg{{display:block;width:40px;height:40px}}.mark{{width:64px;height:64px;margin:0 auto 24px;display:grid;place-items:center;border:1px solid var(--border);border-radius:var(--radius-large);background:var(--surface-secondary);font-size:27px;font-weight:700;animation:arrive .34s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{color:var(--primary)}}.failure .mark{{color:var(--danger)}}.mark>svg{{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}.mark>svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .4s .18s ease-out forwards}}h1{{margin:0 0 9px;font-size:24px;font-weight:700;letter-spacing:-.025em}}p{{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.55}}.detail{{margin:16px auto 0;max-width:360px;color:var(--danger);font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,.mark>svg path{{animation:none}}.mark>svg path{{stroke-dashoffset:0}}}}
+</style></head><body><main class="{state}"><div class="brand"><span class="brand-mark">{brand_mark}</span><span>Axiusflow</span></div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
     )
 }
 
@@ -403,9 +422,13 @@ mod tests {
         assert!(response.contains("var(--primary)"));
         assert!(!response.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
-        assert!(!response.contains("font-family:Inter"));
+        assert!(response.contains("font-family:\"HK Grotesk\""));
+        assert!(response.contains("data:font/ttf;base64,"));
+        assert!(response.contains("classList.toggle('dark',d)"));
+        assert!(response.contains("class=\"brand-mark\"><svg"));
         assert!(response.contains("Content-Type: text/html; charset=utf-8"));
         assert!(response.contains("script-src 'unsafe-inline'"));
+        assert!(response.contains("font-src data:"));
     }
 
     #[test]
@@ -455,7 +478,9 @@ mod tests {
         assert!(page.contains("&lt;script&gt;"));
         assert!(!page.contains("<script>alert('x')</script>"));
         assert!(page.contains(":root"));
-        assert!(!page.contains("@font-face"));
+        assert!(page.contains("@font-face"));
+        assert!(page.contains("classList.toggle('dark',d)"));
+        assert!(page.contains("class=\"brand-mark\"><svg"));
         assert!(page.contains("var(--danger)"));
         assert!(!page.contains("var(--bearish)"));
     }

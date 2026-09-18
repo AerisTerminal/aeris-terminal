@@ -281,7 +281,6 @@ struct CaptionControlSpec {
     icon: HugeIcon,
     label: &'static str,
     command: CaptionCommand,
-    tab_index: isize,
     close: bool,
 }
 
@@ -296,7 +295,6 @@ fn workspace_caption_control(
         icon,
         label,
         command,
-        tab_index,
         close,
     } = spec;
     let colors = theme.colors;
@@ -330,7 +328,7 @@ fn workspace_caption_control(
             control
                 .role(Role::Button)
                 .aria_label(label)
-                .tab_index(tab_index)
+                .tab_index(0)
                 .focus_visible(move |control| {
                     control.border_2().border_color(gpui_color(colors.ring))
                 })
@@ -370,7 +368,6 @@ pub(super) fn workspace_window_controls(
             icon: HugeIcon::WindowMinimize,
             label: "Minimize window",
             command: CaptionCommand::Minimize,
-            tab_index: 0,
             close: false,
         },
         pointer_owner,
@@ -391,7 +388,6 @@ pub(super) fn workspace_window_controls(
                 "Maximize window"
             },
             command: CaptionCommand::MaximizeOrRestore,
-            tab_index: 1,
             close: false,
         },
         pointer_owner,
@@ -404,7 +400,6 @@ pub(super) fn workspace_window_controls(
             icon: HugeIcon::WindowClose,
             label: "Close window",
             command: CaptionCommand::Close,
-            tab_index: 2,
             close: true,
         },
         pointer_owner,
@@ -449,7 +444,6 @@ pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> D
                 icon: HugeIcon::WindowMinimize,
                 label: "Minimize window",
                 command: CaptionCommand::Minimize,
-                tab_index: 0,
                 close: false,
             },
             pointer_owner,
@@ -470,7 +464,6 @@ pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> D
                     "Maximize window"
                 },
                 command: CaptionCommand::MaximizeOrRestore,
-                tab_index: 1,
                 close: false,
             },
             pointer_owner,
@@ -483,7 +476,6 @@ pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> D
                 icon: HugeIcon::WindowClose,
                 label: "Close window",
                 command: CaptionCommand::Close,
-                tab_index: 2,
                 close: true,
             },
             pointer_owner,
@@ -649,13 +641,13 @@ pub(super) fn side_panel_toggle(
     let (id, icon, toggle) = match panel {
         SidePanel::OrderBook => (
             "order_book_toggle",
-            HugeIcon::SidebarRightIcon01,
+            HugeIcon::SidebarRight,
             WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         ),
         SidePanel::Watchlist => (
             "watchlist_toggle",
-            HugeIcon::AnalyticsUpIcon,
+            HugeIcon::SidebarRight,
             WorkspaceSurface::toggle_watchlist
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
         ),
@@ -843,8 +835,8 @@ impl DrawingHistoryControl {
 
     pub(super) const fn icon(self) -> HugeIcon {
         match self {
-            Self::Undo => HugeIcon::Undo03,
-            Self::Redo => HugeIcon::Redo01,
+            Self::Undo => HugeIcon::Undo,
+            Self::Redo => HugeIcon::Redo,
         }
     }
 
@@ -894,8 +886,8 @@ pub(super) fn theme_toggle(
 ) -> impl IntoElement + use<> {
     let next = theme.mode.toggled();
     let icon = match next {
-        axiusflow_design_system::ThemeMode::Light => HugeIcon::SunIcon03,
-        axiusflow_design_system::ThemeMode::Dark => HugeIcon::MoonIcon02,
+        axiusflow_design_system::ThemeMode::Light => HugeIcon::Sun,
+        axiusflow_design_system::ThemeMode::Dark => HugeIcon::Moon,
     };
     let tooltip = format!("Switch to {} theme", next.label());
     let button = Button::new("theme_toggle")
@@ -1099,12 +1091,17 @@ pub(super) fn series_selector(
         .when(!enabled, Button::cursor_not_allowed);
     let open_app = app.clone();
     let bounds_app = app;
-    let button = button_activation(
+    let button = button_activation_at(
         chrome_button_style(button, theme, false, enabled),
         enabled && !pending,
-        move |window, cx| {
+        move |trigger_position, window, cx| {
             open_app.update(cx, |app, app_cx| {
-                app.open_chrome_overlay(ChromeOverlay::Timeframe, window, app_cx);
+                app.open_chrome_overlay_at(
+                    ChromeOverlay::Timeframe,
+                    trigger_position,
+                    window,
+                    app_cx,
+                );
             });
         },
     );
@@ -1148,12 +1145,17 @@ pub(super) fn chart_type_selector(
         .when(!enabled, Button::cursor_not_allowed);
     let open_app = app.clone();
     let bounds_app = app;
-    let button = button_activation(
+    let button = button_activation_at(
         chrome_button_style(button, theme, false, enabled),
         enabled,
-        move |window, cx| {
+        move |trigger_position, window, cx| {
             open_app.update(cx, |app, app_cx| {
-                app.open_chrome_overlay(ChromeOverlay::ChartType, window, app_cx);
+                app.open_chrome_overlay_at(
+                    ChromeOverlay::ChartType,
+                    trigger_position,
+                    window,
+                    app_cx,
+                );
             });
         },
     );
@@ -1221,6 +1223,19 @@ pub(super) fn button_activation(
     button.when(enabled, |button| {
         button.on_click(move |_, window, cx| {
             handler(window, cx);
+            cx.stop_propagation();
+        })
+    })
+}
+
+pub(super) fn button_activation_at(
+    button: Button,
+    enabled: bool,
+    handler: impl Fn(gpui::Point<Pixels>, &mut Window, &mut App) + 'static,
+) -> Button {
+    button.when(enabled, |button| {
+        button.on_click(move |event, window, cx| {
+            handler(event.position(), window, cx);
             cx.stop_propagation();
         })
     })

@@ -103,12 +103,8 @@ impl TerminalApp {
     ) -> Self {
         let mut workspaces = init.workspaces;
         let market_frame_wake = UiWake::default();
-        for (index, workspace) in workspaces.iter_mut().enumerate() {
-            workspace.focus = workspace
-                .focus
-                .clone()
-                .tab_index(isize::try_from(index.saturating_mul(2)).unwrap_or(isize::MAX))
-                .tab_stop(true);
+        for workspace in &mut workspaces {
+            workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
         }
         for workspace in &workspaces {
             for pane in &workspace.panes {
@@ -177,6 +173,7 @@ impl TerminalApp {
             watchlist_drag: None,
             watchlist_scroll: ScrollHandle::new(),
             chart_context_menu: None,
+            chart_context_copy_feedback_generation: 0,
             chart_settings_menu: None,
             chart_settings_section: ChartSettingsSection::Series,
             chart_settings_color_picker: None,
@@ -486,12 +483,8 @@ impl TerminalApp {
     }
 
     fn refresh_workspace_focus_order(&mut self) {
-        for (index, workspace) in self.workspaces.iter_mut().enumerate() {
-            workspace.focus = workspace
-                .focus
-                .clone()
-                .tab_index(isize::try_from(index.saturating_mul(2)).unwrap_or(isize::MAX))
-                .tab_stop(true);
+        for workspace in &mut self.workspaces {
+            workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
         }
     }
 
@@ -590,6 +583,7 @@ impl TerminalApp {
                         kind: request.kind,
                         flyout: PriceAxisMenuFlyout::None,
                         copy_price: request.copy_price,
+                        copy_feedback_generation: None,
                     });
                 }
             }
@@ -645,9 +639,10 @@ impl TerminalApp {
 
     pub(super) fn open_chart_context_menu(
         &mut self,
-        menu: ChartContextMenu,
+        mut menu: ChartContextMenu,
         cx: &mut Context<Self>,
     ) {
+        menu.copy_feedback_generation = None;
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         self.close_chart_settings_menu(cx);
         self.chart_settings_color_picker = None;
@@ -1255,35 +1250,63 @@ impl TerminalApp {
 
     pub(super) fn finish_chart_context_menu(
         &mut self,
-        menu: ChartContextMenu,
+        mut menu: ChartContextMenu,
         action: ChartContextAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chart_context_menu = None;
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
+        menu.copy_feedback_generation = None;
         match action {
             ChartContextAction::CopyPrice => {
                 if let Some(price) = menu.copy_price.as_deref() {
                     cx.write_to_clipboard(ClipboardItem::new_string(price.to_string()));
                 }
+                self.chart_context_copy_feedback_generation = self
+                    .chart_context_copy_feedback_generation
+                    .saturating_add(1);
+                let generation = self.chart_context_copy_feedback_generation;
+                menu.copy_feedback_generation = Some(generation);
+                self.chart_context_menu = Some(menu);
+                cx.notify();
+                cx.spawn_in(window, async move |terminal, cx| {
+                    cx.background_executor()
+                        .timer(COPY_PRICE_FEEDBACK_DURATION)
+                        .await;
+                    let _ = terminal.update_in(cx, |terminal, _, terminal_cx| {
+                        if Self::chart_context_copy_feedback_is_current(
+                            terminal.chart_context_menu.as_ref(),
+                            generation,
+                        ) {
+                            terminal.close_chart_context_menu(terminal_cx);
+                        }
+                    });
+                })
+                .detach();
+                return;
             }
             ChartContextAction::Reset => {
+                self.chart_context_menu = None;
                 self.update_context_menu_pane(&menu, WorkspaceSurface::reset_chart_view, cx);
             }
             ChartContextAction::ClearDrawings => {
+                self.chart_context_menu = None;
                 self.update_context_menu_pane(&menu, WorkspaceSurface::clear_drawings, cx);
             }
             ChartContextAction::ClearIndicators => {
+                self.chart_context_menu = None;
                 self.update_context_menu_pane(&menu, WorkspaceSurface::clear_indicators, cx);
             }
             ChartContextAction::Split(direction) => {
+                self.chart_context_menu = None;
                 self.split_active_pane(direction, window, cx);
             }
             ChartContextAction::Close => {
+                self.chart_context_menu = None;
                 self.close_active_pane(&ClosePane, window, cx);
             }
             ChartContextAction::Settings => {
+                self.chart_context_menu = None;
                 self.set_workspace_chart_pointers_suspended(menu.workspace_id, true, cx);
                 self.chart_settings_section = ChartSettingsSection::Series;
                 self.chart_settings_color_picker = None;
@@ -1294,6 +1317,13 @@ impl TerminalApp {
             }
         }
         cx.notify();
+    }
+
+    pub(super) fn chart_context_copy_feedback_is_current(
+        menu: Option<&ChartContextMenu>,
+        generation: u64,
+    ) -> bool {
+        menu.and_then(|menu| menu.copy_feedback_generation) == Some(generation)
     }
 
     fn update_context_menu_pane(
@@ -2066,6 +2096,7 @@ impl TerminalApp {
 
     pub(super) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.theme = self.theme.toggled();
+        cx.update_global::<gpui_base::Theme, _>(|base, _| *base = base_theme(&self.theme));
         window.refresh();
         for workspace in &self.workspaces {
             for pane in &workspace.panes {

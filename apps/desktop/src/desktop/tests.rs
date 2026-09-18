@@ -1341,8 +1341,8 @@ fn chart_context_remove_actions_use_destructive_color() {
         pane_count: 1,
         flags: 0,
     });
-    assert_eq!(items[0].icon, super::HugeIcon::Refresh01Icon);
-    assert_eq!(items[1].icon, super::HugeIcon::Copy01Icon);
+    assert_eq!(items[0].icon, super::HugeIcon::Refresh);
+    assert_eq!(items[1].icon, super::HugeIcon::Copy);
     assert_eq!(items[1].label, "Copy price");
     assert!(!items[1].enabled);
     assert_eq!(items[1].action, super::ChartContextAction::CopyPrice);
@@ -1356,10 +1356,32 @@ fn chart_context_remove_actions_use_destructive_color() {
         .filter(|item| item.action.is_destructive())
         .map(|item| item.icon)
         .collect::<Vec<_>>();
-    assert_eq!(
-        trash,
-        [super::HugeIcon::DeleteIcon02, super::HugeIcon::DeleteIcon02]
-    );
+    assert_eq!(trash, [super::HugeIcon::Delete, super::HugeIcon::Delete]);
+}
+
+#[test]
+fn copy_price_feedback_generation_fences_stale_close_timers() {
+    let menu = super::ChartContextMenu {
+        workspace_id: 1,
+        pane_id: 2,
+        position: point(px(20.0), px(20.0)),
+        kind: super::ChartContextKind::Pane,
+        flyout: super::PriceAxisMenuFlyout::None,
+        copy_price: Some("123.45".into()),
+        copy_feedback_generation: Some(7),
+    };
+
+    assert!(super::TerminalApp::chart_context_copy_feedback_is_current(
+        Some(&menu),
+        7
+    ));
+    assert!(!super::TerminalApp::chart_context_copy_feedback_is_current(
+        Some(&menu),
+        6
+    ));
+    assert!(!super::TerminalApp::chart_context_copy_feedback_is_current(
+        None, 7
+    ));
 }
 
 #[test]
@@ -1418,8 +1440,8 @@ fn header_history_controls_gate_on_their_own_half_of_the_stack() {
         DrawingHistoryControl::Undo.id(),
         DrawingHistoryControl::Redo.id()
     );
-    assert_eq!(DrawingHistoryControl::Undo.icon(), super::HugeIcon::Undo03);
-    assert_eq!(DrawingHistoryControl::Redo.icon(), super::HugeIcon::Redo01);
+    assert_eq!(DrawingHistoryControl::Undo.icon(), super::HugeIcon::Undo);
+    assert_eq!(DrawingHistoryControl::Redo.icon(), super::HugeIcon::Redo);
 }
 
 #[test]

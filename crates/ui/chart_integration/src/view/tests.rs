@@ -370,6 +370,19 @@ fn mouse_up_out_finishes_chart_gesture_without_stopping_window_propagation() {
 }
 
 #[test]
+fn occluded_mouse_up_inside_chart_is_not_geometrically_outside() {
+    let mut chart = interactive_chart();
+    chart.viewport_origin = (100.0, 80.0);
+    chart.built_for = (640.0, 360.0, 1.0);
+
+    assert!(chart.position_is_inside_viewport(gpui::point(px(420.0), px(240.0))));
+    assert!(chart.position_is_inside_viewport(gpui::point(px(100.0), px(80.0))));
+    assert!(chart.position_is_inside_viewport(gpui::point(px(740.0), px(440.0))));
+    assert!(!chart.position_is_inside_viewport(gpui::point(px(99.0), px(240.0))));
+    assert!(!chart.position_is_inside_viewport(gpui::point(px(420.0), px(441.0))));
+}
+
+#[test]
 fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })

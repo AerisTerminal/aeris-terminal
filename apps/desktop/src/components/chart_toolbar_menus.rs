@@ -17,6 +17,7 @@ pub(super) fn chrome_overlay_layer(
     let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
     let dual_container = overlay == ChromeOverlay::Timeframe;
     let menu_left = compact_menu_left(overlay, app_state, viewport);
+    let animation_origin = chrome_overlay_animation_origin(overlay, app_state, menu_left, viewport);
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
@@ -62,9 +63,66 @@ pub(super) fn chrome_overlay_layer(
                 closing,
                 generation,
                 phase,
+                animation_origin,
             ))
             .into_any_element(),
     )
+}
+
+fn chrome_overlay_animation_origin(
+    overlay: ChromeOverlay,
+    app_state: &WorkspaceSurface,
+    menu_left: Pixels,
+    viewport: gpui::Size<Pixels>,
+) -> PopupAnimationOrigin {
+    let trigger = app_state
+        .chrome_overlay_trigger_position
+        .or_else(|| match overlay {
+            ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe => app_state
+                .timeframe_trigger_bounds
+                .map(|bounds| bounds.center()),
+            ChromeOverlay::ChartType => app_state
+                .chart_type_trigger_bounds
+                .map(|bounds| bounds.center()),
+            ChromeOverlay::Instrument | ChromeOverlay::Indicator => None,
+        });
+    let Some(trigger) = trigger else {
+        return PopupAnimationOrigin::new(0.5, 0.0);
+    };
+
+    let (left, width) = match overlay {
+        ChromeOverlay::Timeframe => {
+            let groups = timeframe_menu_groups(app_state.available_intervals());
+            let flyout = app_state.timeframe_menu_flyout.and_then(|group| {
+                let index = groups.iter().position(|item| *item == group)?;
+                Some((
+                    index,
+                    timeframe_group_intervals(group, app_state.available_intervals()).len(),
+                ))
+            });
+            (menu_left, timeframe_overlay_extent(groups.len(), flyout).0)
+        }
+        ChromeOverlay::ChartType => (menu_left, TIMEFRAME_MENU_WIDTH),
+        ChromeOverlay::QuickTimeframe => (
+            ((viewport.width - px(QUICK_TIMEFRAME_POPUP_WIDTH)) / 2.0).max(px(0.0)),
+            QUICK_TIMEFRAME_POPUP_WIDTH,
+        ),
+        ChromeOverlay::Instrument | ChromeOverlay::Indicator => {
+            let viewport_width: f32 = viewport.width.into();
+            let trigger_x: f32 = trigger.x.into();
+            return PopupAnimationOrigin::new(
+                if viewport_width > 0.0 {
+                    trigger_x / viewport_width
+                } else {
+                    0.5
+                },
+                0.0,
+            );
+        }
+    };
+    let left: f32 = left.into();
+    let trigger_x: f32 = trigger.x.into();
+    PopupAnimationOrigin::new((trigger_x - left) / width.max(1.0), 0.0)
 }
 
 pub(super) fn compact_menu_left(
@@ -216,8 +274,10 @@ pub(super) fn chrome_overlay_panel(
     closing: bool,
     generation: u64,
     phase: ChromeOverlayPhase,
+    animation_origin: PopupAnimationOrigin,
 ) -> impl IntoElement {
     let colors = theme.colors;
+    let enter_offset = animation_origin.enter_offset();
     div()
         .id("chrome_overlay_panel")
         .relative()
@@ -272,7 +332,8 @@ pub(super) fn chrome_overlay_panel(
                 let progress = chrome_overlay_progress(phase, delta);
                 panel
                     .opacity(progress)
-                    .mt(px(-CHROME_OVERLAY_TRANSITION_OFFSET * (1.0 - progress)))
+                    .ml(px(enter_offset.x * (1.0 - progress)))
+                    .mt(px(enter_offset.y * (1.0 - progress)))
             },
         )
 }
@@ -402,27 +463,53 @@ pub(super) fn timeframe_overlay_content(
                         });
                     }),
             )
-            .child(
-                div()
-                    .id("timeframe_overlay_flyout_host")
-                    .absolute()
-                    .left(px(TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP))
-                    .top(px(timeframe_flyout_offset(index)))
-                    .w(px(TIMEFRAME_FLYOUT_WIDTH))
-                    .h(px(flyout_height))
-                    .flex_none()
-                    .child(timeframe_flyout_panel(
-                        app,
-                        intervals,
-                        state.selected,
-                        group,
-                        state.keyboard_active.then_some(state.keyboard_selection),
-                        state.pending,
-                        theme,
-                    )),
-            );
+            .child(timeframe_flyout_host(
+                app,
+                intervals,
+                state,
+                group,
+                index,
+                flyout_height,
+                theme,
+            ));
     }
     overlay
+}
+
+fn timeframe_flyout_host(
+    app: &Entity<WorkspaceSurface>,
+    intervals: &[ChartInterval],
+    state: TimeframeOverlayState,
+    group: TimeframeMenuGroup,
+    index: usize,
+    flyout_height: f32,
+    theme: &AxiusflowTheme,
+) -> Stateful<Div> {
+    let animation_origin = PopupAnimationOrigin::new(
+        0.0,
+        (CHART_CONTEXT_MENU_ROW_HEIGHT / 2.0 / flyout_height).clamp(0.0, 1.0),
+    );
+    div()
+        .id("timeframe_overlay_flyout_host")
+        .absolute()
+        .left(px(TIMEFRAME_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP))
+        .top(px(timeframe_flyout_offset(index)))
+        .w(px(TIMEFRAME_FLYOUT_WIDTH))
+        .h(px(flyout_height))
+        .flex_none()
+        .child(animate_popup_from_origin(
+            timeframe_flyout_panel(
+                app,
+                intervals,
+                state.selected,
+                group,
+                state.keyboard_active.then_some(state.keyboard_selection),
+                state.pending,
+                theme,
+            ),
+            ("timeframe_flyout_enter", group as usize),
+            animation_origin,
+        ))
 }
 
 pub(super) fn timeframe_flyout_panel(
@@ -709,7 +796,7 @@ pub(super) fn timeframe_group_row(
         );
     }
     trailing = trailing.child(
-        header_icon(HugeIcon::ArrowRightIcon01)
+        header_icon(HugeIcon::ArrowRight)
             .with_size(px(16.0))
             .color(gpui_color(colors.icon)),
     );

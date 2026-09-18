@@ -9,6 +9,7 @@ use num_traits::ToPrimitive;
 
 use super::{
     input::{Input, InputState},
+    menu::{PopupAnimationOrigin, animate_popup_from_origin},
     platform_font_weight,
     theme::{gpui_color, platform_border_width},
 };
@@ -81,6 +82,7 @@ impl ColorPicker {
 impl RenderOnce for ColorPicker {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
+        let animation_id = self.id.clone();
         let normalized = normalize_hex_color(&self.current).unwrap_or_else(|| "#335CFF".into());
         let selected = parse_hex_color(&normalized).unwrap_or(Hsva {
             hue: 0.63,
@@ -90,7 +92,7 @@ impl RenderOnce for ColorPicker {
         });
         let handler = self.on_select;
 
-        div()
+        let panel = div()
             .id(self.id)
             .absolute()
             .top(px(34.0))
@@ -169,7 +171,12 @@ impl RenderOnce for ColorPicker {
                         handler.as_ref(),
                         &self.theme,
                     )),
-            )
+            );
+        animate_popup_from_origin(
+            panel,
+            (animation_id, "enter"),
+            PopupAnimationOrigin::TOP_RIGHT,
+        )
     }
 }
 

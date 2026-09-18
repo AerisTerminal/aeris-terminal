@@ -1,8 +1,9 @@
 use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
-    AnyElement, App, Div, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
-    RenderOnce, Stateful, StyleRefinement, Styled, Window, div, prelude::*, px,
+    AnyElement, App, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
+    RenderOnce, StyleRefinement, Styled, Window, prelude::*, px,
 };
+use gpui_base::Button as BaseButton;
 
 use super::{
     platform_font_weight,
@@ -18,7 +19,7 @@ fn tab_radius() -> gpui::Pixels {
 /// layout, content, and activation behavior.
 #[derive(IntoElement)]
 pub(crate) struct Tab {
-    base: Stateful<Div>,
+    base: BaseButton,
     style: StyleRefinement,
     theme: AxiusflowTheme,
     selected: bool,
@@ -29,7 +30,7 @@ pub(crate) struct Tab {
 impl Tab {
     pub(crate) fn new(id: impl Into<ElementId>, theme: &AxiusflowTheme) -> Self {
         Self {
-            base: div().id(id.into()),
+            base: BaseButton::new(id),
             style: StyleRefinement::default(),
             theme: *theme,
             selected: false,

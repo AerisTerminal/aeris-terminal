@@ -3,7 +3,7 @@ use super::*;
 use super::chrome_menu::{
     CHROME_MENU_INDICATOR_SEARCH_HEIGHT, ChromeMenuExtent, chrome_menu_empty, chrome_menu_footer,
     chrome_menu_group_heading, chrome_menu_scroll_body, chrome_menu_search_header,
-    chrome_menu_surface, scrollable_menu_body,
+    chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
 };
 
 pub(super) fn indicator_selector(
@@ -14,7 +14,7 @@ pub(super) fn indicator_selector(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("indicator_selector")
-        .icon(header_icon(HugeIcon::AnalyticsUpIcon))
+        .icon(header_icon(HugeIcon::Chart))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -27,12 +27,17 @@ pub(super) fn indicator_selector(
     chrome_tooltip(
         "indicator_selector",
         "Indicators",
-        button_activation(
+        button_activation_at(
             chrome_button_style(trigger, theme, false, enabled),
             enabled,
-            move |window, cx| {
+            move |trigger_position, window, cx| {
                 app.update(cx, |app, app_cx| {
-                    app.open_chrome_overlay(ChromeOverlay::Indicator, window, app_cx);
+                    app.open_chrome_overlay_at(
+                        ChromeOverlay::Indicator,
+                        trigger_position,
+                        window,
+                        app_cx,
+                    );
                 });
             },
         ),
@@ -55,7 +60,6 @@ fn available_indicator_rows(
     keyboard_selection: usize,
     theme: &AxiusflowTheme,
 ) -> Vec<AnyElement> {
-    let colors = theme.colors;
     specs
         .iter()
         .enumerate()
@@ -73,17 +77,7 @@ fn available_indicator_rows(
                     }
                 })
                 .trailing(button_activation(
-                    Button::new(("add_indicator", index))
-                        .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
-                        .theme(theme)
-                        .resting_fill(colors.surface)
-                        .w(px(24.0))
-                        .h(px(24.0))
-                        .compact()
-                        .border_1()
-                        .border_color(gpui_color(colors.border))
-                        .cursor_pointer()
-                        .tab_stop(false),
+                    compact_menu_add_button(("add_indicator", index), theme),
                     true,
                     move |window, cx| {
                         if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {

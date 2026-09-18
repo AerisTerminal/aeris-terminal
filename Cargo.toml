@@ -20,6 +20,7 @@ members = [
     "crates/ui/terminal_ui",
     "tools/naming_check",
 ]
+exclude = ["third_party/gpui_base"]
 resolver = "3"
 
 [workspace.package]
@@ -64,6 +65,7 @@ rcgen = { version = "=0.14.10", default-features = false, features = ["ring"] }
 rpassword = "=7.5.4"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
+gpui-base = { path = "third_party/gpui_base" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }

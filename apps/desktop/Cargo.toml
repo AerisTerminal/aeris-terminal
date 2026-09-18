@@ -28,6 +28,7 @@ sha2.workspace = true
 sysinfo.workspace = true
 axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
+gpui-base.workspace = true
 gpui_platform.workspace = true
 reqwest_client.workspace = true
 num-traits = "=0.2.19"

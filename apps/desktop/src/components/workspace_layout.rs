@@ -213,15 +213,6 @@ pub(super) fn workspace_pane_element(
         .to_string(),
         theme,
     });
-    let price_alert_dialog = surface.price_alert_dialog.as_ref().map(|dialog| {
-        price_alert_dialog_layer(
-            pane.surface.clone(),
-            dialog,
-            &surface.price_alerts,
-            surface.price_alert_message.as_deref(),
-            theme,
-        )
-    });
     let study_settings_dialog = surface
         .study_settings_dialog
         .as_ref()
@@ -254,6 +245,7 @@ pub(super) fn workspace_pane_element(
                         kind: ChartContextKind::Pane,
                         flyout: PriceAxisMenuFlyout::None,
                         copy_price: None,
+                        copy_feedback_generation: None,
                     },
                     terminal_cx,
                 );
@@ -261,7 +253,6 @@ pub(super) fn workspace_pane_element(
             cx.stop_propagation();
         })
         .child(content)
-        .children(price_alert_dialog)
         .children(study_settings_dialog)
         .into_any_element()
 }
@@ -276,6 +267,18 @@ pub(super) fn workspace_market_area(
     cx: &App,
 ) -> impl IntoElement + use<> {
     let grid = workspace_pane_grid(terminal, workspace, theme, cx);
+    let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
+        let surface = pane.surface.read(cx);
+        surface.price_alert_dialog.as_ref().map(|dialog| {
+            price_alert_dialog_layer(
+                pane.surface.clone(),
+                dialog,
+                &surface.price_alerts,
+                surface.price_alert_message.as_deref(),
+                theme,
+            )
+        })
+    });
     let surface = active_surface.read(cx);
     let drawing_state = surface.drawing_toolbar_state(cx);
     let drawing_scroll = surface.scrolls.drawing.clone();
@@ -327,4 +330,5 @@ pub(super) fn workspace_market_area(
                 theme,
             ))
         })
+        .children(price_alert_dialog)
 }

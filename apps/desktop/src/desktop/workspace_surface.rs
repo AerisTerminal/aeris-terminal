@@ -1103,6 +1103,7 @@ impl WorkspaceSurface {
             chrome_overlay: None,
             chrome_overlay_phase: ChromeOverlayPhase::Opening,
             chrome_overlay_generation: 0,
+            chrome_overlay_trigger_position: None,
             timeframe_menu_flyout: None,
             timeframe_flyout_close_token: 0,
             timeframe_hover_regions: 0,
@@ -1515,9 +1516,30 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_chrome_overlay_with_trigger(overlay, None, window, cx);
+    }
+
+    pub(super) fn open_chrome_overlay_at(
+        &mut self,
+        overlay: ChromeOverlay,
+        trigger_position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chrome_overlay_with_trigger(overlay, Some(trigger_position), window, cx);
+    }
+
+    fn open_chrome_overlay_with_trigger(
+        &mut self,
+        overlay: ChromeOverlay,
+        trigger_position: Option<gpui::Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if overlay == ChromeOverlay::Instrument {
             self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }
+        self.chrome_overlay_trigger_position = trigger_position;
         self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
         self.chrome_overlay_phase = ChromeOverlayPhase::Opening;
         self.chrome_overlay = Some(overlay);
@@ -3458,12 +3480,13 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    pub(super) fn open_watchlist_symbol_menu(
+    pub(super) fn open_watchlist_symbol_menu_at(
         &mut self,
+        trigger_position: gpui::Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_chrome_overlay(ChromeOverlay::Instrument, window, cx);
+        self.open_chrome_overlay_at(ChromeOverlay::Instrument, trigger_position, window, cx);
         self.symbol_selection_target = SymbolSelectionTarget::Watchlist;
     }
 

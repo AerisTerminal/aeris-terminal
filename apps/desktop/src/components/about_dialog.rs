@@ -148,7 +148,7 @@ fn about_update_row(
         };
         Button::new("about_update_action")
             .variant(theme, ButtonVariant::Filled)
-            .icon(header_icon(HugeIcon::Refresh01Icon))
+            .icon(header_icon(HugeIcon::Refresh))
             .label(label)
             .on_click(move |_, _, cx| {
                 action_terminal.update(cx, |terminal, terminal_cx| match action {

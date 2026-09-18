@@ -1,0 +1,62 @@
+[package]
+name = "gpui-base"
+version = "0.5.2"
+edition = "2024"
+autobins = false
+description = "Behavior, interaction, and infrastructure foundations for GPUI applications."
+repository = "https://github.com/longbridge/gpui-kit"
+homepage = "https://gpui-kit.com"
+documentation = "https://docs.rs/gpui-base"
+license-file = "LICENSE-APACHE"
+publish = false
+
+[package.metadata.axiusflow]
+upstream-revision = "c0946e6acdc9e2f984f317ef7f998ee2c79f1a87"
+
+[lib]
+doctest = false
+
+[features]
+inspector = ["gpui_macros/inspector", "gpui/inspector"]
+
+[dependencies]
+anyhow = "1"
+aho-corasick = "1.1.3"
+chrono = "0.4.38"
+futures = "0.3"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2" }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }
+instant = { version = "0.1", features = ["wasm-bindgen"] }
+lsp-types = { version = "0.97.0", features = ["proposed"] }
+markdown = { version = "1.0.0", features = ["serde"] }
+html5ever = "0.27"
+markup5ever_rcdom = "0.3.0"
+ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
+regex = "1"
+schemars = "1"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
+tracing = "0.1.41"
+unicode-segmentation = "1.12.0"
+web-time = "1"
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+smol = "2"
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+async-channel = "2.3.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString"] }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", features = ["test-support"] }
+indoc = "2"
+reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }

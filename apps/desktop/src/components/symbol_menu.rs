@@ -3,7 +3,8 @@ use super::*;
 use super::chrome_menu::{
     CHROME_MENU_ROW_ICON_WELL, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_SEARCH_ICON_SIZE,
     ChromeMenuExtent, chrome_menu_close_button, chrome_menu_empty, chrome_menu_footer,
-    chrome_menu_group_heading, chrome_menu_scroll_body, chrome_menu_surface, scrollable_menu_body,
+    chrome_menu_group_heading, chrome_menu_scroll_body, chrome_menu_surface,
+    compact_menu_add_button, scrollable_menu_body,
 };
 
 pub(super) fn instrument_selector(
@@ -51,12 +52,17 @@ pub(super) fn instrument_selector(
                 TerminalProvider::Hyperliquid => "Hyperliquid",
             }
         ),
-        button_activation(
+        button_activation_at(
             trigger.loading(state.availability.selection_pending),
             state.availability.enabled,
-            move |window, cx| {
+            move |trigger_position, window, cx| {
                 app.update(cx, |app, app_cx| {
-                    app.open_chrome_overlay(ChromeOverlay::Instrument, window, app_cx);
+                    app.open_chrome_overlay_at(
+                        ChromeOverlay::Instrument,
+                        trigger_position,
+                        window,
+                        app_cx,
+                    );
                 });
             },
         ),
@@ -225,17 +231,7 @@ pub(super) fn instrument_dialog_row(
     ));
     if state.target == SymbolSelectionTarget::Watchlist {
         row = row.trailing(button_activation(
-            Button::new(("add_watchlist_symbol", index))
-                .icon(header_icon(HugeIcon::AddIcon01).with_size(px(14.0)))
-                .theme(theme)
-                .resting_fill(theme.colors.surface)
-                .w(px(24.0))
-                .h(px(24.0))
-                .compact()
-                .border_1()
-                .border_color(gpui_color(theme.colors.border))
-                .cursor_pointer()
-                .tab_stop(false),
+            compact_menu_add_button(("add_watchlist_symbol", index), theme),
             true,
             move |window, cx| {
                 if add_app.update(cx, |app, cx| {
@@ -328,30 +324,27 @@ pub(super) fn instrument_exchange_menu(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let panel_fill = colors.surface_secondary.over(colors.surface);
-    div()
-        .id("instrument_exchange_menu")
-        .absolute()
-        .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
-        .left(px(12.0))
-        .w(px(168.0))
-        .flex()
-        .flex_col()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(panel_fill))
-        .p_1()
-        .gap(px(2.0))
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .children(
-            assets::ExchangeLogo::ALL
-                .into_iter()
-                .enumerate()
-                .map(|(index, exchange)| {
+    let last = assets::ExchangeLogo::ALL.len().saturating_sub(1);
+    let panel =
+        div()
+            .id("instrument_exchange_menu")
+            .absolute()
+            .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
+            .left(px(12.0))
+            .w(px(168.0))
+            .flex()
+            .flex_col()
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .border_1()
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(panel_fill))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(assets::ExchangeLogo::ALL.into_iter().enumerate().map(
+                |(index, exchange)| {
                     let row_app = app.clone();
                     let active = exchange == selected;
-                    let mut row = MenuRow::compact_inset(
+                    let mut row = MenuRow::compact(
                         ("instrument_exchange_row", index),
                         exchange.label(),
                         theme,
@@ -359,6 +352,7 @@ pub(super) fn instrument_exchange_menu(
                     .resting_fill(panel_fill)
                     .leading(exchange_mark(exchange, px(20.0), false, &colors))
                     .highlighted(active)
+                    .flush_in_panel(index == 0, index == last)
                     .on_click(move |_, _, cx| {
                         row_app.update(cx, |app, cx| {
                             app.set_instrument_catalog_exchange(exchange, cx);
@@ -368,6 +362,11 @@ pub(super) fn instrument_exchange_menu(
                         row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
                     }
                     row
-                }),
-        )
+                },
+            ));
+    animate_popup_from_origin(
+        panel,
+        "instrument_exchange_menu_enter",
+        PopupAnimationOrigin::TOP_LEFT,
+    )
 }

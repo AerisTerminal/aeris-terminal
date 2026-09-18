@@ -100,6 +100,11 @@ pub(super) fn chart_context_menu_layer(
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
+    let popup_bounds = Bounds::new(
+        origin,
+        size(px(CHART_CONTEXT_MENU_WIDTH), px(overlay_height(8.0, 5.0))),
+    );
+    let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, popup_bounds);
     let dismiss = terminal.clone();
     div()
         .id("chart_context_menu_scrim")
@@ -115,8 +120,10 @@ pub(super) fn chart_context_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(chart_context_menu_panel(
-            terminal, menu, state, origin, theme,
+        .child(animate_popup_from_origin(
+            chart_context_menu_panel(terminal, menu, state, origin, theme),
+            "chart_context_menu_enter",
+            animation_origin,
         ))
         .into_any_element()
 }
@@ -127,7 +134,7 @@ pub(super) fn chart_context_menu_panel(
     state: ChartContextMenuState,
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "chart_context_menu",
         origin,
@@ -156,28 +163,28 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
     [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
-            icon: HugeIcon::Refresh01Icon,
+            icon: HugeIcon::Refresh,
             label: "Reset view",
             enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::Reset,
         },
         ChartContextMenuItem {
             id: "chart_context_copy_price",
-            icon: HugeIcon::Copy01Icon,
+            icon: HugeIcon::Copy,
             label: "Copy price",
             enabled: state.enabled(ChartContextMenuState::COPY_PRICE),
             action: ChartContextAction::CopyPrice,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
-            icon: HugeIcon::DeleteIcon02,
+            icon: HugeIcon::Delete,
             label: "Remove drawings",
             enabled: state.enabled(ChartContextMenuState::DRAWINGS),
             action: ChartContextAction::ClearDrawings,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_indicators",
-            icon: HugeIcon::DeleteIcon02,
+            icon: HugeIcon::Delete,
             label: "Remove indicators",
             enabled: state.enabled(ChartContextMenuState::INDICATORS),
             action: ChartContextAction::ClearIndicators,
@@ -198,14 +205,14 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
         },
         ChartContextMenuItem {
             id: "chart_context_close_pane",
-            icon: HugeIcon::CancelIcon01,
+            icon: HugeIcon::Close,
             label: "Close chart",
             enabled: state.pane_count > 1,
             action: ChartContextAction::Close,
         },
         ChartContextMenuItem {
             id: "chart_context_settings",
-            icon: HugeIcon::Settings01,
+            icon: HugeIcon::Settings,
             label: "Settings",
             enabled: true,
             action: ChartContextAction::Settings,
@@ -223,12 +230,17 @@ pub(super) fn chart_context_menu_item(
 ) -> impl IntoElement {
     let action_terminal = terminal.clone();
     let destructive = item.action.is_destructive();
+    let copy_feedback_generation = (item.action == ChartContextAction::CopyPrice)
+        .then_some(menu.copy_feedback_generation)
+        .flatten();
     let icon_color = gpui_color(if destructive {
         if item.enabled {
             theme.colors.danger
         } else {
             theme.colors.danger.with_alpha(0.55)
         }
+    } else if copy_feedback_generation.is_some() {
+        theme.colors.primary
     } else if item.enabled {
         theme.colors.icon
     } else {
@@ -241,8 +253,36 @@ pub(super) fn chart_context_menu_item(
         enabled,
         action,
     } = item;
-    let mut row = MenuRow::compact(id, label, theme)
-        .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
+    let leading = if let Some(generation) = copy_feedback_generation {
+        div()
+            .size(px(16.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                header_icon(HugeIcon::CopySuccess)
+                    .with_size(px(16.0))
+                    .color(icon_color),
+            )
+            .with_animation(
+                ("copy_price_success", generation),
+                Animation::new(COPY_PRICE_SUCCESS_ANIMATION_DURATION).with_easing(ease_out_quint()),
+                |icon, delta| icon.opacity(delta).mt(px((1.0 - delta) * 2.0)),
+            )
+            .into_any_element()
+    } else {
+        header_icon(icon)
+            .with_size(px(16.0))
+            .color(icon_color)
+            .into_any_element()
+    };
+    let row_label = if copy_feedback_generation.is_some() {
+        "Copied"
+    } else {
+        label
+    };
+    let mut row = MenuRow::compact(id, row_label, theme)
+        .leading(leading)
         .disabled(!enabled)
         .destructive(destructive)
         .flush_in_panel(first, last);
@@ -251,10 +291,14 @@ pub(super) fn chart_context_menu_item(
     {
         row = row.trailing(copy_price_chip(price, enabled, theme));
     }
-    row.on_click(move |_, window, cx| {
+    row.on_click(move |event, window, cx| {
         if enabled {
+            let mut activated_menu = menu.clone();
+            if action == ChartContextAction::Settings {
+                activated_menu.position = event.position();
+            }
             action_terminal.update(cx, |terminal, terminal_cx| {
-                terminal.finish_chart_context_menu(menu.clone(), action, window, terminal_cx);
+                terminal.finish_chart_context_menu(activated_menu, action, window, terminal_cx);
             });
         }
     })
@@ -296,6 +340,11 @@ pub(super) fn price_axis_menu_layer(
     theme: &AxiusflowTheme,
 ) -> AnyElement {
     let origin = clamp_price_axis_menu_origin(menu.position, viewport, state.left);
+    let root_bounds = Bounds::new(
+        origin,
+        size(px(CHART_CONTEXT_MENU_WIDTH), px(overlay_height(7.0, 2.0))),
+    );
+    let root_animation_origin = PopupAnimationOrigin::from_trigger(menu.position, root_bounds);
     let dismiss = terminal.clone();
     let mut layer = div()
         .id("price_axis_menu_scrim")
@@ -311,15 +360,36 @@ pub(super) fn price_axis_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(price_axis_menu_panel(terminal, menu, state, origin, theme));
+        .child(animate_popup_from_origin(
+            price_axis_menu_panel(terminal, menu, state, origin, theme),
+            "price_axis_menu_enter",
+            root_animation_origin,
+        ));
     if menu.flyout != PriceAxisMenuFlyout::None {
-        layer = layer.child(price_axis_flyout_panel(
-            terminal,
-            menu,
-            state,
-            clamp_price_axis_flyout_origin(origin, viewport, menu.flyout),
-            viewport,
-            theme,
+        let flyout_origin = clamp_price_axis_flyout_origin(origin, viewport, menu.flyout);
+        let (rows, separators, row, separators_before) = menu.flyout.geometry();
+        let flyout_bounds = Bounds::new(
+            flyout_origin,
+            size(
+                px(PRICE_AXIS_FLYOUT_WIDTH),
+                px(overlay_height(rows, separators)),
+            ),
+        );
+        let parent_y = origin.y
+            + px(CHART_CONTEXT_MENU_ROW_HEIGHT * row)
+            + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before)
+            + px(CHART_CONTEXT_MENU_ROW_HEIGHT / 2.0);
+        let parent_x = if flyout_origin.x < origin.x {
+            origin.x
+        } else {
+            origin.x + px(CHART_CONTEXT_MENU_WIDTH)
+        };
+        let flyout_animation_origin =
+            PopupAnimationOrigin::from_trigger(point(parent_x, parent_y), flyout_bounds);
+        layer = layer.child(animate_popup_from_origin(
+            price_axis_flyout_panel(terminal, menu, state, flyout_origin, viewport, theme),
+            ("price_axis_flyout_enter", menu.flyout as usize),
+            flyout_animation_origin,
         ));
     }
     layer.into_any_element()
@@ -331,7 +401,7 @@ pub(super) fn price_axis_menu_panel(
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
     theme: &AxiusflowTheme,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "price_axis_menu",
         origin,
@@ -363,7 +433,7 @@ pub(super) fn price_axis_flyout_panel(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
     theme: &AxiusflowTheme,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "price_axis_flyout",
         origin,
@@ -622,15 +692,13 @@ pub(super) fn price_axis_menu_item(
         );
     }
     if chevron {
-        item = item.trailing(
-            header_icon(HugeIcon::ArrowRightIcon01)
-                .with_size(px(16.0))
-                .color(gpui_color(if enabled {
-                    colors.icon
-                } else {
-                    colors.text_muted
-                })),
-        );
+        item = item.trailing(header_icon(HugeIcon::ArrowRight).with_size(px(16.0)).color(
+            gpui_color(if enabled {
+                colors.icon
+            } else {
+                colors.text_muted
+            }),
+        ));
     }
     item
 }
@@ -644,6 +712,8 @@ pub(super) fn chart_settings_menu_layer(
 ) -> AnyElement {
     let panel_size = chart_settings_panel_size(viewport);
     let origin = chart_settings_centered_origin(viewport, panel_size);
+    let animation_origin =
+        PopupAnimationOrigin::from_trigger(menu.position, Bounds::new(origin, panel_size));
     let dismiss = terminal.clone();
     let content = match view.section {
         ChartSettingsSection::Series => {
@@ -667,8 +737,10 @@ pub(super) fn chart_settings_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(chart_settings_panel(
-            terminal, menu, origin, panel_size, content, view, theme,
+        .child(animate_popup_from_origin(
+            chart_settings_panel(terminal, menu, origin, panel_size, content, view, theme),
+            "chart_settings_menu_enter",
+            animation_origin,
         ))
         .into_any_element()
 }
@@ -698,7 +770,7 @@ fn chart_settings_panel(
     content: AnyElement,
     view: ChartSettingsView<'_>,
     theme: &AxiusflowTheme,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
     let actions = chart_settings_actions(terminal, menu, theme);
@@ -785,7 +857,7 @@ fn chart_settings_actions(
         .gap_1()
         .child(chrome_icon_button(
             "chart_settings_reset",
-            HugeIcon::Refresh01Icon,
+            HugeIcon::Refresh,
             CHART_SETTINGS_RESET_ICON_GLYPH,
             "Reset settings",
             ChromeIconButtonTone::Neutral,
@@ -836,7 +908,9 @@ fn chart_settings_sidebar(
     theme: &AxiusflowTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels()) - 1.0).max(0.0));
+    let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels())
+        - theme.dimensions.border_width)
+        .max(0.0));
     let mut sections = div().flex_1().min_h_0().flex().flex_col().gap_0p5();
     for section in ChartSettingsSection::ALL {
         let active = selected == section;
@@ -927,6 +1001,8 @@ fn chart_settings_template_control(
         let save = terminal.clone();
         let apply_all = terminal.clone();
         let apply_all_menu = menu.clone();
+        let template_count = state.templates.len();
+        let last = template_count + usize::from(state.apply_to_all);
         let mut popup = div()
             .id("chart_settings_template_menu")
             .absolute()
@@ -935,24 +1011,26 @@ fn chart_settings_template_control(
             .w(px(240.0))
             .max_h(px(360.0))
             .overflow_y_scroll()
-            .p_1()
             .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
             .border_1()
             .border_color(gpui_color(colors.border_secondary))
             .bg(gpui_color(colors.surface))
             .occlude()
             .child(
-                MenuRow::compact_inset("chart_template_save", "Save…", theme).on_click(
-                    move |_, window, cx| {
+                MenuRow::compact("chart_template_save", "Save…", theme)
+                    .resting_fill(colors.surface)
+                    .flush_in_panel(true, last == 0)
+                    .on_click(move |_, window, cx| {
                         save.update(cx, |terminal, terminal_cx| {
                             terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
                         });
-                    },
-                ),
+                    }),
             );
         if state.apply_to_all {
             popup = popup.child(
-                MenuRow::compact_inset("chart_template_apply_all", "Apply to all charts", theme)
+                MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme)
+                    .resting_fill(colors.surface)
+                    .flush_in_panel(false, template_count == 0)
                     .on_click(move |_, _, cx| {
                         apply_all.update(cx, |terminal, terminal_cx| {
                             terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
@@ -964,7 +1042,9 @@ fn chart_settings_template_control(
             let apply = terminal.clone();
             let apply_menu = menu.clone();
             popup = popup.child(
-                MenuRow::compact_inset(("chart_template", index), template.name.clone(), theme)
+                MenuRow::compact(("chart_template", index), template.name.clone(), theme)
+                    .resting_fill(colors.surface)
+                    .flush_in_panel(false, index + 1 == template_count)
                     .on_click(move |_, _, cx| {
                         apply.update(cx, |terminal, terminal_cx| {
                             terminal.apply_named_chart_settings_template(
@@ -976,7 +1056,11 @@ fn chart_settings_template_control(
                     }),
             );
         }
-        control = control.child(gpui::deferred(popup));
+        control = control.child(gpui::deferred(animate_popup_from_origin(
+            popup,
+            "chart_settings_template_menu_enter",
+            PopupAnimationOrigin::BOTTOM_LEFT,
+        )));
     }
     control
 }
@@ -1997,6 +2081,26 @@ pub(super) fn account_menu_layer(
         action_rows + header_rows,
         separators,
     );
+    let popup_bounds = Bounds::new(
+        origin,
+        size(
+            px(CHART_SETTINGS_MENU_WIDTH),
+            px(overlay_height(action_rows + header_rows, separators)),
+        ),
+    );
+    let animation_origin = PopupAnimationOrigin::from_trigger(anchor, popup_bounds);
+    let panel = compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
+        .children(header)
+        .children(has_header.then(|| menu_separator(theme)))
+        .children(account_menu_actions(&action_terminal, account, theme))
+        .children(account.error.as_deref().map(|error| {
+            div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(gpui_color(colors.danger))
+                .child(error.to_string())
+        }));
     div()
         .id("account_menu_scrim")
         .absolute()
@@ -2011,20 +2115,11 @@ pub(super) fn account_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(
-            compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
-                .children(header)
-                .children(has_header.then(|| menu_separator(theme)))
-                .children(account_menu_actions(&action_terminal, account, theme))
-                .children(account.error.as_deref().map(|error| {
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(gpui_color(colors.danger))
-                        .child(error.to_string())
-                })),
-        )
+        .child(animate_popup_from_origin(
+            panel,
+            "account_menu_enter",
+            animation_origin,
+        ))
         .into_any_element()
 }
 
@@ -2274,9 +2369,9 @@ fn account_menu_row(
         AccountMenuClick::ManageProfile => HugeIcon::User,
         AccountMenuClick::About => HugeIcon::Info,
         AccountMenuClick::SignOut => HugeIcon::SignOut,
-        AccountMenuClick::SignIn => HugeIcon::ArrowRightIcon01,
+        AccountMenuClick::SignIn => HugeIcon::ArrowRight,
         AccountMenuClick::Reopen => HugeIcon::ArrowRightDouble,
-        AccountMenuClick::Cancel => HugeIcon::CancelIcon01,
+        AccountMenuClick::Cancel => HugeIcon::Close,
     };
     let icon_color = gpui_color(if spec.destructive {
         if spec.enabled {

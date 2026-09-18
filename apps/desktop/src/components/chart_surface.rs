@@ -2,14 +2,15 @@ use super::{
     AxiusflowTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
     Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
     IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
-    OrderBookColumnVisibility, ParentElement, RadiusToken, ReadOnlyOrderBookView, Render, Role,
-    SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_RESIZE_HANDLE_WIDTH,
-    ScrollHandle, SidePanel, SidePanelVisibility, StatefulInteractiveElement, Styled, TerminalApp,
-    ToPrimitive, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT, WatchlistDragState,
-    WatchlistRow, Window, WorkspaceSurface, chart_chrome, chart_surface_notice,
-    chrome_close_button, chrome_tooltip, div, exchange_mark, gpui_color, header_icon,
-    market_summary_change, market_summary_price, market_summary_values, platform_tabular_numerals,
-    px, watchlist_drag_translation,
+    OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin, RadiusToken,
+    ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH,
+    SIDE_PANEL_RESIZE_HANDLE_WIDTH, ScrollHandle, SidePanel, SidePanelVisibility,
+    StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH,
+    WORKSPACE_TAB_ICON_HIT, WatchlistDragState, WatchlistRow, Window, WorkspaceSurface,
+    animate_popup_from_origin, chart_chrome, chart_surface_notice, chrome_close_button,
+    chrome_tooltip, div, exchange_mark, gpui_color, header_icon, market_summary_change,
+    market_summary_price, market_summary_values, platform_tabular_numerals, px,
+    watchlist_drag_translation,
 };
 use gpui::{AppContext, Stateful};
 
@@ -701,7 +702,6 @@ pub(super) fn side_panel_header(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let settings_app = app.clone();
-    let add_app = app.clone();
     let close_id = match panel {
         SidePanel::OrderBook => "close_order_book_panel",
         SidePanel::Watchlist => "close_watchlist_panel",
@@ -749,44 +749,14 @@ pub(super) fn side_panel_header(
                         settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
                         cx.stop_propagation();
                     })
-                    .child(
-                        header_icon(HugeIcon::Settings01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)),
-                    ),
+                    .child(header_icon(HugeIcon::Settings).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
                 theme,
             )
         }))
-        .children((panel == SidePanel::Watchlist).then(|| {
-            chrome_tooltip(
-                "watchlist_add_symbol",
-                "Add symbol to watchlist",
-                div()
-                    .id("watchlist_add_symbol")
-                    .occlude()
-                    .size(px(WORKSPACE_TAB_ICON_HIT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-                    .text_color(gpui_color(colors.icon))
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .aria_label("Add symbol to watchlist")
-                    .hover(move |button| {
-                        button.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        add_app.update(cx, |surface, surface_cx| {
-                            surface.open_watchlist_symbol_menu(window, surface_cx);
-                        });
-                        cx.stop_propagation();
-                    })
-                    .child(
-                        header_icon(HugeIcon::AddIcon01).with_size(px(WORKSPACE_TAB_ICON_GLYPH)),
-                    ),
-                theme,
-            )
-        }))
+        .children(
+            (panel == SidePanel::Watchlist)
+                .then(|| watchlist_add_symbol_control(app.clone(), theme)),
+        )
         .child(chrome_tooltip(
             close_id,
             "Close side panel",
@@ -797,6 +767,39 @@ pub(super) fn side_panel_header(
             }),
             theme,
         ))
+}
+
+fn watchlist_add_symbol_control(
+    app: Entity<WorkspaceSurface>,
+    theme: &AxiusflowTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    chrome_tooltip(
+        "watchlist_add_symbol",
+        "Add symbol to watchlist",
+        div()
+            .id("watchlist_add_symbol")
+            .occlude()
+            .size(px(WORKSPACE_TAB_ICON_HIT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+            .text_color(gpui_color(colors.icon))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label("Add symbol to watchlist")
+            .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                app.update(cx, |surface, surface_cx| {
+                    surface.open_watchlist_symbol_menu_at(event.position, window, surface_cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(header_icon(HugeIcon::Add).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
+        theme,
+    )
 }
 
 pub(super) fn order_book_column_menu_layer(
@@ -835,16 +838,18 @@ pub(super) fn order_book_column_menu_layer(
         .id("order_book_column_menu_layer")
         .absolute()
         .inset_0()
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    dismiss_app.update(cx, WorkspaceSurface::close_order_book_column_menu);
-                    cx.stop_propagation();
-                }),
-        )
-        .child(panel)
+        .child(div().absolute().inset_0().occlude().on_mouse_down(
+            MouseButton::Left,
+            move |_, _, cx| {
+                dismiss_app.update(cx, WorkspaceSurface::close_order_book_column_menu);
+                cx.stop_propagation();
+            },
+        ))
+        .child(animate_popup_from_origin(
+            panel,
+            "order_book_column_menu_enter",
+            PopupAnimationOrigin::TOP_RIGHT,
+        ))
 }
 
 pub(super) fn order_book_column_menu_item(

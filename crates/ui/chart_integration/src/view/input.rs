@@ -30,6 +30,18 @@ impl NucleusChartView {
         let y = f64::from(window_y - self.viewport_origin.1);
         (chart_x - self.engine.pane_left, y)
     }
+
+    pub(super) fn position_is_inside_viewport(&self, position: gpui::Point<gpui::Pixels>) -> bool {
+        let x: f32 = position.x.into();
+        let y: f32 = position.y.into();
+        let (width, height, _) = self.built_for;
+        width > 0.0
+            && height > 0.0
+            && x >= self.viewport_origin.0
+            && x <= self.viewport_origin.0 + width
+            && y >= self.viewport_origin.1
+            && y <= self.viewport_origin.1 + height
+    }
     pub(super) fn update_crosshair_magnet(&mut self, magnet: bool) {
         let enabled = magnet && self.drawing_tool.drawing_kind().is_some();
         if self.engine.crosshair_ohlc_magnet != enabled {
@@ -542,6 +554,13 @@ impl NucleusChartView {
         cx: &mut Context<Self>,
     ) {
         if self.pointer_interaction == PointerInteractionState::Suspended {
+            return;
+        }
+        // GPUI dispatches `on_mouse_up_out` in capture phase when this hitbox is
+        // not hovered. An occluding menu also makes the chart hitbox non-hovered,
+        // even though the release is still geometrically inside the chart. Treat
+        // only a real release outside the chart rectangle as a lost mouse-up.
+        if self.position_is_inside_viewport(event.position) {
             return;
         }
         self.finish_mouse_up(event);
