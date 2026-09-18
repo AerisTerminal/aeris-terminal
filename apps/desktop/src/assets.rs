@@ -219,19 +219,15 @@ impl SeriesIcon {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrandIcon {
     Mark,
-    WordmarkDarkText,
-    WordmarkLightText,
 }
 
 impl BrandIcon {
-    pub const ALL: [Self; 3] = [Self::Mark, Self::WordmarkDarkText, Self::WordmarkLightText];
+    pub const ALL: [Self; 1] = [Self::Mark];
 
     #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
-            Self::Mark => "axiusflow_logo.svg",
-            Self::WordmarkDarkText => "axiusflow_logo_with_text_dark.svg",
-            Self::WordmarkLightText => "axiusflow_logo_with_text_light.svg",
+            Self::Mark => "logo.svg",
         };
         format!("{BRAND_ASSET_PREFIX}{name}").into()
     }
@@ -359,13 +355,7 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
 
 fn brand_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(BRAND_ASSET_PREFIX)? {
-        "axiusflow_logo.svg" => include_bytes!("../assets/brand_assets/axiusflow_logo.svg"),
-        "axiusflow_logo_with_text_dark.svg" => {
-            include_bytes!("../assets/brand_assets/axiusflow_logo_with_text_dark.svg")
-        }
-        "axiusflow_logo_with_text_light.svg" => {
-            include_bytes!("../assets/brand_assets/axiusflow_logo_with_text_light.svg")
-        }
+        "logo.svg" => include_bytes!("../assets/axiusflow_assets/logo.svg"),
         _ => return None,
     })
 }
@@ -525,18 +515,6 @@ mod tests {
                 .unwrap()
                 .contains("viewBox=\"0 0 54 54\"")
         );
-
-        for wordmark in [BrandIcon::WordmarkDarkText, BrandIcon::WordmarkLightText] {
-            let bytes = assets
-                .load(wordmark.path().as_ref())
-                .unwrap()
-                .expect("brand wordmark");
-            assert!(
-                std::str::from_utf8(&bytes)
-                    .unwrap()
-                    .contains("viewBox=\"0 0 188 54\"")
-            );
-        }
     }
 
     #[test]

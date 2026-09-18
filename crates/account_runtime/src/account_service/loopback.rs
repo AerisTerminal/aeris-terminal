@@ -25,8 +25,7 @@ const PLATFORM_MEDIUM_FONT: &[u8] =
     include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Medium.ttf");
 const PLATFORM_BOLD_FONT: &[u8] =
     include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Bold.ttf");
-const BRAND_MARK: &str =
-    include_str!("../../../../apps/desktop/assets/brand_assets/axiusflow_logo.svg");
+const BRAND_MARK: &str = include_str!("../../../../apps/desktop/assets/axiusflow_assets/logo.svg");
 const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var d=q.matches;document.documentElement.classList.toggle('dark',d);document.documentElement.dataset.theme=d?'dark':'light';document.documentElement.style.colorScheme=d?'dark':'light'}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
 
 /// One bound loopback listener awaiting a single callback.

@@ -1200,7 +1200,7 @@ fn compile_windows_installer(
     setup_path: &Path,
 ) -> Result<(), String> {
     let script = repository.join("tools/windows/axiusflow_setup.iss");
-    let icon = repository.join("apps/desktop/assets/brand_assets/axiusflow.ico");
+    let icon = repository.join("apps/desktop/assets/axiusflow_assets/axiusflow.ico");
     for input in [
         script.as_path(),
         icon.as_path(),
