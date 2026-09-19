@@ -192,7 +192,7 @@ pub struct VaultEntry {
     pub key: String,
 }
 
-/// Versioned inventory of every local artifact owned by Axiusflow.
+/// Versioned inventory of every local artifact owned by `TradingPlot`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallationInventory {
@@ -224,7 +224,7 @@ pub trait LifecycleHooks {
     /// # Errors
     /// Returns a redacted platform error if a registration remains enabled.
     fn disable_registrations(&self, registrations: &[String]) -> Result<(), String>;
-    /// Stops all verified Axiusflow process identities before uninstall.
+    /// Stops all verified `TradingPlot` process identities before uninstall.
     ///
     /// # Errors
     /// Returns a redacted error if an owned process remains active.
@@ -274,6 +274,7 @@ pub enum LifecycleError {
     UninstallPendingCleanup,
     ExternalArtifactRemaining,
     JournalCorrupt,
+    StateMigrationFailed,
 }
 
 impl fmt::Display for LifecycleError {
@@ -283,7 +284,7 @@ impl fmt::Display for LifecycleError {
             Self::InvalidSignature => "release signature verification failed",
             Self::IncompatibleRelease => "release does not match this platform",
             Self::DowngradeRejected => "release downgrade policy rejected activation",
-            Self::InvalidInventory => "Axiusflow ownership inventory is invalid",
+            Self::InvalidInventory => "TradingPlot ownership inventory is invalid",
             Self::UpdateLocked => "another lifecycle transaction is active",
             Self::StagingFailed => "release staging did not complete",
             Self::VerificationFailed => "staged release inventory verification failed",
@@ -292,8 +293,9 @@ impl fmt::Display for LifecycleError {
             Self::RollbackFailed => "candidate rollback requires remediation",
             Self::UpdatePendingCleanup => "update is pending superseded-file cleanup",
             Self::UninstallPendingCleanup => "uninstall is pending local-artifact cleanup",
-            Self::ExternalArtifactRemaining => "an external Axiusflow artifact remains",
+            Self::ExternalArtifactRemaining => "an external TradingPlot artifact remains",
             Self::JournalCorrupt => "lifecycle recovery journal is invalid",
+            Self::StateMigrationFailed => "legacy local state migration did not complete",
         })
     }
 }
@@ -1484,11 +1486,38 @@ fn inventory_roots(inventory: &InstallationInventory) -> Vec<PathBuf> {
     roots
 }
 
-/// Resolves the one native Axiusflow data root used by the desktop runtime.
+/// Resolves the one native `TradingPlot` data root used by the desktop runtime.
 ///
 /// # Errors
 /// Returns an error when the current user's native data directory is unavailable.
 pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("TradingPlot"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|root| root.join("Library/Application Support/TradingPlot"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
+            })
+            .map(|root| root.join("tradingplot"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+}
+
+fn native_legacy_data_root() -> Result<PathBuf, LifecycleError> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("LOCALAPPDATA")
@@ -1515,13 +1544,120 @@ pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
     }
 }
 
-/// Resolves the stable per-user Axiusflow installation root used by the
+/// Moves legacy Axiusflow local state into the `TradingPlot` data root before
+/// runtime services open persisted files. Existing `TradingPlot` files win; only
+/// missing paths are migrated, so a previous `TradingPlot` run is never replaced
+/// by older local state.
+///
+/// # Errors
+/// Returns an error if either owned root is unsafe or a required filesystem
+/// move cannot complete.
+pub fn migrate_legacy_native_data_root() -> Result<(), LifecycleError> {
+    let legacy = native_legacy_data_root()?;
+    let current = native_data_root()?;
+    if legacy == current || !legacy.exists() {
+        return Ok(());
+    }
+    validate_owned_root(&legacy)?;
+    validate_owned_root(&current)?;
+
+    match fs::symlink_metadata(&current) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(LifecycleError::StateMigrationFailed);
+            }
+            merge_legacy_owned_directory(&legacy, &current)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            merge_legacy_owned_directory(&legacy, &current)
+        }
+        Err(_) => Err(LifecycleError::StateMigrationFailed),
+    }
+}
+
+fn merge_legacy_owned_directory(source: &Path, destination: &Path) -> Result<(), LifecycleError> {
+    let source_metadata =
+        fs::symlink_metadata(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
+        return Err(LifecycleError::StateMigrationFailed);
+    }
+    fs::create_dir_all(destination).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    let destination_metadata =
+        fs::symlink_metadata(destination).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    if !destination_metadata.is_dir() || destination_metadata.file_type().is_symlink() {
+        return Err(LifecycleError::StateMigrationFailed);
+    }
+
+    for entry in fs::read_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)? {
+        let entry = entry.map_err(|_| LifecycleError::StateMigrationFailed)?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let source_type = entry
+            .file_type()
+            .map_err(|_| LifecycleError::StateMigrationFailed)?;
+        if source_type.is_symlink() {
+            return Err(LifecycleError::StateMigrationFailed);
+        }
+        match fs::symlink_metadata(&destination_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::rename(&source_path, &destination_path)
+                    .map_err(|_| LifecycleError::StateMigrationFailed)?;
+            }
+            Ok(destination_metadata)
+                if source_type.is_dir()
+                    && destination_metadata.is_dir()
+                    && !destination_metadata.file_type().is_symlink() =>
+            {
+                merge_legacy_owned_directory(&source_path, &destination_path)?;
+            }
+            Ok(_) => {}
+            Err(_) => return Err(LifecycleError::StateMigrationFailed),
+        }
+    }
+
+    let mut remaining = fs::read_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    let empty = remaining.next().is_none();
+    drop(remaining);
+    if empty {
+        fs::remove_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
+    }
+    Ok(())
+}
+
+/// Resolves the stable per-user `TradingPlot` installation root used by the
 /// website bootstrap and the persisted launcher. It intentionally requires no
 /// administrator-owned system directory.
 ///
 /// # Errors
 /// Returns an error when the current user's native home directory is unavailable.
 pub fn native_install_root() -> Result<PathBuf, LifecycleError> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("Programs/TradingPlot"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|root| root.join("Applications/TradingPlot"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
+            })
+            .map(|root| root.join("tradingplot/app"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+}
+
+fn native_legacy_install_root() -> Result<PathBuf, LifecycleError> {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("LOCALAPPDATA")
@@ -1548,6 +1684,31 @@ pub fn native_install_root() -> Result<PathBuf, LifecycleError> {
     }
 }
 
+fn native_legacy_cache_root() -> Result<PathBuf, LifecycleError> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("Axiusflow/cache"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|root| root.join("Library/Caches/Axiusflow"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".cache")))
+            .map(|root| root.join("axiusflow"))
+            .ok_or(LifecycleError::InvalidInventory)
+    }
+}
+
 /// Builds the versioned inventory for all currently owned native artifacts.
 ///
 /// # Errors
@@ -1563,14 +1724,14 @@ pub fn native_installation_inventory(
         {
             std::env::var_os("LOCALAPPDATA")
                 .map(PathBuf::from)
-                .map(|root| root.join("Axiusflow/cache"))
+                .map(|root| root.join("TradingPlot/cache"))
                 .ok_or(LifecycleError::InvalidInventory)?
         }
         #[cfg(target_os = "macos")]
         {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .map(|root| root.join("Library/Caches/Axiusflow"))
+                .map(|root| root.join("Library/Caches/TradingPlot"))
                 .ok_or(LifecycleError::InvalidInventory)?
         }
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -1578,42 +1739,55 @@ pub fn native_installation_inventory(
             std::env::var_os("XDG_CACHE_HOME")
                 .map(PathBuf::from)
                 .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".cache")))
-                .map(|root| root.join("axiusflow"))
+                .map(|root| root.join("tradingplot"))
                 .ok_or(LifecycleError::InvalidInventory)?
         }
     };
     let logs = data.join("logs");
-    let registrations = vec!["start-menu:Axiusflow".to_string()];
+    let legacy_install = native_legacy_install_root()?;
+    let legacy_install_parent = legacy_install
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or(LifecycleError::InvalidInventory)?;
+    let legacy_cleanup_roots = vec![
+        native_legacy_data_root()?,
+        native_legacy_cache_root()?,
+        legacy_install,
+        legacy_install_parent.join(".Axiusflow-lifecycle"),
+        legacy_install_parent.join(".Axiusflow-lifecycle.lock"),
+        legacy_install_parent.join("Axiusflow-Uninstall"),
+    ];
+    let registrations = vec!["start-menu:TradingPlot".to_string()];
     Ok(InstallationInventory {
         schema_version: INVENTORY_SCHEMA_VERSION,
         install_root,
         data_roots: vec![data],
         cache_roots: vec![cache],
         log_roots: vec![logs],
-        legacy_cleanup_roots: Vec::new(),
+        legacy_cleanup_roots,
         vault_entries: vec![
             VaultEntry {
-                service: "com.axiusflow.terminal".to_string(),
+                service: "com.tradingplot.terminal".to_string(),
                 key: "provider-rithmic-test-default-v1".to_string(),
             },
             VaultEntry {
-                service: "com.axiusflow.account".to_string(),
+                service: "com.tradingplot.account".to_string(),
                 key: "account-refresh-default-v1".to_string(),
             },
             VaultEntry {
-                service: "com.axiusflow.account".to_string(),
+                service: "com.tradingplot.account".to_string(),
                 key: "account-entitlement-lease-v1".to_string(),
             },
             VaultEntry {
-                service: "com.axiusflow.account".to_string(),
+                service: "com.tradingplot.account".to_string(),
                 key: "account-entitlement-directory-v1".to_string(),
             },
             VaultEntry {
-                service: "com.axiusflow.account".to_string(),
+                service: "com.tradingplot.account".to_string(),
                 key: "account-device-key-v1".to_string(),
             },
             VaultEntry {
-                service: "com.axiusflow.account".to_string(),
+                service: "com.tradingplot.account".to_string(),
                 key: "account-profile-v1".to_string(),
             },
         ],
@@ -1815,7 +1989,7 @@ where
 
 #[cfg(target_os = "windows")]
 fn embedded_authenticode_thumbprint() -> Result<Option<&'static str>, LifecycleError> {
-    let Some(thumbprint) = option_env!("AXIUSFLOW_AUTHENTICODE_CERT_SHA1") else {
+    let Some(thumbprint) = option_env!("TRADINGPLOT_AUTHENTICODE_CERT_SHA1") else {
         return Ok(None);
     };
     if !valid_authenticode_thumbprint(thumbprint) {
@@ -1888,7 +2062,7 @@ fn run_windows_authenticode_check(
     path: &Path,
     expected_thumbprint: &str,
 ) -> Result<(), LifecycleError> {
-    const SCRIPT: &str = "$ErrorActionPreference='Stop'; Import-Module -Name $env:AXIUSFLOW_AUTHENTICODE_SECURITY_MODULE -Force -ErrorAction Stop; $s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:AXIUSFLOW_AUTHENTICODE_PATH -ErrorAction Stop; if ($s.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ine $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -or $null -eq $s.TimeStamperCertificate) { exit 1 }; exit 0";
+    const SCRIPT: &str = "$ErrorActionPreference='Stop'; Import-Module -Name $env:TRADINGPLOT_AUTHENTICODE_SECURITY_MODULE -Force -ErrorAction Stop; $s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:TRADINGPLOT_AUTHENTICODE_PATH -ErrorAction Stop; if ($s.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ine $env:TRADINGPLOT_AUTHENTICODE_CERT_SHA1 -or $null -eq $s.TimeStamperCertificate) { exit 1 }; exit 0";
     let mut child = Command::new(powershell)
         .args([
             "-NoLogo",
@@ -1897,9 +2071,9 @@ fn run_windows_authenticode_check(
             "-Command",
             SCRIPT,
         ])
-        .env("AXIUSFLOW_AUTHENTICODE_SECURITY_MODULE", security_module)
-        .env("AXIUSFLOW_AUTHENTICODE_PATH", path)
-        .env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", expected_thumbprint)
+        .env("TRADINGPLOT_AUTHENTICODE_SECURITY_MODULE", security_module)
+        .env("TRADINGPLOT_AUTHENTICODE_PATH", path)
+        .env("TRADINGPLOT_AUTHENTICODE_CERT_SHA1", expected_thumbprint)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2180,7 +2354,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier, Mutex};
 
-    const LIFECYCLE_LOCK_CHILD_PATH_ENV: &str = "AXIUSFLOW_TEST_LIFECYCLE_LOCK_PATH";
+    const LIFECYCLE_LOCK_CHILD_PATH_ENV: &str = "TRADINGPLOT_TEST_LIFECYCLE_LOCK_PATH";
 
     #[derive(Default)]
     struct Hooks {
@@ -2235,7 +2409,7 @@ mod tests {
 
     fn temporary_root(name: &str) -> PathBuf {
         let root = fixture_base_dir().join(format!(
-            "axiusflow-lifecycle-{name}-{}-{}",
+            "tradingplot-lifecycle-{name}-{}-{}",
             std::process::id(),
             rand_suffix()
         ));
@@ -2381,17 +2555,17 @@ mod tests {
         fs::create_dir_all(&bundle).expect("bundle");
         let desktop = format!("desktop-{generation}").into_bytes();
         let launcher = format!("launcher-{generation}").into_bytes();
-        fs::write(bundle.join("axiusflow_desktop"), &desktop).expect("desktop");
-        fs::write(bundle.join("axiusflow_launcher"), &launcher).expect("launcher");
+        fs::write(bundle.join("tradingplot_desktop"), &desktop).expect("desktop");
+        fs::write(bundle.join("tradingplot_launcher"), &launcher).expect("launcher");
         if let Some(bytes) = &rollback_compatibility {
             fs::write(bundle.join(ROLLBACK_COMPATIBILITY_FILENAME), bytes)
                 .expect("rollback compatibility");
         }
         let mut files = vec![
-            (ReleaseFileRole::Desktop, "axiusflow_desktop", desktop),
+            (ReleaseFileRole::Desktop, "tradingplot_desktop", desktop),
             (
                 ReleaseFileRole::RuntimeAsset,
-                "axiusflow_launcher",
+                "tradingplot_launcher",
                 launcher,
             ),
         ];
@@ -2402,17 +2576,21 @@ mod tests {
                 bytes,
             ));
         }
-        let files = files
+        let mut files = files
             .into_iter()
             .map(|(role, path, bytes)| ReleaseFile {
                 role,
                 path: path.to_string(),
-                url: format!("https://releases.axiusflow.test/{generation}/{path}"),
+                url: format!("https://releases.tradingplot.test/{generation}/{path}"),
                 size: bytes.len() as u64,
                 sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
                 executable: true,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // Manifest validation requires path-sorted inventories. Under the old
+        // product name the desktop/launcher entries happened to sort before
+        // rollback-compatibility.json; the TradingPlot prefix does not.
+        files.sort_by(|left, right| left.path.cmp(&right.path));
         let manifest = ReleaseManifest {
             schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
             release_identity: format!("release-{generation}"),
@@ -2471,7 +2649,7 @@ mod tests {
         let expected = ReleaseFile {
             role: ReleaseFileRole::Desktop,
             path: "fixture.exe".to_string(),
-            url: "https://releases.axiusflow.test/fixture.exe".to_string(),
+            url: "https://releases.tradingplot.test/fixture.exe".to_string(),
             size: bytes.len() as u64,
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
             executable: true,
@@ -2528,7 +2706,7 @@ mod tests {
             Err(LifecycleError::InvalidSignature)
         );
         let (signed, key, bundle) = release(&root, 2);
-        fs::write(bundle.join("axiusflow_desktop"), b"tampered").expect("tamper bundle");
+        fs::write(bundle.join("tradingplot_desktop"), b"tampered").expect("tamper bundle");
         let install_root = root.join("install");
         let installer =
             ReleaseInstaller::new(&install_root, key.verifying_key(), ReleasePolicy::native(0))
@@ -2550,8 +2728,8 @@ mod tests {
             1,
             ReleaseFile {
                 role: ReleaseFileRole::Engine,
-                path: "axiusflow_engine".to_string(),
-                url: "https://releases.axiusflow.test/1/axiusflow_engine".to_string(),
+                path: "tradingplot_engine".to_string(),
+                url: "https://releases.tradingplot.test/1/tradingplot_engine".to_string(),
                 size: 6,
                 sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(b"engine")),
                 executable: true,
@@ -2582,7 +2760,7 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        fs::remove_file(bundle.join("axiusflow_launcher")).expect("drop one bundle file");
+        fs::remove_file(bundle.join("tradingplot_launcher")).expect("drop one bundle file");
         assert_eq!(
             installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::StagingFailed)
@@ -2599,7 +2777,7 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        fs::write(bundle.join("axiusflow_desktop"), b"truncated").expect("truncate bundle file");
+        fs::write(bundle.join("tradingplot_desktop"), b"truncated").expect("truncate bundle file");
         assert_eq!(
             installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::VerificationFailed)
@@ -2788,7 +2966,7 @@ mod tests {
             installer
                 .release_directory(&retained)
                 .expect("retained directory")
-                .join("axiusflow_desktop"),
+                .join("tradingplot_desktop"),
             b"tampered retained desktop",
         )
         .expect("mutate retained desktop");
@@ -2820,7 +2998,7 @@ mod tests {
         let desktop = installer
             .release_directory(&active)
             .expect("release directory")
-            .join("axiusflow_desktop");
+            .join("tradingplot_desktop");
         fs::write(desktop, b"post-install mutation").expect("mutate active desktop");
         assert_eq!(
             installer.audit_active_release(),
@@ -3026,7 +3204,7 @@ mod tests {
             .expect("write activated journal");
 
         fs::write(
-            candidate_root.join("axiusflow_desktop"),
+            candidate_root.join("tradingplot_desktop"),
             b"post-activation mutation",
         )
         .expect("mutate candidate desktop");
@@ -3737,7 +3915,7 @@ mod tests {
         let old_desktop = installer
             .release_directory(&first_active)
             .expect("old release directory")
-            .join("axiusflow_desktop");
+            .join("tradingplot_desktop");
         // FILE_SHARE_READ lets the pre-install audit read the old release
         // while still blocking its deletion, mirroring a locked executable.
         let lock = OpenOptions::new()
@@ -3875,10 +4053,60 @@ mod tests {
                 inventory
                     .vault_entries
                     .iter()
-                    .any(|entry| entry.service == "com.axiusflow.account" && entry.key == key),
+                    .any(|entry| entry.service == "com.tradingplot.account" && entry.key == key),
                 "native inventory lost account vault key {key}"
             );
         }
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn native_inventory_owns_legacy_axiusflow_roots_for_cleanup() {
+        let root = temporary_root("inventory-legacy-roots");
+        let inventory =
+            native_installation_inventory(root.join("install")).expect("native inventory builds");
+        for expected in [
+            native_legacy_data_root().expect("legacy data root"),
+            native_legacy_cache_root().expect("legacy cache root"),
+            native_legacy_install_root().expect("legacy install root"),
+        ] {
+            assert!(
+                inventory.legacy_cleanup_roots.contains(&expected),
+                "native inventory lost legacy cleanup root {}",
+                expected.display()
+            );
+        }
+        let _ = remove_owned_path(&root);
+    }
+
+    #[test]
+    fn legacy_state_merge_preserves_current_files_and_moves_missing_state() {
+        let root = temporary_root("legacy-state-merge");
+        let legacy = root.join("Axiusflow");
+        let current = root.join("TradingPlot");
+        fs::create_dir_all(legacy.join("desktop")).expect("legacy desktop directory");
+        fs::create_dir_all(&current).expect("current state directory");
+        fs::write(legacy.join("workspace-state.pb"), b"legacy-workspace")
+            .expect("legacy workspace");
+        fs::write(current.join("workspace-state.pb"), b"current-workspace")
+            .expect("current workspace");
+        fs::write(legacy.join("desktop/chart-chrome"), b"legacy-chart-chrome")
+            .expect("legacy chart chrome");
+
+        merge_legacy_owned_directory(&legacy, &current).expect("legacy state merges");
+
+        assert_eq!(
+            fs::read(current.join("workspace-state.pb")).expect("current workspace reads"),
+            b"current-workspace"
+        );
+        assert_eq!(
+            fs::read(current.join("desktop/chart-chrome")).expect("migrated chart chrome reads"),
+            b"legacy-chart-chrome"
+        );
+        assert_eq!(
+            fs::read(legacy.join("workspace-state.pb")).expect("conflicting legacy state remains"),
+            b"legacy-workspace"
+        );
         let _ = remove_owned_path(&root);
     }
 
@@ -3925,15 +4153,15 @@ mod tests {
             legacy_cleanup_roots: Vec::new(),
             vault_entries: vec![
                 VaultEntry {
-                    service: "com.axiusflow.account".to_string(),
+                    service: "com.tradingplot.account".to_string(),
                     key: "account-refresh-default-v1".to_string(),
                 },
                 VaultEntry {
-                    service: "com.axiusflow.terminal".to_string(),
+                    service: "com.tradingplot.terminal".to_string(),
                     key: "provider-rithmic-test-default-v1".to_string(),
                 },
             ],
-            registrations: vec!["start-menu:Axiusflow".to_string()],
+            registrations: vec!["start-menu:TradingPlot".to_string()],
         };
         let hooks = Hooks::default();
         let outcome = installer.uninstall(&inventory, &hooks).expect("uninstall");

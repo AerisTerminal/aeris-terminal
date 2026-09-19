@@ -8,7 +8,7 @@ use super::{
     ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, now_unix_nanos,
     provider_display_name,
 };
-use axiusflow_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
+use tradingplot_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
@@ -165,7 +165,7 @@ fn provenanced_runtime_bar(
             ),
             event_time_unix_nanos: exchange,
             publication_time_unix_nanos: received,
-            producer: "axiusflow_engine".to_string(),
+            producer: "tradingplot_engine".to_string(),
             schema_version: 1,
             correlation_id: format!("engine-series-{consumer_id}-{generation}"),
             causation_id: String::new(),
@@ -176,7 +176,7 @@ fn provenanced_runtime_bar(
             exchange_timestamp_unix_nanos: exchange,
             provider_receive_timestamp_unix_nanos: received,
             nic_receive_timestamp_unix_nanos: None,
-            axiusflow_receive_timestamp_unix_nanos: received,
+            tradingplot_receive_timestamp_unix_nanos: received,
             normalized_timestamp_unix_nanos: received,
             fanout_enqueue_timestamp_unix_nanos: Some(received),
             correction_flags: 0,

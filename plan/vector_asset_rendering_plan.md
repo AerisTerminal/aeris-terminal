@@ -1,11 +1,11 @@
-# Axiusflow Native Vector Asset Rendering Plan
+# TradingPlot Native Vector Asset Rendering Plan
 
 ## Purpose
 
-Axiusflow needs one reliable native rendering path for static vector artwork used by:
+TradingPlot needs one reliable native rendering path for static vector artwork used by:
 
 - theme-colored interface icons;
-- Axiusflow brand marks and wordmarks;
+- TradingPlot brand marks and wordmarks;
 - broker, exchange, venue, and company marks;
 - chart-series glyphs;
 - future trusted product artwork.
@@ -16,7 +16,7 @@ The product goal is:
 > edge quality at the actual device-pixel size of the GPUI element, without blocking the UI thread
 > or allowing rendering work and memory to grow without bounds.
 
-This plan replaces the current special-case colored-SVG workaround with a reusable Axiusflow-owned
+This plan replaces the current special-case colored-SVG workaround with a reusable TradingPlot-owned
 presentation component. It deliberately does not introduce Vello. GPUI already owns the window,
 graphics device, image atlas, and presentation schedule, and its pinned `SvgRenderer` already uses
 `usvg` plus `resvg` for static SVG parsing and rasterization. A second `wgpu` renderer would create a
@@ -60,11 +60,11 @@ an SVG payload.
 
 - `apps/desktop/src/assets.rs` remains the single inventory and byte source for trusted embedded
   desktop artwork.
-- A new Axiusflow-owned module under `apps/desktop/src/native_ui` owns vector presentation,
+- A new TradingPlot-owned module under `apps/desktop/src/native_ui` owns vector presentation,
   requested-size calculation, derived-image lifecycle, bounded caching, and placeholder behavior.
 - GPUI remains the only window renderer and the only owner that uploads `RenderImage` data to the
   platform graphics backend.
-- GPUI's pinned `SvgRenderer` remains the SVG parser/rasterizer boundary. Axiusflow does not depend
+- GPUI's pinned `SvgRenderer` remains the SVG parser/rasterizer boundary. TradingPlot does not depend
   directly on `vello`, `vello_svg`, `wgpu`, `usvg`, `resvg`, or `tiny-skia` for this feature.
 - The desktop vector cache owns only derived presentation images. It does not become a second asset
   inventory or store canonical account data.
@@ -85,7 +85,7 @@ displays it.
 ## Target data flow
 
 ```text
-AxiusflowAssets
+TradingPlotAssets
       |
       v
 validated VectorAsset metadata
@@ -248,7 +248,7 @@ Least-recently-used eviction is appropriate for completed images. Pending work h
 and does not count as a completed entry. Failed requests use a short bounded negative-cache/backoff
 entry so a malformed asset cannot be reparsed every frame.
 
-Eviction must release the Axiusflow-held `Arc<RenderImage>` and invoke the appropriate GPUI image
+Eviction must release the TradingPlot-held `Arc<RenderImage>` and invoke the appropriate GPUI image
 drop/removal path when required. Tests must cover shared references so an image still in use is not
 invalidated unsafely.
 
@@ -347,7 +347,7 @@ Exit criteria:
 - [ ] Replace `ColoredSvgMark` and `MARK_CACHE` in `terminal_chrome.rs`.
 - [ ] Migrate series glyphs.
 - [ ] Migrate exchange/broker marks in the terminal header, symbol menu, and terminal view.
-- [ ] Migrate Axiusflow brand marks in onboarding and About UI.
+- [ ] Migrate TradingPlot brand marks in onboarding and About UI.
 - [ ] Add wordmark usage through an aspect-ratio-preserving constructor before any product surface
   begins using it.
 - [ ] Remove `svg_intrinsic_width`, raw float cache keys, and the old SVG fallback path.
@@ -404,10 +404,10 @@ Focused iteration should include:
 
 ```text
 cargo fmt --all -- --check
-cargo check -p axiusflow_desktop --locked
-cargo test -p axiusflow_desktop --locked
-cargo clippy -p axiusflow_desktop --all-targets --all-features --locked -- -D warnings
-cargo test -p axiusflow_naming_check --locked
+cargo check -p tradingplot_desktop --locked
+cargo test -p tradingplot_desktop --locked
+cargo clippy -p tradingplot_desktop --all-targets --all-features --locked -- -D warnings
+cargo test -p tradingplot_naming_check --locked
 ```
 
 Before completed native delivery:
@@ -426,7 +426,7 @@ confirmation, and installed-app confirmation. Compilation must not be presented 
 ### Proper architecture
 
 - GPUI remains the only platform renderer and graphics-device owner.
-- The asset inventory remains authoritative in `AxiusflowAssets`.
+- The asset inventory remains authoritative in `TradingPlotAssets`.
 - One native UI module owns all derived full-color vector images.
 - Account/network state does not move into presentation code.
 - No Vello, `wgpu`, duplicate SVG renderer, or parallel asset inventory is introduced.
@@ -478,7 +478,7 @@ Before adoption, a focused prototype must prove all of the following:
 - no blocking GPU readback into `RenderImage`;
 - correct device-loss and multi-window lifecycle;
 - bounded memory and submission work;
-- better measured frame time or quality than the GPUI-native pipeline on representative Axiusflow
+- better measured frame time or quality than the GPUI-native pipeline on representative TradingPlot
   workloads;
 - no regression to release packaging, startup time, binary size, or supported hardware.
 

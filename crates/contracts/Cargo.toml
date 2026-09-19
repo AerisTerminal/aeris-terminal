@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_contracts"
+name = "tradingplot_contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

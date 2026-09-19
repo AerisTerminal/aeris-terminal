@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_instruments"
+name = "tradingplot_instruments"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

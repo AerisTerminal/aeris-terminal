@@ -414,7 +414,7 @@ mod macos {
         let cancelled = Arc::clone(&cancellation.cancelled);
         let (ready, registered) = sync_channel(1);
         let worker = thread::Builder::new()
-            .name("axiusflow-power-macos".to_string())
+            .name("tradingplot-power-macos".to_string())
             .spawn(move || match Registration::connect(publisher) {
                 Ok(registration) => {
                     if ready.send(Ok(())).is_ok() {

@@ -7,13 +7,13 @@
 //! redacted form and surfaced as session state; the verified plan is the
 //! desktop capability source.
 
-use axiusflow_account::{AccountId, LeaseClaims, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use sha2::{Digest as _, Sha256};
+use tradingplot_account::{AccountId, LeaseClaims, PlanId};
 
 use super::oidc::OidcEndpoints;
-use axiusflow_platform_runtime::CredentialVault;
+use tradingplot_platform_runtime::CredentialVault;
 
 /// Approved default: online lease refresh cadence.
 pub const LEASE_REFRESH_INTERVAL_SECONDS: u64 = 6 * 3600;
@@ -288,9 +288,9 @@ struct LeaseReply {
 #[cfg(test)]
 mod tests {
     use super::{device_id_for_key, untrusted_account_id, validate_compact};
-    use axiusflow_account::AccountId;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
+    use tradingplot_account::AccountId;
 
     fn sign_fixture(seed: &[u8; 32], kid: &str, payload: &serde_json::Value) -> String {
         let key = SigningKey::from_bytes(seed);

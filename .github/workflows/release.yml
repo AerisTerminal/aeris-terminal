@@ -47,7 +47,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: axiusflow-production-release
+  group: tradingplot-production-release
   cancel-in-progress: false
 
 jobs:
@@ -170,7 +170,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:NUCLEUS_CHARTS_TOKEN)) {
             throw 'NUCLEUS_CHARTS_TOKEN is missing.'
           }
-          $config = Join-Path $env:RUNNER_TEMP 'axiusflow-release-gitconfig'
+          $config = Join-Path $env:RUNNER_TEMP 'tradingplot-release-gitconfig'
           $token = [Uri]::EscapeDataString($env:NUCLEUS_CHARTS_TOKEN)
           $contents = "[url `"https://x-access-token:$token@github.com/`"]`r`n`tinsteadOf = https://github.com/`r`n"
           [IO.File]::WriteAllText($config, $contents, [Text.UTF8Encoding]::new($false))
@@ -211,14 +211,14 @@ jobs:
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve qualified workspace package metadata.' }
-          $releasePackages = @($metadata.packages | Where-Object { $_.name -eq 'axiusflow_platform_runtime' })
+          $releasePackages = @($metadata.packages | Where-Object { $_.name -eq 'tradingplot_platform_runtime' })
           if ($releasePackages.Count -ne 1) { throw 'Qualified workspace package identity is ambiguous.' }
           $releaseVersion = [string]$releasePackages[0].version
           if ([string]::IsNullOrWhiteSpace($releaseVersion) -or $releaseVersion -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
             throw 'Qualified release version is invalid.'
           }
-          $launcher = Join-Path $PWD 'target\release\axiusflow_launcher.exe'
-          $desktop = Join-Path $PWD 'target\release\axiusflow_desktop.exe'
+          $launcher = Join-Path $PWD 'target\release\tradingplot_launcher.exe'
+          $desktop = Join-Path $PWD 'target\release\tradingplot_desktop.exe'
           foreach ($path in @($launcher, $desktop)) {
             $item = Get-Item -LiteralPath $path -ErrorAction Stop
             if ($item.PSIsContainer -or $item.Length -le 0) { throw "Qualified release artifact '$path' is invalid." }
@@ -246,8 +246,8 @@ jobs:
           $handoff = Join-Path $handoffRoot "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $handoff) { throw "Release handoff already exists at '$handoff'." }
           New-Item -ItemType Directory -Path $handoff | Out-Null
-          Copy-Item -LiteralPath $launcher -Destination (Join-Path $handoff 'axiusflow_launcher.exe')
-          Copy-Item -LiteralPath $desktop -Destination (Join-Path $handoff 'axiusflow_desktop.exe')
+          Copy-Item -LiteralPath $launcher -Destination (Join-Path $handoff 'tradingplot_launcher.exe')
+          Copy-Item -LiteralPath $desktop -Destination (Join-Path $handoff 'tradingplot_desktop.exe')
 
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_sha=$env:GITHUB_SHA"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_version=$releaseVersion"
@@ -261,7 +261,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'axiusflow-release-gitconfig') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'tradingplot-release-gitconfig') -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath (Join-Path $PWD 'target\release') -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath (Join-Path $PWD 'target\release-publish') -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -273,7 +273,7 @@ jobs:
     runs-on: [self-hosted, axiusflow, windows, release-signing]
     timeout-minutes: 60
     env:
-      AXIUSFLOW_RELEASE_ENVIRONMENT: self-hosted-release-station
+      TRADINGPLOT_RELEASE_ENVIRONMENT: self-hosted-release-station
       RELEASE_VERIFYING_KEY_B64URL: ${{ vars.RELEASE_VERIFYING_KEY_B64URL }}
       AUTHENTICODE_CERTIFICATE_SHA1: ${{ vars.AUTHENTICODE_CERTIFICATE_SHA1 }}
       AUTHENTICODE_TIMESTAMP_URL: ${{ vars.AUTHENTICODE_TIMESTAMP_URL }}
@@ -344,7 +344,7 @@ jobs:
           }
           $target = Join-Path $PWD 'target\release'
           New-Item -ItemType Directory -Path $target -Force | Out-Null
-          foreach ($name in @('axiusflow_launcher.exe', 'axiusflow_desktop.exe')) {
+          foreach ($name in @('tradingplot_launcher.exe', 'tradingplot_desktop.exe')) {
             Copy-Item -LiteralPath (Join-Path $handoff $name) -Destination (Join-Path $target $name)
           }
 
@@ -371,15 +371,15 @@ jobs:
           }
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve signing-checkout package metadata.' }
-          $releasePackages = @($metadata.packages | Where-Object { $_.name -eq 'axiusflow_platform_runtime' })
+          $releasePackages = @($metadata.packages | Where-Object { $_.name -eq 'tradingplot_platform_runtime' })
           if ($releasePackages.Count -ne 1) { throw 'Signing-checkout package identity is ambiguous.' }
           $signingReleaseVersion = [string]$releasePackages[0].version
           if ($env:QUALIFIED_RELEASE_VERSION -ne $signingReleaseVersion) {
             throw "Qualified release version '$env:QUALIFIED_RELEASE_VERSION' does not match signing checkout '$signingReleaseVersion'."
           }
           $expected = @{
-            'axiusflow_launcher.exe' = $env:EXPECTED_LAUNCHER_SHA256
-            'axiusflow_desktop.exe' = $env:EXPECTED_DESKTOP_SHA256
+            'tradingplot_launcher.exe' = $env:EXPECTED_LAUNCHER_SHA256
+            'tradingplot_desktop.exe' = $env:EXPECTED_DESKTOP_SHA256
           }
           foreach ($name in $expected.Keys) {
             $path = Join-Path $PWD "target\release\$name"
@@ -459,7 +459,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_SIGNING_KEY_FILE=$signingKey"
 
           if ($env:CLOUDFLARE_ACCOUNT_ID -notmatch '^[0-9A-Fa-f]{32}$') {
-            throw 'CLOUDFLARE_ACCOUNT_ID must pin the intended Axiusflow Cloudflare account.'
+            throw 'CLOUDFLARE_ACCOUNT_ID must pin the intended production Cloudflare account.'
           }
           $whoamiJson = (& $env:WRANGLER_PATH whoami --json | Out-String)
           if ($LASTEXITCODE -ne 0) {
@@ -472,7 +472,7 @@ jobs:
           }
           $accounts = @($whoami.accounts | Where-Object { $_.id -eq $env:CLOUDFLARE_ACCOUNT_ID })
           if ($whoami.loggedIn -ne $true -or $accounts.Count -ne 1) {
-            throw 'Wrangler is not authenticated to the pinned Axiusflow Cloudflare account.'
+            throw 'Wrangler is not authenticated to the pinned production Cloudflare account.'
           }
 
       - name: Publish qualified signed release

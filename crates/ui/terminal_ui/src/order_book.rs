@@ -1,5 +1,5 @@
-use axiusflow_instruments::InstrumentPrecision;
-use axiusflow_market_data::{
+use tradingplot_instruments::InstrumentPrecision;
+use tradingplot_market_data::{
     OrderBookColumnLevel, OrderBookFrame, OrderBookPublication, OrderBookRow,
 };
 
@@ -20,7 +20,7 @@ pub struct OrderBookSelection {
 /// Projects the one authoritative runtime-owned order book into display rows.
 ///
 /// This function is intentionally stateless. Sequence handling, snapshot/delta
-/// validation, recovery, and depth ownership all live in `axiusflow_market_data::OrderBook`.
+/// validation, recovery, and depth ownership all live in `tradingplot_market_data::OrderBook`.
 /// The UI never maintains another candidate book.
 #[must_use]
 pub fn project_order_book(
@@ -102,7 +102,7 @@ pub fn project_order_book(
 }
 
 fn project_level(
-    level: axiusflow_market_data::DepthLevel,
+    level: tradingplot_market_data::DepthLevel,
     price_scale: u8,
     quantity_scale: u8,
     maximum_quantity: i64,
@@ -205,8 +205,8 @@ pub(crate) fn grouped_fixed_point_text(value: i64, scale: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::{DepthLevel, OrderBookState};
     use std::collections::BTreeMap;
+    use tradingplot_market_data::{DepthLevel, OrderBookState};
 
     fn selection(instrument_id: &str, selection_generation: u64) -> OrderBookSelection {
         OrderBookSelection {
@@ -258,7 +258,7 @@ mod tests {
             }],
             traded_volumes: BTreeMap::from([(
                 20_025,
-                axiusflow_market_data::AggressorTradeVolumes { buy: 4, sell: 2 },
+                tradingplot_market_data::AggressorTradeVolumes { buy: 4, sell: 2 },
             )]),
             trade_source_watermark: 11,
             state: OrderBookState::Ready,
@@ -305,7 +305,7 @@ mod tests {
         );
         assert_eq!(
             frame.traded_volumes.get(&20_025).copied(),
-            Some(axiusflow_market_data::AggressorTradeVolumes { buy: 4, sell: 2 })
+            Some(tradingplot_market_data::AggressorTradeVolumes { buy: 4, sell: 2 })
         );
         assert_eq!(frame.trade_source_watermark, 11);
         assert!(frame.rows[1].ask.is_none());

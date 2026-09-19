@@ -68,14 +68,14 @@ pub(super) const fn engine_install_failure_stage(error: &EngineError) -> Failure
 
 pub(super) fn publish_ready(
     events: &mut ConsumerEvents,
-    publication: &axiusflow_market_engine::ConsumerPublication,
+    publication: &tradingplot_market_engine::ConsumerPublication,
 ) {
     publish_state(events, publication, SeriesLoadState::Ready, None);
 }
 
 pub(super) fn publish_state(
     events: &mut ConsumerEvents,
-    publication: &axiusflow_market_engine::ConsumerPublication,
+    publication: &tradingplot_market_engine::ConsumerPublication,
     state: SeriesLoadState,
     detail: Option<&str>,
 ) {
@@ -90,13 +90,13 @@ pub(super) fn publish_state(
 }
 
 pub(super) fn snapshot_message(
-    publication: &axiusflow_market_engine::ConsumerPublication,
+    publication: &tradingplot_market_engine::ConsumerPublication,
 ) -> MarketRuntimeEvent {
     MarketRuntimeEvent::SeriesSnapshot(publication.clone())
 }
 
 pub(super) fn series_update_message(
-    publication: &axiusflow_market_engine::ConsumerSeriesUpdate,
+    publication: &tradingplot_market_engine::ConsumerSeriesUpdate,
 ) -> MarketRuntimeEvent {
     MarketRuntimeEvent::SeriesUpdate(publication.clone())
 }
@@ -365,7 +365,7 @@ impl Coordinator<'_> {
 
     pub(super) fn publish_current_snapshot(
         &mut self,
-        publication: &axiusflow_market_engine::ConsumerPublication,
+        publication: &tradingplot_market_engine::ConsumerPublication,
     ) {
         let state =
             self.canonical_series_load_state(publication.consumer_id, &publication.snapshot.series);
@@ -464,7 +464,7 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         provider_generation: ProviderGeneration,
         waiter: &DemandWaiter,
-        publication: &axiusflow_market_engine::ConsumerPublication,
+        publication: &tradingplot_market_engine::ConsumerPublication,
     ) -> Result<(), String> {
         let needs_covering_repair =
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
@@ -639,7 +639,7 @@ impl Coordinator<'_> {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Axiusflow engine series-queue overflow recovery failed: {error}");
+                    eprintln!("TradingPlot engine series-queue overflow recovery failed: {error}");
                 }
             }
             if let Some(events) = self.events.get_mut(&consumer_id) {
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn order_book_publication_preserves_canonical_depth_beyond_the_old_ui_cutoff() {
         const LEVELS: usize = 64;
-        let instrument = axiusflow_contracts::InstallProviderInstrument {
+        let instrument = tradingplot_contracts::InstallProviderInstrument {
             provider: "rithmic".to_string(),
             session_generation: 1,
             selection_generation: 1,
@@ -717,28 +717,28 @@ mod tests {
             price_increment: Some(25),
         };
         let mut order_book = ProviderOrderBook::new(instrument.clone());
-        let snapshot = axiusflow_market_data::DepthSnapshot {
-            metadata: axiusflow_market_data::EventMetadata {
+        let snapshot = tradingplot_market_data::DepthSnapshot {
+            metadata: tradingplot_market_data::EventMetadata {
                 provider_id: instrument.provider.clone(),
                 instrument_id: instrument.instrument_id.clone(),
                 entitlement_id: instrument.entitlement_id.clone(),
                 source_sequence: 1,
                 session_generation: 1,
-                timestamps: axiusflow_market_data::QualifiedTimestamp {
+                timestamps: tradingplot_market_data::QualifiedTimestamp {
                     exchange_unix_nanos: Some(1),
                     provider_unix_nanos: None,
                     received_unix_nanos: 1,
                 },
             },
             bids: (0..LEVELS)
-                .map(|index| axiusflow_market_data::DepthLevel {
+                .map(|index| tradingplot_market_data::DepthLevel {
                     price: 20_000 - i64::try_from(index).expect("bounded index"),
                     quantity: 1,
                     order_count: Some(1),
                 })
                 .collect(),
             asks: (0..LEVELS)
-                .map(|index| axiusflow_market_data::DepthLevel {
+                .map(|index| tradingplot_market_data::DepthLevel {
                     price: 20_001 + i64::try_from(index).expect("bounded index"),
                     quantity: 1,
                     order_count: Some(1),
@@ -747,19 +747,19 @@ mod tests {
         };
         assert!(matches!(
             order_book.book.install_snapshot(&snapshot),
-            Ok(axiusflow_market_data::OrderBookApplyOutcome::Published)
+            Ok(tradingplot_market_data::OrderBookApplyOutcome::Published)
         ));
 
         let display_depth = crate::MarketDisplayDepth {
             provider_generation: 1,
             display_generation: 3,
             source_sequence: 7,
-            bids: vec![axiusflow_market_data::DepthLevel {
+            bids: vec![tradingplot_market_data::DepthLevel {
                 price: 20_000,
                 quantity: 5,
                 order_count: Some(2),
             }],
-            asks: vec![axiusflow_market_data::DepthLevel {
+            asks: vec![tradingplot_market_data::DepthLevel {
                 price: 20_050,
                 quantity: 6,
                 order_count: Some(3),

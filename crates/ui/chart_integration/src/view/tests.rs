@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use super::*;
-use axiusflow_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
 use nucleuscharts_engine::AxisTextMidpoint;
+use tradingplot_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
 
 fn interactive_chart() -> NucleusChartView {
     let mut chart = NucleusChartView::new();
@@ -58,11 +58,11 @@ fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
     );
     assert_eq!(
         options.layout.font_family,
-        axiusflow_design_system::platform_font_stack()
+        tradingplot_design_system::platform_font_stack()
     );
     assert_eq!(
         options.watermark.font_family,
-        axiusflow_design_system::platform_font_stack()
+        tradingplot_design_system::platform_font_stack()
     );
     assert_eq!(
         options.grid.vert_lines.color,
@@ -532,8 +532,8 @@ fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
 #[test]
 fn chart_legend_text_colors_project_platform_chrome_and_nucleus_market_colors() {
     for (theme, platform) in [
-        (ChartTheme::Light, AxiusflowTheme::light()),
-        (ChartTheme::Dark, AxiusflowTheme::dark()),
+        (ChartTheme::Light, TradingPlotTheme::light()),
+        (ChartTheme::Dark, TradingPlotTheme::dark()),
     ] {
         let palette = legend_palette(theme, "#089981", "#f7525f");
         let colors = platform.colors;

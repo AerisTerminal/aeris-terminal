@@ -1,6 +1,6 @@
-use axiusflow_contracts::ProviderInstrumentSummary;
-use axiusflow_observability::{FeedConnectionState, FeedIdentity};
 use std::num::NonZeroUsize;
+use tradingplot_contracts::ProviderInstrumentSummary;
+use tradingplot_observability::{FeedConnectionState, FeedIdentity};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RithmicShellState {

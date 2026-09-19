@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_naming_check"
+name = "tradingplot_naming_check"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

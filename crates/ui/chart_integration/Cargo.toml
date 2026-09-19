@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_chart_integration"
+name = "tradingplot_chart_integration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,9 @@ publish.workspace = true
 diagnostics = []
 
 [dependencies]
-axiusflow_application = { path = "../../application" }
-axiusflow_design_system = { path = "../design_system" }
-axiusflow_terminal_ui = { path = "../terminal_ui", default-features = false }
+tradingplot_application = { path = "../../application" }
+tradingplot_design_system = { path = "../design_system" }
+tradingplot_terminal_ui = { path = "../terminal_ui", default-features = false }
 gpui.workspace = true
 num-traits = "=0.2.19"
 nucleuscharts_engine.workspace = true

@@ -2,12 +2,12 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $verifier = Join-Path $PSScriptRoot "verify_native_transition_capture.ps1"
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("axiusflow-native-transition-verifier-" + [Guid]::NewGuid().ToString("N"))
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("tradingplot-native-transition-verifier-" + [Guid]::NewGuid().ToString("N"))
 $null = New-Item -ItemType Directory -Path $testRoot
 $artifact = Join-Path $testRoot "native-transitions.json"
 $manifestPath = "$artifact.manifest.json"
 $cargoLockPath = Join-Path $testRoot "Cargo.lock"
-$executablePath = Join-Path $testRoot "axiusflow_desktop.exe"
+$executablePath = Join-Path $testRoot "tradingplot_desktop.exe"
 
 function Write-Json {
     param([string]$Path, [object]$Value)

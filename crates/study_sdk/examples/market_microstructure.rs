@@ -1,4 +1,4 @@
-use axiusflow_study_sdk::{
+use tradingplot_study_sdk::{
     BarPeriod, BarSeriesKey, MarketStream, NativeStudyProgram, NativeStudyRegistration,
     StreamRequirements, StudyDefinition, StudyDependency, StudyExecutionContext,
     StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,

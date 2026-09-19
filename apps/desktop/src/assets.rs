@@ -1,11 +1,11 @@
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
-const DRAWING_ASSET_PREFIX: &str = "axiusflow/icons/drawing/";
-const UI_ASSET_PREFIX: &str = "axiusflow/icons/ui/";
-const SERIES_ASSET_PREFIX: &str = "axiusflow/icons/series/";
-const BRAND_ASSET_PREFIX: &str = "axiusflow/brand/";
-const EXCHANGE_ASSET_PREFIX: &str = "axiusflow/exchange_logo/";
+const DRAWING_ASSET_PREFIX: &str = "tradingplot/icons/drawing/";
+const UI_ASSET_PREFIX: &str = "tradingplot/icons/ui/";
+const SERIES_ASSET_PREFIX: &str = "tradingplot/icons/series/";
+const BRAND_ASSET_PREFIX: &str = "tradingplot/brand/";
+const EXCHANGE_ASSET_PREFIX: &str = "tradingplot/exchange_logo/";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiIcon {
@@ -166,17 +166,17 @@ impl DrawingIcon {
     #[must_use]
     pub fn path(self) -> SharedString {
         match self {
-            Self::TrendLine => concat!("axiusflow/icons/drawing/", "trend-line.svg"),
+            Self::TrendLine => concat!("tradingplot/icons/drawing/", "trend-line.svg"),
             Self::HorizontalLine => {
-                concat!("axiusflow/icons/drawing/", "horizontal-line.svg")
+                concat!("tradingplot/icons/drawing/", "horizontal-line.svg")
             }
-            Self::VerticalLine => concat!("axiusflow/icons/drawing/", "vertical-line.svg"),
-            Self::Ray => concat!("axiusflow/icons/drawing/", "horizontal-ray.svg"),
-            Self::Rectangle => concat!("axiusflow/icons/drawing/", "rectangle.svg"),
-            Self::Path => concat!("axiusflow/icons/drawing/", "path.svg"),
-            Self::Cursor => concat!("axiusflow/icons/drawing/", "cursor.svg"),
-            Self::Brush => concat!("axiusflow/icons/drawing/", "brush.svg"),
-            Self::Text => concat!("axiusflow/icons/drawing/", "text.svg"),
+            Self::VerticalLine => concat!("tradingplot/icons/drawing/", "vertical-line.svg"),
+            Self::Ray => concat!("tradingplot/icons/drawing/", "horizontal-ray.svg"),
+            Self::Rectangle => concat!("tradingplot/icons/drawing/", "rectangle.svg"),
+            Self::Path => concat!("tradingplot/icons/drawing/", "path.svg"),
+            Self::Cursor => concat!("tradingplot/icons/drawing/", "cursor.svg"),
+            Self::Brush => concat!("tradingplot/icons/drawing/", "brush.svg"),
+            Self::Text => concat!("tradingplot/icons/drawing/", "text.svg"),
         }
         .into()
     }
@@ -256,9 +256,9 @@ impl ExchangeLogo {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AxiusflowAssets;
+pub struct TradingPlotAssets;
 
-impl AssetSource for AxiusflowAssets {
+impl AssetSource for TradingPlotAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         Ok(drawing_asset(path)
             .or_else(|| ui_asset(path))
@@ -355,7 +355,7 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
 
 fn brand_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(BRAND_ASSET_PREFIX)? {
-        "logo.svg" => include_bytes!("../assets/axiusflow_assets/logo.svg"),
+        "logo.svg" => include_bytes!("../assets/tradingplot_assets/logo.svg"),
         _ => return None,
     })
 }
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn every_drawing_icon_has_a_unique_embedded_asset() {
-        let assets = AxiusflowAssets;
+        let assets = TradingPlotAssets;
         let mut paths = HashSet::new();
 
         for icon in DrawingIcon::ALL {
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn drawing_icons_are_theme_neutral_svg() {
-        let assets = AxiusflowAssets;
+        let assets = TradingPlotAssets;
 
         for icon in DrawingIcon::GEOMETRIC {
             let path = icon.path();
@@ -419,17 +419,17 @@ mod tests {
     fn horizontal_line_uses_the_horizontal_line_glyph_not_the_diagonal_ray() {
         assert_eq!(
             DrawingIcon::HorizontalLine.path().as_ref(),
-            "axiusflow/icons/drawing/horizontal-line.svg"
+            "tradingplot/icons/drawing/horizontal-line.svg"
         );
         assert_eq!(
             DrawingIcon::Ray.path().as_ref(),
-            "axiusflow/icons/drawing/horizontal-ray.svg"
+            "tradingplot/icons/drawing/horizontal-ray.svg"
         );
     }
 
     #[test]
     fn list_filters_the_asset_namespace() {
-        let assets = AxiusflowAssets;
+        let assets = TradingPlotAssets;
         assert_eq!(
             assets.list("").expect("all assets").len(),
             DrawingIcon::ALL.len()
@@ -440,7 +440,7 @@ mod tests {
         );
         assert_eq!(
             assets
-                .list("axiusflow/icons/drawing/trend")
+                .list("tradingplot/icons/drawing/trend")
                 .expect("filtered assets"),
             vec![DrawingIcon::TrendLine.path()]
         );
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn ui_icon_inventory_is_embedded_and_theme_neutral() {
-        let assets = AxiusflowAssets;
+        let assets = TradingPlotAssets;
         let mut paths = HashSet::new();
         for icon in UiIcon::ALL {
             let path = icon.path();
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn colored_marks_use_square_vector_masks() {
-        let assets = AxiusflowAssets;
+        let assets = TradingPlotAssets;
         for icon in SeriesIcon::ALL {
             let bytes = assets
                 .load(icon.path().as_ref())
@@ -522,8 +522,8 @@ mod tests {
         use gpui::SvgRenderer;
         use std::sync::Arc;
 
-        let assets = AxiusflowAssets;
-        let renderer = SvgRenderer::new(Arc::new(AxiusflowAssets));
+        let assets = TradingPlotAssets;
+        let renderer = SvgRenderer::new(Arc::new(TradingPlotAssets));
         let rasterize = |path: &SharedString, logical_size: f32, window_scale: f32| {
             let bytes = assets.load(path.as_ref()).unwrap().expect("asset bytes");
             let header = std::str::from_utf8(&bytes[..bytes.len().min(768)]).unwrap();

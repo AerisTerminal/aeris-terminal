@@ -1,13 +1,21 @@
-//! `AxiusFlow` native Study SDK.
+//! `TradingPlot` native Study SDK.
 //!
 //! This crate is the stable Axius-owned surface above the in-process Study
 //! Runtime. Technical-analysis math delegates to the exact pinned Nucleus pure
 //! indicator crate so built-ins and SDK studies do not fork formula behavior.
 
-pub use axiusflow_market_data::{
+use num_traits::ToPrimitive;
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    num::NonZeroUsize,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
+pub use tradingplot_market_data::{
     AggressorSide, BarPeriod, BarSeriesKey, DepthLevel, OrderBookState,
 };
-pub use axiusflow_market_runtime::{
+pub use tradingplot_market_runtime::{
     MarketStream, StreamRequirements,
     study::{
         MAXIMUM_STUDY_IDENTIFIER_BYTES, NativeStudyCalculate, NativeStudyProgram,
@@ -22,17 +30,9 @@ pub use axiusflow_market_runtime::{
         StudyThresholdRegion, StudyTradeSample, StudyTradeWindow,
     },
 };
-use num_traits::ToPrimitive;
-use std::{
-    collections::BTreeMap,
-    error::Error,
-    fmt,
-    num::NonZeroUsize,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
 
 /// Converts one fixed-point market value into the floating-point representation used by study
-/// formulas without requiring authors to depend on `AxiusFlow`'s internal conversion crate.
+/// formulas without requiring authors to depend on `TradingPlot`'s internal conversion crate.
 ///
 /// The conversion is intentionally explicit because canonical market storage remains fixed-point.
 /// `None` is reserved for a conversion failure; ordinary `i64` market values and the runtime's
@@ -255,7 +255,7 @@ pub type TrustedStudyRestore = fn(
 
 /// Build-time descriptor for one reviewed trusted-native study package.
 ///
-/// `AxiusFlow` does not load arbitrary native libraries at runtime. Product builds statically link
+/// `TradingPlot` does not load arbitrary native libraries at runtime. Product builds statically link
 /// approved study crates and list their descriptors at the desktop packaging boundary. The signed
 /// application therefore defines the trust set.
 #[derive(Clone, Copy)]
@@ -2503,7 +2503,7 @@ pub mod builtins {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::BarPeriod;
+    use tradingplot_market_data::BarPeriod;
 
     fn test_series() -> BarSeriesKey {
         BarSeriesKey {

@@ -55,7 +55,7 @@ mod tests {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let root = std::env::temp_dir().join(format!("axiusflow-atomic-file-{nonce}"));
+        let root = std::env::temp_dir().join(format!("tradingplot-atomic-file-{nonce}"));
         std::fs::create_dir_all(&root).expect("fixture root");
         let destination = root.join("current.json");
         let source = root.join("current.json.next");

@@ -24,7 +24,7 @@ pub struct MarketEventProvenance {
     pub exchange_timestamp_unix_nanos: i64,
     pub provider_receive_timestamp_unix_nanos: i64,
     pub nic_receive_timestamp_unix_nanos: Option<i64>,
-    pub axiusflow_receive_timestamp_unix_nanos: i64,
+    pub tradingplot_receive_timestamp_unix_nanos: i64,
     pub normalized_timestamp_unix_nanos: i64,
     pub fanout_enqueue_timestamp_unix_nanos: Option<i64>,
     pub correction_flags: u64,
@@ -163,7 +163,7 @@ fn update_provenance_digest(digest: &mut Sha256, provenance: &MarketEventProvena
     }
     digest.update(
         provenance
-            .axiusflow_receive_timestamp_unix_nanos
+            .tradingplot_receive_timestamp_unix_nanos
             .to_be_bytes(),
     );
     digest.update(provenance.normalized_timestamp_unix_nanos.to_be_bytes());
@@ -479,7 +479,7 @@ mod tests {
             exchange_timestamp_unix_nanos: 1_000_000_000,
             provider_receive_timestamp_unix_nanos: 1_000_000_001,
             nic_receive_timestamp_unix_nanos: None,
-            axiusflow_receive_timestamp_unix_nanos: 1_000_000_002,
+            tradingplot_receive_timestamp_unix_nanos: 1_000_000_002,
             normalized_timestamp_unix_nanos: 1_000_000_003,
             fanout_enqueue_timestamp_unix_nanos: None,
             correction_flags: 0,

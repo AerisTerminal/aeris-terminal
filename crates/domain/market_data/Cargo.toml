@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_market_data"
+name = "tradingplot_market_data"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

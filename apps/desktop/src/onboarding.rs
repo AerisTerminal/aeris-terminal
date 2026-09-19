@@ -1,11 +1,13 @@
 use std::time::Duration;
 
-use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     App, Context, Entity, IntoElement, MouseButton, Render, RenderOnce, Role, Window, div,
     prelude::*, px, relative,
 };
 use gpui_base::{Easing, Transition, transition};
+use tradingplot_design_system::{
+    RadiusToken, TradingPlotTheme, TypographyRole, platform_font_family,
+};
 
 use crate::desktop::native_ui::platform_font_weight;
 use crate::{
@@ -14,7 +16,7 @@ use crate::{
 };
 
 pub(super) struct OnboardingApp {
-    theme: AxiusflowTheme,
+    theme: TradingPlotTheme,
     polling: bool,
     launch_error: Option<String>,
     terminal: Option<Entity<crate::desktop::TerminalApp>>,
@@ -24,7 +26,7 @@ pub(super) struct OnboardingApp {
 impl OnboardingApp {
     pub(super) fn new() -> Self {
         Self {
-            theme: AxiusflowTheme::dark(),
+            theme: TradingPlotTheme::dark(),
             polling: false,
             launch_error: None,
             terminal: None,
@@ -33,19 +35,19 @@ impl OnboardingApp {
     }
 
     fn begin_sign_in(cx: &mut App) {
-        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+        if let Some(account) = tradingplot_desktop::account::DesktopAccount::shared()
             && let Err(error) = account.request_sign_in()
         {
-            eprintln!("Axiusflow sign-in degraded: {error}");
+            eprintln!("TradingPlot sign-in degraded: {error}");
         }
         cx.refresh_windows();
     }
 
     fn reopen_sign_in(cx: &mut App) {
-        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+        if let Some(account) = tradingplot_desktop::account::DesktopAccount::shared()
             && let Err(error) = account.reopen_browser()
         {
-            eprintln!("Axiusflow sign-in browser reopen degraded: {error}");
+            eprintln!("TradingPlot sign-in browser reopen degraded: {error}");
         }
         cx.refresh_windows();
     }
@@ -65,10 +67,11 @@ impl OnboardingApp {
                     .timer(Duration::from_millis(100))
                     .await;
                 let Ok(finished) = screen.update_in(cx, |screen, _, screen_cx| {
-                    let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() else {
+                    let Some(account) = tradingplot_desktop::account::DesktopAccount::shared()
+                    else {
                         if screen.launch_error.is_none() {
                             screen.launch_error = Some(
-                                "Sign-in service is unavailable. Restart Axiusflow.".to_string(),
+                                "Sign-in service is unavailable. Restart TradingPlot.".to_string(),
                             );
                             screen.loading = false;
                             screen_cx.notify();
@@ -102,11 +105,12 @@ impl OnboardingApp {
                     // expiry may have landed while startup ran. Drop the
                     // just-built workers on this background task and resume
                     // waiting instead of attaching stale state to the window.
-                    let still_authenticated = axiusflow_desktop::account::DesktopAccount::shared()
-                        .is_some_and(|account| {
-                            let _ = account.poll();
-                            account.authenticated()
-                        });
+                    let still_authenticated = tradingplot_desktop::account::DesktopAccount::shared(
+                    )
+                    .is_some_and(|account| {
+                        let _ = account.poll();
+                        account.authenticated()
+                    });
                     if !still_authenticated {
                         drop(configured);
                         let _ = screen.update_in(cx, |screen, _, screen_cx| {
@@ -164,7 +168,7 @@ struct OnboardingButton {
     label: &'static str,
     primary: bool,
     pending: bool,
-    theme: AxiusflowTheme,
+    theme: TradingPlotTheme,
 }
 
 impl RenderOnce for OnboardingButton {
@@ -259,7 +263,7 @@ fn onboarding_button(
     label: &'static str,
     primary: bool,
     pending: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement {
     OnboardingButton {
         id,
@@ -276,7 +280,7 @@ impl Render for OnboardingApp {
             return terminal.clone().into_any_element();
         }
         self.start_account_poll(window, cx);
-        if axiusflow_desktop::account::DesktopAccount::shared()
+        if tradingplot_desktop::account::DesktopAccount::shared()
             .is_some_and(|account| account.verification_pending())
         {
             return session_verification_surface(window, &self.theme).into_any_element();
@@ -305,7 +309,7 @@ impl Render for OnboardingApp {
                 .into_any_element();
         }
         if self.loading
-            || axiusflow_desktop::account::DesktopAccount::shared()
+            || tradingplot_desktop::account::DesktopAccount::shared()
                 .is_some_and(|account| account.authenticated())
         {
             return div()
@@ -322,7 +326,7 @@ impl Render for OnboardingApp {
     }
 }
 
-fn session_verification_surface(window: &Window, theme: &AxiusflowTheme) -> gpui::Div {
+fn session_verification_surface(window: &Window, theme: &TradingPlotTheme) -> gpui::Div {
     let colors = theme.colors;
     div()
         .relative()
@@ -360,13 +364,13 @@ fn session_verification_surface(window: &Window, theme: &AxiusflowTheme) -> gpui
                         .mt_2()
                         .text_sm()
                         .text_color(gpui_color(colors.text_secondary))
-                        .child("Checking your existing Axiusflow credentials."),
+                        .child("Checking your existing TradingPlot credentials."),
                 ),
         )
 }
 
 fn onboarding_status(
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     launch_error: Option<&String>,
     account_error: Option<&str>,
     request_pending: bool,
@@ -424,14 +428,14 @@ fn onboarding_status(
 
 pub(super) fn onboarding_surface(
     window: &Window,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     launch_error: Option<&String>,
 ) -> gpui::Div {
     let colors = theme.colors;
-    let account = axiusflow_desktop::account::DesktopAccount::shared();
+    let account = tradingplot_desktop::account::DesktopAccount::shared();
     let presentation = account
         .as_ref()
-        .map(axiusflow_desktop::account::DesktopAccount::presentation);
+        .map(tradingplot_desktop::account::DesktopAccount::presentation);
     let authorizing = presentation
         .as_ref()
         .is_some_and(|view| view.action == "Waiting for browser");
@@ -439,7 +443,7 @@ pub(super) fn onboarding_surface(
     let pending = request_pending || authorizing;
     let account_error = account
         .as_ref()
-        .and_then(axiusflow_desktop::account::DesktopAccount::error);
+        .and_then(tradingplot_desktop::account::DesktopAccount::error);
     let status = onboarding_status(
         theme,
         launch_error,
@@ -478,7 +482,7 @@ pub(super) fn onboarding_surface(
                             .mt_8()
                             .text_3xl()
                             .font_weight(platform_font_weight(TypographyRole::Strong))
-                            .child("AXIUSFLOW"),
+                            .child("TRADINGPLOT"),
                     )
                     .child(
                         div()

@@ -1,7 +1,7 @@
 use crate::series_store::{SeriesSnapshot, SeriesTail, SeriesTailOperation};
 use crate::{ConsumerId, EngineError, GenerationId, ProviderGeneration};
-use axiusflow_market_data::{BarSeriesKey, MarketBar};
 use std::{collections::BTreeMap, sync::Arc};
+use tradingplot_market_data::{BarSeriesKey, MarketBar};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConsumerPublication {

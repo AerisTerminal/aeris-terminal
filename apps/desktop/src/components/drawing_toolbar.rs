@@ -131,7 +131,7 @@ pub(super) fn drawing_toolbar(
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
     scroll: &ScrollHandle,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let tool_terminal = terminal.clone();
@@ -207,7 +207,7 @@ pub(super) fn drawing_toolbar(
 fn drawing_toolbar_actions(
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     div()
         .flex()
@@ -271,7 +271,7 @@ fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
 fn drawing_toolbar_collapse(
     terminal: Entity<TerminalApp>,
     time_axis_height: f32,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let height = drawing_toolbar_toggle_height(time_axis_height);
@@ -325,7 +325,7 @@ impl DrawingActionSpec {
 fn drawing_action_control(
     spec: DrawingActionSpec,
     app: Entity<WorkspaceSurface>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let button = drawing_toolbar_button(
         spec.id,
@@ -345,7 +345,7 @@ fn drawing_action_control(
 pub(super) fn drawing_toolbar_expander(
     terminal: Entity<TerminalApp>,
     time_axis_height: f32,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let height = drawing_toolbar_toggle_height(time_axis_height);
@@ -371,7 +371,7 @@ fn drawing_toolbar_toggle_hit(
     id: &'static str,
     icon: HugeIcon,
     tooltip: &'static str,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let colors = theme.colors;
@@ -402,7 +402,7 @@ fn drawing_toolbar_button(
     icon: DrawingToolIcon,
     _tooltip: &'static str,
     icon_size: f32,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     selected: bool,
 ) -> Button {
     let icon = match icon {

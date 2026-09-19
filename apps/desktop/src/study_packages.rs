@@ -4,7 +4,7 @@
 //! becomes trusted only when the signed desktop build links it and adds its descriptor to this
 //! bounded list.
 
-use axiusflow_study_sdk::{TrustedStudyPackage, TrustedStudyRegistry, TrustedStudyRegistryError};
+use tradingplot_study_sdk::{TrustedStudyPackage, TrustedStudyRegistry, TrustedStudyRegistryError};
 
 /// Build-time allowlist for reviewed external native study packages.
 ///

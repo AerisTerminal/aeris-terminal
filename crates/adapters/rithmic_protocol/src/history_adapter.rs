@@ -4,21 +4,21 @@ use crate::{
     RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicHistoryConnection,
     RithmicProviderInstrument, RithmicSessionMessage, TimeBarReplayRequest, TimeBarType,
 };
-use axiusflow_market_data::{
-    ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation, RithmicTimeUnit,
-};
-use axiusflow_provider_history::{
-    DataClass, DatasetCapability, HandoffBatch, HandoffCoordinator, HandoffState,
-    HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
-    LiveAcceptance, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
-    SequencedHistory, VerifiedHistorySnapshot,
-};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use tradingplot_market_data::{
+    ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation, RithmicTimeUnit,
+};
+use tradingplot_provider_history::{
+    DataClass, DatasetCapability, HandoffBatch, HandoffCoordinator, HandoffState,
+    HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
+    LiveAcceptance, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
+    SequencedHistory, VerifiedHistorySnapshot,
 };
 
 const PROVIDER_ID: &str = "rithmic";
@@ -1224,8 +1224,8 @@ mod tests {
     use super::*;
     use crate::InstrumentDescriptor;
     use crate::{BarIdentity, DecodedTickBar, ObservedHistoryRange, Ohlc, TickBarKey};
-    use axiusflow_provider_history::HistoryRange;
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+    use tradingplot_provider_history::HistoryRange;
 
     #[derive(Clone)]
     struct FixtureTransport {

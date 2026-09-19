@@ -1,9 +1,9 @@
-use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
-use axiusflow_rithmic_protocol_adapter::{
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCredentialBytes,
-};
 use rpassword::prompt_password;
 use std::{fmt, io::IsTerminal};
+use tradingplot_platform_runtime::{CredentialVault, NativeCredentialVault};
+use tradingplot_rithmic_protocol_adapter::{
+    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCredentialBytes,
+};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

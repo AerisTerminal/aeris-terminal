@@ -1,7 +1,7 @@
 //! Bounded displayed-provenance retention for the chart view.
 
-use axiusflow_application::{MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot};
 use std::{collections::BTreeMap, num::NonZeroUsize};
+use tradingplot_application::{MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot};
 
 const DISPLAYED_PROVENANCE_MAX_ITEMS: usize = 4_096;
 

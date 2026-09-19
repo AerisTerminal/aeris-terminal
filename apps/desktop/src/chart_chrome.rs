@@ -1,5 +1,3 @@
-use axiusflow_chart_integration::ChartType;
-use axiusflow_design_system::RadiusToken;
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
@@ -7,6 +5,8 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+use tradingplot_chart_integration::ChartType;
+use tradingplot_design_system::RadiusToken;
 
 pub const CHART_CHROME_HEIGHT: f32 = 44.0;
 pub const CHART_CONTROL_SIZE: f32 = 32.0;
@@ -361,7 +361,7 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
 
 #[must_use]
 pub fn chart_chrome_state_path() -> Option<PathBuf> {
-    axiusflow_platform_runtime::native_data_root()
+    tradingplot_platform_runtime::native_data_root()
         .ok()
         .map(|root| root.join("desktop").join("chart-chrome"))
 }
@@ -588,13 +588,13 @@ mod tests {
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
     };
-    use axiusflow_chart_integration::ChartType;
     use std::sync::Mutex;
     use std::time::Duration;
+    use tradingplot_chart_integration::ChartType;
 
     fn temporary_chart_chrome_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "axiusflow-chart-chrome-{label}-{}-{}",
+            "tradingplot-chart-chrome-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

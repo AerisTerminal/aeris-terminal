@@ -1,13 +1,13 @@
-# AxiusFlow Study SDK
+# TradingPlot Study SDK
 
-`axiusflow_study_sdk` is the author-facing Rust facade for native studies that execute inside the
-AxiusFlow Study Runtime. A study declares durable settings, dependencies, outputs, invalidation,
+`tradingplot_study_sdk` is the author-facing Rust facade for native studies that execute inside the
+TradingPlot Study Runtime. A study declares durable settings, dependencies, outputs, invalidation,
 and a trusted Rust calculation function. The runtime owns scheduling, bounded buffers, state
 accounting, transaction/rollback, and provider demand derived from those declarations.
 
 ## Trust and packaging model
 
-Native studies are **statically linked trusted code**. AxiusFlow does not scan a plugin directory,
+Native studies are **statically linked trusted code**. TradingPlot does not scan a plugin directory,
 load arbitrary DLLs/shared libraries, or define a public native ABI. A production build approves a
 study by pinning/reviewing its crate and dependency closure, linking it into the application, and
 adding its `TrustedStudyPackage` descriptor to the bounded product allowlist in
@@ -30,7 +30,7 @@ Restore callbacks are part of the reviewed static package boundary: they must be
 bounded, and free of network, disk, process, or other blocking I/O.
 
 ```rust
-use axiusflow_study_sdk::{
+use tradingplot_study_sdk::{
     STUDY_SDK_COMPATIBILITY_EPOCH, TrustedStudyPackage,
 };
 
@@ -40,7 +40,7 @@ pub const PACKAGE: TrustedStudyPackage = TrustedStudyPackage::new(
     1,
     restore,
 );
-# use axiusflow_study_sdk::{NativeStudyRegistration, StudyDependency, StudySdkError, StudySettingValue};
+# use tradingplot_study_sdk::{NativeStudyRegistration, StudyDependency, StudySdkError, StudySettingValue};
 # use std::collections::BTreeMap;
 # fn restore(_: u32, _: Vec<StudyDependency>, _: BTreeMap<String, StudySettingValue>) -> Result<NativeStudyRegistration, StudySdkError> { unimplemented!() }
 ```
@@ -111,7 +111,7 @@ The examples compile against the SDK facade only:
 Check all examples with:
 
 ```text
-cargo check -p axiusflow_study_sdk --examples --locked
+cargo check -p tradingplot_study_sdk --examples --locked
 ```
 
 The built-in studies in `src/lib.rs` are production examples of settings metadata, recursive

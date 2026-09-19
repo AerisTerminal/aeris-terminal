@@ -164,7 +164,7 @@ pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) enabled: bool,
     pub(super) error: Option<&'a str>,
     pub(super) workspace_drag: Option<WorkspaceDragState>,
-    pub(super) theme: AxiusflowTheme,
+    pub(super) theme: TradingPlotTheme,
 }
 
 pub(super) fn workspace_window_drag_region(
@@ -236,8 +236,8 @@ pub(super) fn workspace_title_bar(
             .flex_1(),
         terminal,
     );
-    let account = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
-        axiusflow_desktop::account::unavailable_menu_state,
+    let account = tradingplot_desktop::account::DesktopAccount::shared().map_or_else(
+        tradingplot_desktop::account::unavailable_menu_state,
         |account| account.menu_state(),
     );
     let profile_region = div()
@@ -288,7 +288,7 @@ fn workspace_caption_control(
     terminal: Option<&Entity<TerminalApp>>,
     spec: CaptionControlSpec,
     pointer_owner: CaptionPointerOwner,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Stateful<Div> {
     let CaptionControlSpec {
         id,
@@ -354,7 +354,7 @@ fn workspace_caption_control(
 pub(super) fn workspace_window_controls(
     terminal: &Entity<TerminalApp>,
     window: &Window,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Div {
     let pointer_owner = caption_pointer_owner(current_caption_platform());
     if pointer_owner == CaptionPointerOwner::System {
@@ -416,7 +416,7 @@ pub(super) fn workspace_window_controls(
         .child(close)
 }
 
-pub(super) fn onboarding_title_bar(window: &Window, theme: &AxiusflowTheme) -> Div {
+pub(super) fn onboarding_title_bar(window: &Window, theme: &TradingPlotTheme) -> Div {
     let pointer_owner = caption_pointer_owner(current_caption_platform());
     let drag_region = div().id("onboarding_window_drag_region").h_full().flex_1();
     let drag_region = if current_caption_platform() == CaptionPlatform::Windows {
@@ -615,7 +615,7 @@ pub(super) fn header_controls(
 
 fn header_global_controls(
     terminal: &Entity<TerminalApp>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     div()
         .w(px(HEADER_GLOBAL_CONTROLS_WIDTH))
@@ -631,7 +631,7 @@ fn header_global_controls(
 
 pub(super) fn side_panel_toggle(
     app: Entity<WorkspaceSurface>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     panel: SidePanel,
     enabled: bool,
     selected: bool,
@@ -668,7 +668,7 @@ pub(super) fn side_panel_toggle(
 
 pub(super) fn connection_status_indicator(
     presentation: ConnectionPresentation,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let color = (presentation.color)(theme);
     let provider = SharedString::from(presentation.provider);
@@ -702,7 +702,7 @@ struct ConnectionStatusTooltip {
     provider: SharedString,
     status: SharedString,
     latency: SharedString,
-    theme: AxiusflowTheme,
+    theme: TradingPlotTheme,
 }
 
 impl Render for ConnectionStatusTooltip {
@@ -717,7 +717,7 @@ impl Render for ConnectionStatusTooltip {
                 .border_1()
                 .border_color(gpui_color(colors.border))
                 .bg(gpui_color(colors.surface))
-                .font_family(axiusflow_design_system::platform_font_family())
+                .font_family(tradingplot_design_system::platform_font_family())
                 .font_weight(platform_font_weight(TypographyRole::Normal))
                 .flex()
                 .flex_col()
@@ -748,7 +748,7 @@ fn connection_tooltip_row(
     label: &'static str,
     value: SharedString,
     numeric: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     div()
         .flex()
@@ -763,7 +763,7 @@ fn connection_tooltip_row(
         )
         .child(if numeric {
             div()
-                .font_family(axiusflow_design_system::platform_font_family())
+                .font_family(tradingplot_design_system::platform_font_family())
                 .font_features(platform_tabular_numerals())
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_primary))
@@ -789,7 +789,7 @@ struct PanelToggleState {
 
 fn panel_toggle(
     state: PanelToggleState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     app: Entity<WorkspaceSurface>,
 ) -> impl IntoElement {
     let button = Button::new(state.id)
@@ -859,7 +859,7 @@ fn drawing_history_control(
     app: Entity<WorkspaceSurface>,
     control: DrawingHistoryControl,
     history: DrawingHistoryState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let enabled = control.enabled(history);
     let button = Button::new(control.id())
@@ -880,12 +880,12 @@ fn drawing_history_control(
 
 pub(super) fn theme_toggle(
     terminal: Entity<TerminalApp>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let next = theme.mode.toggled();
     let icon = match next {
-        axiusflow_design_system::ThemeMode::Light => HugeIcon::Sun,
-        axiusflow_design_system::ThemeMode::Dark => HugeIcon::Moon,
+        tradingplot_design_system::ThemeMode::Light => HugeIcon::Sun,
+        tradingplot_design_system::ThemeMode::Dark => HugeIcon::Moon,
     };
     let tooltip = format!("Switch to {} theme", next.label());
     let button = Button::new("theme_toggle")
@@ -964,7 +964,7 @@ pub(super) fn rasterize_colored_svg(
         return Ok(Arc::clone(image));
     }
 
-    let bytes = assets::AxiusflowAssets
+    let bytes = assets::TradingPlotAssets
         .load(path.as_ref())
         .map_err(|error| gpui::ImageCacheError::Other(Arc::new(error)))?
         .ok_or_else(|| {
@@ -1030,7 +1030,7 @@ pub(super) fn exchange_mark(
     logo: assets::ExchangeLogo,
     size: Pixels,
     bordered: bool,
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
 ) -> Div {
     let glyph_size = if bordered { size - px(4.0) } else { size };
     div()
@@ -1061,7 +1061,7 @@ pub(super) fn chrome_tooltip(
     id: &'static str,
     label: impl Into<gpui::SharedString>,
     trigger: impl IntoElement + 'static,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     with_tooltip(
         (id, usize::MAX),
@@ -1076,7 +1076,7 @@ pub(super) fn series_selector(
     label: String,
     _message: String,
     pending: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     enabled: bool,
 ) -> impl IntoElement {
     let button = Button::new("series_selector")
@@ -1132,7 +1132,7 @@ pub(super) fn chart_type_selector(
     chart_type: ChartType,
     label: String,
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement {
     let button = Button::new("chart_type_selector")
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
@@ -1180,7 +1180,7 @@ pub(super) fn chart_type_selector(
 
 pub(super) fn chrome_button_style(
     button: Button,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     selected: bool,
     enabled: bool,
 ) -> Button {
@@ -1200,7 +1200,7 @@ pub(super) fn chrome_button_style(
 }
 
 pub(super) fn chrome_control_foreground(
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
     selected: bool,
     enabled: bool,
 ) -> ThemeColor {
@@ -1239,7 +1239,7 @@ pub(super) fn button_activation_at(
     })
 }
 
-type ConnectionColor = fn(&AxiusflowTheme) -> ThemeColor;
+type ConnectionColor = fn(&TradingPlotTheme) -> ThemeColor;
 
 pub(super) struct ConnectionPresentation {
     pub(super) provider: &'static str,

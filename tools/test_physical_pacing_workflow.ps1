@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $finalizer = Join-Path $PSScriptRoot "finalize_physical_pacing_matrix.ps1"
 $verifier = Join-Path $PSScriptRoot "verify_physical_pacing_matrix.ps1"
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("axiusflow-physical-pacing-workflow-" + [Guid]::NewGuid().ToString("N"))
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("tradingplot-physical-pacing-workflow-" + [Guid]::NewGuid().ToString("N"))
 $null = New-Item -ItemType Directory -Path $testRoot
 
 function Write-Json {
@@ -43,7 +43,7 @@ function Invoke-Verifier {
 }
 
 try {
-    $binaryPath = Join-Path $testRoot "axiusflow_desktop.exe"
+    $binaryPath = Join-Path $testRoot "tradingplot_desktop.exe"
     $cargoLockPath = Join-Path $testRoot "Cargo.lock"
     [IO.File]::WriteAllBytes($binaryPath, [byte[]](9, 8, 7, 6))
     [IO.File]::WriteAllText($cargoLockPath, "fixture-lock")
@@ -58,7 +58,7 @@ try {
         source_worktree_clean = $true
         cargo_lock_path = "Cargo.lock"
         cargo_lock_sha256 = $cargoLockHash
-        binary_path = "axiusflow_desktop.exe"
+        binary_path = "tradingplot_desktop.exe"
         binary_sha256 = $binaryHash
         required_profiles_hz = @(60, 120, 144)
         prepared_utc = "2030-01-01T00:00:00Z"

@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_account_runtime"
+name = "tradingplot_account_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,9 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-axiusflow_account = { path = "../domain/account" }
-axiusflow_contracts = { path = "../contracts" }
-axiusflow_platform_runtime = { path = "../platform_runtime" }
+tradingplot_account = { path = "../domain/account" }
+tradingplot_contracts = { path = "../contracts" }
+tradingplot_platform_runtime = { path = "../platform_runtime" }
 base64.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true

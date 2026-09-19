@@ -22,12 +22,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_account::{
+use tradingplot_account::{
     AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
     MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
 };
-use axiusflow_contracts::{AccountSessionState, AccountView, LoginAuthorization};
-use axiusflow_platform_runtime::{CredentialVault, NativeCredentialVault};
+use tradingplot_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+use tradingplot_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
 use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, device_id_for_key};
@@ -40,12 +40,16 @@ use pkce::{PkceVerifier, generate_oauth_random};
 
 /// How long one login transaction waits for the browser callback.
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
-/// Native public client identifier registered with the control plane.
+/// Native public client identifier currently registered with the control plane.
+///
+/// This is an external deployment contract and remains stable across the
+/// `TradingPlot` product-name migration until the control plane provisions a new
+/// client identifier.
 pub const NATIVE_CLIENT_ID: &str = "axiusflow-desktop";
-/// Default control-plane OIDC issuer (the Better Auth mount).
+/// Currently provisioned control-plane OIDC issuer (the Better Auth mount).
 pub const DEFAULT_AUTH_ISSUER: &str = "https://auth.axiusflow.com/api/auth";
 
-const ACCOUNT_VAULT_SERVICE: &str = "com.axiusflow.account";
+const ACCOUNT_VAULT_SERVICE: &str = "com.tradingplot.account";
 const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
 const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
@@ -110,8 +114,7 @@ impl AccountServiceConfig {
     /// Reads deployment configuration from the environment.
     #[must_use]
     pub fn from_environment() -> Self {
-        let issuer = std::env::var("AXIUSFLOW_AUTH_ISSUER")
-            .unwrap_or_else(|_| DEFAULT_AUTH_ISSUER.to_string());
+        let issuer = configured_auth_issuer(|name| std::env::var(name).ok());
         Self {
             issuer,
             client_id: NATIVE_CLIENT_ID.to_string(),
@@ -123,6 +126,12 @@ impl AccountServiceConfig {
     pub fn is_configured(&self) -> bool {
         self.issuer.starts_with("https://") && !self.client_id.trim().is_empty()
     }
+}
+
+fn configured_auth_issuer(mut read: impl FnMut(&str) -> Option<String>) -> String {
+    read("TRADINGPLOT_AUTH_ISSUER")
+        .or_else(|| read("AXIUSFLOW_AUTH_ISSUER"))
+        .unwrap_or_else(|| DEFAULT_AUTH_ISSUER.to_string())
 }
 
 struct PendingLogin {
@@ -265,7 +274,7 @@ impl AccountService {
     /// Creates an account session starting signed out.
     #[must_use]
     pub fn new(config: AccountServiceConfig) -> Self {
-        let rejected_restore_marker = axiusflow_platform_runtime::native_data_root()
+        let rejected_restore_marker = tradingplot_platform_runtime::native_data_root()
             .map_or(RejectedRestoreMarker::Unavailable, |root| {
                 RejectedRestoreMarker::Path(root.join(REJECTED_RESTORE_MARKER_FILE))
             });
@@ -397,7 +406,7 @@ impl AccountService {
         }
         let restoring = self.clone();
         if std::thread::Builder::new()
-            .name("axiusflow-account-restore".to_string())
+            .name("tradingplot-account-restore".to_string())
             .spawn(move || restoring.restore_online_session())
             .is_err()
         {
@@ -757,7 +766,7 @@ impl AccountService {
     fn spawn_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
         let service = self.clone();
         std::thread::Builder::new()
-            .name("axiusflow-account-cached-expiry".to_string())
+            .name("tradingplot-account-cached-expiry".to_string())
             .spawn(move || service.run_cached_lease_expiry_worker(expires_at_unix_seconds))
             .ok();
     }
@@ -1183,7 +1192,7 @@ impl AccountService {
         );
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("axiusflow-account-login".to_string())
+            .name("tradingplot-account-login".to_string())
             .spawn(move || service.run_login_transaction(request_generation, &listener))
             .is_err()
         {
@@ -1266,7 +1275,7 @@ impl AccountService {
 
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("axiusflow-account-profile-refresh".to_string())
+            .name("tradingplot-account-profile-refresh".to_string())
             .spawn(move || {
                 service.run_profile_refresh(generation);
                 service
@@ -1349,10 +1358,10 @@ impl AccountService {
         };
         if let Some((endpoints, token)) = revocation {
             std::thread::Builder::new()
-                .name("axiusflow-account-revoke".to_string())
+                .name("tradingplot-account-revoke".to_string())
                 .spawn(move || {
                     if oidc::revoke_refresh(&endpoints, &token).is_err() {
-                        eprintln!("Axiusflow sign-out revocation degraded");
+                        eprintln!("TradingPlot sign-out revocation degraded");
                     }
                 })
                 .ok();
@@ -1512,7 +1521,7 @@ impl AccountService {
                     // retired state or weakening enforcement.
                     let service = self.clone();
                     std::thread::Builder::new()
-                        .name("axiusflow-account-lease-warmup".to_string())
+                        .name("tradingplot-account-lease-warmup".to_string())
                         .spawn(move || {
                             if let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) {
                                 service.refresh_lease_once(
@@ -1596,7 +1605,7 @@ impl AccountService {
         };
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("axiusflow-account-lease".to_string())
+            .name("tradingplot-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .is_err()
         {
@@ -1635,7 +1644,7 @@ impl AccountService {
     fn spawn_lease_worker(&self, generation: u64) -> bool {
         let service = self.clone();
         std::thread::Builder::new()
-            .name("axiusflow-account-lease".to_string())
+            .name("tradingplot-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .is_ok()
     }
@@ -1919,7 +1928,7 @@ fn lock_state(
 
 /// Redacted lease observation: outcome class only, never identities.
 fn note_lease(outcome: &str) {
-    eprintln!("Axiusflow lease: {outcome}");
+    eprintln!("TradingPlot lease: {outcome}");
 }
 
 /// Sleeps until the next lease round in interruptible slices. Returns false
@@ -2727,12 +2736,9 @@ mod tests {
     use super::{
         AccountRestoreReadiness, AccountService, AccountServiceConfig, DEVICE_VAULT_KEY,
         LEASE_DIRECTORY_VAULT_KEY, LEASE_VAULT_KEY, LOGIN_TIMEOUT, LocalRestore, REFRESH_VAULT_KEY,
-        RejectedRestoreMarker, UnavailableVault, claim_profile_refresh,
+        RejectedRestoreMarker, UnavailableVault, claim_profile_refresh, configured_auth_issuer,
         oidc::{self, AccountProfile, VerifiedTokens},
     };
-    use axiusflow_account::{AccountId, PlanId};
-    use axiusflow_contracts::{AccountSessionState, AccountView};
-    use axiusflow_platform_runtime::CredentialVault;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::{
@@ -2746,8 +2752,29 @@ mod tests {
         },
         time::Duration,
     };
+    use tradingplot_account::{AccountId, PlanId};
+    use tradingplot_contracts::{AccountSessionState, AccountView};
+    use tradingplot_platform_runtime::CredentialVault;
 
     static MARKER_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn auth_issuer_prefers_tradingplot_override_then_legacy_override_then_default() {
+        let preferred = configured_auth_issuer(|name| match name {
+            "TRADINGPLOT_AUTH_ISSUER" => Some("https://preferred.example/api/auth".to_string()),
+            "AXIUSFLOW_AUTH_ISSUER" => Some("https://legacy.example/api/auth".to_string()),
+            _ => None,
+        });
+        assert_eq!(preferred, "https://preferred.example/api/auth");
+
+        let legacy = configured_auth_issuer(|name| match name {
+            "AXIUSFLOW_AUTH_ISSUER" => Some("https://legacy.example/api/auth".to_string()),
+            _ => None,
+        });
+        assert_eq!(legacy, "https://legacy.example/api/auth");
+
+        assert_eq!(configured_auth_issuer(|_| None), super::DEFAULT_AUTH_ISSUER);
+    }
 
     #[derive(Default)]
     struct MemoryVault {
@@ -3030,7 +3057,7 @@ mod tests {
     fn marker_fixture() -> (PathBuf, PathBuf) {
         let sequence = MARKER_FIXTURE_SEQUENCE.fetch_add(1, Ordering::AcqRel);
         let root = std::env::temp_dir().join(format!(
-            "axiusflow-account-restore-marker-{}-{sequence}",
+            "tradingplot-account-restore-marker-{}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("marker fixture directory creates");
@@ -5544,7 +5571,7 @@ mod tests {
     #[test]
     fn sign_out_clears_state_and_deletes_vault_material() {
         use super::{DEVICE_VAULT_KEY, LEASE_VAULT_KEY, PROFILE_VAULT_KEY, REFRESH_VAULT_KEY};
-        use axiusflow_platform_runtime::CredentialVault as _;
+        use tradingplot_platform_runtime::CredentialVault as _;
 
         let service = service();
         let vault = MemoryVault::default();

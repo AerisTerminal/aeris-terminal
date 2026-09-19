@@ -1,8 +1,8 @@
-use axiusflow_provider_history::{
+use std::num::{NonZeroU64, NonZeroUsize};
+use tradingplot_provider_history::{
     HandoffCoordinator, HandoffState, LiveAcceptance, ProviderHistoryError, SequencedHistory,
     VerifiedHistorySnapshot,
 };
-use std::num::{NonZeroU64, NonZeroUsize};
 
 #[test]
 fn snapshot_cutover_discards_overlap_and_releases_only_contiguous_live_data() {

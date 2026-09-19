@@ -8,12 +8,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_hyperliquid_market_adapter::{
+use tradingplot_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidSocket, SocketEvent, WsClientEvent,
     build_aggregated_l2_subscription, build_ping, build_unsubscribe, decode_book_snapshot,
     parse_ws_frame,
 };
-use axiusflow_market_data::DepthSnapshot;
+use tradingplot_market_data::DepthSnapshot;
 
 use crate::{
     hyperliquid_realtime::HyperliquidInstrumentDemand, market_service::ProviderCoordinatorWake,

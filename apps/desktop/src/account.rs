@@ -12,8 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_account_runtime::{AccountRefreshQuiesce, AccountService, AccountServiceConfig};
-use axiusflow_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+use tradingplot_account_runtime::{AccountRefreshQuiesce, AccountService, AccountServiceConfig};
+use tradingplot_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
 pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section=profile";
@@ -26,11 +26,12 @@ pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section
 /// Returns an error when the background browser worker cannot be started.
 pub fn open_manage_profile() -> Result<(), String> {
     std::thread::Builder::new()
-        .name("axiusflow-open-profile".to_string())
+        .name("tradingplot-open-profile".to_string())
         .spawn(|| {
-            if let Err(error) = axiusflow_platform_runtime::open_system_browser(MANAGE_PROFILE_URL)
+            if let Err(error) =
+                tradingplot_platform_runtime::open_system_browser(MANAGE_PROFILE_URL)
             {
-                eprintln!("Axiusflow profile browser open degraded: {error}");
+                eprintln!("TradingPlot profile browser open degraded: {error}");
             }
         })
         .map(|_| ())
@@ -55,7 +56,7 @@ pub fn start_login(
     let authorization = service.begin_login(request_generation)?;
     if let Err(error) = open_login_browser_with(
         &authorization.authorization_url,
-        axiusflow_platform_runtime::open_system_browser,
+        tradingplot_platform_runtime::open_system_browser,
     ) {
         let _ = service.cancel_login(authorization.request_generation);
         return Err(error);
@@ -67,7 +68,7 @@ fn open_login_browser_with(
     url: &str,
     open_browser: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<(), String> {
-    if url.is_empty() || url.len() > axiusflow_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES {
+    if url.is_empty() || url.len() > tradingplot_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES {
         return Err("account service returned an invalid authorization URL".to_string());
     }
     open_browser(url).map_err(|_| "system browser could not be opened".to_string())
@@ -506,7 +507,7 @@ impl DesktopAccount {
         let (request_tx, request_rx) = mpsc::sync_channel(2);
         let (result_tx, result_rx) = mpsc::sync_channel(2);
         std::thread::Builder::new()
-            .name("axiusflow-account-client".to_string())
+            .name("tradingplot-account-client".to_string())
             .spawn(move || run_account_client_with(&request_rx, &result_tx, handle))
             .map_err(|_| "desktop account client could not start".to_string())?;
         // Generations seed from the wall clock so a fresh desktop process
@@ -534,7 +535,7 @@ impl DesktopAccount {
         });
         let poller = Arc::clone(&shared);
         std::thread::Builder::new()
-            .name("axiusflow-account-poller".to_string())
+            .name("tradingplot-account-poller".to_string())
             .spawn(move || {
                 for response in result_rx {
                     apply_account_response(&poller, response);
@@ -718,7 +719,7 @@ impl DesktopAccount {
             .and_then(|url| url.clone())
             .filter(|url| {
                 !url.is_empty()
-                    && url.len() <= axiusflow_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES
+                    && url.len() <= tradingplot_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES
             })
             .ok_or_else(|| "no sign-in page to reopen; start sign-in again".to_string())?;
         self.begin_request(
@@ -1078,7 +1079,7 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
         AccountRequest::ReopenBrowser { authorization_url } => {
             match open_login_browser_with(
                 &authorization_url,
-                axiusflow_platform_runtime::open_system_browser,
+                tradingplot_platform_runtime::open_system_browser,
             ) {
                 Ok(()) => AccountResponse::BrowserReopened,
                 Err(error) => AccountResponse::LoginActionFailed(error),
@@ -1127,10 +1128,10 @@ mod tests {
         account_state_label, open_login_browser_with, resolve_authoritative_authentication,
         sanitized_plan_label, unavailable_menu_state,
     };
-    use axiusflow_account_runtime::{AccountService, AccountServiceConfig};
-    use axiusflow_contracts::{AccountSessionState, AccountView};
     use std::sync::{Arc, Mutex, atomic::Ordering};
     use std::time::{Duration, Instant};
+    use tradingplot_account_runtime::{AccountService, AccountServiceConfig};
+    use tradingplot_contracts::{AccountSessionState, AccountView};
 
     /// Scripted fake runtime behind an isolated desktop session. The worker
     /// thread drives it exactly like production: Begin opens the browser
@@ -1668,7 +1669,7 @@ mod tests {
     #[test]
     fn authoritative_runtime_authentication_overrides_stale_desktop_view() {
         let runtime = AccountService::new(
-            AccountServiceConfig::try_new("https://auth.axiusflow.test/api/auth", "desktop-test")
+            AccountServiceConfig::try_new("https://auth.tradingplot.test/api/auth", "desktop-test")
                 .expect("test account config builds"),
         );
         let session = DesktopAccount::spawn_with_runtime(inert_engine, Some(runtime))

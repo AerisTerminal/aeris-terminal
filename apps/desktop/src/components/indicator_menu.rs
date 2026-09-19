@@ -11,7 +11,7 @@ pub(super) fn indicator_selector(
     _input: Entity<InputState>,
     _message: Option<String>,
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("indicator_selector")
         .icon(header_icon(HugeIcon::Chart))
@@ -58,7 +58,7 @@ fn available_indicator_rows(
     app: &Entity<WorkspaceSurface>,
     specs: &[&chart_chrome::IndicatorSpec],
     keyboard_selection: usize,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Vec<AnyElement> {
     specs
         .iter()
@@ -95,7 +95,7 @@ fn available_indicator_rows(
 pub(super) fn indicator_dialog_content(
     app: &Entity<WorkspaceSurface>,
     state: IndicatorDialogState<'_>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;

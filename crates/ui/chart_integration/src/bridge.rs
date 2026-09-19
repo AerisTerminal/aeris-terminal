@@ -1,11 +1,11 @@
 //! Bounded replay-to-Nucleus data bridge with correlated recovery commands.
 
-use axiusflow_application::{
+use std::{num::NonZeroUsize, time::Instant};
+use tradingplot_application::{
     ProvenancedMarketBar, ReplayRecoveryCommand, ReplaySession, ReplaySnapshot, ReplayStreamUpdate,
     ReplayValidationError, ResnapshotReason, SequenceDecision,
 };
-use axiusflow_terminal_ui::BoundedUiQueue;
-use std::{num::NonZeroUsize, time::Instant};
+use tradingplot_terminal_ui::BoundedUiQueue;
 
 pub(crate) const MAX_RECOVERY_DISPATCH_ATTEMPTS: usize = 3;
 
@@ -558,7 +558,7 @@ fn snapshot_may_replace(
 }
 
 fn delta_matches_snapshot(
-    delta: &axiusflow_application::StreamDelta<ProvenancedMarketBar>,
+    delta: &tradingplot_application::StreamDelta<ProvenancedMarketBar>,
     snapshot: &ReplaySnapshot,
 ) -> bool {
     let provenance = delta.item().provenance();
@@ -570,7 +570,7 @@ fn delta_matches_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
+    use tradingplot_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
 
     fn snapshot() -> ReplaySnapshot {
         EmbeddedReplaySource

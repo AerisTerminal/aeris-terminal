@@ -15,7 +15,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_platform_runtime::{
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ed25519_dalek::VerifyingKey;
+use sha2::{Digest as _, Sha256};
+use sysinfo::{ProcessesToUpdate, System};
+use tradingplot_platform_runtime::{
     ActiveRelease, BLOCK_PLAN_FILENAME, BlockFilePlan, CredentialVault, InstallationInventory,
     LifecycleHooks, MAXIMUM_SIGNED_BLOCK_PLAN_BYTES, NativeCredentialVault,
     RELEASE_CHANNEL_SCHEMA_VERSION, ReleaseChannelPointer, ReleaseFile, ReleaseInstaller,
@@ -23,10 +27,6 @@ use axiusflow_platform_runtime::{
     decode_and_verify_block_plan, native_install_root, native_installation_inventory,
     replace_file_atomically, rollout_eligible, verify_release_file, verify_release_manifest,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::VerifyingKey;
-use sha2::{Digest as _, Sha256};
-use sysinfo::{ProcessesToUpdate, System};
 
 // Candidate readiness is a bounded in-process runtime probe. Keep activation
 // finite while allowing one complete cold-start attempt on slower machines.
@@ -34,8 +34,12 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 const RESTART_COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
+// Stable launcher/desktop wire tokens. Continue emitting the pre-rename values
+// for compatibility with installed desktops, while accepting the transient
+// TradingPlot commit token emitted by rename-transition builds.
 const UPDATE_RESTART_READY: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
 const UPDATE_RESTART_COMMIT: &str = "AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
+const TRANSITIONAL_UPDATE_RESTART_COMMIT: &str = "TRADINGPLOT_UPDATE_RESTART_COMMIT_V1\n";
 const MAXIMUM_UPDATE_RESTART_COMMIT_BYTES: usize = 128;
 const MAXIMUM_INPUT_BYTES: u64 = 1024 * 1024;
 const RELEASE_HTTP_TIMEOUT: Duration = Duration::from_mins(10);
@@ -50,7 +54,7 @@ const EARLY_DESKTOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 fn main() {
     let no_arguments = std::env::args_os().len() == 1;
     if let Err(error) = run(std::env::args_os().skip(1)) {
-        eprintln!("Axiusflow lifecycle: {error}");
+        eprintln!("TradingPlot lifecycle: {error}");
         if no_arguments {
             show_user_launch_error(&error);
         }
@@ -63,7 +67,7 @@ fn show_user_launch_error(error: &str) {
     use std::os::windows::process::CommandExt as _;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const SCRIPT: &str = "$shell=New-Object -ComObject WScript.Shell; [void]$shell.Popup($env:AXIUSFLOW_LAUNCH_ERROR,0,'Axiusflow',16)";
+    const SCRIPT: &str = "$shell=New-Object -ComObject WScript.Shell; [void]$shell.Popup($env:TRADINGPLOT_LAUNCH_ERROR,0,'TradingPlot',16)";
     let message = user_launch_error_message(error);
     let _ = Command::new("powershell.exe")
         .args([
@@ -74,7 +78,7 @@ fn show_user_launch_error(error: &str) {
             "-Command",
             SCRIPT,
         ])
-        .env("AXIUSFLOW_LAUNCH_ERROR", message)
+        .env("TRADINGPLOT_LAUNCH_ERROR", message)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -87,7 +91,7 @@ fn show_user_launch_error(_error: &str) {}
 
 fn user_launch_error_message(error: &str) -> String {
     let detail: String = error.chars().take(320).collect();
-    format!("Axiusflow could not start.\n\n{detail}")
+    format!("TradingPlot could not start.\n\n{detail}")
 }
 
 fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
@@ -199,7 +203,7 @@ fn run(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
             remove_relocated_binary(&staged);
             result
         }
-        _ => Err("usage: axiusflow_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--prepare-update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher|--launcher-identity>".to_string()),
+        _ => Err("usage: tradingplot_launcher <--launch-desktop|--install <manifest> <bundle>|--update|--prepare-update|--update-and-restart|--check-update|--recover|--remove-all-local-data|--promote-stable-launcher|--launcher-identity>".to_string()),
     }
 }
 
@@ -216,7 +220,7 @@ fn bootstrap_update_and_launch(
 ) -> Result<(), String> {
     let install_root = native_install_root().map_err(|error| error.to_string())?;
     fs::create_dir_all(&install_root)
-        .map_err(|_| "per-user Axiusflow installation root could not be created".to_string())?;
+        .map_err(|_| "per-user TradingPlot installation root could not be created".to_string())?;
     // Validate the ownership root before copying the bootstrap into it. This
     // rejects a pre-created symlinked install root before the first write.
     let installer = ReleaseInstaller::new(&install_root, *verifying_key, ReleasePolicy::native(0))
@@ -251,7 +255,7 @@ fn bootstrap_requires_remote_install(active: Option<&ActiveRelease>) -> bool {
 fn windows_start_menu_shortcut() -> Result<PathBuf, String> {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .map(|root| root.join("Microsoft/Windows/Start Menu/Programs/Axiusflow/Axiusflow.lnk"))
+        .map(|root| root.join("Microsoft/Windows/Start Menu/Programs/TradingPlot/TradingPlot.lnk"))
         .ok_or_else(|| "Windows Start Menu location is unavailable".to_string())
 }
 
@@ -294,7 +298,7 @@ fn persist_stable_launcher(source: &Path, destination: &Path) -> Result<(), Stri
         .parent()
         .ok_or_else(|| "stable launcher destination is invalid".to_string())?;
     let staging = parent.join(format!(
-        ".axiusflow_launcher{}.next",
+        ".tradingplot_launcher{}.next",
         std::env::consts::EXE_SUFFIX
     ));
     let _ = fs::remove_file(&staging);
@@ -311,7 +315,7 @@ fn persist_stable_launcher(source: &Path, destination: &Path) -> Result<(), Stri
 
 fn stable_launcher_path(install_root: &Path) -> PathBuf {
     install_root.join(format!(
-        "axiusflow_launcher{}",
+        "tradingplot_launcher{}",
         std::env::consts::EXE_SUFFIX
     ))
 }
@@ -328,12 +332,12 @@ fn promote_stable_launcher(executable: &Path, verifying_key: &VerifyingKey) -> R
     let active = installer
         .audit_active_release()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+        .ok_or_else(|| "no verified TradingPlot release is active".to_string())?;
     let expected = installer
         .release_directory(&active)
         .map_err(|error| error.to_string())?
         .join(format!(
-            "axiusflow_launcher{}",
+            "tradingplot_launcher{}",
             std::env::consts::EXE_SUFFIX
         ));
     let executable = fs::canonicalize(executable)
@@ -427,7 +431,7 @@ fn install_remote_update(
         .install(signed, &bundle_root, hooks)
         .map_err(|error| error.to_string())?;
     if let Err(error) = spawn_active_launcher_promotion(installer) {
-        eprintln!("Axiusflow launcher promotion deferred: {error}");
+        eprintln!("TradingPlot launcher promotion deferred: {error}");
     }
     remove_download_bundle(&downloads_root, &bundle_root)?;
     Ok(())
@@ -442,7 +446,7 @@ fn prepare_remote_update(
     let active = checked
         .active
         .as_ref()
-        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+        .ok_or_else(|| "no verified TradingPlot release is active".to_string())?;
     let current_generation = active.install_generation;
     if checked.channel.install_generation == current_generation || !checked.offer_eligible {
         print_update_check_report(&channel_update_check_report(
@@ -633,7 +637,7 @@ where
     // every same-generation launch so one transient failure cannot strand an
     // old launcher that lacks newer lifecycle commands.
     if let Err(error) = promote() {
-        eprintln!("Axiusflow launcher promotion deferred: {error}");
+        eprintln!("TradingPlot launcher promotion deferred: {error}");
     }
     true
 }
@@ -647,7 +651,7 @@ fn update_and_restart(
     let (desktop, prepared) = preflight_update_restart(installer, verifying_key, install_root)?;
     let current = checked_release_channel(installer, verifying_key, install_root)?;
     if !prepared_matches_current_offer(&prepared.signed_release, &current) {
-        return Err("prepared Axiusflow update is no longer current and eligible".to_string());
+        return Err("prepared TradingPlot update is no longer current and eligible".to_string());
     }
     // READY reports only that the signed prepared release passed preflight.
     // The desktop sends COMMIT after account/workspace durability succeeds;
@@ -669,7 +673,7 @@ fn update_and_restart(
         remove_download_bundle(&prepared.downloads_root, &prepared.bundle_root)
     })();
     if let Err(update_error) = update_result {
-        eprintln!("Axiusflow update deferred: {update_error}");
+        eprintln!("TradingPlot update deferred: {update_error}");
         // The desktop has already yielded ownership to this launcher. Recover
         // whatever transaction state is safely recoverable, then relaunch the
         // verified active release so a transient update failure does not make
@@ -679,7 +683,7 @@ fn update_and_restart(
             Ok(Some(_)) => {}
             Ok(None) => {
                 return Err(format!(
-                    "{update_error}; no verified Axiusflow release is active{}",
+                    "{update_error}; no verified TradingPlot release is active{}",
                     recovery_error.map_or_else(String::new, |error| {
                         format!("; update recovery failed: {error}")
                     })
@@ -719,7 +723,7 @@ fn preflight_update_restart(
     let active = installer
         .audit_active_release()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+        .ok_or_else(|| "no verified TradingPlot release is active".to_string())?;
     let downloads_root = install_root.join(".release-downloads");
     require_existing_secure_directory(&downloads_root)?;
     let channel: ReleaseChannelPointer =
@@ -735,11 +739,14 @@ fn preflight_update_restart(
     let desktop = installer
         .release_directory(&active)
         .map_err(|error| error.to_string())?
-        .join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX));
+        .join(format!(
+            "tradingplot_desktop{}",
+            std::env::consts::EXE_SUFFIX
+        ));
     let metadata = fs::symlink_metadata(&desktop)
-        .map_err(|_| "active Axiusflow desktop is unavailable".to_string())?;
+        .map_err(|_| "active TradingPlot desktop is unavailable".to_string())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("active Axiusflow desktop is invalid".to_string());
+        return Err("active TradingPlot desktop is invalid".to_string());
     }
     Ok((
         desktop,
@@ -811,10 +818,12 @@ fn verify_prepared_channel_with_policy(
         return Err("prepared release manifest does not match the stable channel".to_string());
     }
     if signed.manifest.install_generation <= active.install_generation {
-        return Err("no newer prepared Axiusflow update is available".to_string());
+        return Err("no newer prepared TradingPlot update is available".to_string());
     }
     if !release_offer_eligible(channel, Some(active), install_root, quarantined) {
-        return Err("prepared Axiusflow update is not eligible for this installation".to_string());
+        return Err(
+            "prepared TradingPlot update is not eligible for this installation".to_string(),
+        );
     }
     Ok(())
 }
@@ -830,7 +839,7 @@ fn announce_update_restart_ready() -> Result<(), String> {
 fn wait_for_update_restart_commit() -> Result<(), String> {
     let (result_tx, result_rx) = mpsc::sync_channel(1);
     thread::Builder::new()
-        .name("axiusflow-update-restart-commit".to_string())
+        .name("tradingplot-update-restart-commit".to_string())
         .spawn(move || {
             let stdin = std::io::stdin();
             let result = read_update_restart_commit(stdin.lock());
@@ -854,7 +863,7 @@ fn read_update_restart_commit(input: impl std::io::BufRead) -> Result<(), String
         .map_err(|_| "update restart commit could not be read".to_string())?;
     if count == 0
         || line.len() > MAXIMUM_UPDATE_RESTART_COMMIT_BYTES
-        || line != UPDATE_RESTART_COMMIT
+        || (line != UPDATE_RESTART_COMMIT && line != TRANSITIONAL_UPDATE_RESTART_COMMIT)
     {
         return Err("update restart was not committed".to_string());
     }
@@ -865,7 +874,7 @@ fn wait_for_desktop_stop(desktop: &Path) -> Result<(), String> {
     let deadline = Instant::now() + RESTART_WAIT_TIMEOUT;
     while process_is_running(desktop) {
         if Instant::now() >= deadline {
-            return Err("active Axiusflow desktop did not close for restart".to_string());
+            return Err("active TradingPlot desktop did not close for restart".to_string());
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -1091,12 +1100,12 @@ fn spawn_active_launcher_promotion(installer: &ReleaseInstaller) -> Result<(), S
     let active = installer
         .audit_active_release()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+        .ok_or_else(|| "no verified TradingPlot release is active".to_string())?;
     let launcher = installer
         .release_directory(&active)
         .map_err(|error| error.to_string())?
         .join(format!(
-            "axiusflow_launcher{}",
+            "tradingplot_launcher{}",
             std::env::consts::EXE_SUFFIX
         ));
     let metadata = fs::symlink_metadata(&launcher)
@@ -1115,7 +1124,7 @@ fn spawn_active_launcher_promotion(installer: &ReleaseInstaller) -> Result<(), S
 }
 
 fn bootstrap_minimum_generation() -> Result<u64, String> {
-    let encoded = option_env!("AXIUSFLOW_BOOTSTRAP_MIN_GENERATION").ok_or_else(|| {
+    let encoded = option_env!("TRADINGPLOT_BOOTSTRAP_MIN_GENERATION").ok_or_else(|| {
         "bootstrap minimum release generation was not embedded by packaging".to_string()
     })?;
     encoded
@@ -1137,7 +1146,7 @@ fn release_http_agent(timeout: Duration) -> ureq::Agent {
 }
 
 fn embedded_release_base_url() -> Result<&'static str, String> {
-    let url = option_env!("AXIUSFLOW_RELEASE_BASE_URL")
+    let url = option_env!("TRADINGPLOT_RELEASE_BASE_URL")
         .ok_or_else(|| "release base URL was not embedded by packaging".to_string())?;
     if !valid_https_url(url) || url.ends_with('/') || url.contains('?') {
         return Err("embedded release base URL is invalid".to_string());
@@ -1202,7 +1211,7 @@ fn validate_release_channel(channel: &ReleaseChannelPointer, base_url: &str) -> 
     if channel.manifest_url != expected_manifest_url || !valid_https_url(&channel.manifest_url) {
         return Err("release channel manifest URL is invalid".to_string());
     }
-    let expected_installer_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+    let expected_installer_name = format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX);
     let installer = &channel.installer;
     let expected_installer_url = format!("{release_root}/{expected_installer_name}");
     let installer_digest = URL_SAFE_NO_PAD
@@ -1486,7 +1495,7 @@ fn validate_closed_content_range(
 }
 
 fn verify_block_payload(
-    block: &axiusflow_platform_runtime::BlockDescriptor,
+    block: &tradingplot_platform_runtime::BlockDescriptor,
     bytes: &[u8],
 ) -> Result<(), String> {
     let expected = URL_SAFE_NO_PAD
@@ -1779,7 +1788,7 @@ fn relocate_running_binary(
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
     let staged = dir.join(format!(
-        "axiusflow_uninstall{}",
+        "tradingplot_uninstall{}",
         std::env::consts::EXE_SUFFIX
     ));
     fs::rename(executable, &staged)?;
@@ -1849,7 +1858,7 @@ fn uninstall_from_root(root: &Path) -> Result<(), String> {
 }
 
 fn embedded_verifying_key() -> Result<VerifyingKey, String> {
-    let encoded = option_env!("AXIUSFLOW_RELEASE_VERIFYING_KEY")
+    let encoded = option_env!("TRADINGPLOT_RELEASE_VERIFYING_KEY")
         .ok_or_else(|| "release verification key was not embedded by packaging".to_string())?;
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
@@ -1876,14 +1885,14 @@ fn launch_active_desktop(
     let active = installer
         .audit_active_release()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "no verified Axiusflow release is active".to_string())?;
+        .ok_or_else(|| "no verified TradingPlot release is active".to_string())?;
     let retained = installer
         .retained_known_good_release()
         .map_err(|error| error.to_string())?;
     let quarantined = match read_quarantined_release(install_root) {
         Ok(quarantined) => quarantined,
         Err(error) => {
-            eprintln!("Axiusflow failed-release quarantine could not be read: {error}");
+            eprintln!("TradingPlot failed-release quarantine could not be read: {error}");
             None
         }
     };
@@ -1903,7 +1912,7 @@ fn launch_active_desktop(
         Ok(child) => child,
         Err(error) if retained.is_some() => {
             eprintln!(
-                "Axiusflow active release {} failed to start; restoring retained known-good release",
+                "TradingPlot active release {} failed to start; restoring retained known-good release",
                 active.install_generation
             );
             return rollback_and_launch_retained(installer, hooks, install_root, &active, &error);
@@ -1917,7 +1926,7 @@ fn launch_active_desktop(
     match observe_early_desktop_startup(&mut child, EARLY_DESKTOP_STARTUP_WINDOW) {
         Ok(EarlyDesktopStartup::ExitedUnsuccessfully) => {
             eprintln!(
-                "Axiusflow active release {} exited during startup; restoring retained known-good release",
+                "TradingPlot active release {} exited during startup; restoring retained known-good release",
                 active.install_generation
             );
             rollback_and_launch_retained(
@@ -1925,19 +1934,19 @@ fn launch_active_desktop(
                 hooks,
                 install_root,
                 &active,
-                "active Axiusflow desktop exited during startup",
+                "active TradingPlot desktop exited during startup",
             )
         }
         Ok(EarlyDesktopStartup::Running | EarlyDesktopStartup::ExitedSuccessfully) => {
             if should_promote_after_probation(&active, launcher_generation)
                 && let Err(error) = spawn_active_launcher_promotion(installer)
             {
-                eprintln!("Axiusflow launcher promotion deferred: {error}");
+                eprintln!("TradingPlot launcher promotion deferred: {error}");
             }
             Ok(())
         }
         Err(error) => {
-            eprintln!("Axiusflow startup observation degraded: {error}");
+            eprintln!("TradingPlot startup observation degraded: {error}");
             Ok(())
         }
     }
@@ -1976,7 +1985,10 @@ fn spawn_desktop_release(
     let executable = installer
         .release_directory(release)
         .map_err(|error| error.to_string())?
-        .join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX));
+        .join(format!(
+            "tradingplot_desktop{}",
+            std::env::consts::EXE_SUFFIX
+        ));
     let mut command = Command::new(executable);
     if suppress_launcher_promotion {
         // Installed desktop defaults to workspace-tabs. Supplying the explicit
@@ -1989,7 +2001,7 @@ fn spawn_desktop_release(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| "active Axiusflow process could not be started".to_string())
+        .map_err(|_| "active TradingPlot process could not be started".to_string())
 }
 
 fn observe_early_desktop_startup(
@@ -2083,7 +2095,10 @@ impl NativeHooks {
         self.install_root
             .join("versions")
             .join(&release.directory_name)
-            .join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX))
+            .join(format!(
+                "tradingplot_desktop{}",
+                std::env::consts::EXE_SUFFIX
+            ))
     }
 
     fn readiness_report(&self) -> PathBuf {
@@ -2127,7 +2142,7 @@ impl LifecycleHooks for NativeHooks {
             let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
             while process_is_running(&desktop) {
                 if Instant::now() >= deadline {
-                    return Err("active Axiusflow desktop must close before update".to_string());
+                    return Err("active TradingPlot desktop must close before update".to_string());
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -2180,7 +2195,7 @@ impl LifecycleHooks for NativeHooks {
     fn disable_registrations(&self, registrations: &[String]) -> Result<(), String> {
         if registrations
             .iter()
-            .any(|entry| entry == "start-menu:Axiusflow")
+            .any(|entry| entry == "start-menu:TradingPlot")
         {
             remove_launcher_registration()?;
         }
@@ -2202,20 +2217,20 @@ impl LifecycleHooks for NativeHooks {
 
     fn audit_external_absence(&self, inventory: &InstallationInventory) -> Result<(), String> {
         if owned_process_is_running(&self.install_root) {
-            return Err("an Axiusflow process remains active".to_string());
+            return Err("an TradingPlot process remains active".to_string());
         }
         if inventory
             .registrations
             .iter()
-            .any(|entry| entry == "start-menu:Axiusflow")
+            .any(|entry| entry == "start-menu:TradingPlot")
             && !launcher_registration_absent()?
         {
-            return Err("an Axiusflow Start Menu shortcut remains".to_string());
+            return Err("an TradingPlot Start Menu shortcut remains".to_string());
         }
         for entry in &inventory.vault_entries {
             let vault = NativeCredentialVault::new(&entry.service).map_err(redacted)?;
             if vault.load(&entry.key).map_err(redacted)?.is_some() {
-                return Err("an Axiusflow vault entry remains".to_string());
+                return Err("an TradingPlot vault entry remains".to_string());
             }
         }
         Ok(())
@@ -2242,7 +2257,7 @@ fn process_is_running(executable: &Path) -> bool {
 
 fn owned_process_is_running(install_root: &Path) -> bool {
     let versions = install_root.join("versions");
-    let desktop = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
+    let desktop = format!("tradingplot_desktop{}", std::env::consts::EXE_SUFFIX);
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
     system.processes().values().any(|process| {
@@ -2254,17 +2269,17 @@ fn owned_process_is_running(install_root: &Path) -> bool {
 }
 
 fn redacted<E>(_error: E) -> String {
-    "native Axiusflow lifecycle operation failed".to_string()
+    "native TradingPlot lifecycle operation failed".to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_platform_runtime::{
+    use ed25519_dalek::SigningKey;
+    use tradingplot_platform_runtime::{
         BLOCK_PLAN_BLOCK_BYTES, BlockDescriptor, RELEASE_MANIFEST_SCHEMA_VERSION, ReleaseFileRole,
         ReleaseInstallerMetadata, ReleaseManifest, RolloutMetadata, sign_release_manifest,
     };
-    use ed25519_dalek::SigningKey;
 
     fn temporary_base(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -2279,7 +2294,7 @@ mod tests {
         generation: u64,
         payload: &[u8],
     ) -> (SigningKey, ReleaseChannelPointer) {
-        let base_url = "https://auth.axiusflow.test/releases";
+        let base_url = "https://auth.tradingplot.test/releases";
         let identity = "0123456789abcdef0123456789abcdef01234567";
         let release_root = format!(
             "{base_url}/{}/{}/{generation}-{identity}",
@@ -2289,8 +2304,8 @@ mod tests {
         let suffix = std::env::consts::EXE_SUFFIX;
         let file = ReleaseFile {
             role: ReleaseFileRole::Desktop,
-            path: format!("axiusflow_desktop{suffix}"),
-            url: format!("{release_root}/axiusflow_desktop{suffix}"),
+            path: format!("tradingplot_desktop{suffix}"),
+            url: format!("{release_root}/tradingplot_desktop{suffix}"),
             size: payload.len() as u64,
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(payload)),
             executable: true,
@@ -2324,8 +2339,8 @@ mod tests {
             manifest_url: format!("{release_root}/manifest.json"),
             signed_release,
             installer: ReleaseInstallerMetadata {
-                filename: format!("Axiusflow-Setup{suffix}"),
-                url: format!("{release_root}/Axiusflow-Setup{suffix}"),
+                filename: format!("TradingPlot-Setup{suffix}"),
+                url: format!("{release_root}/TradingPlot-Setup{suffix}"),
                 size: 12,
                 sha256_b64url: URL_SAFE_NO_PAD.encode([4_u8; 32]),
             },
@@ -2377,7 +2392,7 @@ mod tests {
         let target = ReleaseFile {
             size: target_bytes.len() as u64,
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(&target_bytes)),
-            url: "https://releases.axiusflow.test/target.exe".to_string(),
+            url: "https://releases.tradingplot.test/target.exe".to_string(),
             ..source.clone()
         };
         let plan = BlockFilePlan {
@@ -2526,7 +2541,7 @@ mod tests {
             &active,
             &signing_key.verifying_key(),
             8,
-            "https://auth.axiusflow.test/releases",
+            "https://auth.tradingplot.test/releases",
             &base,
             None,
         )
@@ -2542,7 +2557,7 @@ mod tests {
                 &same_generation,
                 &signing_key.verifying_key(),
                 8,
-                "https://auth.axiusflow.test/releases",
+                "https://auth.tradingplot.test/releases",
                 &base,
                 None,
             )
@@ -2557,7 +2572,7 @@ mod tests {
                 &active,
                 &signing_key.verifying_key(),
                 8,
-                "https://auth.axiusflow.test/releases",
+                "https://auth.tradingplot.test/releases",
                 &base,
                 None,
             )
@@ -2619,7 +2634,7 @@ mod tests {
                 &active,
                 &signing_key.verifying_key(),
                 8,
-                "https://auth.axiusflow.test/releases",
+                "https://auth.tradingplot.test/releases",
                 &base,
                 None,
             )
@@ -2652,7 +2667,7 @@ mod tests {
                 &active,
                 &signing_key.verifying_key(),
                 8,
-                "https://auth.axiusflow.test/releases",
+                "https://auth.tradingplot.test/releases",
                 &base,
                 Some(&quarantined),
             )
@@ -2743,6 +2758,12 @@ mod tests {
             read_update_restart_commit(std::io::Cursor::new(UPDATE_RESTART_COMMIT.as_bytes()))
                 .is_ok()
         );
+        assert!(
+            read_update_restart_commit(std::io::Cursor::new(
+                TRANSITIONAL_UPDATE_RESTART_COMMIT.as_bytes()
+            ))
+            .is_ok()
+        );
         for invalid in [
             b"".as_slice(),
             UPDATE_RESTART_READY,
@@ -2832,7 +2853,7 @@ mod tests {
     fn stable_launcher_persistence_replaces_existing_copy() {
         let base = temporary_base("stable-replace");
         let source = base.join("source.exe");
-        let destination = base.join("axiusflow_launcher.exe");
+        let destination = base.join("tradingplot_launcher.exe");
         fs::write(&source, b"new-launcher").expect("source fixture");
         fs::write(&destination, b"old-launcher").expect("destination fixture");
 
@@ -2842,7 +2863,7 @@ mod tests {
             fs::read(&destination).expect("committed launcher"),
             b"new-launcher"
         );
-        assert!(!base.join(".axiusflow_launcher.exe.next").exists());
+        assert!(!base.join(".tradingplot_launcher.exe.next").exists());
         fs::remove_dir_all(base).expect("remove temporary base");
     }
 
@@ -2886,7 +2907,7 @@ mod tests {
 
     #[test]
     fn stable_channel_requires_exact_website_envelope_and_immutable_paths() {
-        let base_url = "https://auth.axiusflow.test/releases";
+        let base_url = "https://auth.tradingplot.test/releases";
         let identity = "0123456789abcdef0123456789abcdef01234567";
         let release_root = format!(
             "{base_url}/{}/{}/7-{identity}",
@@ -2897,8 +2918,8 @@ mod tests {
         let suffix = std::env::consts::EXE_SUFFIX;
         let files = vec![ReleaseFile {
             role: ReleaseFileRole::Desktop,
-            path: format!("axiusflow_desktop{suffix}"),
-            url: format!("{release_root}/axiusflow_desktop{suffix}"),
+            path: format!("tradingplot_desktop{suffix}"),
+            url: format!("{release_root}/tradingplot_desktop{suffix}"),
             size: 10,
             sha256: digest,
             executable: true,
@@ -2937,8 +2958,8 @@ mod tests {
             manifest_url: format!("{release_root}/manifest.json"),
             signed_release: signed,
             installer: ReleaseInstallerMetadata {
-                filename: format!("Axiusflow-Setup{suffix}"),
-                url: format!("{release_root}/Axiusflow-Setup{suffix}"),
+                filename: format!("TradingPlot-Setup{suffix}"),
+                url: format!("{release_root}/TradingPlot-Setup{suffix}"),
                 size: 12,
                 sha256_b64url: URL_SAFE_NO_PAD.encode([4_u8; 32]),
             },
@@ -2986,8 +3007,8 @@ mod tests {
     #[test]
     fn user_launch_failure_message_is_bounded() {
         let message = user_launch_error_message(&"x".repeat(800));
-        assert!(message.starts_with("Axiusflow could not start.\n\n"));
-        assert_eq!(message.chars().count(), 348);
+        assert!(message.starts_with("TradingPlot could not start.\n\n"));
+        assert_eq!(message.chars().count(), 350);
     }
 
     // Note: the relocated-child path (`uninstall_from_root_with_key` with

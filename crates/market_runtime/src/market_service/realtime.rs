@@ -18,7 +18,7 @@ use crate::hyperliquid_display_depth::{
 use crate::study::{
     StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyQuoteView, StudyTradeWindow,
 };
-use axiusflow_rithmic_protocol_adapter::ProviderInvalidationReason;
+use tradingplot_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
@@ -857,13 +857,13 @@ impl Coordinator<'_> {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
-                    eprintln!("Axiusflow live non-bar study execution failed: {error}");
+                    eprintln!("TradingPlot live non-bar study execution failed: {error}");
                 }
             }
             Err(error) => {
                 // Native study failure must not change acceptance/recovery of
                 // authoritative provider state.
-                eprintln!("Axiusflow live non-bar study execution failed: {error}");
+                eprintln!("TradingPlot live non-bar study execution failed: {error}");
             }
         }
     }
@@ -991,14 +991,14 @@ impl Coordinator<'_> {
                 Ok(batch) => {
                     self.publish_study_outputs(&batch.executed);
                     for error in batch.errors {
-                        eprintln!("Axiusflow live study execution failed: {error}");
+                        eprintln!("TradingPlot live study execution failed: {error}");
                     }
                 }
                 Err(error) => {
                     // Study failure is isolated from canonical market publication.
                     // A user calculation must never force provider recovery or make
                     // an accepted market tail look discontinuous.
-                    eprintln!("Axiusflow live study execution failed: {error}");
+                    eprintln!("TradingPlot live study execution failed: {error}");
                 }
             }
         }
@@ -2004,7 +2004,7 @@ impl Coordinator<'_> {
                 }
             };
             if let Err(error) = published {
-                eprintln!("Axiusflow engine Rithmic live publication failed: {error}");
+                eprintln!("TradingPlot engine Rithmic live publication failed: {error}");
                 self.rithmic_series_recovering(
                     &series,
                     generation,
@@ -2244,7 +2244,7 @@ impl Coordinator<'_> {
                 }
             };
             if let Err(error) = published {
-                eprintln!("Axiusflow engine Hyperliquid live publication failed: {error}");
+                eprintln!("TradingPlot engine Hyperliquid live publication failed: {error}");
                 self.hyperliquid_series_recovering(
                     &series,
                     generation,
@@ -2376,11 +2376,11 @@ impl Coordinator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::{
+    use std::num::NonZeroU64;
+    use tradingplot_market_data::{
         AggressorTradeVolumes, DepthLevel, EventMetadata, QualifiedTimestamp,
     };
-    use axiusflow_market_engine::StreamRequirements;
-    use std::num::NonZeroU64;
+    use tradingplot_market_engine::StreamRequirements;
 
     fn generation() -> ProviderGeneration {
         ProviderGeneration(NonZeroU64::new(1).expect("generation"))
@@ -2411,13 +2411,13 @@ mod tests {
 
     fn rithmic_trade(sequence: u64, timestamp: i64, price: i64) -> MarketTrade {
         MarketTrade {
-            metadata: axiusflow_market_data::EventMetadata {
+            metadata: tradingplot_market_data::EventMetadata {
                 provider_id: "rithmic".to_string(),
                 instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
                 entitlement_id: "rithmic-test:CME:MNQ".to_string(),
                 source_sequence: sequence,
                 session_generation: 1,
-                timestamps: axiusflow_market_data::QualifiedTimestamp {
+                timestamps: tradingplot_market_data::QualifiedTimestamp {
                     exchange_unix_nanos: Some(timestamp),
                     provider_unix_nanos: None,
                     received_unix_nanos: timestamp,
@@ -2426,7 +2426,7 @@ mod tests {
             trade_id: format!("trade-{sequence}"),
             price,
             quantity: 1,
-            aggressor: axiusflow_market_data::AggressorSide::Unknown,
+            aggressor: tradingplot_market_data::AggressorSide::Unknown,
         }
     }
 
@@ -2455,13 +2455,13 @@ mod tests {
         aggressor: AggressorSide,
     ) -> MarketTrade {
         MarketTrade {
-            metadata: axiusflow_market_data::EventMetadata {
+            metadata: tradingplot_market_data::EventMetadata {
                 provider_id: "rithmic".to_string(),
                 instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
                 entitlement_id: "rithmic-test:CME:MNQ".to_string(),
                 source_sequence: sequence,
                 session_generation,
-                timestamps: axiusflow_market_data::QualifiedTimestamp {
+                timestamps: tradingplot_market_data::QualifiedTimestamp {
                     exchange_unix_nanos: Some(received_unix_nanos),
                     provider_unix_nanos: None,
                     received_unix_nanos,

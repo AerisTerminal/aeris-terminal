@@ -141,7 +141,7 @@ if (-not $PackageOnly -and -not $PrebuildOnly) {
         $env:GITHUB_WORKFLOW -eq "Production release" -and
         $env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and
         $env:GITHUB_REF -eq "refs/heads/main" -and
-        $env:AXIUSFLOW_RELEASE_ENVIRONMENT -eq "self-hosted-release-station"
+        $env:TRADINGPLOT_RELEASE_ENVIRONMENT -eq "self-hosted-release-station"
     )
     if (-not $expectedReleaseContext) {
         throw "Production publication is CI-authoritative and must run from the self-hosted Production release workflow. Use -PackageOnly for local qualification without R2/channel mutation."
@@ -211,7 +211,7 @@ try {
     }
 
     if (-not $SkipQualification) {
-        Write-Host "Qualifying Axiusflow release $Generation at $identity"
+        Write-Host "Qualifying TradingPlot release $Generation at $identity"
         & cargo fmt --all -- --check
         if ($LASTEXITCODE -ne 0) { throw "cargo fmt gate failed." }
 
@@ -226,32 +226,32 @@ try {
         Write-Host "Building release binaries before production signing secrets are materialized"
         $saved = @{}
         foreach ($name in @(
-            'AXIUSFLOW_RELEASE_VERIFYING_KEY',
-            'AXIUSFLOW_RELEASE_BASE_URL',
-            'AXIUSFLOW_BOOTSTRAP_MIN_GENERATION',
-            'AXIUSFLOW_RELEASE_IDENTITY',
-            'AXIUSFLOW_INSTALL_GENERATION',
-            'AXIUSFLOW_AUTHENTICODE_CERT_SHA1',
-            'AXIUSFLOW_LOCAL_PACKAGE'
+            'TRADINGPLOT_RELEASE_VERIFYING_KEY',
+            'TRADINGPLOT_RELEASE_BASE_URL',
+            'TRADINGPLOT_BOOTSTRAP_MIN_GENERATION',
+            'TRADINGPLOT_RELEASE_IDENTITY',
+            'TRADINGPLOT_INSTALL_GENERATION',
+            'TRADINGPLOT_AUTHENTICODE_CERT_SHA1',
+            'TRADINGPLOT_LOCAL_PACKAGE'
         )) {
             $saved[$name] = [Environment]::GetEnvironmentVariable($name)
         }
         try {
-            $env:AXIUSFLOW_RELEASE_VERIFYING_KEY = $ReleaseVerifyingKey
-            $env:AXIUSFLOW_RELEASE_BASE_URL = $baseUrl
-            $env:AXIUSFLOW_BOOTSTRAP_MIN_GENERATION = [string]$Generation
-            $env:AXIUSFLOW_RELEASE_IDENTITY = $identity
-            $env:AXIUSFLOW_INSTALL_GENERATION = [string]$Generation
+            $env:TRADINGPLOT_RELEASE_VERIFYING_KEY = $ReleaseVerifyingKey
+            $env:TRADINGPLOT_RELEASE_BASE_URL = $baseUrl
+            $env:TRADINGPLOT_BOOTSTRAP_MIN_GENERATION = [string]$Generation
+            $env:TRADINGPLOT_RELEASE_IDENTITY = $identity
+            $env:TRADINGPLOT_INSTALL_GENERATION = [string]$Generation
             if ($authenticodeConfigured) {
-                $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 = $AuthenticodeCertificateSha1
+                $env:TRADINGPLOT_AUTHENTICODE_CERT_SHA1 = $AuthenticodeCertificateSha1
             } else {
-                Remove-Item Env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -ErrorAction SilentlyContinue
+                Remove-Item Env:TRADINGPLOT_AUTHENTICODE_CERT_SHA1 -ErrorAction SilentlyContinue
             }
-            Remove-Item Env:AXIUSFLOW_LOCAL_PACKAGE -ErrorAction SilentlyContinue
+            Remove-Item Env:TRADINGPLOT_LOCAL_PACKAGE -ErrorAction SilentlyContinue
 
-            & cargo build --locked --release -p axiusflow_platform_runtime --bin axiusflow_launcher
+            & cargo build --locked --release -p tradingplot_platform_runtime --bin tradingplot_launcher
             if ($LASTEXITCODE -ne 0) { throw "release launcher prebuild failed." }
-            & cargo build --locked --release -p axiusflow_desktop --all-features
+            & cargo build --locked --release -p tradingplot_desktop --all-features
             if ($LASTEXITCODE -ne 0) { throw "release desktop prebuild failed." }
         }
         finally {
@@ -312,9 +312,9 @@ try {
         Write-Host "Building and signing release package without publishing"
     }
     if ([string]::IsNullOrWhiteSpace($PublisherPath)) {
-        & cargo run --locked --release -p axiusflow_platform_runtime --bin axiusflow_release_publisher -- @publisherArgs
+        & cargo run --locked --release -p tradingplot_platform_runtime --bin tradingplot_release_publisher -- @publisherArgs
     } else {
-        $resolvedPublisher = Resolve-RequiredCommandPath $PublisherPath "Prebuilt Axiusflow release publisher"
+        $resolvedPublisher = Resolve-RequiredCommandPath $PublisherPath "Prebuilt TradingPlot release publisher"
         if (-not [string]::IsNullOrWhiteSpace($PublisherSha256)) {
             $actualPublisherSha256 = (Get-FileHash -LiteralPath $resolvedPublisher -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($actualPublisherSha256 -ne $PublisherSha256.ToLowerInvariant()) {

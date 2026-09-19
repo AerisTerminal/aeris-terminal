@@ -3,7 +3,7 @@
 /// Canonical application identity registered with Rithmic and sent in every
 /// R|Protocol login. Keep this as the single source of truth so production,
 /// smoke tools, and protocol fixtures cannot drift in capitalization.
-pub const RITHMIC_APPLICATION_NAME: &str = "Axiusflow";
+pub const RITHMIC_APPLICATION_NAME: &str = "TradingPlot";
 
 #[cfg(rithmic_kit)]
 #[allow(dead_code, clippy::all, clippy::pedantic)]

@@ -39,7 +39,7 @@ pub(super) fn chrome_menu_extent(
 }
 
 pub(super) fn chrome_menu_surface(
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
     extent: ChromeMenuExtent,
 ) -> Div {
     div()
@@ -51,7 +51,7 @@ pub(super) fn chrome_menu_surface(
         .max_h_full()
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
-        .font_family(axiusflow_design_system::platform_font_family())
+        .font_family(tradingplot_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_secondary))
 }
@@ -62,7 +62,7 @@ pub(super) fn chrome_menu_scroll_body() -> Div {
 
 pub(super) fn chrome_menu_group_heading(
     label: &'static str,
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
 ) -> Div {
     div()
         .flex_none()
@@ -78,7 +78,7 @@ pub(super) fn chrome_menu_group_heading(
 pub(super) fn chrome_menu_empty(
     title: &'static str,
     detail: &'static str,
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
 ) -> Div {
     div()
         .h(px(144.0))
@@ -105,7 +105,7 @@ pub(super) fn chrome_menu_empty(
 
 pub(super) fn chrome_menu_search_header(
     input: &Entity<InputState>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     app: &Entity<WorkspaceSurface>,
     hint: impl Into<gpui::SharedString>,
     search_height: f32,
@@ -156,7 +156,7 @@ pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
     icon_size: f32,
     label: &'static str,
     tone: ChromeIconButtonTone,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     on_activate: F,
 ) -> impl IntoElement + use<F> {
     let colors = theme.colors;
@@ -190,7 +190,7 @@ pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
 
 pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
     id: &'static str,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     on_close: F,
 ) -> impl IntoElement + use<F> {
     chrome_icon_button(
@@ -206,7 +206,7 @@ pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
 
 pub(super) fn chrome_menu_close_button(
     app: &Entity<WorkspaceSurface>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let close_app = app.clone();
     chrome_close_button("chrome_menu_close", theme, move |window, cx| {
@@ -223,7 +223,7 @@ pub(super) fn chrome_menu_close_button(
 /// watchlist header add control remains a circular/full-radius chrome action.
 pub(super) fn compact_menu_add_button(
     id: impl Into<gpui::ElementId>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Button {
     Button::new(id)
         .icon(header_icon(HugeIcon::Add).with_size(px(14.0)))
@@ -240,7 +240,7 @@ pub(super) fn compact_menu_add_button(
 }
 
 pub(super) fn chrome_menu_shortcut(
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
     keys: &'static [&'static str],
     caption: &'static str,
 ) -> Div {
@@ -285,7 +285,7 @@ pub(super) fn scrollable_menu_body(
 }
 
 pub(super) fn chrome_menu_footer(
-    colors: &axiusflow_design_system::ThemeColors,
+    colors: &tradingplot_design_system::ThemeColors,
     enter: &'static str,
     trailing: impl Into<gpui::SharedString>,
 ) -> Div {

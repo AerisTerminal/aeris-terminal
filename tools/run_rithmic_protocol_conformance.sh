@@ -9,7 +9,7 @@ if [[ -d "$kit_proto_dir" ]]; then
     cargo test \
         --manifest-path "$manifest_path" \
         --locked \
-        --package axiusflow_rithmic_protocol_adapter \
+        --package tradingplot_rithmic_protocol_adapter \
         --all-targets \
         --all-features
     kit_evidence="passed"
@@ -17,10 +17,10 @@ else
     kit_evidence="unavailable"
 fi
 
-AXIUSFLOW_RITHMIC_KIT_DISABLED=1 cargo test \
+TRADINGPLOT_RITHMIC_KIT_DISABLED=1 cargo test \
     --manifest-path "$manifest_path" \
     --locked \
-    --package axiusflow_rithmic_protocol_adapter \
+    --package tradingplot_rithmic_protocol_adapter \
     --all-targets \
     --all-features
 

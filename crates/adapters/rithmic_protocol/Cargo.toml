@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_rithmic_protocol_adapter"
+name = "tradingplot_rithmic_protocol_adapter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,10 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-axiusflow_market_data = { path = "../../domain/market_data" }
-axiusflow_observability = { path = "../../observability" }
-axiusflow_platform_runtime = { path = "../../platform_runtime" }
-axiusflow_provider_history = { path = "../../provider_history" }
+tradingplot_market_data = { path = "../../domain/market_data" }
+tradingplot_observability = { path = "../../observability" }
+tradingplot_platform_runtime = { path = "../../platform_runtime" }
+tradingplot_provider_history = { path = "../../provider_history" }
 prost.workspace = true
 rustls.workspace = true
 rpassword.workspace = true

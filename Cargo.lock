@@ -589,217 +589,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiusflow_account"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_account_runtime"
-version = "0.2.3"
-dependencies = [
- "axiusflow_account",
- "axiusflow_contracts",
- "axiusflow_platform_runtime",
- "base64 0.23.1",
- "ed25519-dalek",
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "ureq",
- "zeroize",
-]
-
-[[package]]
-name = "axiusflow_application"
-version = "0.2.3"
-dependencies = [
- "axiusflow_instruments",
- "axiusflow_market_data",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "axiusflow_chart_integration"
-version = "0.2.3"
-dependencies = [
- "axiusflow_application",
- "axiusflow_design_system",
- "axiusflow_terminal_ui",
- "gpui",
- "nucleuscharts_engine",
- "nucleuscharts_render",
- "nucleuscharts_render_gpui",
- "num-traits",
- "serde_json",
-]
-
-[[package]]
-name = "axiusflow_contracts"
-version = "0.2.3"
-dependencies = [
- "prost",
-]
-
-[[package]]
-name = "axiusflow_design_system"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_desktop"
-version = "0.2.3"
-dependencies = [
- "axiusflow_account_runtime",
- "axiusflow_application",
- "axiusflow_chart_integration",
- "axiusflow_contracts",
- "axiusflow_design_system",
- "axiusflow_instruments",
- "axiusflow_market_data",
- "axiusflow_market_runtime",
- "axiusflow_observability",
- "axiusflow_platform_runtime",
- "axiusflow_study_sdk",
- "axiusflow_terminal_ui",
- "embed-resource",
- "getrandom 0.4.3",
- "gpui",
- "gpui-base",
- "gpui_platform",
- "num-traits",
- "prost",
- "reqwest_client",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sysinfo 0.39.6",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "axiusflow_hyperliquid_market_adapter"
-version = "0.2.3"
-dependencies = [
- "axiusflow_market_data",
- "rustls",
- "serde",
- "serde_json",
- "tungstenite",
- "ureq",
- "webpki-roots 1.0.9",
-]
-
-[[package]]
-name = "axiusflow_instruments"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_market_data"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_market_engine"
-version = "0.2.3"
-dependencies = [
- "axiusflow_market_data",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "axiusflow_market_runtime"
-version = "0.2.3"
-dependencies = [
- "axiusflow_contracts",
- "axiusflow_hyperliquid_market_adapter",
- "axiusflow_market_data",
- "axiusflow_market_engine",
- "axiusflow_platform_runtime",
- "axiusflow_provider_history",
- "axiusflow_rithmic_protocol_adapter",
- "serde_json",
- "zeroize",
-]
-
-[[package]]
-name = "axiusflow_naming_check"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_observability"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_platform_runtime"
-version = "0.2.3"
-dependencies = [
- "base64 0.23.1",
- "display-info",
- "ed25519-dalek",
- "embed-resource",
- "keyring",
- "notify-rust",
- "same-file",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "signal-hook",
- "sysinfo 0.39.6",
- "ureq",
- "wayland-client",
- "wayland-protocols",
- "windows-sys 0.61.2",
- "zbus",
-]
-
-[[package]]
-name = "axiusflow_provider_history"
-version = "0.2.3"
-
-[[package]]
-name = "axiusflow_rithmic_protocol_adapter"
-version = "0.2.3"
-dependencies = [
- "axiusflow_market_data",
- "axiusflow_observability",
- "axiusflow_platform_runtime",
- "axiusflow_provider_history",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "rcgen",
- "rpassword",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "socket2",
- "tungstenite",
- "webpki-roots 1.0.9",
- "zeroize",
-]
-
-[[package]]
-name = "axiusflow_study_sdk"
-version = "0.2.3"
-dependencies = [
- "axiusflow_market_data",
- "axiusflow_market_runtime",
- "nucleuscharts_indicators",
- "num-traits",
-]
-
-[[package]]
-name = "axiusflow_terminal_ui"
-version = "0.2.3"
-dependencies = [
- "axiusflow_design_system",
- "axiusflow_instruments",
- "axiusflow_market_data",
- "gpui",
-]
-
-[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7450,6 +7239,217 @@ dependencies = [
  "thread_local",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tradingplot_account"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_account_runtime"
+version = "0.2.3"
+dependencies = [
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tradingplot_account",
+ "tradingplot_contracts",
+ "tradingplot_platform_runtime",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
+name = "tradingplot_application"
+version = "0.2.3"
+dependencies = [
+ "sha2 0.11.0",
+ "tradingplot_instruments",
+ "tradingplot_market_data",
+]
+
+[[package]]
+name = "tradingplot_chart_integration"
+version = "0.2.3"
+dependencies = [
+ "gpui",
+ "nucleuscharts_engine",
+ "nucleuscharts_render",
+ "nucleuscharts_render_gpui",
+ "num-traits",
+ "serde_json",
+ "tradingplot_application",
+ "tradingplot_design_system",
+ "tradingplot_terminal_ui",
+]
+
+[[package]]
+name = "tradingplot_contracts"
+version = "0.2.3"
+dependencies = [
+ "prost",
+]
+
+[[package]]
+name = "tradingplot_design_system"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_desktop"
+version = "0.2.3"
+dependencies = [
+ "embed-resource",
+ "getrandom 0.4.3",
+ "gpui",
+ "gpui-base",
+ "gpui_platform",
+ "num-traits",
+ "prost",
+ "reqwest_client",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo 0.39.6",
+ "tradingplot_account_runtime",
+ "tradingplot_application",
+ "tradingplot_chart_integration",
+ "tradingplot_contracts",
+ "tradingplot_design_system",
+ "tradingplot_instruments",
+ "tradingplot_market_data",
+ "tradingplot_market_runtime",
+ "tradingplot_observability",
+ "tradingplot_platform_runtime",
+ "tradingplot_study_sdk",
+ "tradingplot_terminal_ui",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "tradingplot_hyperliquid_market_adapter"
+version = "0.2.3"
+dependencies = [
+ "rustls",
+ "serde",
+ "serde_json",
+ "tradingplot_market_data",
+ "tungstenite",
+ "ureq",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "tradingplot_instruments"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_market_data"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_market_engine"
+version = "0.2.3"
+dependencies = [
+ "serde_json",
+ "sha2 0.11.0",
+ "tradingplot_market_data",
+]
+
+[[package]]
+name = "tradingplot_market_runtime"
+version = "0.2.3"
+dependencies = [
+ "serde_json",
+ "tradingplot_contracts",
+ "tradingplot_hyperliquid_market_adapter",
+ "tradingplot_market_data",
+ "tradingplot_market_engine",
+ "tradingplot_platform_runtime",
+ "tradingplot_provider_history",
+ "tradingplot_rithmic_protocol_adapter",
+ "zeroize",
+]
+
+[[package]]
+name = "tradingplot_naming_check"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_observability"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_platform_runtime"
+version = "0.2.3"
+dependencies = [
+ "base64 0.23.1",
+ "display-info",
+ "ed25519-dalek",
+ "embed-resource",
+ "keyring",
+ "notify-rust",
+ "same-file",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "signal-hook",
+ "sysinfo 0.39.6",
+ "ureq",
+ "wayland-client",
+ "wayland-protocols",
+ "windows-sys 0.61.2",
+ "zbus",
+]
+
+[[package]]
+name = "tradingplot_provider_history"
+version = "0.2.3"
+
+[[package]]
+name = "tradingplot_rithmic_protocol_adapter"
+version = "0.2.3"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "rcgen",
+ "rpassword",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "socket2",
+ "tradingplot_market_data",
+ "tradingplot_observability",
+ "tradingplot_platform_runtime",
+ "tradingplot_provider_history",
+ "tungstenite",
+ "webpki-roots 1.0.9",
+ "zeroize",
+]
+
+[[package]]
+name = "tradingplot_study_sdk"
+version = "0.2.3"
+dependencies = [
+ "nucleuscharts_indicators",
+ "num-traits",
+ "tradingplot_market_data",
+ "tradingplot_market_runtime",
+]
+
+[[package]]
+name = "tradingplot_terminal_ui"
+version = "0.2.3"
+dependencies = [
+ "gpui",
+ "tradingplot_design_system",
+ "tradingplot_instruments",
+ "tradingplot_market_data",
 ]
 
 [[package]]

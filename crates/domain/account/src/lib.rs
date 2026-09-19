@@ -1,4 +1,4 @@
-//! Axiusflow-owned account, plan, and feature identity.
+//! `TradingPlot`-owned account, plan, and feature identity.
 //!
 //! Pure provider-neutral contracts for phase 5 authentication. No HTTP, no
 //! GPUI, no vault, no Better Auth, no billing SDK, no provider wire types.
@@ -20,7 +20,10 @@ pub const MAXIMUM_PROFILE_EMAIL_BYTES: usize = 320;
 pub const MAXIMUM_PROFILE_PHOTO_URL_BYTES: usize = 2048;
 /// Entitlement lease schema version understood by this release.
 pub const LEASE_SCHEMA_VERSION: u32 = 1;
-/// Audience the control plane mints leases for.
+/// Audience currently provisioned for leases minted by the control plane.
+///
+/// This is an external signed-token contract and remains stable across the
+/// `TradingPlot` product-name migration until the issuer moves to a new audience.
 pub const LEASE_AUDIENCE: &str = "axiusflow-engine";
 /// Maximum compact lease size accepted for validation.
 pub const MAXIMUM_LEASE_BYTES: usize = 2048;
@@ -29,7 +32,7 @@ pub const MAXIMUM_DEVICE_ID_BYTES: usize = 128;
 /// Maximum signing-key identifier length accepted in a lease.
 pub const MAXIMUM_KEY_ID_BYTES: usize = 64;
 
-/// Canonical Axiusflow account identity. External identifiers (identity-provider
+/// Canonical `TradingPlot` account identity. External identifiers (identity-provider
 /// user ID, email, billing-vendor customer, Rithmic account) are links, never
 /// this value.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

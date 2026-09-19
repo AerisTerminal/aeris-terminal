@@ -14,7 +14,7 @@ struct AboutUpdateView {
 
 fn about_update_view(
     update: Option<&UpdatePresentation>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AboutUpdateView {
     let colors = theme.colors;
     let (status, status_color, action) = match update.map(|value| &value.state) {
@@ -26,16 +26,18 @@ fn about_update_view(
         Some(UpdateState::Checking) => {
             ("Checking for updates…".to_string(), colors.text_muted, None)
         }
-        Some(UpdateState::Current) => {
-            ("Axiusflow is up to date.".to_string(), colors.primary, None)
-        }
+        Some(UpdateState::Current) => (
+            "TradingPlot is up to date.".to_string(),
+            colors.primary,
+            None,
+        ),
         Some(UpdateState::Downloading { latest_version }) => (
-            format!("Downloading Axiusflow {latest_version}…"),
+            format!("Downloading TradingPlot {latest_version}…"),
             colors.text_muted,
             None,
         ),
         Some(UpdateState::ReadyToRestart { latest_version }) => (
-            format!("Axiusflow {latest_version} is ready. Restart to update."),
+            format!("TradingPlot {latest_version} is ready. Restart to update."),
             colors.primary,
             Some(AboutAction::Restart),
         ),
@@ -58,7 +60,7 @@ fn about_update_view(
     }
 }
 
-fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -> AnyElement {
+fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &TradingPlotTheme) -> AnyElement {
     let colors = theme.colors;
     let close_terminal = terminal.clone();
     div()
@@ -84,7 +86,7 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AxiusflowTheme) -
                                 .text_base()
                                 .font_weight(platform_font_weight(TypographyRole::Strong))
                                 .text_color(gpui_color(colors.text_primary))
-                                .child("About Axiusflow"),
+                                .child("About TradingPlot"),
                         )
                         .child(
                             div()
@@ -110,7 +112,7 @@ fn about_dialog_body(
     terminal: &Entity<TerminalApp>,
     update: Option<&UpdatePresentation>,
     view: &AboutUpdateView,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let system_version = update.map_or_else(
@@ -137,7 +139,7 @@ fn about_dialog_body(
 fn about_update_row(
     terminal: &Entity<TerminalApp>,
     view: &AboutUpdateView,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let action_button = view.action.map(|action| {
@@ -195,7 +197,7 @@ fn about_update_row(
 pub(super) fn about_dialog_layer(
     terminal: &Entity<TerminalApp>,
     update: Option<&UpdatePresentation>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let dismiss = terminal.clone();
@@ -240,7 +242,7 @@ fn about_detail_row(
     label: &'static str,
     value: String,
     value_color: ThemeColor,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     div()
         .flex()

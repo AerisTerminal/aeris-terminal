@@ -18,11 +18,6 @@ use crate::{
     RithmicProviderRuntime, RithmicProviderRuntimeError, RithmicProviderRuntimeState,
     SessionGeneration,
 };
-use axiusflow_market_data::{
-    AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
-    QualifiedTimestamp, TopOfBookQuote,
-};
-use axiusflow_platform_runtime::{CredentialVault, PowerEvent};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -37,12 +32,17 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tradingplot_market_data::{
+    AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
+    QualifiedTimestamp, TopOfBookQuote,
+};
+use tradingplot_platform_runtime::{CredentialVault, PowerEvent};
 
 const PROVIDER_ID: &str = "rithmic";
 const SYSTEM_ID: &str = "RITHMIC_TEST";
 const ENVIRONMENT: &str = "Test";
-/// Native credential-vault service for the Axiusflow terminal.
-pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.axiusflow.terminal";
+/// Native credential-vault service for the `TradingPlot` terminal.
+pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.tradingplot.terminal";
 /// Non-secret vault key for the default Rithmic Test account.
 pub const RITHMIC_TEST_VAULT_KEY: &str = "provider-rithmic-test-default-v1";
 const MAXIMUM_INSTRUMENTS: usize = 128;
@@ -2163,7 +2163,6 @@ mod tests {
         MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, OrderBookSides, OrderBookUpdate,
         OrderBookUpdateKind, QuoteUpdate, TradeUpdate,
     };
-    use axiusflow_market_data::{BookSide, DepthDelta};
     use std::{
         io::Read,
         net::{TcpListener, TcpStream},
@@ -2171,6 +2170,7 @@ mod tests {
         sync::Barrier,
         thread,
     };
+    use tradingplot_market_data::{BookSide, DepthDelta};
 
     struct MemoryVault(Vec<u8>);
 

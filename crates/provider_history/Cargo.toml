@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_provider_history"
+name = "tradingplot_provider_history"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -235,7 +235,7 @@ mod tests {
                 .unwrap_or_default();
             for dependency in forbidden {
                 // Whole dependency names only: a substring match would ban
-                // axiusflow_hyperliquid_market_adapter through "hyper" while
+                // tradingplot_hyperliquid_market_adapter through "hyper" while
                 // the gate targets public server frameworks.
                 assert!(
                     name != *dependency
@@ -280,8 +280,8 @@ mod tests {
     fn cargo_dependency_direction_excludes_ui_from_backend_layers() {
         let ui = [
             "gpui",
-            "axiusflow_chart_integration",
-            "axiusflow_terminal_ui",
+            "tradingplot_chart_integration",
+            "tradingplot_terminal_ui",
         ];
         for relative in [
             "crates/market_engine/Cargo.toml",
@@ -297,8 +297,8 @@ mod tests {
         assert_excludes(
             "crates/ui/chart_integration/Cargo.toml",
             &[
-                "axiusflow_rithmic_protocol_adapter",
-                "axiusflow_hyperliquid_market_adapter",
+                "tradingplot_rithmic_protocol_adapter",
+                "tradingplot_hyperliquid_market_adapter",
             ],
         );
     }
@@ -360,7 +360,7 @@ mod tests {
         );
         assert!(
             application_sources.is_empty(),
-            "provider_kit must not gain Axiusflow Rust/application source: {:?}",
+            "provider_kit must not gain TradingPlot Rust/application source: {:?}",
             application_sources
                 .iter()
                 .map(|path| relative_string(path))
@@ -397,7 +397,7 @@ mod tests {
             if contents.contains("nucleuscharts_indicators.workspace") {
                 assert_eq!(
                     relative, "crates/study_sdk/Cargo.toml",
-                    "pure Nucleus TA must enter Axiusflow only through the Study SDK facade"
+                    "pure Nucleus TA must enter TradingPlot only through the Study SDK facade"
                 );
             }
             if contents.contains("nucleuscharts_engine.workspace")
@@ -414,11 +414,11 @@ mod tests {
         assert_excludes(
             "crates/study_sdk/Cargo.toml",
             &[
-                "axiusflow_market_engine",
-                "axiusflow_account_runtime",
-                "axiusflow_chart_integration",
-                "axiusflow_rithmic_protocol_adapter",
-                "axiusflow_hyperliquid_market_adapter",
+                "tradingplot_market_engine",
+                "tradingplot_account_runtime",
+                "tradingplot_chart_integration",
+                "tradingplot_rithmic_protocol_adapter",
+                "tradingplot_hyperliquid_market_adapter",
                 "nucleuscharts_engine",
                 "nucleuscharts_render",
                 "nucleuscharts_render_gpui",
@@ -445,12 +445,12 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "axiusflow_rithmic_protocol_adapter",
-                    "axiusflow_hyperliquid_market_adapter",
-                    "axiusflow_local_history",
-                    "axiusflow_local_storage",
-                    "axiusflow_market_engine",
-                    "axiusflow_provider_history",
+                    "tradingplot_rithmic_protocol_adapter",
+                    "tradingplot_hyperliquid_market_adapter",
+                    "tradingplot_local_history",
+                    "tradingplot_local_storage",
+                    "tradingplot_market_engine",
+                    "tradingplot_provider_history",
                     "rusqlite",
                 ],
             );
@@ -554,20 +554,20 @@ mod tests {
         assert_excludes(
             "apps/desktop/Cargo.toml",
             &[
-                "axiusflow_desktop_market_runtime",
-                "axiusflow_desktop_provider_runtime",
-                "axiusflow_rithmic_protocol_adapter",
-                "axiusflow_hyperliquid_market_adapter",
-                "axiusflow_provider_history",
-                "axiusflow_local_storage",
-                "axiusflow_local_history",
-                "axiusflow_market_engine",
+                "tradingplot_desktop_market_runtime",
+                "tradingplot_desktop_provider_runtime",
+                "tradingplot_rithmic_protocol_adapter",
+                "tradingplot_hyperliquid_market_adapter",
+                "tradingplot_provider_history",
+                "tradingplot_local_storage",
+                "tradingplot_local_history",
+                "tradingplot_market_engine",
             ],
         );
     }
 
     #[test]
-    fn workspace_uses_only_axiusflow_owned_gpui_controls() {
+    fn workspace_uses_only_tradingplot_owned_gpui_controls() {
         const RETIRED_COMPONENT_IDENTITIES: &[&str] = &[
             concat!("gpui", "-component"),
             concat!("gpui", "_component"),
@@ -690,11 +690,11 @@ mod tests {
     fn market_core_manifests_exclude_process_and_runtime_dependencies() {
         assert_dependencies_are(
             "crates/application/Cargo.toml",
-            &["axiusflow_instruments", "axiusflow_market_data", "sha2"],
+            &["tradingplot_instruments", "tradingplot_market_data", "sha2"],
         );
         assert_dependencies_are(
             "crates/market_engine/Cargo.toml",
-            &["axiusflow_market_data"],
+            &["tradingplot_market_data"],
         );
         assert_dependencies_are("crates/domain/instruments/Cargo.toml", &[]);
         assert_dependencies_are("crates/domain/market_data/Cargo.toml", &[]);
@@ -706,10 +706,10 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "axiusflow_desktop_market_runtime",
-                    "axiusflow_desktop_provider_runtime",
-                    "axiusflow_local_engine_client",
-                    "axiusflow_local_history",
+                    "tradingplot_desktop_market_runtime",
+                    "tradingplot_desktop_provider_runtime",
+                    "tradingplot_local_engine_client",
+                    "tradingplot_local_history",
                 ],
             );
         }
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(
             applications,
             ["desktop".to_string()].into(),
-            "Axiusflow must have exactly one application process"
+            "TradingPlot must have exactly one application process"
         );
     }
     #[test]
@@ -1007,10 +1007,10 @@ mod tests {
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
-                "axiusflow_local_storage",
-                "axiusflow_local_history",
-                "axiusflow_chart_integration",
-                "axiusflow_terminal_ui",
+                "tradingplot_local_storage",
+                "tradingplot_local_history",
+                "tradingplot_chart_integration",
+                "tradingplot_terminal_ui",
                 "gpui",
             ] {
                 assert!(
@@ -1025,11 +1025,11 @@ mod tests {
     fn engine_manifest_owns_backend_composition_without_ui() {
         let market = manifest("crates/market_runtime/Cargo.toml");
         for dependency in [
-            "axiusflow_rithmic_protocol_adapter",
-            "axiusflow_hyperliquid_market_adapter",
-            "axiusflow_market_engine",
-            "axiusflow_provider_history",
-            "axiusflow_platform_runtime",
+            "tradingplot_rithmic_protocol_adapter",
+            "tradingplot_hyperliquid_market_adapter",
+            "tradingplot_market_engine",
+            "tradingplot_provider_history",
+            "tradingplot_platform_runtime",
         ] {
             assert!(
                 market.contains(dependency),
@@ -1037,7 +1037,7 @@ mod tests {
             );
         }
         let account = manifest("crates/account_runtime/Cargo.toml");
-        for dependency in ["axiusflow_account", "axiusflow_platform_runtime"] {
+        for dependency in ["tradingplot_account", "tradingplot_platform_runtime"] {
             assert!(
                 account.contains(dependency),
                 "account_runtime must compose {dependency}"
@@ -1051,8 +1051,8 @@ mod tests {
                 relative,
                 &[
                     "gpui",
-                    "axiusflow_chart_integration",
-                    "axiusflow_terminal_ui",
+                    "tradingplot_chart_integration",
+                    "tradingplot_terminal_ui",
                 ],
             );
         }
@@ -1067,11 +1067,11 @@ mod tests {
         }
         let market = manifest("crates/market_runtime/Cargo.toml");
         assert!(
-            market.contains("axiusflow_provider_history"),
+            market.contains("tradingplot_provider_history"),
             "market runtime lost provider-history adapter boundary"
         );
         assert!(
-            !market.contains("axiusflow_local_storage"),
+            !market.contains("tradingplot_local_storage"),
             "market runtime must not persist market history"
         );
         let module = manifest("crates/market_runtime/src/market_service/mod.rs");
@@ -1272,7 +1272,7 @@ mod tests {
         let cleanup = &update[cleanup_start..cleanup_end];
         assert!(
             workspace_tabs.contains("drop(cleanup);")
-                && cleanup.contains("axiusflow-update-restart-cleanup")
+                && cleanup.contains("tradingplot-update-restart-cleanup")
                 && cleanup.contains(".spawn(move || {")
                 && cleanup.contains("child.kill()")
                 && cleanup.contains("child.wait()"),
@@ -1346,7 +1346,7 @@ mod tests {
             .expect("update restart preparation boundary");
         let prepare = &workspace_tabs[prepare_start..prepare_end];
         assert!(
-            prepare.contains("axiusflow_desktop::account::begin_refresh_quiesce()")
+            prepare.contains("tradingplot_desktop::account::begin_refresh_quiesce()")
                 && prepare.contains("account_refresh.wait()?")
                 && prepare.contains("drop(account_refresh)"),
             "update restart must quiesce account refresh and release its claim on cancellation"
@@ -1368,7 +1368,7 @@ mod tests {
 
         let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
         assert!(
-            lifecycle.contains("axiusflow_desktop::account::begin_refresh_quiesce()")
+            lifecycle.contains("tradingplot_desktop::account::begin_refresh_quiesce()")
                 && lifecycle.contains("quiesce.wait()")
                 && lifecycle.contains("quiesce.retain_until_process_exit()")
                 && lifecycle.contains("blocks_exit: true")
@@ -1387,7 +1387,7 @@ mod tests {
             .expect("account-only quit boundary");
         let account_quit = &desktop[account_quit_start..account_quit_end];
         assert!(
-            account_quit.contains("axiusflow_desktop::account::begin_refresh_quiesce()")
+            account_quit.contains("tradingplot_desktop::account::begin_refresh_quiesce()")
                 && account_quit.contains("cx.background_executor().spawn")
                 && account_quit.contains("if let Err(first_error) = quiesce.wait()")
                 && account_quit.contains("quiesce.wait()?;")
@@ -1396,7 +1396,7 @@ mod tests {
             "account-only quit must keep one quiesce claim across its bounded retry and reach refresh durability off GPUI before process exit"
         );
         let account_install = desktop
-            .find("let account = match axiusflow_desktop::account::DesktopAccount::install()")
+            .find("let account = match tradingplot_desktop::account::DesktopAccount::install()")
             .expect("production account installation");
         let after_account_install = &desktop[account_install..];
         assert!(
@@ -1519,7 +1519,7 @@ mod tests {
                 "platform lifecycle lost {contract}"
             );
         }
-        let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
         for contract in [
             "--check-update",
             "--prepare-update",
@@ -1567,7 +1567,8 @@ mod tests {
                 .join("crates/platform_runtime/src/background_service.rs")
                 .exists()
         );
-        let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
+        let publisher =
+            manifest("crates/platform_runtime/src/bin/tradingplot_release_publisher.rs");
         let release_script = manifest("tools/publish_release.ps1");
         assert!(
             publisher.contains("--minimum-version")
@@ -1581,7 +1582,8 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn protected_release_and_non_blocking_update_contracts_remain_owned() {
-        let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
+        let publisher =
+            manifest("crates/platform_runtime/src/bin/tradingplot_release_publisher.rs");
         let release_script = manifest("tools/publish_release.ps1");
         for contract in [
             "AuthenticodeCertificateSha1",
@@ -1594,7 +1596,11 @@ mod tests {
             "RolloutPercentage",
             "PackageOnly",
             "GITHUB_ACTIONS",
-            "AXIUSFLOW_RELEASE_ENVIRONMENT",
+            "TRADINGPLOT_RELEASE_ENVIRONMENT",
+            "https://auth.axiusflow.com/releases",
+            "axiusflow-releases",
+            "Axiusflow\\release-signing-key.b64",
+            "axiusflow-website\\node_modules\\.bin\\wrangler.cmd",
             "git rev-parse origin/main",
             "\"--authenticode-certificate-sha1\", $AuthenticodeCertificateSha1",
             "\"--authenticode-timestamp-url\", $AuthenticodeTimestampUrl",
@@ -1630,10 +1636,11 @@ mod tests {
             "RELEASE_RETIREMENT_FILENAME",
             "wrangler_delete",
             "AXIUSFLOW_RELEASE_PROVENANCE_V1\\0",
+            "AXIUSFLOW_RELEASE_RETIREMENT_V1\\0",
             "provenance.json",
             "requires_provenance_signature",
             "verify_production_publication_context",
-            "AXIUSFLOW_AUTHENTICODE_CERT_SHA1",
+            "TRADINGPLOT_AUTHENTICODE_CERT_SHA1",
             "rollback-compatibility.json",
         ] {
             assert!(
@@ -1658,9 +1665,10 @@ mod tests {
             "allow_unsigned_windows_release:",
             "trust_reset_from_generation:",
             "trust_reset_from_release_identity:",
-            "AXIUSFLOW_RELEASE_ENVIRONMENT: self-hosted-release-station",
+            "TRADINGPLOT_RELEASE_ENVIRONMENT: self-hosted-release-station",
             "RELEASE_VERIFYING_KEY_B64URL",
             "AxiusflowReleaseHandoff",
+            "Axiusflow\\release-signing-key.b64",
             "needs.qualify-windows.outputs.launcher_sha256",
             "needs.qualify-windows.outputs.desktop_sha256",
             "QUALIFIED_RELEASE_VERIFYING_KEY",
@@ -1705,6 +1713,7 @@ mod tests {
         let cleanup_workflow = manifest(".github/workflows/release_handoff_cleanup.yml");
         assert!(
             cleanup_workflow.contains("runs-on: [self-hosted, axiusflow, windows, release-build]")
+                && cleanup_workflow.contains("AxiusflowReleaseHandoff")
                 && cleanup_workflow.contains("AddHours(-24)")
                 && !cleanup_workflow.contains("runs-on: ubuntu-latest")
                 && !cleanup_workflow.contains("runs-on: windows-latest"),
@@ -1720,23 +1729,41 @@ mod tests {
             .expect("prebuild path boundary");
         assert!(
             !release_script[prebuild_start..prebuild_end]
-                .contains("--bin axiusflow_release_publisher"),
+                .contains("--bin tradingplot_release_publisher"),
             "unprivileged prebuild must not manufacture the trusted release publisher"
         );
         assert!(
             release_script[prebuild_start..prebuild_end]
-                .contains("Remove-Item Env:AXIUSFLOW_LOCAL_PACKAGE"),
+                .contains("Remove-Item Env:TRADINGPLOT_LOCAL_PACKAGE"),
             "production prebuild must clear the local-package updater-disable marker"
         );
 
         let desktop_update = manifest("apps/desktop/src/update.rs");
         assert!(
-            desktop_update.contains("option_env!(\"AXIUSFLOW_LOCAL_PACKAGE\")"),
+            desktop_update.contains("option_env!(\"TRADINGPLOT_LOCAL_PACKAGE\")"),
             "desktop updater must honor the compile-time local-package marker"
         );
         assert!(
-            publisher.contains("command.env(\"AXIUSFLOW_LOCAL_PACKAGE\", \"1\")")
-                && publisher.contains("command.env_remove(\"AXIUSFLOW_LOCAL_PACKAGE\")"),
+            desktop_update.contains("AXIUSFLOW_UPDATE_RESTART_READY_V2")
+                && desktop_update.contains("TRADINGPLOT_UPDATE_RESTART_READY_V2")
+                && desktop_update.contains("AXIUSFLOW_UPDATE_RESTART_COMMIT_V1"),
+            "desktop updater must preserve the pre-rename restart wire protocol while accepting transition builds"
+        );
+        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
+        assert!(
+            launcher.contains("AXIUSFLOW_UPDATE_RESTART_READY_V2")
+                && launcher.contains("AXIUSFLOW_UPDATE_RESTART_COMMIT_V1")
+                && launcher.contains("TRADINGPLOT_UPDATE_RESTART_COMMIT_V1"),
+            "launcher must preserve the pre-rename restart wire protocol while accepting transition builds"
+        );
+        assert!(
+            manifest("crates/platform_runtime/src/release_delivery.rs")
+                .contains("AXIUSFLOW_RELEASE_BLOCK_PLAN_V1\\0"),
+            "release block-plan signing domain must remain stable across the TradingPlot rename"
+        );
+        assert!(
+            publisher.contains("command.env(\"TRADINGPLOT_LOCAL_PACKAGE\", \"1\")")
+                && publisher.contains("command.env_remove(\"TRADINGPLOT_LOCAL_PACKAGE\")"),
             "release publisher must mark local package builds and clear inherited markers from production builds"
         );
 
@@ -1789,7 +1816,7 @@ mod tests {
                 .join("tools/build_clean_break_installer.ps1")
                 .exists()
                 && !repository_root()
-                    .join("tools/windows/axiusflow_clean_break_setup.iss")
+                    .join("tools/windows/tradingplot_clean_break_setup.iss")
                     .exists(),
             "obsolete clean-break installer path must stay retired"
         );
@@ -1818,7 +1845,7 @@ mod tests {
 
     #[test]
     fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
-        let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
         for contract in [
             "rollout_eligible",
             "current_update_check_report",
@@ -1857,27 +1884,29 @@ mod tests {
     fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
         for path in [
             "apps/desktop/src/main.rs",
-            "crates/platform_runtime/src/bin/axiusflow_launcher.rs",
+            "crates/platform_runtime/src/bin/tradingplot_launcher.rs",
         ] {
             assert!(
                 manifest(path).contains("windows_subsystem = \"windows\""),
                 "Windows GUI binary {path} lost subsystem marker"
             );
         }
-        let setup = manifest("tools/windows/axiusflow_setup.iss");
+        let setup = manifest("tools/windows/tradingplot_setup.iss");
         for contract in [
             "PrivilegesRequired=lowest",
-            "DefaultDirName={localappdata}\\Programs\\Axiusflow",
-            "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
-            "AppUserModelID: \"com.axiusflow.desktop\"",
-            "DestName: \"axiusflow_launcher.exe\"",
+            "AppPublisherURL=https://axiusflow.com",
+            "AppSupportURL=https://axiusflow.com",
+            "DefaultDirName={localappdata}\\Programs\\TradingPlot",
+            "UninstallDisplayIcon={app}\\tradingplot_launcher.exe",
+            "AppUserModelID: \"com.tradingplot.desktop\"",
+            "DestName: \"tradingplot_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
-            "ValueName: \"Axiusflow Engine\"; Flags: deletevalue",
+            "ValueName: \"TradingPlot Engine\"; Flags: deletevalue",
             "RollbackCompatibilityPath",
             "DestName: \"rollback-compatibility.json\"",
             "function PrepareToInstall(var NeedsRestart: Boolean): String;",
-            "{localappdata}\\Programs\\.Axiusflow-lifecycle\\uninstall.json",
-            "Finishing the previous Axiusflow uninstall...",
+            "{localappdata}\\Programs\\.TradingPlot-lifecycle\\uninstall.json",
+            "Finishing the previous TradingPlot uninstall...",
         ] {
             assert!(
                 setup.contains(contract),
@@ -1895,11 +1924,12 @@ mod tests {
             "pending uninstall cleanup must run before the bundled release installation hook"
         );
         assert!(!setup.contains("EnginePath"));
-        let publisher = manifest("crates/platform_runtime/src/bin/axiusflow_release_publisher.rs");
+        let publisher =
+            manifest("crates/platform_runtime/src/bin/tradingplot_release_publisher.rs");
         assert!(
             publisher.contains("compile_windows_installer")
                 && publisher.contains("ReleaseFileRole::RuntimeAsset")
-                && publisher.contains("axiusflow_launcher")
+                && publisher.contains("tradingplot_launcher")
         );
         assert!(!production_prefix(&publisher).contains("ReleaseFileRole::Engine"));
     }
@@ -1934,7 +1964,7 @@ mod tests {
             for forbidden in [
                 "/proc/",
                 "\"/tmp",
-                "/opt/axiusflow",
+                "/opt/tradingplot",
                 "/Applications/",
                 "C:\\Program",
                 "C:/Program",
@@ -2027,9 +2057,9 @@ mod tests {
         );
         for production_release_contract in [
             "release-pair",
-            "AXIUSFLOW_RELEASE_IDENTITY",
-            "AXIUSFLOW_INSTALL_GENERATION",
-            "AXIUSFLOW_RELEASE_VERIFYING_KEY",
+            "TRADINGPLOT_RELEASE_IDENTITY",
+            "TRADINGPLOT_INSTALL_GENERATION",
+            "TRADINGPLOT_RELEASE_VERIFYING_KEY",
         ] {
             assert!(
                 !workflow.contains(production_release_contract),
@@ -2153,7 +2183,7 @@ mod tests {
     }
     #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
-        let launcher = manifest("crates/platform_runtime/src/bin/axiusflow_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
         // The launcher runs from inside the tree uninstall deletes, and
         // Windows refuses to delete a running executable: uninstall must
         // rename the image to a sibling staging dir first so the original
@@ -2227,6 +2257,12 @@ mod tests {
                 "live-market gates lost the required gate {runner}"
             );
         }
+        assert!(
+            workflow.contains("AXIUSFLOW_RITHMIC_KIT_ROOT")
+                && workflow.contains("TRADINGPLOT_RITHMIC_KIT_ROOT")
+                && workflow.contains("C:\\axiusflow-deps\\provider-kit"),
+            "live-market gates must keep the provisioned Rithmic kit location and accept both env names"
+        );
         for hosted in ["ubuntu-latest", "windows-latest", "macos-latest"] {
             assert!(
                 !workflow.contains(&format!("runs-on: {hosted}")),
@@ -2238,7 +2274,7 @@ mod tests {
     #[test]
     fn rithmic_application_name_has_one_canonical_source() {
         let adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
-        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Axiusflow\";"));
+        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"TradingPlot\";"));
         for relative in [
             "crates/adapters/rithmic_protocol/src/provider_session.rs",
             "crates/adapters/rithmic_protocol/src/protocol.rs",
@@ -2249,7 +2285,7 @@ mod tests {
         ] {
             let source = manifest(relative);
             assert!(
-                !source.contains("\"AxiusFlow\""),
+                !source.contains("\"TradingPlot\""),
                 "{relative} reintroduced non-canonical identity"
             );
             assert!(
@@ -2325,8 +2361,10 @@ mod tests {
                 "market coordinator must not own account state {identifier}"
             );
         }
-        assert!(manifest("apps/desktop/Cargo.toml").contains("axiusflow_account_runtime"));
-        assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("axiusflow_account"));
+        assert!(manifest("apps/desktop/Cargo.toml").contains("tradingplot_account_runtime"));
+        assert!(
+            !manifest("crates/ui/chart_integration/Cargo.toml").contains("tradingplot_account")
+        );
     }
     #[test]
     fn account_contracts_remain_plain_bounded_values() {

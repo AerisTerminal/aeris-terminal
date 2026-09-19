@@ -9,7 +9,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 cargo run `
     --manifest-path (Join-Path $repoRoot "Cargo.toml") `
     --locked `
-    --package axiusflow_rithmic_protocol_adapter `
+    --package tradingplot_rithmic_protocol_adapter `
     --bin rithmic_test_smoke `
     -- `
     --authorized-silence-recovery

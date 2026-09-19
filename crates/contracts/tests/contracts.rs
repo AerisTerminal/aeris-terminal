@@ -1,4 +1,5 @@
-use axiusflow_contracts::{
+use prost::Message as _;
+use tradingplot_contracts::{
     AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
     ProviderState, SeriesCadence, SeriesKey, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
@@ -6,7 +7,6 @@ use axiusflow_contracts::{
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
-use prost::Message as _;
 
 fn workspace_tab() -> WorkspaceTabState {
     let instrument = InstallProviderInstrument {

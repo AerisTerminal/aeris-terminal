@@ -1,7 +1,7 @@
 use crate::provider_runtime::{ConnectTrigger, RecoveryReason, SessionGeneration};
-use axiusflow_market_data::{BarSeriesKey, MarketEvent};
 use core::fmt;
 use std::{collections::BTreeSet, error::Error, num::NonZeroUsize};
+use tradingplot_market_data::{BarSeriesKey, MarketEvent};
 
 /// Maximum bytes accepted in one provider discovery identity field.
 pub const MAXIMUM_DISCOVERY_FIELD_BYTES: usize = 256;
@@ -416,10 +416,10 @@ impl fmt::Debug for ProviderSessionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_market_data::{
+    use std::{cell::Cell, num::NonZeroU64};
+    use tradingplot_market_data::{
         AggressorSide, BarPeriod, BarSeriesKey, EventMetadata, MarketTrade, QualifiedTimestamp,
     };
-    use std::{cell::Cell, num::NonZeroU64};
 
     fn nonzero(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).unwrap_or(NonZeroUsize::MIN)

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Exercises Axiusflow's real Win32 non-client hit-test and caption-action path.
+Exercises TradingPlot's real Win32 non-client hit-test and caption-action path.
 
 .DESCRIPTION
 Build the release diagnostics binary first. Run this script once for each launch mode and DPI
@@ -9,7 +9,7 @@ transitions and 50 fresh-process launches.
 #>
 [CmdletBinding()]
 param(
-    [string]$BinaryPath = "target/release/axiusflow_desktop.exe",
+    [string]$BinaryPath = "target/release/tradingplot_desktop.exe",
     [ValidateSet("normal", "workspace-tabs", "multi-chart")]
     [string]$Mode = "normal",
     [ValidateRange(1, 1000)]
@@ -30,7 +30,7 @@ Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public static class AxiusflowWindowControlsNative {
+public static class TradingPlotWindowControlsNative {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, UIntPtr w, IntPtr l);
@@ -94,7 +94,7 @@ public static class AxiusflowWindowControlsNative {
 "@
 
 # Keep P/Invoke screen/client coordinates in the same physical-pixel space as the GPUI process.
-[void][AxiusflowWindowControlsNative]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
+[void][TradingPlotWindowControlsNative]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
 
 $WM_MOUSEMOVE = 0x0200
 $WM_NCHITTEST = 0x0084
@@ -147,25 +147,25 @@ function Start-TestWindow([string]$Lane) {
 }
 
 function Get-ControlPoints([IntPtr]$Handle) {
-    $rect = New-Object AxiusflowWindowControlsNative+RECT
+    $rect = New-Object TradingPlotWindowControlsNative+RECT
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     do {
-        if (([AxiusflowWindowControlsNative]::GetClientRect($Handle, [ref]$rect)) -and ($rect.Right -gt $rect.Left) -and ($rect.Bottom -gt $rect.Top)) {
+        if (([TradingPlotWindowControlsNative]::GetClientRect($Handle, [ref]$rect)) -and ($rect.Right -gt $rect.Left) -and ($rect.Bottom -gt $rect.Top)) {
             break
         }
         Start-Sleep -Milliseconds 25
     } while ([DateTime]::UtcNow -lt $deadline)
     Assert-True (($rect.Right -gt $rect.Left) -and ($rect.Bottom -gt $rect.Top)) "GetClientRect did not expose a valid native client area after the window transition."
-    $dpi = [int][AxiusflowWindowControlsNative]::GetDpiForWindow($Handle)
+    $dpi = [int][TradingPlotWindowControlsNative]::GetDpiForWindow($Handle)
     $scale = $dpi / 96.0
     $width = $rect.Right - $rect.Left
     $titleBarY = [Math]::Round(21.0 * $scale)
     $headerY = [Math]::Round(65.0 * $scale)
     function Make-Point([int]$ClientX, [int]$ClientY) {
-        $screen = New-Object AxiusflowWindowControlsNative+POINT
+        $screen = New-Object TradingPlotWindowControlsNative+POINT
         $screen.X = $ClientX
         $screen.Y = $ClientY
-        Assert-True ([AxiusflowWindowControlsNative]::ClientToScreen($Handle, [ref]$screen)) "ClientToScreen failed."
+        Assert-True ([TradingPlotWindowControlsNative]::ClientToScreen($Handle, [ref]$screen)) "ClientToScreen failed."
         return @{ ClientX = $ClientX; ClientY = $ClientY; ScreenX = $screen.X; ScreenY = $screen.Y }
     }
     return @{
@@ -181,24 +181,24 @@ function Get-ControlPoints([IntPtr]$Handle) {
 function Get-HitTest([IntPtr]$Handle, $Point) {
     # Move the real cursor so Windows emits the same client/non-client transition sequence as a
     # user. Synthetic WM_MOUSEMOVE alone does not maintain Win32's NC tracking state.
-    [void][AxiusflowWindowControlsNative]::ActivateWindow($Handle)
-    [void][AxiusflowWindowControlsNative]::BringWindowToTop($Handle)
-    [void][AxiusflowWindowControlsNative]::SetActiveWindow($Handle)
-    [void][AxiusflowWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
-    [void][AxiusflowWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
+    [void][TradingPlotWindowControlsNative]::ActivateWindow($Handle)
+    [void][TradingPlotWindowControlsNative]::BringWindowToTop($Handle)
+    [void][TradingPlotWindowControlsNative]::SetActiveWindow($Handle)
+    [void][TradingPlotWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
+    [void][TradingPlotWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
     Start-Sleep -Milliseconds 25
-    $actualCursor = New-Object AxiusflowWindowControlsNative+POINT
-    [void][AxiusflowWindowControlsNative]::GetCursorPos([ref]$actualCursor)
+    $actualCursor = New-Object TradingPlotWindowControlsNative+POINT
+    [void][TradingPlotWindowControlsNative]::GetCursorPos([ref]$actualCursor)
     $cursorMoved = $actualCursor.X -eq $Point.ScreenX -and $actualCursor.Y -eq $Point.ScreenY
     if ($null -eq $script:CursorInjectionAvailable) { $script:CursorInjectionAvailable = $cursorMoved }
     if (-not $cursorMoved) {
         # Headless/remote Windows sessions may reject cursor injection. Exercise the same pinned
         # GPUI input callback directly in that case, using client coordinates.
-        [void][AxiusflowWindowControlsNative]::SendMessage(
+        [void][TradingPlotWindowControlsNative]::SendMessage(
             $Handle, $WM_MOUSEMOVE, [UIntPtr]::Zero, (New-LParam $Point.ClientX $Point.ClientY))
         Start-Sleep -Milliseconds 25
     }
-    $result = [AxiusflowWindowControlsNative]::SendMessage(
+    $result = [TradingPlotWindowControlsNative]::SendMessage(
         $Handle, $WM_NCHITTEST, [UIntPtr]::Zero, (New-LParam $Point.ScreenX $Point.ScreenY))
     return $result.ToInt32()
 }
@@ -220,8 +220,8 @@ function Assert-StableHitTest([IntPtr]$Handle, $Point, [int]$Expected, [string]$
 }
 
 function Save-DiagnosticCapture([IntPtr]$Handle) {
-    $rect = New-Object AxiusflowWindowControlsNative+RECT
-    if (-not [AxiusflowWindowControlsNative]::GetWindowRect($Handle, [ref]$rect)) { return }
+    $rect = New-Object TradingPlotWindowControlsNative+RECT
+    if (-not [TradingPlotWindowControlsNative]::GetWindowRect($Handle, [ref]$rect)) { return }
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
     if ($width -le 0 -or $height -le 0) { return }
@@ -285,55 +285,55 @@ function Assert-GlyphPixels([IntPtr]$Handle, $Points) {
 function Invoke-NativeClick([IntPtr]$Handle, [int]$HitCode, $Point) {
     Assert-StableHitTest $Handle $Point $HitCode "Native click target"
     if ($script:CursorInjectionAvailable) {
-        [void][AxiusflowWindowControlsNative]::ActivateWindow($Handle)
-        [void][AxiusflowWindowControlsNative]::SetActiveWindow($Handle)
-        [void][AxiusflowWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
-        [void][AxiusflowWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
-        Assert-True ([AxiusflowWindowControlsNative]::SendMove()) "SendInput cursor move failed."
+        [void][TradingPlotWindowControlsNative]::ActivateWindow($Handle)
+        [void][TradingPlotWindowControlsNative]::SetActiveWindow($Handle)
+        [void][TradingPlotWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
+        [void][TradingPlotWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
+        Assert-True ([TradingPlotWindowControlsNative]::SendMove()) "SendInput cursor move failed."
         Start-Sleep -Milliseconds 25
-        Assert-True ([AxiusflowWindowControlsNative]::SendLeftButton($true)) "SendInput left-button down failed."
+        Assert-True ([TradingPlotWindowControlsNative]::SendLeftButton($true)) "SendInput left-button down failed."
         Start-Sleep -Milliseconds 25
-        Assert-True ([AxiusflowWindowControlsNative]::SendLeftButton($false)) "SendInput left-button up failed."
+        Assert-True ([TradingPlotWindowControlsNative]::SendLeftButton($false)) "SendInput left-button up failed."
     } else {
         $screen = New-LParam $Point.ScreenX $Point.ScreenY
         $hit = [UIntPtr]::new([uint32]$HitCode)
-        [void][AxiusflowWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONDOWN, $hit, $screen)
-        [void][AxiusflowWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONUP, $hit, $screen)
+        [void][TradingPlotWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONDOWN, $hit, $screen)
+        [void][TradingPlotWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONUP, $hit, $screen)
     }
 }
 
 function Invoke-RealClientClick([IntPtr]$Handle, $Point) {
     Assert-StableHitTest $Handle $Point $HTCLIENT "Client click target"
     Assert-True ([bool]$script:CursorInjectionAvailable) "The required live lane cannot use synthetic client input."
-    [void][AxiusflowWindowControlsNative]::ActivateWindow($Handle)
-    [void][AxiusflowWindowControlsNative]::SetActiveWindow($Handle)
-    [void][AxiusflowWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
-    [void][AxiusflowWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
-    Assert-True ([AxiusflowWindowControlsNative]::SendMove()) "SendInput header move failed."
+    [void][TradingPlotWindowControlsNative]::ActivateWindow($Handle)
+    [void][TradingPlotWindowControlsNative]::SetActiveWindow($Handle)
+    [void][TradingPlotWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
+    [void][TradingPlotWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
+    Assert-True ([TradingPlotWindowControlsNative]::SendMove()) "SendInput header move failed."
     Start-Sleep -Milliseconds 25
-    Assert-True ([AxiusflowWindowControlsNative]::SendLeftButton($true)) "SendInput header down failed."
+    Assert-True ([TradingPlotWindowControlsNative]::SendLeftButton($true)) "SendInput header down failed."
     Start-Sleep -Milliseconds 25
-    Assert-True ([AxiusflowWindowControlsNative]::SendLeftButton($false)) "SendInput header up failed."
+    Assert-True ([TradingPlotWindowControlsNative]::SendLeftButton($false)) "SendInput header up failed."
 }
 
 function Invoke-CrossRelease([IntPtr]$Handle, [int]$DownHitCode, $DownPoint, [int]$UpHitCode, $UpPoint) {
     Assert-StableHitTest $Handle $DownPoint $DownHitCode "Cross-release press target"
     if ($script:CursorInjectionAvailable) {
-        [void][AxiusflowWindowControlsNative]::ActivateWindow($Handle)
-        [void][AxiusflowWindowControlsNative]::SetActiveWindow($Handle)
-        [void][AxiusflowWindowControlsNative]::SetCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
-        [void][AxiusflowWindowControlsNative]::SetPhysicalCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
-        Assert-True ([AxiusflowWindowControlsNative]::SendMove()) "SendInput cross-release move failed."
+        [void][TradingPlotWindowControlsNative]::ActivateWindow($Handle)
+        [void][TradingPlotWindowControlsNative]::SetActiveWindow($Handle)
+        [void][TradingPlotWindowControlsNative]::SetCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
+        [void][TradingPlotWindowControlsNative]::SetPhysicalCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
+        Assert-True ([TradingPlotWindowControlsNative]::SendMove()) "SendInput cross-release move failed."
         Start-Sleep -Milliseconds 25
-        Assert-True ([AxiusflowWindowControlsNative]::SendLeftButton($true)) "SendInput cross-release down failed."
-        [void][AxiusflowWindowControlsNative]::SetPhysicalCursorPos($UpPoint.ScreenX, $UpPoint.ScreenY)
+        Assert-True ([TradingPlotWindowControlsNative]::SendLeftButton($true)) "SendInput cross-release down failed."
+        [void][TradingPlotWindowControlsNative]::SetPhysicalCursorPos($UpPoint.ScreenX, $UpPoint.ScreenY)
         Start-Sleep -Milliseconds 25
-        Assert-True ([AxiusflowWindowControlsNative]::SendLeftButton($false)) "SendInput cross-release up failed."
+        Assert-True ([TradingPlotWindowControlsNative]::SendLeftButton($false)) "SendInput cross-release up failed."
     } else {
-        [void][AxiusflowWindowControlsNative]::SendMessage(
+        [void][TradingPlotWindowControlsNative]::SendMessage(
             $Handle, $WM_NCLBUTTONDOWN, [UIntPtr]::new([uint32]$DownHitCode),
             (New-LParam $DownPoint.ScreenX $DownPoint.ScreenY))
-        [void][AxiusflowWindowControlsNative]::SendMessage(
+        [void][TradingPlotWindowControlsNative]::SendMessage(
             $Handle, $WM_NCLBUTTONUP, [UIntPtr]::new([uint32]$UpHitCode),
             (New-LParam $UpPoint.ScreenX $UpPoint.ScreenY))
     }
@@ -349,10 +349,10 @@ function Wait-State([scriptblock]$Predicate, [string]$Failure) {
 }
 
 function Close-TestProcess($TestProcess, [IntPtr]$InitialHandle, [string]$Failure) {
-    [void][AxiusflowWindowControlsNative]::PostMessage($InitialHandle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
+    [void][TradingPlotWindowControlsNative]::PostMessage($InitialHandle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 250
-    foreach ($handle in [AxiusflowWindowControlsNative]::WindowsForProcess([uint32]$TestProcess.Id)) {
-        [void][AxiusflowWindowControlsNative]::PostMessage($handle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
+    foreach ($handle in [TradingPlotWindowControlsNative]::WindowsForProcess([uint32]$TestProcess.Id)) {
+        [void][TradingPlotWindowControlsNative]::PostMessage($handle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
     }
     Assert-True ($TestProcess.WaitForExit(10000)) $Failure
 }
@@ -375,12 +375,12 @@ function Read-LiveDiagnostics([string]$Path) {
             $text = $reader.ReadToEnd()
             foreach ($line in ($text -split "`r?`n")) {
                 try {
-                    if ($line -match '^AXIUSFLOW_LIVE_SNAPSHOT (\{.*\})$') {
+                    if ($line -match '^TRADINGPLOT_LIVE_SNAPSHOT (\{.*\})$') {
                         $snapshot = $Matches[1] | ConvertFrom-Json
-                    } elseif ($line -match '^AXIUSFLOW_LIVE_UPDATE (\{.*\})$') {
+                    } elseif ($line -match '^TRADINGPLOT_LIVE_UPDATE (\{.*\})$') {
                         $update = $Matches[1] | ConvertFrom-Json
                         if ($update.kind -eq "tail") { $tailUpdates++ }
-                    } elseif ($line -match '^AXIUSFLOW_CHART_REBUILD (\{.*\})$') {
+                    } elseif ($line -match '^TRADINGPLOT_CHART_REBUILD (\{.*\})$') {
                         $rebuild = $Matches[1] | ConvertFrom-Json
                         $lastRebuild = $rebuild
                         if ($rebuild.data -eq "tail_replace") {
@@ -392,7 +392,7 @@ function Read-LiveDiagnostics([string]$Path) {
                                 $tailReplaceFrameRebuilds++
                             }
                         }
-                    } elseif ($line -match '^AXIUSFLOW_CHART_MOUSE_DOWN ') {
+                    } elseif ($line -match '^TRADINGPLOT_CHART_MOUSE_DOWN ') {
                         $chartMouseDowns++
                     }
                 } catch {
@@ -448,10 +448,10 @@ $liveDiagnosticsReportPath = $null
 $observedDpi = 0
 $script:CursorInjectionAvailable = $null
 $script:LaunchIndex = 0
-$originalLiveEvidence = $env:AXIUSFLOW_LIVE_EVIDENCE
-$env:AXIUSFLOW_LIVE_EVIDENCE = "1"
-$originalCursor = New-Object AxiusflowWindowControlsNative+POINT
-[void][AxiusflowWindowControlsNative]::GetPhysicalCursorPos([ref]$originalCursor)
+$originalLiveEvidence = $env:TRADINGPLOT_LIVE_EVIDENCE
+$env:TRADINGPLOT_LIVE_EVIDENCE = "1"
+$originalCursor = New-Object TradingPlotWindowControlsNative+POINT
+[void][TradingPlotWindowControlsNative]::GetPhysicalCursorPos([ref]$originalCursor)
 try {
     $active = Start-TestWindow "live"
     $autoloadDiagnostics = Wait-LiveSnapshot $active
@@ -466,14 +466,14 @@ try {
     $captionMouseDownsBefore = $streamingDiagnostics.ChartMouseDowns
     $warmPoints = Assert-HitTests $active.Handle
     Assert-GlyphPixels $active.Handle $warmPoints
-    $beforeWarmMaximize = [AxiusflowWindowControlsNative]::IsZoomed($active.Handle)
+    $beforeWarmMaximize = [TradingPlotWindowControlsNative]::IsZoomed($active.Handle)
     Invoke-NativeClick $active.Handle $HTMAXBUTTON $warmPoints.Maximize
-    Wait-State { [AxiusflowWindowControlsNative]::IsZoomed($active.Handle) -ne $beforeWarmMaximize } "Warm maximize did not transition while live ticks were active."
+    Wait-State { [TradingPlotWindowControlsNative]::IsZoomed($active.Handle) -ne $beforeWarmMaximize } "Warm maximize did not transition while live ticks were active."
     $warmPoints = Get-ControlPoints $active.Handle
     Invoke-NativeClick $active.Handle $HTMINBUTTON $warmPoints.Minimize
-    Wait-State { [AxiusflowWindowControlsNative]::IsIconic($active.Handle) } "Warm minimize did not transition while live ticks were active."
-    [void][AxiusflowWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
-    Wait-State { -not [AxiusflowWindowControlsNative]::IsIconic($active.Handle) } "Warm restore after minimize did not transition."
+    Wait-State { [TradingPlotWindowControlsNative]::IsIconic($active.Handle) } "Warm minimize did not transition while live ticks were active."
+    [void][TradingPlotWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
+    Wait-State { -not [TradingPlotWindowControlsNative]::IsIconic($active.Handle) } "Warm restore after minimize did not transition."
     $warmPoints = Get-ControlPoints $active.Handle
     Invoke-RealClientClick $active.Handle $warmPoints.Interactive
     Start-Sleep -Milliseconds 150
@@ -486,31 +486,31 @@ try {
     Assert-GlyphPixels $active.Handle $points
 
     for ($cycle = 0; $cycle -lt $MaximizeCycles; $cycle++) {
-        $before = [AxiusflowWindowControlsNative]::IsZoomed($active.Handle)
+        $before = [TradingPlotWindowControlsNative]::IsZoomed($active.Handle)
         $points = Get-ControlPoints $active.Handle
         Invoke-NativeClick $active.Handle $HTMAXBUTTON $points.Maximize
-        Wait-State { [AxiusflowWindowControlsNative]::IsZoomed($active.Handle) -ne $before } "Maximize cycle $cycle did not transition once."
+        Wait-State { [TradingPlotWindowControlsNative]::IsZoomed($active.Handle) -ne $before } "Maximize cycle $cycle did not transition once."
         Start-Sleep -Milliseconds 100
         [void](Assert-HitTests $active.Handle $false)
     }
 
     $points = Get-ControlPoints $active.Handle
-    $beforeCrossRelease = [AxiusflowWindowControlsNative]::IsZoomed($active.Handle)
+    $beforeCrossRelease = [TradingPlotWindowControlsNative]::IsZoomed($active.Handle)
     Invoke-CrossRelease $active.Handle $HTMAXBUTTON $points.Maximize $HTMINBUTTON $points.Minimize
     Start-Sleep -Milliseconds 100
-    Assert-True ([AxiusflowWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeCrossRelease) "Cross-button release changed window state."
+    Assert-True ([TradingPlotWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeCrossRelease) "Cross-button release changed window state."
 
     $points = Get-ControlPoints $active.Handle
-    $beforeOutsideRelease = [AxiusflowWindowControlsNative]::IsZoomed($active.Handle)
+    $beforeOutsideRelease = [TradingPlotWindowControlsNative]::IsZoomed($active.Handle)
     Invoke-CrossRelease $active.Handle $HTMAXBUTTON $points.Maximize $HTCAPTION $points.Drag
     Start-Sleep -Milliseconds 100
-    Assert-True ([AxiusflowWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeOutsideRelease) "Release outside the pressed caption changed window state."
+    Assert-True ([TradingPlotWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeOutsideRelease) "Release outside the pressed caption changed window state."
 
     $points = Get-ControlPoints $active.Handle
     Invoke-NativeClick $active.Handle $HTMINBUTTON $points.Minimize
-    Wait-State { [AxiusflowWindowControlsNative]::IsIconic($active.Handle) } "Minimize did not transition."
-    [void][AxiusflowWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
-    Wait-State { -not [AxiusflowWindowControlsNative]::IsIconic($active.Handle) } "Restore after minimize did not transition."
+    Wait-State { [TradingPlotWindowControlsNative]::IsIconic($active.Handle) } "Minimize did not transition."
+    [void][TradingPlotWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
+    Wait-State { -not [TradingPlotWindowControlsNative]::IsIconic($active.Handle) } "Restore after minimize did not transition."
     [void](Assert-HitTests $active.Handle)
 
     Close-TestProcess $active.Process $active.Handle "Desktop did not exit after WM_CLOSE; possible orphan or stalled retirement."
@@ -529,7 +529,7 @@ try {
 
     [ordered]@{
         schema_version = 2
-        evidence_scope = "axiusflow_live_chart_and_native_window_controls"
+        evidence_scope = "tradingplot_live_chart_and_native_window_controls"
         mode = $Mode
         dpi = $observedDpi
         warmup_seconds = $WarmupSeconds
@@ -562,8 +562,8 @@ try {
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resolvedReport -Encoding UTF8
     Write-Host "Window-control conformance passed: $resolvedReport"
 } finally {
-    $env:AXIUSFLOW_LIVE_EVIDENCE = $originalLiveEvidence
-    [void][AxiusflowWindowControlsNative]::SetPhysicalCursorPos($originalCursor.X, $originalCursor.Y)
+    $env:TRADINGPLOT_LIVE_EVIDENCE = $originalLiveEvidence
+    [void][TradingPlotWindowControlsNative]::SetPhysicalCursorPos($originalCursor.X, $originalCursor.Y)
     if ($null -ne $active -and -not $active.Process.HasExited) {
         Stop-Process -Id $active.Process.Id -Force
     }

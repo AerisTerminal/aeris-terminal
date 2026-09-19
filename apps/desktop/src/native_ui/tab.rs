@@ -1,9 +1,11 @@
-use axiusflow_design_system::{AxiusflowTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
     RenderOnce, StyleRefinement, Styled, Window, prelude::*, px,
 };
 use gpui_base::Button as BaseButton;
+use tradingplot_design_system::{
+    RadiusToken, TradingPlotTheme, TypographyRole, platform_font_family,
+};
 
 use super::{
     platform_font_weight,
@@ -14,21 +16,21 @@ fn tab_radius() -> gpui::Pixels {
     px(f32::from(RadiusToken::Full.logical_pixels()))
 }
 
-/// Shared Axiusflow tab surface. Tabs own their semantic role, selected-state
+/// Shared `TradingPlot` tab surface. Tabs own their semantic role, selected-state
 /// treatment, focus treatment, and the canonical pill radius while callers own
 /// layout, content, and activation behavior.
 #[derive(IntoElement)]
 pub(crate) struct Tab {
     base: BaseButton,
     style: StyleRefinement,
-    theme: AxiusflowTheme,
+    theme: TradingPlotTheme,
     selected: bool,
     segmented: bool,
     children: Vec<AnyElement>,
 }
 
 impl Tab {
-    pub(crate) fn new(id: impl Into<ElementId>, theme: &AxiusflowTheme) -> Self {
+    pub(crate) fn new(id: impl Into<ElementId>, theme: &TradingPlotTheme) -> Self {
         Self {
             base: BaseButton::new(id),
             style: StyleRefinement::default(),

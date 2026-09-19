@@ -5,8 +5,8 @@
 //! interval, and candle-open timestamp with exactly one forming candle.
 //! Trade volume is never added into provider candles.
 
-use axiusflow_market_data::{BarPeriod, MarketBar};
 use serde::Deserialize;
+use tradingplot_market_data::{BarPeriod, MarketBar};
 
 use crate::decimal::RawDecimal;
 

@@ -2,10 +2,10 @@
 
 use crate::bridge::MergedChartData;
 use crate::view::ChartType;
-use axiusflow_application::{ProvenancedMarketBar, ReplaySnapshot};
 use nucleuscharts_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
 use num_traits::ToPrimitive;
 use std::num::NonZeroUsize;
+use tradingplot_application::{ProvenancedMarketBar, ReplaySnapshot};
 
 const DEFAULT_CHART_DATA_QUEUE_CAPACITY: usize = 64;
 

@@ -6,10 +6,10 @@
 //! are legal (one-sided markets) and surface as an empty level list with a
 //! valid sequence.
 
-use axiusflow_market_data::{
+use serde::Deserialize;
+use tradingplot_market_data::{
     DepthLevel, DepthSnapshot, EventMetadata, QualifiedTimestamp, TopOfBookQuote,
 };
-use serde::Deserialize;
 
 use crate::decimal::{NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE, parse_decimal_to_fixed};
 

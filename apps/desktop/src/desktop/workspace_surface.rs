@@ -285,7 +285,7 @@ fn runtime_study_registration_with_registry(
     state: &WorkspaceChartStudyState,
     current_series: &BarSeriesKey,
     active: &[RuntimeStudyState],
-    registry: &axiusflow_study_sdk::TrustedStudyRegistry<'_>,
+    registry: &tradingplot_study_sdk::TrustedStudyRegistry<'_>,
 ) -> Result<NativeStudyRegistration, String> {
     let dependencies = state
         .dependencies
@@ -408,7 +408,7 @@ fn parse_study_decimal(text: &str) -> Result<StudyDecimal, String> {
         || !whole.bytes().all(|byte| byte.is_ascii_digit())
         || !fraction.bytes().all(|byte| byte.is_ascii_digit())
         || fraction.len()
-            > usize::from(axiusflow_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE)
+            > usize::from(tradingplot_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE)
     {
         return Err("decimal setting is invalid".to_string());
     }
@@ -507,16 +507,18 @@ pub(super) fn study_setting_condition_matches(
 
 pub(super) fn study_display_name(identifier: &str) -> String {
     match identifier {
-        axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER => "Simple Moving Average".to_string(),
-        axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER => "Exponential Moving Average".to_string(),
-        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER => "EMA Ribbon".to_string(),
-        axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
-        axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
-        axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER => "Volume Weighted Average Price".to_string(),
-        axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER => "Relative Strength Index".to_string(),
-        axiusflow_study_sdk::BUILTIN_MACD_IDENTIFIER => "MACD".to_string(),
-        axiusflow_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER => "Stochastic".to_string(),
-        axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER => "Average True Range".to_string(),
+        tradingplot_study_sdk::BUILTIN_SMA_IDENTIFIER => "Simple Moving Average".to_string(),
+        tradingplot_study_sdk::BUILTIN_EMA_IDENTIFIER => "Exponential Moving Average".to_string(),
+        tradingplot_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER => "EMA Ribbon".to_string(),
+        tradingplot_study_sdk::BUILTIN_WMA_IDENTIFIER => "Weighted Moving Average".to_string(),
+        tradingplot_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER => "Bollinger Bands".to_string(),
+        tradingplot_study_sdk::BUILTIN_VWAP_IDENTIFIER => {
+            "Volume Weighted Average Price".to_string()
+        }
+        tradingplot_study_sdk::BUILTIN_RSI_IDENTIFIER => "Relative Strength Index".to_string(),
+        tradingplot_study_sdk::BUILTIN_MACD_IDENTIFIER => "MACD".to_string(),
+        tradingplot_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER => "Stochastic".to_string(),
+        tradingplot_study_sdk::BUILTIN_ATR_IDENTIFIER => "Average True Range".to_string(),
         _ => identifier.to_string(),
     }
 }
@@ -547,16 +549,18 @@ fn runtime_study_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
     let cadence = SeriesCadence::try_from(series.cadence)
         .map_err(|_| "study series cadence is unknown".to_string())?;
     let period = match cadence {
-        SeriesCadence::FixedSeconds => axiusflow_market_data::BarPeriod::time(series.cadence_value),
-        SeriesCadence::Trades => axiusflow_market_data::BarPeriod::tick(series.cadence_value),
+        SeriesCadence::FixedSeconds => {
+            tradingplot_market_data::BarPeriod::time(series.cadence_value)
+        }
+        SeriesCadence::Trades => tradingplot_market_data::BarPeriod::tick(series.cadence_value),
         SeriesCadence::SessionDays => {
-            axiusflow_market_data::BarPeriod::session(series.cadence_value)
+            tradingplot_market_data::BarPeriod::session(series.cadence_value)
         }
         SeriesCadence::CalendarWeeks => {
-            axiusflow_market_data::BarPeriod::week(series.cadence_value)
+            tradingplot_market_data::BarPeriod::week(series.cadence_value)
         }
         SeriesCadence::CalendarMonths => {
-            axiusflow_market_data::BarPeriod::month(series.cadence_value)
+            tradingplot_market_data::BarPeriod::month(series.cadence_value)
         }
         SeriesCadence::Unspecified => {
             return Err("study series cadence is unspecified".to_string());
@@ -653,59 +657,59 @@ fn legacy_runtime_study_contract(
 )> {
     let contract = match indicator {
         ChartIndicator::Sma => (
-            axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+            tradingplot_study_sdk::BUILTIN_SMA_IDENTIFIER,
+            tradingplot_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
             vec![legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_SMA_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_SMA_DEFAULT_PERIOD,
+                tradingplot_study_sdk::BUILTIN_SMA_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_SMA_DEFAULT_PERIOD,
             )],
-            vec![axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string()],
+            vec![tradingplot_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Ema => (
-            axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_EMA_IMPLEMENTATION_REVISION,
+            tradingplot_study_sdk::BUILTIN_EMA_IDENTIFIER,
+            tradingplot_study_sdk::BUILTIN_EMA_IMPLEMENTATION_REVISION,
             vec![legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_EMA_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_EMA_DEFAULT_PERIOD,
+                tradingplot_study_sdk::BUILTIN_EMA_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_EMA_DEFAULT_PERIOD,
             )],
-            vec![axiusflow_study_sdk::BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string()],
+            vec![tradingplot_study_sdk::BUILTIN_EMA_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::EmaRibbon => legacy_ema_ribbon_contract(),
         ChartIndicator::Wma => (
-            axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
+            tradingplot_study_sdk::BUILTIN_WMA_IDENTIFIER,
+            tradingplot_study_sdk::BUILTIN_WMA_IMPLEMENTATION_REVISION,
             vec![legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_WMA_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
+                tradingplot_study_sdk::BUILTIN_WMA_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_WMA_DEFAULT_PERIOD,
             )],
-            vec![axiusflow_study_sdk::BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string()],
+            vec![tradingplot_study_sdk::BUILTIN_WMA_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Bollinger => legacy_bollinger_contract(),
         ChartIndicator::Vwap => (
-            axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_VWAP_IMPLEMENTATION_REVISION,
+            tradingplot_study_sdk::BUILTIN_VWAP_IDENTIFIER,
+            tradingplot_study_sdk::BUILTIN_VWAP_IMPLEMENTATION_REVISION,
             Vec::new(),
-            vec![axiusflow_study_sdk::BUILTIN_VWAP_OUTPUT_IDENTIFIER.to_string()],
+            vec![tradingplot_study_sdk::BUILTIN_VWAP_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Rsi => (
-            axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_RSI_IMPLEMENTATION_REVISION,
+            tradingplot_study_sdk::BUILTIN_RSI_IDENTIFIER,
+            tradingplot_study_sdk::BUILTIN_RSI_IMPLEMENTATION_REVISION,
             vec![legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_RSI_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_RSI_DEFAULT_PERIOD,
+                tradingplot_study_sdk::BUILTIN_RSI_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_RSI_DEFAULT_PERIOD,
             )],
-            vec![axiusflow_study_sdk::BUILTIN_RSI_OUTPUT_IDENTIFIER.to_string()],
+            vec![tradingplot_study_sdk::BUILTIN_RSI_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Macd => legacy_macd_contract(),
         ChartIndicator::Stochastic => legacy_stochastic_contract(),
         ChartIndicator::Atr => (
-            axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER,
-            axiusflow_study_sdk::BUILTIN_ATR_IMPLEMENTATION_REVISION,
+            tradingplot_study_sdk::BUILTIN_ATR_IDENTIFIER,
+            tradingplot_study_sdk::BUILTIN_ATR_IMPLEMENTATION_REVISION,
             vec![legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_ATR_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_ATR_DEFAULT_PERIOD,
+                tradingplot_study_sdk::BUILTIN_ATR_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_ATR_DEFAULT_PERIOD,
             )],
-            vec![axiusflow_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
+            vec![tradingplot_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
         ),
         ChartIndicator::Volume => return None,
     };
@@ -719,14 +723,14 @@ fn legacy_ema_ribbon_contract() -> (
     Vec<String>,
 ) {
     (
-        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER,
-        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
-        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
+        tradingplot_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER,
+        tradingplot_study_sdk::BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+        tradingplot_study_sdk::BUILTIN_EMA_RIBBON_PERIOD_SETTINGS
             .iter()
-            .zip(axiusflow_study_sdk::BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
+            .zip(tradingplot_study_sdk::BUILTIN_EMA_RIBBON_DEFAULT_PERIODS)
             .map(|(identifier, period)| legacy_integer_setting(identifier, period))
             .collect(),
-        axiusflow_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
+        tradingplot_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
             .iter()
             .map(|identifier| (*identifier).to_string())
             .collect(),
@@ -740,26 +744,26 @@ fn legacy_macd_contract() -> (
     Vec<String>,
 ) {
     (
-        axiusflow_study_sdk::BUILTIN_MACD_IDENTIFIER,
-        axiusflow_study_sdk::BUILTIN_MACD_IMPLEMENTATION_REVISION,
+        tradingplot_study_sdk::BUILTIN_MACD_IDENTIFIER,
+        tradingplot_study_sdk::BUILTIN_MACD_IMPLEMENTATION_REVISION,
         vec![
             legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_MACD_FAST_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_MACD_DEFAULT_FAST_PERIOD,
+                tradingplot_study_sdk::BUILTIN_MACD_FAST_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_MACD_DEFAULT_FAST_PERIOD,
             ),
             legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_MACD_SLOW_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
+                tradingplot_study_sdk::BUILTIN_MACD_SLOW_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_MACD_DEFAULT_SLOW_PERIOD,
             ),
             legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_MACD_SIGNAL_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD,
+                tradingplot_study_sdk::BUILTIN_MACD_SIGNAL_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_MACD_DEFAULT_SIGNAL_PERIOD,
             ),
         ],
         vec![
-            axiusflow_study_sdk::BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER.to_string(),
-            axiusflow_study_sdk::BUILTIN_MACD_SIGNAL_OUTPUT_IDENTIFIER.to_string(),
-            axiusflow_study_sdk::BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_MACD_LINE_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_MACD_SIGNAL_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_MACD_HISTOGRAM_OUTPUT_IDENTIFIER.to_string(),
         ],
     )
 }
@@ -771,21 +775,21 @@ fn legacy_stochastic_contract() -> (
     Vec<String>,
 ) {
     (
-        axiusflow_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER,
-        axiusflow_study_sdk::BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
+        tradingplot_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER,
+        tradingplot_study_sdk::BUILTIN_STOCHASTIC_IMPLEMENTATION_REVISION,
         vec![
             legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_STOCHASTIC_K_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD,
+                tradingplot_study_sdk::BUILTIN_STOCHASTIC_K_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_K_PERIOD,
             ),
             legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_STOCHASTIC_D_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD,
+                tradingplot_study_sdk::BUILTIN_STOCHASTIC_D_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_STOCHASTIC_DEFAULT_D_PERIOD,
             ),
         ],
         vec![
-            axiusflow_study_sdk::BUILTIN_STOCHASTIC_K_OUTPUT_IDENTIFIER.to_string(),
-            axiusflow_study_sdk::BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_STOCHASTIC_K_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_STOCHASTIC_D_OUTPUT_IDENTIFIER.to_string(),
         ],
     )
 }
@@ -797,29 +801,30 @@ fn legacy_bollinger_contract() -> (
     Vec<String>,
 ) {
     (
-        axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER,
-        axiusflow_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
+        tradingplot_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER,
+        tradingplot_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
         vec![
             legacy_integer_setting(
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING,
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_PERIOD,
+                tradingplot_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING,
+                tradingplot_study_sdk::BUILTIN_BOLLINGER_DEFAULT_PERIOD,
             ),
             WorkspaceStudySettingState {
-                identifier: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING.to_string(),
+                identifier: tradingplot_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING.to_string(),
                 value: Some(workspace_study_setting_state::Value::Decimal(
                     WorkspaceStudyDecimalState {
-                        mantissa: axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.mantissa,
+                        mantissa: tradingplot_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION
+                            .mantissa,
                         scale: u32::from(
-                            axiusflow_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.scale,
+                            tradingplot_study_sdk::BUILTIN_BOLLINGER_DEFAULT_DEVIATION.scale,
                         ),
                     },
                 )),
             },
         ],
         vec![
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+            tradingplot_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
         ],
     )
 }
@@ -938,7 +943,7 @@ impl WorkspaceSurface {
         let nucleus_state_json = match chart.export_semantic_state_json() {
             Ok(state) => state,
             Err(error) => {
-                eprintln!("Axiusflow drawings could not be serialized: {error}");
+                eprintln!("TradingPlot drawings could not be serialized: {error}");
                 return self.restored_chart_state.clone();
             }
         };
@@ -1012,13 +1017,13 @@ impl WorkspaceSurface {
                 let _ = chart.set_appearance_settings(appearance);
             }
             if let Err(error) = chart.restore_indicator_states(&indicators) {
-                eprintln!("Axiusflow persisted indicators could not be restored: {error}");
+                eprintln!("TradingPlot persisted indicators could not be restored: {error}");
             }
             if restore_drawings
                 && !drawing_json.is_empty()
                 && let Err(error) = chart.import_semantic_state_json(&drawing_json, &locked)
             {
-                eprintln!("Axiusflow persisted drawings could not be restored: {error}");
+                eprintln!("TradingPlot persisted drawings could not be restored: {error}");
             }
             if let Some(price_axis) = price_axis {
                 let _ = chart.restore_price_axis_menu_state(price_axis);
@@ -1041,7 +1046,7 @@ impl WorkspaceSurface {
         chart_chrome: chart_chrome::ChartChromePreferences,
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
-        let theme = AxiusflowTheme::dark();
+        let theme = TradingPlotTheme::dark();
         let restored_rithmic = restored_market_selection(&startup);
         let TerminalStartupState {
             chart,
@@ -1137,7 +1142,7 @@ impl WorkspaceSurface {
             #[cfg(feature = "diagnostics")]
             foreground_interactions: ForegroundInteractionDiagnostics::default(),
             #[cfg(feature = "diagnostics")]
-            live_evidence_enabled: std::env::var_os("AXIUSFLOW_LIVE_EVIDENCE").is_some(),
+            live_evidence_enabled: std::env::var_os("TRADINGPLOT_LIVE_EVIDENCE").is_some(),
             #[cfg(feature = "diagnostics")]
             live_evidence_publications: 0,
         }
@@ -1882,16 +1887,16 @@ impl WorkspaceSurface {
                 let interval_nanos =
                     interval_nanos.map_or_else(|| "null".to_string(), |value| value.to_string());
                 eprintln!(
-                    "AXIUSFLOW_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos}}}",
+                    "TRADINGPLOT_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos}}}",
                     snapshot.bars().len()
                 );
             }
             ReplayStreamUpdate::Delta(delta) => eprintln!(
-                "AXIUSFLOW_LIVE_UPDATE {{\"kind\":\"delta\",\"timestamp\":{}}}",
+                "TRADINGPLOT_LIVE_UPDATE {{\"kind\":\"delta\",\"timestamp\":{}}}",
                 delta.item().provenance().exchange_timestamp_unix_nanos
             ),
             ReplayStreamUpdate::Tail(tail) => eprintln!(
-                "AXIUSFLOW_LIVE_UPDATE {{\"kind\":\"tail\",\"timestamp\":{},\"forming\":{}}}",
+                "TRADINGPLOT_LIVE_UPDATE {{\"kind\":\"tail\",\"timestamp\":{},\"forming\":{}}}",
                 tail.item().provenance().exchange_timestamp_unix_nanos,
                 tail.forming()
             ),
@@ -1922,7 +1927,7 @@ impl WorkspaceSurface {
         // snapshot may, and that snapshot is what swaps the chart.
         let swapping = self.rithmic_switch.is_swapping();
         let next_state = match (&self.chart, update) {
-            (existing, axiusflow_application::ReplayStreamUpdate::Snapshot(snapshot))
+            (existing, tradingplot_application::ReplayStreamUpdate::Snapshot(snapshot))
                 if existing.is_none() || swapping =>
             {
                 let chart_theme = nucleus_chart_theme(self.theme.mode);
@@ -2497,7 +2502,7 @@ impl WorkspaceSurface {
 
     fn apply_study_output(
         &self,
-        snapshot: &axiusflow_market_runtime::MarketStudyOutputSnapshot,
+        snapshot: &tradingplot_market_runtime::MarketStudyOutputSnapshot,
         cx: &mut Context<Self>,
     ) {
         if self.studies.suppresses_output(snapshot.study_id) {
@@ -2548,7 +2553,7 @@ impl WorkspaceSurface {
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    eprintln!("Axiusflow study output could not be displayed: {error}");
+                    eprintln!("TradingPlot study output could not be displayed: {error}");
                 }
             }
         });
@@ -2556,7 +2561,7 @@ impl WorkspaceSurface {
 
     fn apply_study_removed(
         &mut self,
-        removed: &axiusflow_market_runtime::MarketStudyRemoved,
+        removed: &tradingplot_market_runtime::MarketStudyRemoved,
         cx: &mut Context<Self>,
     ) {
         let study_ids = removed
@@ -2586,7 +2591,7 @@ impl WorkspaceSurface {
 
     fn apply_study_invalidated(
         &mut self,
-        invalidated: &axiusflow_market_runtime::MarketStudyOutputsInvalidated,
+        invalidated: &tradingplot_market_runtime::MarketStudyOutputsInvalidated,
         cx: &mut Context<Self>,
     ) {
         self.studies
@@ -2899,7 +2904,7 @@ impl WorkspaceSurface {
             FeedConnectionState::Disconnected => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.set_connection_state(
-                        axiusflow_terminal_ui::OrderBookConnectionState::Offline,
+                        tradingplot_terminal_ui::OrderBookConnectionState::Offline,
                         order_book_cx,
                     );
                 });
@@ -2909,7 +2914,7 @@ impl WorkspaceSurface {
             | FeedConnectionState::Recovering => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.set_connection_state(
-                        axiusflow_terminal_ui::OrderBookConnectionState::Recovering,
+                        tradingplot_terminal_ui::OrderBookConnectionState::Recovering,
                         order_book_cx,
                     );
                 });
@@ -2917,7 +2922,7 @@ impl WorkspaceSurface {
             FeedConnectionState::Streaming => {
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     order_book.set_connection_state(
-                        axiusflow_terminal_ui::OrderBookConnectionState::Online,
+                        tradingplot_terminal_ui::OrderBookConnectionState::Online,
                         order_book_cx,
                     );
                 });
@@ -2941,7 +2946,7 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    pub(super) fn apply_theme(&mut self, theme: &AxiusflowTheme, cx: &mut Context<Self>) {
+    pub(super) fn apply_theme(&mut self, theme: &TradingPlotTheme, cx: &mut Context<Self>) {
         self.order_book.update(cx, |order_book, order_book_cx| {
             order_book.set_theme(*theme, order_book_cx);
         });
@@ -3041,7 +3046,7 @@ impl WorkspaceSurface {
         let states = self.retained_chart_presentation.indicators.clone();
         let result = chart.update(cx, |chart, _| chart.restore_indicator_states(&states));
         if let Err(error) = result {
-            eprintln!("Axiusflow chart indicators could not be restored: {error}");
+            eprintln!("TradingPlot chart indicators could not be restored: {error}");
         }
     }
 
@@ -3179,13 +3184,13 @@ impl WorkspaceSurface {
                 .background_executor()
                 .spawn(async move {
                     if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
-                        eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                        eprintln!("TradingPlot chart chrome could not be saved: {error}");
                     }
                 })
                 .detach(),
             Ok(false) => {}
             Err(error) => {
-                eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                eprintln!("TradingPlot chart chrome could not be saved: {error}");
             }
         }
         cx.notify();
@@ -3311,7 +3316,7 @@ impl WorkspaceSurface {
         let dispatched = if self.market_worker.try_select_provider(request).is_ok() {
             self.market_state.symbol_selection_pending = true;
             self.order_book
-                .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
+                .update(cx, tradingplot_terminal_ui::ReadOnlyOrderBookView::clear);
             self.symbol_message = format!(
                 "Selecting {} · {}",
                 selection.instrument.symbol, selection.instrument.exchange
@@ -3470,7 +3475,7 @@ impl WorkspaceSurface {
         self.side_panels.set(SidePanel::OrderBook, visible);
         if visible {
             self.order_book
-                .update(cx, axiusflow_terminal_ui::ReadOnlyOrderBookView::clear);
+                .update(cx, tradingplot_terminal_ui::ReadOnlyOrderBookView::clear);
         } else {
             self.menu_state.order_book_column_open = false;
         }
@@ -4059,7 +4064,7 @@ mod tests {
     use super::*;
 
     fn custom_package_calculate(
-        context: &mut axiusflow_study_sdk::StudyExecutionContext<'_>,
+        context: &mut tradingplot_study_sdk::StudyExecutionContext<'_>,
     ) -> Result<(), String> {
         context
             .output(0)
@@ -4071,10 +4076,10 @@ mod tests {
         revision: u32,
         dependencies: Vec<StudyDependency>,
         settings: std::collections::BTreeMap<String, StudySettingValue>,
-    ) -> Result<NativeStudyRegistration, axiusflow_study_sdk::StudySdkError> {
+    ) -> Result<NativeStudyRegistration, tradingplot_study_sdk::StudySdkError> {
         if revision != 1 {
             return Err(
-                axiusflow_study_sdk::StudySdkError::UnsupportedImplementationRevision {
+                tradingplot_study_sdk::StudySdkError::UnsupportedImplementationRevision {
                     identifier: "example.workspace_reconnect".to_string(),
                     revision,
                 },
@@ -4082,16 +4087,16 @@ mod tests {
         }
         if settings.into_iter().next().is_some() {
             return Err(
-                axiusflow_study_sdk::StudySdkError::InvalidDependencyContract(
+                tradingplot_study_sdk::StudySdkError::InvalidDependencyContract(
                     "example.workspace_reconnect".to_string(),
                 ),
             );
         }
-        let definition = axiusflow_study_sdk::StudyDefinition {
+        let definition = tradingplot_study_sdk::StudyDefinition {
             identifier: "example.workspace_reconnect".to_string(),
             dependencies,
             settings: Vec::new(),
-            outputs: vec![axiusflow_study_sdk::StudyOutputSpec {
+            outputs: vec![tradingplot_study_sdk::StudyOutputSpec {
                 identifier: "value".to_string(),
                 title: "Workspace Reconnect Example".to_string(),
                 legend_label: None,
@@ -4101,12 +4106,12 @@ mod tests {
                 threshold_region: None,
                 point_style: StudyPointStyle::Uniform,
             }],
-            invalidation: axiusflow_study_sdk::StudyInvalidationPolicy::SameRange,
+            invalidation: tradingplot_study_sdk::StudyInvalidationPolicy::SameRange,
         };
         Ok(NativeStudyRegistration {
-            settings: axiusflow_study_sdk::StudySettings::defaults(&definition.settings)?,
+            settings: tradingplot_study_sdk::StudySettings::defaults(&definition.settings)?,
             definition,
-            program: axiusflow_study_sdk::NativeStudyProgram::stateless(custom_package_calculate),
+            program: tradingplot_study_sdk::NativeStudyProgram::stateless(custom_package_calculate),
         })
     }
 
@@ -4115,20 +4120,20 @@ mod tests {
             provider_id: "rithmic".to_string(),
             instrument_id: instrument.to_string(),
             entitlement_id: "test".to_string(),
-            period: axiusflow_market_data::BarPeriod::time(60).expect("minute series"),
+            period: tradingplot_market_data::BarPeriod::time(60).expect("minute series"),
             definition_version: 1,
         }
     }
 
     #[test]
     fn trusted_custom_study_restores_across_workspace_reopen_and_current_series_rebind() {
-        let packages = [axiusflow_study_sdk::TrustedStudyPackage::new(
+        let packages = [tradingplot_study_sdk::TrustedStudyPackage::new(
             "example.workspace_reconnect",
-            axiusflow_study_sdk::STUDY_SDK_COMPATIBILITY_EPOCH,
+            tradingplot_study_sdk::STUDY_SDK_COMPATIBILITY_EPOCH,
             1,
             custom_package_restore,
         )];
-        let registry = axiusflow_study_sdk::TrustedStudyRegistry::from_packages(&packages)
+        let registry = tradingplot_study_sdk::TrustedStudyRegistry::from_packages(&packages)
             .expect("custom package registry");
         let persisted = WorkspaceChartStudyState {
             local_id: 7,
@@ -4248,14 +4253,14 @@ mod tests {
         let original = legacy_runtime_study(1, ChartIndicator::Wma, true).expect("WMA study");
         let mut replacement = original.clone();
         replacement.settings = vec![WorkspaceStudySettingState {
-            identifier: axiusflow_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
+            identifier: tradingplot_study_sdk::BUILTIN_WMA_PERIOD_SETTING.to_string(),
             value: Some(workspace_study_setting_state::Value::Integer(42)),
         }];
         let series = BarSeriesKey {
             provider_id: "rithmic".to_string(),
             instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
             entitlement_id: "test".to_string(),
-            period: axiusflow_market_data::BarPeriod::time(60).expect("minute series"),
+            period: tradingplot_market_data::BarPeriod::time(60).expect("minute series"),
             definition_version: 1,
         };
         let mut studies = RuntimeStudiesState {
@@ -4297,7 +4302,7 @@ mod tests {
         downstream.dependencies.push(WorkspaceStudyDependencyState {
             kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
             study_local_id: 1,
-            output_identifier: axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            output_identifier: tradingplot_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
             ..WorkspaceStudyDependencyState::default()
         });
         let mut studies = RuntimeStudiesState {
@@ -4417,7 +4422,7 @@ mod tests {
         study.dependencies = vec![WorkspaceStudyDependencyState {
             kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
             study_local_id: upstream_local_id,
-            output_identifier: axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            output_identifier: tradingplot_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
             ..WorkspaceStudyDependencyState::default()
         }];
         study
@@ -4608,16 +4613,16 @@ mod tests {
         let restored = persisted_runtime_studies(Some(&state));
         assert_eq!(restored.len(), 10);
         let expected = [
-            (axiusflow_study_sdk::BUILTIN_SMA_IDENTIFIER, false),
-            (axiusflow_study_sdk::BUILTIN_EMA_IDENTIFIER, true),
-            (axiusflow_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER, false),
-            (axiusflow_study_sdk::BUILTIN_WMA_IDENTIFIER, true),
-            (axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER, false),
-            (axiusflow_study_sdk::BUILTIN_VWAP_IDENTIFIER, true),
-            (axiusflow_study_sdk::BUILTIN_ATR_IDENTIFIER, false),
-            (axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER, true),
-            (axiusflow_study_sdk::BUILTIN_MACD_IDENTIFIER, false),
-            (axiusflow_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER, true),
+            (tradingplot_study_sdk::BUILTIN_SMA_IDENTIFIER, false),
+            (tradingplot_study_sdk::BUILTIN_EMA_IDENTIFIER, true),
+            (tradingplot_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER, false),
+            (tradingplot_study_sdk::BUILTIN_WMA_IDENTIFIER, true),
+            (tradingplot_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER, false),
+            (tradingplot_study_sdk::BUILTIN_VWAP_IDENTIFIER, true),
+            (tradingplot_study_sdk::BUILTIN_ATR_IDENTIFIER, false),
+            (tradingplot_study_sdk::BUILTIN_RSI_IDENTIFIER, true),
+            (tradingplot_study_sdk::BUILTIN_MACD_IDENTIFIER, false),
+            (tradingplot_study_sdk::BUILTIN_STOCHASTIC_IDENTIFIER, true),
         ];
         for (state, (identifier, visible)) in restored.iter().zip(expected) {
             assert_eq!(state.persisted.identifier, identifier);
@@ -4625,7 +4630,7 @@ mod tests {
         }
         assert_eq!(
             restored[2].persisted.output_identifiers,
-            axiusflow_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
+            tradingplot_study_sdk::BUILTIN_EMA_RIBBON_OUTPUT_IDENTIFIERS
                 .iter()
                 .map(|identifier| (*identifier).to_string())
                 .collect::<Vec<_>>()
@@ -4633,9 +4638,9 @@ mod tests {
         assert_eq!(
             restored[4].persisted.output_identifiers,
             vec![
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
-                axiusflow_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+                tradingplot_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+                tradingplot_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+                tradingplot_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
             ]
         );
         assert!(restored.iter().all(|state| {
@@ -4682,13 +4687,13 @@ mod tests {
         assert_eq!(restored[2].persisted.local_id, 1);
         assert_eq!(
             restored[2].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_RSI_IDENTIFIER
+            tradingplot_study_sdk::BUILTIN_RSI_IDENTIFIER
         );
         assert!(!restored[2].persisted.visible);
         assert_eq!(restored[3].persisted.local_id, 2);
         assert_eq!(
             restored[3].persisted.identifier,
-            axiusflow_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
+            tradingplot_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER
         );
         assert!(!restored[3].persisted.visible);
     }
@@ -4941,7 +4946,7 @@ mod tests {
             provider_id: "hyperliquid".to_string(),
             instrument_id: "hyperliquid:perp:BTC".to_string(),
             entitlement_id: "hyperliquid-public".to_string(),
-            period: axiusflow_market_data::BarPeriod::time(60).expect("minute period"),
+            period: tradingplot_market_data::BarPeriod::time(60).expect("minute period"),
             definition_version: 1,
         };
         let upstream_id = StudyInstanceId::try_from_u64(7).expect("runtime study id");
@@ -4954,7 +4959,7 @@ mod tests {
         downstream.dependencies = vec![WorkspaceStudyDependencyState {
             kind: WorkspaceStudyDependencyKind::StudyOutput as i32,
             study_local_id: 1,
-            output_identifier: axiusflow_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
+            output_identifier: tradingplot_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
             ..WorkspaceStudyDependencyState::default()
         }];
 

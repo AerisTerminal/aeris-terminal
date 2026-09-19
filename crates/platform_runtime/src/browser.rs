@@ -1,6 +1,6 @@
 //! System-browser opening for account-runtime authentication URLs.
 //!
-//! The in-process account runtime returns an Axiusflow authentication URL.
+//! The in-process account runtime returns an `TradingPlot` authentication URL.
 //! This boundary opens that URL in the user's
 //! system browser. It performs process work, so callers must keep it off the
 //! UI thread on background workers. It never handles credentials or tokens.
@@ -159,7 +159,7 @@ mod launcher_tests {
 
     #[test]
     fn missing_launcher_reports_failure() {
-        let command = launcher_command("axiusflow-definitely-missing-launcher", LAUNCHER_SCRIPT);
+        let command = launcher_command("tradingplot-definitely-missing-launcher", LAUNCHER_SCRIPT);
         assert_eq!(
             run_launcher(command, "https://auth.axiusflow.com/sign-in?x=1&y=2"),
             Err("system browser could not be opened".to_string())

@@ -4,9 +4,9 @@ use crate::errors::ReplayValidationError;
 use crate::provenance::ProvenancedMarketBar;
 use crate::replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate};
 use crate::stream::{SequenceDecision, StreamDelta, StreamProtocolError};
-use axiusflow_instruments::InstrumentRevision;
-use axiusflow_market_data::BarDefinition;
 use std::{num::NonZeroU64, sync::Arc};
+use tradingplot_instruments::InstrumentRevision;
+use tradingplot_market_data::BarDefinition;
 
 /// Immutable application generation published atomically by one model writer.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -57,7 +57,7 @@ fn boolean_control(
     identifier: &str,
     selected: bool,
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     let identifier = identifier.to_string();
     let update = app.clone();
@@ -80,9 +80,9 @@ fn choice_control(
     control_id: usize,
     identifier: &str,
     current: Option<&str>,
-    options: &[axiusflow_market_runtime::study::StudySettingChoiceOption],
+    options: &[tradingplot_market_runtime::study::StudySettingChoiceOption],
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     let mut row = div().flex().flex_wrap().gap_2();
     for (index, option) in options.iter().enumerate() {
@@ -116,7 +116,7 @@ fn choice_control(
 fn text_control(
     input: Option<&Entity<InputState>>,
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     input.map_or_else(
@@ -150,7 +150,7 @@ fn setting_control(
     control_id: usize,
     spec: &StudySettingSpec,
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> AnyElement {
     match &spec.presentation.control {
         StudySettingControl::Boolean => boolean_control(
@@ -192,7 +192,7 @@ fn setting_row(
     dialog: &StudySettingsDialogState,
     control_id: usize,
     spec: &StudySettingSpec,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     cx: &App,
 ) -> Option<AnyElement> {
     if !workspace_surface::study_setting_condition_matches(
@@ -257,7 +257,7 @@ fn setting_row(
 fn study_settings_body(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     cx: &App,
 ) -> AnyElement {
     let colors = theme.colors;
@@ -311,7 +311,7 @@ fn study_settings_body(
 fn study_settings_header(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Div {
     let colors = theme.colors;
     let cancel = app.clone();
@@ -352,7 +352,7 @@ fn study_settings_header(
 fn study_settings_footer(
     app: &Entity<WorkspaceSurface>,
     busy: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Div {
     let colors = theme.colors;
     let reset = app.clone();
@@ -405,7 +405,7 @@ fn study_settings_footer(
 pub(super) fn study_settings_dialog_layer(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     cx: &App,
 ) -> AnyElement {
     let colors = theme.colors;

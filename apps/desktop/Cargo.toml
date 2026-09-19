@@ -1,5 +1,5 @@
 [package]
-name = "axiusflow_desktop"
+name = "tradingplot_desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,26 +7,26 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-diagnostics = ["axiusflow_chart_integration/diagnostics"]
+diagnostics = ["tradingplot_chart_integration/diagnostics"]
 
 [dependencies]
-axiusflow_application = { path = "../../crates/application" }
-axiusflow_account_runtime = { path = "../../crates/account_runtime" }
-axiusflow_chart_integration = { path = "../../crates/ui/chart_integration" }
-axiusflow_design_system = { path = "../../crates/ui/design_system" }
-axiusflow_instruments = { path = "../../crates/domain/instruments" }
-axiusflow_market_data = { path = "../../crates/domain/market_data" }
-axiusflow_market_runtime = { path = "../../crates/market_runtime" }
-axiusflow_study_sdk = { path = "../../crates/study_sdk" }
-axiusflow_contracts = { path = "../../crates/contracts" }
-axiusflow_observability = { path = "../../crates/observability" }
-axiusflow_platform_runtime = { path = "../../crates/platform_runtime" }
+tradingplot_application = { path = "../../crates/application" }
+tradingplot_account_runtime = { path = "../../crates/account_runtime" }
+tradingplot_chart_integration = { path = "../../crates/ui/chart_integration" }
+tradingplot_design_system = { path = "../../crates/ui/design_system" }
+tradingplot_instruments = { path = "../../crates/domain/instruments" }
+tradingplot_market_data = { path = "../../crates/domain/market_data" }
+tradingplot_market_runtime = { path = "../../crates/market_runtime" }
+tradingplot_study_sdk = { path = "../../crates/study_sdk" }
+tradingplot_contracts = { path = "../../crates/contracts" }
+tradingplot_observability = { path = "../../crates/observability" }
+tradingplot_platform_runtime = { path = "../../crates/platform_runtime" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
-axiusflow_terminal_ui = { path = "../../crates/ui/terminal_ui" }
+tradingplot_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui-base.workspace = true
 gpui_platform.workspace = true

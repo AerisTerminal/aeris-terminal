@@ -36,8 +36,8 @@ pub use lifecycle::{
     ROLLBACK_COMPATIBILITY_FILENAME, ROLLBACK_COMPATIBILITY_SCHEMA_VERSION, ReleaseChannelPointer,
     ReleaseFile, ReleaseFileRole, ReleaseInstaller, ReleaseInstallerMetadata, ReleaseManifest,
     ReleasePolicy, RollbackCompatibilityMetadata, RolloutMetadata, SignedReleaseManifest,
-    UninstallOutcome, UpdateOutcome, VaultEntry, native_data_root, native_install_root,
-    native_installation_inventory, sign_release_manifest, verify_release_file,
+    UninstallOutcome, UpdateOutcome, VaultEntry, migrate_legacy_native_data_root, native_data_root,
+    native_install_root, native_installation_inventory, sign_release_manifest, verify_release_file,
     verify_release_manifest, verify_release_manifest_signature,
 };
 pub use live_market_gate::{

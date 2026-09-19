@@ -34,6 +34,8 @@ pub const MAXIMUM_BLOCK_PLAN_BLOCKS: usize = 4096;
 /// Maximum number of network range requests a valid plan may require.
 pub const MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS: usize = 256;
 
+// Stable wire-domain identifier. This predates the TradingPlot product rename
+// and must remain unchanged so existing signed block plans stay verifiable.
 const BLOCK_PLAN_SIGNING_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_BLOCK_PLAN_V1\0";
 
 /// One independently signed reconstruction plan.
@@ -371,8 +373,8 @@ mod tests {
             architecture: std::env::consts::ARCH.to_string(),
             files: vec![ReleaseFile {
                 role: ReleaseFileRole::Desktop,
-                path: "axiusflow_desktop".to_string(),
-                url: format!("https://releases.axiusflow.test/{generation}/axiusflow_desktop"),
+                path: "tradingplot_desktop".to_string(),
+                url: format!("https://releases.tradingplot.test/{generation}/tradingplot_desktop"),
                 size,
                 sha256: digest(digest_byte),
                 executable: true,
@@ -552,6 +554,10 @@ mod tests {
 
     #[test]
     fn signing_domain_is_distinct_from_plain_plan_json() {
+        assert_eq!(
+            BLOCK_PLAN_SIGNING_DOMAIN,
+            b"AXIUSFLOW_RELEASE_BLOCK_PLAN_V1\0"
+        );
         let size = BLOCK_PLAN_BLOCK_BYTES + 3;
         let source = manifest("source-release", 7, size, 1);
         let target = manifest("target-release", 8, size, 2);

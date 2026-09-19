@@ -8,17 +8,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axiusflow_contracts::{
+use tradingplot_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
 };
-use axiusflow_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
-use axiusflow_platform_runtime::{
+use tradingplot_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
+use tradingplot_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
-use axiusflow_rithmic_protocol_adapter::{
+use tradingplot_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
     ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
     RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
@@ -171,14 +171,14 @@ impl EnvironmentMonitors {
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            panicked.push("axiusflow-engine-rithmic-network-monitor");
+            panicked.push("tradingplot-engine-rithmic-network-monitor");
         }
         if self
             .power_worker
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            panicked.push("axiusflow-engine-rithmic-power-monitor");
+            panicked.push("tradingplot-engine-rithmic-power-monitor");
         }
         panicked
     }
@@ -205,18 +205,40 @@ impl EnvironmentState {
     }
 }
 
+/// One authenticated ticker-plant login together with the bookkeeping that
+/// must follow it when ownership moves from catalog service to live demand.
+///
+/// Rithmic Test permits one ticker-plant login per account. Stopping the
+/// catalog session and opening a second login for realtime left a window in
+/// which every catalog command was rejected and two logins overlapped, so the
+/// session is handed over intact instead.
+struct CatalogHandoff {
+    runtime: Runtime,
+    events: RithmicProviderEvents,
+    retries: RithmicRetryScheduler,
+    /// Searches still awaiting a callback, keyed by search generation.
+    searches: BTreeMap<usize, u64>,
+    /// Selections still awaiting a callback, keyed by selection generation.
+    selections: BTreeMap<usize, u64>,
+}
+
 enum CatalogSessionExit {
-    SelectionCompleted {
+    /// A non-empty realtime demand arrived while the catalog session was
+    /// authenticated; the same login now serves that demand. The handoff is
+    /// boxed so the far more common retry and closed exits stay small.
+    Demand {
+        handoff: Box<CatalogHandoff>,
         generation: u64,
-        selection: RithmicCatalogEvent,
+        demand: RithmicRealtimeDemand,
     },
     Retry(u64),
     Closed,
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_catalog_session(
     mut runtime: Runtime,
-    events: &RithmicProviderEvents,
+    events: RithmicProviderEvents,
     channels: ProviderChannels<'_>,
     environment: &Receiver<EnvironmentMessage>,
     environment_state: &mut EnvironmentState,
@@ -227,7 +249,7 @@ fn run_catalog_session(
     let mut searches = BTreeMap::new();
     let mut selections = BTreeMap::new();
     let mut initial_control = Some(initial_control);
-    if apply_current_environment(&mut runtime, events, &mut retries, *environment_state).is_err() {
+    if apply_current_environment(&mut runtime, &events, &mut retries, *environment_state).is_err() {
         return CatalogSessionExit::Retry(generation);
     }
     loop {
@@ -235,7 +257,7 @@ fn run_catalog_session(
             environment,
             environment_state,
             &mut runtime,
-            events,
+            &events,
             &mut retries,
         ) {
             Ok(true) => {
@@ -259,6 +281,27 @@ fn run_catalog_session(
                 return CatalogSessionExit::Closed;
             }
         }
+        match channels.realtime_controls.try_recv() {
+            Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
+                return CatalogSessionExit::Demand {
+                    handoff: Box::new(CatalogHandoff {
+                        runtime,
+                        events,
+                        retries,
+                        searches,
+                        selections,
+                    }),
+                    generation,
+                    demand,
+                };
+            }
+            Ok(RithmicRealtimeControl::Subscribe(_) | RithmicRealtimeControl::Stop)
+            | Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                let _ = runtime.stop();
+                return CatalogSessionExit::Closed;
+            }
+        }
         loop {
             let control = initial_control
                 .take()
@@ -266,7 +309,7 @@ fn run_catalog_session(
             match control {
                 Ok(control) => dispatch_catalog_control(
                     &runtime,
-                    events,
+                    &events,
                     channels.catalog_publications,
                     generation,
                     &mut searches,
@@ -292,18 +335,13 @@ fn run_catalog_session(
                 &mut searches,
                 &mut selections,
             ) {
-                if runtime.stop().is_err() {
-                    let publications = channels.catalog_publications;
-                    reject_deferred_selection(publications, generation, &selection);
-                    return CatalogSessionExit::Closed;
-                }
-                return CatalogSessionExit::SelectionCompleted {
-                    generation,
-                    selection,
-                };
+                // The login stays open: the coordinator answers a resolved
+                // selection with a realtime demand for this same generation,
+                // and further catalog commands keep working meanwhile.
+                channels.publish_catalog(selection);
             }
         }
-        if catalog_session_failed(&mut runtime, events, &mut retries) {
+        if catalog_session_failed(&mut runtime, &events, &mut retries) {
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
@@ -662,27 +700,6 @@ fn retry_catalog_session(runtime: &mut Runtime, generation: u64) -> CatalogSessi
     CatalogSessionExit::Retry(generation)
 }
 
-fn reject_deferred_selection(
-    publications: &SyncSender<RithmicCatalogEvent>,
-    provider_generation: u64,
-    selection: &RithmicCatalogEvent,
-) {
-    if let RithmicCatalogEvent::SelectionResolved {
-        consumer_id,
-        command_generation,
-        instrument: _,
-    } = selection
-    {
-        reject_catalog_generation(
-            publications,
-            *consumer_id,
-            Some(provider_generation),
-            *command_generation,
-            true,
-        );
-    }
-}
-
 const fn protocol_rejection(reason: RithmicCatalogRejection) -> ProviderCatalogRejectionReason {
     match reason {
         RithmicCatalogRejection::SearchRejected => ProviderCatalogRejectionReason::SearchRejected,
@@ -740,65 +757,13 @@ pub(crate) fn run(
         return;
     };
     let mut last_generation = 0_u64;
-    let mut reusable_generation = None;
     loop {
         match realtime_controls.try_recv() {
-            Ok(RithmicRealtimeControl::Subscribe(mut demand)) if !demand.is_empty() => {
-                let mut transport_recovery = false;
-                loop {
-                    let mut stop_requested = false;
-                    while let Ok(control) = realtime_controls.try_recv() {
-                        match control {
-                            RithmicRealtimeControl::Subscribe(newer) => {
-                                demand = newer;
-                                stop_requested = false;
-                            }
-                            RithmicRealtimeControl::Stop => stop_requested = true,
-                        }
-                    }
-                    if stop_requested || demand.is_empty() {
-                        break;
-                    }
-                    let generation = reusable_generation
-                        .take()
-                        .filter(|generation| *generation == demand.requested_generation())
-                        .unwrap_or_else(|| {
-                            next_generation(last_generation, demand.requested_generation())
-                        });
-                    let reconnect_delay =
-                        reconnect_backoff_delay(transport_recovery, channels.reconnect_delay);
-                    if !reconnect_delay.is_zero() {
-                        thread::park_timeout(reconnect_delay);
-                    }
-                    let (environment_events, environment_state) = environment.parts();
-                    match run_demand(
-                        demand,
-                        generation,
-                        channels,
-                        environment_events,
-                        environment_state,
-                    ) {
-                        SelectionExit::Replace {
-                            demand: replacement,
-                            generation,
-                            transport_recovery: replacement_transport_recovery,
-                        } => {
-                            demand = replacement;
-                            last_generation = generation;
-                            transport_recovery = replacement_transport_recovery;
-                        }
-                        SelectionExit::Idle { generation } => {
-                            last_generation = generation;
-                            let _ = realtime_publications
-                                .send(RithmicRealtimeEvent::Disconnected(generation, None));
-                            break;
-                        }
-                        SelectionExit::Closed { generation } => {
-                            let _ = realtime_publications
-                                .send(RithmicRealtimeEvent::Disconnected(generation, None));
-                            return;
-                        }
-                    }
+            Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
+                let generation = next_generation(last_generation, demand.requested_generation());
+                match serve_demand(demand, generation, None, channels, &mut environment) {
+                    DemandExit::Idle(generation) => last_generation = generation,
+                    DemandExit::Closed => return,
                 }
             }
             Ok(RithmicRealtimeControl::Subscribe(_) | RithmicRealtimeControl::Stop)
@@ -808,18 +773,125 @@ pub(crate) fn run(
 
         match handle_idle_catalog(&mut environment, channels, last_generation) {
             IdleCatalogOutcome::Unchanged => {}
-            IdleCatalogOutcome::Updated { generation, reuse } => {
-                last_generation = generation;
-                reusable_generation = reuse.then_some(generation);
+            IdleCatalogOutcome::Retired(generation) => last_generation = generation,
+            IdleCatalogOutcome::Demand {
+                handoff,
+                generation,
+                demand,
+            } => {
+                let generation = handoff_generation(generation, demand.requested_generation());
+                match serve_demand(
+                    demand,
+                    generation,
+                    Some(handoff),
+                    channels,
+                    &mut environment,
+                ) {
+                    DemandExit::Idle(generation) => last_generation = generation,
+                    DemandExit::Closed => return,
+                }
             }
             IdleCatalogOutcome::Closed => return,
         }
     }
 }
 
+enum DemandExit {
+    /// Demand ended; the last generation label used.
+    Idle(u64),
+    Closed,
+}
+
+/// Serves realtime demand until it is stopped or emptied, replacing the
+/// session only after a transport failure. A handed-over catalog login is used
+/// for the first session instead of opening a second ticker-plant login.
+fn serve_demand(
+    mut demand: RithmicRealtimeDemand,
+    mut generation: u64,
+    mut handoff: Option<Box<CatalogHandoff>>,
+    channels: ProviderChannels<'_>,
+    environment: &mut EnvironmentMonitors,
+) -> DemandExit {
+    let mut transport_recovery = false;
+    loop {
+        let mut stop_requested = false;
+        while let Ok(control) = channels.realtime_controls.try_recv() {
+            match control {
+                RithmicRealtimeControl::Subscribe(newer) => {
+                    demand = newer;
+                    stop_requested = false;
+                }
+                RithmicRealtimeControl::Stop => stop_requested = true,
+            }
+        }
+        if stop_requested || demand.is_empty() {
+            if let Some(mut handoff) = handoff.take() {
+                reject_pending_catalog(
+                    channels.catalog_publications,
+                    generation,
+                    &mut handoff.searches,
+                    &mut handoff.selections,
+                );
+                let _ = handoff.runtime.stop();
+            }
+            return DemandExit::Idle(generation);
+        }
+        let reconnect_delay = reconnect_backoff_delay(transport_recovery, channels.reconnect_delay);
+        if !reconnect_delay.is_zero() {
+            thread::park_timeout(reconnect_delay);
+        }
+        let (environment_events, environment_state) = environment.parts();
+        match run_demand(
+            demand,
+            generation,
+            handoff.take(),
+            channels,
+            environment_events,
+            environment_state,
+        ) {
+            SelectionExit::Replace {
+                demand: replacement,
+                generation: replaced,
+                transport_recovery: replacement_transport_recovery,
+            } => {
+                demand = replacement;
+                generation = next_generation(replaced, demand.requested_generation());
+                transport_recovery = replacement_transport_recovery;
+            }
+            SelectionExit::Idle { generation } => {
+                channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
+                return DemandExit::Idle(generation);
+            }
+            SelectionExit::Closed { generation } => {
+                channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
+                return DemandExit::Closed;
+            }
+        }
+    }
+}
+
+/// Generation label for demand served by a handed-over catalog login.
+///
+/// The live session keeps its catalog label unless the demand was issued
+/// under a newer one; labels never regress, and the session is not replaced
+/// merely because the label moves forward.
+const fn handoff_generation(session: u64, requested: u64) -> u64 {
+    if requested > session {
+        requested
+    } else {
+        session
+    }
+}
+
 enum IdleCatalogOutcome {
     Unchanged,
-    Updated { generation: u64, reuse: bool },
+    /// The catalog session ended without demand; the last generation label used.
+    Retired(u64),
+    Demand {
+        handoff: Box<CatalogHandoff>,
+        generation: u64,
+        demand: RithmicRealtimeDemand,
+    },
     Closed,
 }
 
@@ -842,27 +914,23 @@ fn handle_idle_catalog(
     let (environment_events, environment_state) = environment.parts();
     match run_catalog_session(
         runtime,
-        &events,
+        events,
         channels,
         environment_events,
         environment_state,
         generation,
         control,
     ) {
-        CatalogSessionExit::SelectionCompleted {
+        CatalogSessionExit::Demand {
+            handoff,
             generation,
-            selection,
-        } => {
-            channels.publish_catalog(selection);
-            IdleCatalogOutcome::Updated {
-                generation,
-                reuse: true,
-            }
-        }
-        CatalogSessionExit::Retry(generation) => IdleCatalogOutcome::Updated {
+            demand,
+        } => IdleCatalogOutcome::Demand {
+            handoff,
             generation,
-            reuse: false,
+            demand,
         },
+        CatalogSessionExit::Retry(generation) => IdleCatalogOutcome::Retired(generation),
         CatalogSessionExit::Closed => IdleCatalogOutcome::Closed,
     }
 }
@@ -986,16 +1054,57 @@ fn handle_live_catalog(
     None
 }
 
+/// Session state entering live demand: either the catalog login handed over
+/// intact or a fresh login that still has to connect.
+struct LiveSessionStart {
+    runtime: Runtime,
+    events: RithmicProviderEvents,
+    retries: RithmicRetryScheduler,
+    searches: BTreeMap<usize, u64>,
+    selections: BTreeMap<usize, u64>,
+    /// Adapter generation already streaming, when the login is handed over.
+    streaming: Option<SessionGeneration>,
+}
+
+fn live_session_start(handoff: Option<Box<CatalogHandoff>>) -> Result<LiveSessionStart, String> {
+    if let Some(handoff) = handoff {
+        let handoff = *handoff;
+        let streaming = match handoff.runtime.state() {
+            Ok(RithmicProviderRuntimeState::Streaming { generation }) => Some(generation),
+            _ => None,
+        };
+        Ok(LiveSessionStart {
+            runtime: handoff.runtime,
+            events: handoff.events,
+            retries: handoff.retries,
+            searches: handoff.searches,
+            selections: handoff.selections,
+            streaming,
+        })
+    } else {
+        let (runtime, events) = open_catalog_runtime()?;
+        Ok(LiveSessionStart {
+            runtime,
+            events,
+            retries: RithmicRetryScheduler::default(),
+            searches: BTreeMap::new(),
+            selections: BTreeMap::new(),
+            streaming: None,
+        })
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_demand(
     mut demand: RithmicRealtimeDemand,
     mut generation: u64,
+    handoff: Option<Box<CatalogHandoff>>,
     channels: ProviderChannels<'_>,
     environment: &Receiver<EnvironmentMessage>,
     environment_state: &mut EnvironmentState,
 ) -> SelectionExit {
-    let opened = open_catalog_runtime();
-    let Ok((mut runtime, events)) = opened else {
+    let handed_over = handoff.is_some();
+    let Ok(start) = live_session_start(handoff) else {
         channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
         return wait_for_replacement(
             channels.realtime_controls,
@@ -1005,13 +1114,26 @@ fn run_demand(
             true,
         );
     };
+    let LiveSessionStart {
+        mut runtime,
+        events,
+        mut retries,
+        mut searches,
+        mut selections,
+        streaming,
+    } = start;
     channels.publish_realtime(RithmicRealtimeEvent::Connecting(generation));
-    let mut retries = RithmicRetryScheduler::default();
-    let mut searches = BTreeMap::new();
-    let mut selections = BTreeMap::new();
-    let mut subscription_generation = None;
+    let mut subscription_generation = streaming;
     let mut subscription_dirty = true;
-    if apply_current_environment(&mut runtime, &events, &mut retries, *environment_state).is_err() {
+    if streaming.is_some() {
+        // The handed-over login already discovered its instruments; the
+        // catalog loop consumed that callback, so report readiness here.
+        channels.publish_realtime(RithmicRealtimeEvent::Connected(generation));
+    }
+    if !handed_over
+        && apply_current_environment(&mut runtime, &events, &mut retries, *environment_state)
+            .is_err()
+    {
         channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, None));
     }
     loop {
@@ -1191,7 +1313,7 @@ fn drain_live_events(
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Axiusflow Rithmic live session failed: {reason:?}");
+                eprintln!("TradingPlot Rithmic live session failed: {reason:?}");
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
                 let _ = runtime.stop();
@@ -1205,7 +1327,7 @@ fn drain_live_events(
             }
             Err(error) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Axiusflow Rithmic live callback failed: {error}");
+                eprintln!("TradingPlot Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
                 return Some(wait_for_replacement(
@@ -1379,7 +1501,7 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
     let (sender, receiver) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
     let mut network = network;
     let network_worker = spawn_environment_monitor(
-        "axiusflow-engine-rithmic-network-monitor",
+        "tradingplot-engine-rithmic-network-monitor",
         sender.clone(),
         move || {
             network
@@ -1390,7 +1512,7 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
     )?;
     let mut power = power;
     let power_worker = match spawn_environment_monitor(
-        "axiusflow-engine-rithmic-power-monitor",
+        "tradingplot-engine-rithmic-power-monitor",
         sender,
         move || {
             power
@@ -1541,12 +1663,12 @@ mod tests {
 
     use super::{
         EnvironmentState, RithmicCatalogEvent, catalog_selection_subscription, next_generation,
-        publish_catalog_callback, queue_depth_snapshot, reject_deferred_selection,
+        publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
         reject_pending_catalog, retire_pending_catalog_generation,
     };
-    use axiusflow_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
-    use axiusflow_platform_runtime::{NetworkEvent, PowerEvent};
-    use axiusflow_rithmic_protocol_adapter::{
+    use tradingplot_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
+    use tradingplot_platform_runtime::{NetworkEvent, PowerEvent};
+    use tradingplot_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
     };
 
@@ -1658,25 +1780,8 @@ mod tests {
     #[test]
     fn unconfirmed_catalog_close_rejects_the_deferred_selection() {
         let (publications, published) = mpsc::sync_channel(1);
-        let selection = RithmicCatalogEvent::SelectionResolved {
-            consumer_id: 41,
-            command_generation: 3,
-            instrument: axiusflow_contracts::InstallProviderInstrument {
-                provider: "rithmic".to_string(),
-                session_generation: 7,
-                selection_generation: 3,
-                instrument_id: "MNQ-CME".to_string(),
-                provider_symbol: "MNQU6".to_string(),
-                display_symbol: "MNQ Sep 2026".to_string(),
-                venue_id: "CME".to_string(),
-                price_scale: 2,
-                quantity_scale: 0,
-                entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
-                price_increment: Some(25),
-            },
-        };
 
-        reject_deferred_selection(&publications, 7, &selection);
+        reject_catalog_generation(&publications, 41, Some(7), 3, true);
 
         assert!(matches!(
             published.recv().expect("close failure is published"),

@@ -44,19 +44,19 @@ try {
     Assert-True ($sourceRevision -match '^[0-9a-fA-F]{40}$') "Git did not return a full source revision."
     Assert-True ([string]::IsNullOrWhiteSpace((Get-GitText @("status", "--porcelain")))) "Physical pacing preparation requires a clean worktree."
 
-    & cargo build --locked --release -p axiusflow_desktop --bin axiusflow_desktop
+    & cargo build --locked --release -p tradingplot_desktop --bin tradingplot_desktop
     Assert-True ($LASTEXITCODE -eq 0) "Release desktop build failed."
 
     Assert-True ((Get-GitText @("rev-parse", "HEAD")) -eq $sourceRevision) "Source revision changed during the release build."
     Assert-True ([string]::IsNullOrWhiteSpace((Get-GitText @("status", "--porcelain")))) "The worktree changed during the release build."
 
-    $builtExecutable = Join-Path $repositoryRoot "target\release\axiusflow_desktop.exe"
+    $builtExecutable = Join-Path $repositoryRoot "target\release\tradingplot_desktop.exe"
     Assert-True (Test-Path -LiteralPath $builtExecutable -PathType Leaf) "Release desktop executable was not produced: $builtExecutable"
     $cargoLockPath = Join-Path $repositoryRoot "Cargo.lock"
     Assert-True (Test-Path -LiteralPath $cargoLockPath -PathType Leaf) "Cargo.lock is missing."
 
     $null = New-Item -ItemType Directory -Path $resolvedOutputDirectory
-    $frozenExecutable = Join-Path $resolvedOutputDirectory "axiusflow_desktop.exe"
+    $frozenExecutable = Join-Path $resolvedOutputDirectory "tradingplot_desktop.exe"
     $frozenCargoLock = Join-Path $resolvedOutputDirectory "Cargo.lock"
     Copy-Item -LiteralPath $builtExecutable -Destination $frozenExecutable
     Copy-Item -LiteralPath $cargoLockPath -Destination $frozenCargoLock
@@ -71,7 +71,7 @@ try {
         source_worktree_clean = $true
         cargo_lock_path = "Cargo.lock"
         cargo_lock_sha256 = $cargoLockHash
-        binary_path = "axiusflow_desktop.exe"
+        binary_path = "tradingplot_desktop.exe"
         binary_sha256 = $binaryHash
         required_profiles_hz = @(60, 120, 144)
         prepared_utc = [DateTimeOffset]::UtcNow.ToString("O")

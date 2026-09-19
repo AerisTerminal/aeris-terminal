@@ -249,7 +249,7 @@ fn spawn_signal_worker(
     cancellation: Arc<CancellationInner>,
 ) -> Result<JoinHandle<()>, SessionShutdownError> {
     thread::Builder::new()
-        .name("axiusflow-session-signal".to_string())
+        .name("tradingplot-session-signal".to_string())
         .spawn(move || {
             if signals.forever().next().is_some() && !cancellation.cancelled.load(Ordering::Acquire)
             {
@@ -286,7 +286,7 @@ fn spawn_logind_worker(
         .map_err(|_| SessionShutdownError::NativeRegistration)? = Some(connection);
     let cancellation = Arc::clone(cancellation);
     thread::Builder::new()
-        .name("axiusflow-session-logind".to_string())
+        .name("tradingplot-session-logind".to_string())
         .spawn(move || run_logind(messages, &events, &cancellation))
         .map(Some)
         .map_err(|_| SessionShutdownError::ThreadStart)
@@ -322,7 +322,7 @@ fn windows_monitor() -> Result<NativeSessionShutdownMonitor, SessionShutdownErro
     });
     let worker_cancellation = Arc::clone(&cancelled);
     let worker = thread::Builder::new()
-        .name("axiusflow-session-window".to_string())
+        .name("tradingplot-session-window".to_string())
         .spawn(move || windows::run(&events, &worker_cancellation))
         .map_err(|_| SessionShutdownError::ThreadStart)?;
     Ok(NativeSessionShutdownMonitor {
@@ -343,7 +343,7 @@ fn windows_shutdown_guard(
     let worker_cancellation = Arc::clone(&cancelled);
     let (ready_tx, ready_rx) = sync_channel(1);
     let worker = thread::Builder::new()
-        .name("axiusflow-session-shutdown-guard".to_string())
+        .name("tradingplot-session-shutdown-guard".to_string())
         .spawn(move || windows::run_guard(gate, &worker_cancellation, &ready_tx))
         .map_err(|_| SessionShutdownError::ThreadStart)?;
     if ready_rx.recv().ok() != Some(true) {
@@ -412,7 +412,7 @@ mod windows {
     }
 
     fn create_window(requested: &AtomicBool) -> Option<HWND> {
-        let class_name = "AxiusflowEngineSessionMonitor\0"
+        let class_name = "TradingPlotEngineSessionMonitor\0"
             .encode_utf16()
             .collect::<Vec<_>>();
         let instance = unsafe { GetModuleHandleW(ptr::null()) };
@@ -543,7 +543,7 @@ mod windows {
     }
 
     fn create_guard_window(state: &GuardWindowState) -> Option<HWND> {
-        let class_name = "AxiusflowSessionShutdownGuard\0"
+        let class_name = "TradingPlotSessionShutdownGuard\0"
             .encode_utf16()
             .collect::<Vec<_>>();
         let instance = unsafe { GetModuleHandleW(ptr::null()) };

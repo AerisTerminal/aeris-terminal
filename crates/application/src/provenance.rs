@@ -5,8 +5,8 @@ use crate::stream::{
     MarketEventProvenance, MarketSnapshotIdentityRef, MarketValueChecksumRef, Provenanced,
     SnapshotEvidence, compute_market_snapshot_checksum,
 };
-use axiusflow_instruments::InstrumentRevision;
-use axiusflow_market_data::{BarDefinition, MarketBar};
+use tradingplot_instruments::InstrumentRevision;
+use tradingplot_market_data::{BarDefinition, MarketBar};
 
 /// Request metadata propagated through application boundaries.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,7 +142,8 @@ pub(crate) fn embedded_event_provenance(bar: &MarketBar) -> MarketEventProvenanc
         exchange_timestamp_unix_nanos,
         provider_receive_timestamp_unix_nanos: exchange_timestamp_unix_nanos.saturating_add(1_000),
         nic_receive_timestamp_unix_nanos: None,
-        axiusflow_receive_timestamp_unix_nanos: exchange_timestamp_unix_nanos.saturating_add(2_000),
+        tradingplot_receive_timestamp_unix_nanos: exchange_timestamp_unix_nanos
+            .saturating_add(2_000),
         normalized_timestamp_unix_nanos: exchange_timestamp_unix_nanos.saturating_add(3_000),
         fanout_enqueue_timestamp_unix_nanos: None,
         correction_flags: 0,

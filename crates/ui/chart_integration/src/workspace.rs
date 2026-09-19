@@ -1,4 +1,4 @@
-//! Axiusflow's stable-pane adapter around Nucleus's authoritative split workspace.
+//! `TradingPlot`'s stable-pane adapter around Nucleus's authoritative split workspace.
 
 use nucleuscharts_engine::{SplitDirection, Workspace, WorkspaceError, WorkspaceLayout};
 use num_traits::ToPrimitive;
@@ -115,7 +115,7 @@ impl ChartWorkspaceLayout {
     }
 }
 
-/// Nucleus-owned workspace model with stable Axiusflow pane identity mapping.
+/// Nucleus-owned workspace model with stable `TradingPlot` pane identity mapping.
 pub struct NucleusWorkspace {
     workspace: Workspace,
     pane_by_cell: BTreeMap<u64, u64>,

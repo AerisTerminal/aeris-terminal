@@ -35,15 +35,15 @@ use super::{
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-use axiusflow_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
-use axiusflow_contracts::{
+use gpui::{Bounds, point, px, size};
+use tradingplot_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
+use tradingplot_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
     SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
-use axiusflow_design_system::{AxiusflowTheme, ThemeColor, ThemeMode};
-use axiusflow_market_data::{ChartInterval, MarketBar};
-use axiusflow_observability::FeedConnectionState;
-use gpui::{Bounds, point, px, size};
+use tradingplot_design_system::{ThemeColor, ThemeMode, TradingPlotTheme};
+use tradingplot_market_data::{ChartInterval, MarketBar};
+use tradingplot_observability::FeedConnectionState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogCommandOrderBookain {
@@ -626,7 +626,7 @@ fn saved_workspace_boot_fixture() -> WorkspaceState {
 #[test]
 fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
     let unique = format!(
-        "axiusflow-workspace-boot-consumption-{}-{}",
+        "tradingplot-workspace-boot-consumption-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -810,7 +810,7 @@ fn watchlist_drag_reflows_continuously_at_row_midpoints() {
 
 #[test]
 fn chrome_controls_use_icon_and_disabled_hierarchy() {
-    let colors = AxiusflowTheme::light().colors;
+    let colors = TradingPlotTheme::light().colors;
     assert_eq!(chrome_control_foreground(&colors, false, true), colors.icon);
     assert_eq!(
         chrome_control_foreground(&colors, true, true),

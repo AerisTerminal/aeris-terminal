@@ -5,25 +5,6 @@
 //! application replay model used by engine publications without inventing a
 //! second desktop wire protocol.
 
-use axiusflow_application::ReplayRecoveryCommand;
-use axiusflow_application::{
-    EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
-    MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
-};
-use axiusflow_contracts::{
-    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
-};
-use axiusflow_market_data::ChartInterval;
-use axiusflow_market_data::OrderBookFrame;
-use axiusflow_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
-use axiusflow_market_runtime::{
-    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
-    MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
-    MarketStudyOutputsInvalidated, MarketStudyRemoved,
-};
-use axiusflow_observability::FeedConnectionState;
-use axiusflow_observability::FeedDiagnosticsSnapshot;
 use std::{
     collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
@@ -34,6 +15,25 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tradingplot_application::ReplayRecoveryCommand;
+use tradingplot_application::{
+    EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
+    MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
+};
+use tradingplot_contracts::{
+    InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
+};
+use tradingplot_market_data::ChartInterval;
+use tradingplot_market_data::OrderBookFrame;
+use tradingplot_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
+use tradingplot_market_runtime::{
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
+    MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
+    MarketStudyOutputsInvalidated, MarketStudyRemoved,
+};
+use tradingplot_observability::FeedConnectionState;
+use tradingplot_observability::FeedDiagnosticsSnapshot;
 
 /// A bounded coordinator mailbox whose receiving endpoint has been dropped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1588,20 +1588,6 @@ mod tests {
         MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
-    use axiusflow_application::{
-        Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
-    };
-    use axiusflow_contracts::{
-        InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-        SearchProviderInstruments, SelectProviderInstrument,
-    };
-    use axiusflow_market_data::OrderBookFrame;
-    use axiusflow_market_data::{
-        BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
-    };
-    use axiusflow_market_runtime::study::StudyInstanceId;
-    use axiusflow_observability::{FeedDiagnostics, FeedIdentity};
-    use axiusflow_study_sdk::builtins;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
@@ -1612,6 +1598,20 @@ mod tests {
         thread,
         time::Duration,
     };
+    use tradingplot_application::{
+        Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
+    };
+    use tradingplot_contracts::{
+        InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+        SearchProviderInstruments, SelectProviderInstrument,
+    };
+    use tradingplot_market_data::OrderBookFrame;
+    use tradingplot_market_data::{
+        BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
+    };
+    use tradingplot_market_runtime::study::StudyInstanceId;
+    use tradingplot_observability::{FeedDiagnostics, FeedIdentity};
+    use tradingplot_study_sdk::builtins;
 
     fn tail_operation(message: &MarketWorkerMessage) -> Option<ReplayTailOperation> {
         match message {

@@ -10,8 +10,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::lifecycle::RolloutMetadata;
 
-const INSTALLATION_DOMAIN: &[u8] = b"axiusflow-rollout-installation-v1\0";
-const COHORT_DOMAIN: &[u8] = b"axiusflow-rollout-cohort-v1\0";
+const INSTALLATION_DOMAIN: &[u8] = b"tradingplot-rollout-installation-v1\0";
+const COHORT_DOMAIN: &[u8] = b"tradingplot-rollout-cohort-v1\0";
 
 /// Returns whether this installation is eligible for one signed rollout.
 ///
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn zero_percent_is_a_hold_and_full_rollout_needs_no_bucket_exception() {
-        let root = Path::new("/users/example/axiusflow");
+        let root = Path::new("/users/example/tradingplot");
         assert!(!rollout_eligible(&rollout("stable", 0), root));
         assert!(rollout_eligible(&rollout("stable", 100), root));
         assert!(!rollout_eligible(&rollout("stable", 101), root));
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn bucket_is_deterministic_and_namespaced_by_signed_cohort() {
-        let root = Path::new("/users/example/axiusflow");
+        let root = Path::new("/users/example/tradingplot");
         let stable = rollout("stable", 50);
         let canary = rollout("canary", 50);
 
@@ -80,13 +80,13 @@ mod tests {
         assert_ne!(rollout_sample(&stable, root), rollout_sample(&canary, root));
         assert_ne!(
             rollout_sample(&stable, root),
-            rollout_sample(&stable, Path::new("/users/other/axiusflow"))
+            rollout_sample(&stable, Path::new("/users/other/tradingplot"))
         );
     }
 
     #[test]
     fn increasing_percentage_for_one_ring_is_monotonic() {
-        let root = Path::new("/users/example/axiusflow");
+        let root = Path::new("/users/example/tradingplot");
         let mut seen_eligible = false;
         for percentage in 0..=100 {
             let eligible = rollout_eligible(&rollout("stable", percentage), root);
@@ -102,8 +102,8 @@ mod tests {
     fn deterministic_vector_fences_bucket_algorithm_changes() {
         let sample = rollout_sample(
             &rollout("canary", 25),
-            Path::new("/users/example/axiusflow"),
+            Path::new("/users/example/tradingplot"),
         );
-        assert_eq!(sample, 10_878_209_242_113_886_559);
+        assert_eq!(sample, 10_497_042_065_979_413_368);
     }
 }

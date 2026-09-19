@@ -144,7 +144,7 @@ impl TerminalApp {
             })
             .transpose()
             .unwrap_or_else(|error| {
-                eprintln!("Axiusflow workspace persistence could not start: {error}");
+                eprintln!("TradingPlot workspace persistence could not start: {error}");
                 None
             });
         let persisted_layout = workspace_layout_tabs(&workspaces, cx);
@@ -152,7 +152,7 @@ impl TerminalApp {
         Self {
             workspaces,
             active,
-            theme: AxiusflowTheme::dark(),
+            theme: TradingPlotTheme::dark(),
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
             window_active: true,
             frame_poll_gate: frame_poll_gate::FramePollGate::default(),
@@ -187,7 +187,7 @@ impl TerminalApp {
             profile_refresh_on_activation: false,
             about_dialog_open: false,
             updater: DesktopUpdater::new()
-                .map_err(|error| eprintln!("Axiusflow update UI degraded: {error}"))
+                .map_err(|error| eprintln!("TradingPlot update UI degraded: {error}"))
                 .ok(),
             update_restart_persistence_pending: false,
             chart_chrome: init.chart_chrome,
@@ -1102,7 +1102,7 @@ impl TerminalApp {
         if let Some(updater) = self.updater.as_mut()
             && let Err(error) = updater.request_check()
         {
-            eprintln!("Axiusflow update check degraded: {error}");
+            eprintln!("TradingPlot update check degraded: {error}");
         }
         cx.notify();
     }
@@ -1111,7 +1111,7 @@ impl TerminalApp {
         if let Some(updater) = self.updater.as_mut()
             && let Err(error) = updater.request_restart()
         {
-            eprintln!("Axiusflow update restart degraded: {error}");
+            eprintln!("TradingPlot update restart degraded: {error}");
         }
         cx.notify();
     }
@@ -1129,20 +1129,20 @@ impl TerminalApp {
             // handle cannot block GPUI on process shutdown.
             drop(cleanup);
         }
-        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() {
+        if let Some(account) = tradingplot_desktop::account::DesktopAccount::shared() {
             let _ = account.request_profile_refresh();
         }
     }
 
     fn commit_update_restart_after_persistence(
         &mut self,
-        account_refresh: axiusflow_account_runtime::AccountRefreshQuiesce,
+        account_refresh: tradingplot_account_runtime::AccountRefreshQuiesce,
         cx: &mut Context<Self>,
     ) {
         self.update_restart_persistence_pending = false;
         let Some(updater) = self.updater.as_mut() else {
             drop(account_refresh);
-            if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared() {
+            if let Some(account) = tradingplot_desktop::account::DesktopAccount::shared() {
                 let _ = account.request_profile_refresh();
             }
             self.workspace_error = Some("update client is unavailable".to_string());
@@ -1176,7 +1176,7 @@ impl TerminalApp {
             .as_ref()
             .map(WorkspaceLayoutPersistence::shutdown_wait);
         let chart_chrome_wait = chart_chrome::chart_chrome_shutdown_wait();
-        let account_refresh = axiusflow_desktop::account::begin_refresh_quiesce();
+        let account_refresh = tradingplot_desktop::account::begin_refresh_quiesce();
 
         self.update_restart_persistence_pending = true;
         let durability = cx.background_executor().spawn(async move {
@@ -1232,7 +1232,7 @@ impl TerminalApp {
                 terminal_cx.notify();
             });
             if update.is_err()
-                && let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                && let Some(account) = tradingplot_desktop::account::DesktopAccount::shared()
             {
                 let _ = account.request_profile_refresh();
             }
@@ -1252,8 +1252,8 @@ impl TerminalApp {
         if !self.account_menu_open {
             return None;
         }
-        let account = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
-            axiusflow_desktop::account::unavailable_menu_state,
+        let account = tradingplot_desktop::account::DesktopAccount::shared().map_or_else(
+            tradingplot_desktop::account::unavailable_menu_state,
             |account| account.menu_state(),
         );
         Some(account_menu_layer(
@@ -1489,13 +1489,13 @@ impl TerminalApp {
                 .background_executor()
                 .spawn(async move {
                     if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
-                        eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                        eprintln!("TradingPlot chart chrome could not be saved: {error}");
                     }
                 })
                 .detach(),
             Ok(false) => {}
             Err(error) => {
-                eprintln!("Axiusflow chart chrome could not be saved: {error}");
+                eprintln!("TradingPlot chart chrome could not be saved: {error}");
             }
         }
     }
@@ -2126,45 +2126,45 @@ impl TerminalApp {
     }
 
     pub(super) fn request_sign_in(cx: &mut Context<Self>) {
-        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+        let result = tradingplot_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),
             |account| account.request_sign_in(),
         );
         if let Err(error) = result {
-            eprintln!("Axiusflow sign-in degraded: {error}");
+            eprintln!("TradingPlot sign-in degraded: {error}");
         }
         cx.notify();
     }
 
     pub(super) fn sign_out(cx: &mut Context<Self>) {
-        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+        let result = tradingplot_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),
             |account| account.request_sign_out(),
         );
         if let Err(error) = result {
-            eprintln!("Axiusflow sign-out degraded: {error}");
+            eprintln!("TradingPlot sign-out degraded: {error}");
         }
         cx.notify();
     }
 
     pub(super) fn reopen_browser_page(cx: &mut Context<Self>) {
-        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+        let result = tradingplot_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),
             |account| account.reopen_browser(),
         );
         if let Err(error) = result {
-            eprintln!("Axiusflow browser reopen degraded: {error}");
+            eprintln!("TradingPlot browser reopen degraded: {error}");
         }
         cx.notify();
     }
 
     pub(super) fn cancel_sign_in(cx: &mut Context<Self>) {
-        let result = axiusflow_desktop::account::DesktopAccount::shared().map_or_else(
+        let result = tradingplot_desktop::account::DesktopAccount::shared().map_or_else(
             || Err("sign-in is unavailable".to_string()),
             |account| account.request_cancel(),
         );
         if let Err(error) = result {
-            eprintln!("Axiusflow sign-in cancellation degraded: {error}");
+            eprintln!("TradingPlot sign-in cancellation degraded: {error}");
         }
         cx.notify();
     }
@@ -2282,10 +2282,10 @@ impl TerminalApp {
         if became_active {
             if self.profile_refresh_on_activation {
                 self.profile_refresh_on_activation = false;
-                if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                if let Some(account) = tradingplot_desktop::account::DesktopAccount::shared()
                     && let Err(error) = account.request_profile_refresh()
                 {
-                    eprintln!("Axiusflow profile refresh degraded: {error}");
+                    eprintln!("TradingPlot profile refresh degraded: {error}");
                 }
             }
             self.schedule_market_frame(window, cx);
@@ -2317,7 +2317,7 @@ impl TerminalApp {
         window.on_next_frame(move |window, cx| {
             let diagnostics = terminal.update(cx, |terminal, cx| {
                 terminal.frame_poll_gate.complete();
-                if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                if let Some(account) = tradingplot_desktop::account::DesktopAccount::shared()
                     && account.poll()
                 {
                     cx.notify();
@@ -2334,7 +2334,7 @@ impl TerminalApp {
                         .and_then(WorkspaceLayoutPersistence::error);
                     cx.notify();
                 }
-                let authenticated = axiusflow_desktop::account::DesktopAccount::shared()
+                let authenticated = tradingplot_desktop::account::DesktopAccount::shared()
                     .is_some_and(|account| account.authenticated());
                 let mut diagnostics = Vec::new();
                 let mut summaries_changed = false;
@@ -2415,7 +2415,8 @@ impl TerminalApp {
                             );
                             return;
                         }
-                        if let Some(account) = axiusflow_desktop::account::DesktopAccount::shared()
+                        if let Some(account) =
+                            tradingplot_desktop::account::DesktopAccount::shared()
                             && account.poll()
                         {
                             terminal.schedule_market_frame(window, terminal_cx);

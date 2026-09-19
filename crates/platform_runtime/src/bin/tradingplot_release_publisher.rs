@@ -13,7 +13,11 @@ use std::{
     process::{Command, Stdio},
 };
 
-use axiusflow_platform_runtime::{
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use tradingplot_platform_runtime::{
     BLOCK_PLAN_BLOCK_BYTES, BLOCK_PLAN_FILENAME, BLOCK_PLAN_SCHEMA_VERSION, BlockDescriptor,
     BlockFilePlan, BlockPlan, MAXIMUM_BLOCK_PLAN_BLOCKS, MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS,
     RELEASE_CHANNEL_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION,
@@ -23,27 +27,25 @@ use axiusflow_platform_runtime::{
     sign_block_plan, sign_release_manifest, verify_release_file, verify_release_manifest,
     verify_release_manifest_signature,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 const DEFAULT_CHANNEL: &str = "stable";
 const DEFAULT_OUTPUT_ROOT: &str = "target/release-publish";
 const WRANGLER_MAXIMUM_OBJECT_BYTES: u64 = 315 * 1024 * 1024;
 const MAXIMUM_CHANNEL_BYTES: u64 = 1024 * 1024;
 const RELEASE_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+// Stable signature domains. These are protocol identifiers from before the
+// TradingPlot rename; changing them would invalidate already signed metadata.
 const RELEASE_PROVENANCE_SIGNATURE_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_PROVENANCE_V1\0";
 const RELEASE_RETIREMENT_SCHEMA_VERSION: u32 = 1;
 const RELEASE_RETIREMENT_FILENAME: &str = "retirement.json";
 const RELEASE_RETIREMENT_SIGNATURE_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_RETIREMENT_V1\0";
 const MAXIMUM_RETIREMENT_BYTES: u64 = 2 * 1024 * 1024;
 const PUBLIC_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
-const VERIFY_AUTHENTICODE_METADATA: &str = r"$signature = Get-AuthenticodeSignature -LiteralPath $env:AXIUSFLOW_AUTHENTICODE_PATH; if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ine $env:AXIUSFLOW_AUTHENTICODE_CERT_SHA1 -or $null -eq $signature.TimeStamperCertificate) { exit 1 }";
+const VERIFY_AUTHENTICODE_METADATA: &str = r"$signature = Get-AuthenticodeSignature -LiteralPath $env:TRADINGPLOT_AUTHENTICODE_PATH; if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ine $env:TRADINGPLOT_AUTHENTICODE_CERT_SHA1 -or $null -eq $signature.TimeStamperCertificate) { exit 1 }";
 
 fn main() {
     if let Err(error) = run(std::env::args_os().skip(1)) {
-        eprintln!("Axiusflow release publisher: {error}");
+        eprintln!("TradingPlot release publisher: {error}");
         std::process::exit(1);
     }
 }
@@ -285,7 +287,7 @@ impl PublisherConfig {
 }
 
 fn usage() -> String {
-    "usage: axiusflow_release_publisher --signing-key-file <base64url-key-file> [--expected-verifying-key <base64url-public-key>] [--skip-build] --release-identity <git-head> --generation <n> --release-version <candidate-semver> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--rollout-cohort all] [--rollout-percentage 100] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>] ([--authenticode-tool <signtool>] --authenticode-certificate-sha1 <40-hex-thumbprint> --authenticode-timestamp-url <RFC3161-url> | --allow-unsigned-windows-release) [--trust-reset-from-generation <n> --trust-reset-from-release-identity <identity>]".to_string()
+    "usage: tradingplot_release_publisher --signing-key-file <base64url-key-file> [--expected-verifying-key <base64url-public-key>] [--skip-build] --release-identity <git-head> --generation <n> --release-version <candidate-semver> --minimum-version <compatible-launcher-semver> --base-url <https-release-base> --published-at <UTC-RFC3339> [--channel stable] [--rollout-cohort all] [--rollout-percentage 100] [--output target/release-publish] [--r2-bucket <bucket>] [--wrangler <command>] [--iscc <Inno Setup compiler>] ([--authenticode-tool <signtool>] --authenticode-certificate-sha1 <40-hex-thumbprint> --authenticode-timestamp-url <RFC3161-url> | --allow-unsigned-windows-release) [--trust-reset-from-generation <n> --trust-reset-from-release-identity <identity>]".to_string()
 }
 
 fn required_argument(
@@ -314,7 +316,7 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
     let repository =
         std::env::current_dir().map_err(|_| "repository directory is unavailable".to_string())?;
     if !repository.join("Cargo.toml").is_file() {
-        return Err("run the release publisher from the Axiusflow repository root".to_string());
+        return Err("run the release publisher from the TradingPlot repository root".to_string());
     }
     verify_repository_identity(&repository, &config.release_identity)?;
     let signing_key = read_signing_key(&config.signing_key_file)?;
@@ -338,7 +340,7 @@ fn run(arguments: impl Iterator<Item = OsString>) -> Result<(), String> {
         && let Err(first_error) =
             upload_release(&config, bucket, &published, &signing_key, &verifying_key)
     {
-        eprintln!("Axiusflow release publisher retrying publication after: {first_error}");
+        eprintln!("TradingPlot release publisher retrying publication after: {first_error}");
         upload_release(&config, bucket, &published, &signing_key, &verifying_key).map_err(
             |second_error| {
                 format!(
@@ -373,7 +375,7 @@ fn verify_production_publication_context(
         ("GITHUB_EVENT_NAME", "workflow_dispatch"),
         ("GITHUB_REF", "refs/heads/main"),
         (
-            "AXIUSFLOW_RELEASE_ENVIRONMENT",
+            "TRADINGPLOT_RELEASE_ENVIRONMENT",
             "self-hosted-release-station",
         ),
     ] {
@@ -557,9 +559,9 @@ fn build_release_binaries(
         "--locked",
         "--release",
         "-p",
-        "axiusflow_platform_runtime",
+        "tradingplot_platform_runtime",
         "--bin",
-        "axiusflow_launcher",
+        "tradingplot_launcher",
     ]);
     configure_release_build(&mut launcher, repository, config, &public_key, &generation);
     run_child(launcher, "release launcher build")?;
@@ -570,7 +572,7 @@ fn build_release_binaries(
         "--locked",
         "--release",
         "-p",
-        "axiusflow_desktop",
+        "tradingplot_desktop",
         "--all-features",
     ]);
     configure_release_build(
@@ -592,19 +594,19 @@ fn configure_release_build(
 ) {
     command
         .current_dir(repository)
-        .env("AXIUSFLOW_RELEASE_VERIFYING_KEY", public_key)
-        .env("AXIUSFLOW_RELEASE_BASE_URL", &config.base_url)
-        .env("AXIUSFLOW_BOOTSTRAP_MIN_GENERATION", generation)
-        .env("AXIUSFLOW_RELEASE_IDENTITY", &config.release_identity)
-        .env("AXIUSFLOW_INSTALL_GENERATION", generation)
+        .env("TRADINGPLOT_RELEASE_VERIFYING_KEY", public_key)
+        .env("TRADINGPLOT_RELEASE_BASE_URL", &config.base_url)
+        .env("TRADINGPLOT_BOOTSTRAP_MIN_GENERATION", generation)
+        .env("TRADINGPLOT_RELEASE_IDENTITY", &config.release_identity)
+        .env("TRADINGPLOT_INSTALL_GENERATION", generation)
         .stdin(Stdio::null());
     if config.r2_bucket.is_none() {
-        command.env("AXIUSFLOW_LOCAL_PACKAGE", "1");
+        command.env("TRADINGPLOT_LOCAL_PACKAGE", "1");
     } else {
-        command.env_remove("AXIUSFLOW_LOCAL_PACKAGE");
+        command.env_remove("TRADINGPLOT_LOCAL_PACKAGE");
     }
     if let Some(certificate) = config.authenticode_certificate_sha1.as_deref() {
-        command.env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", certificate);
+        command.env("TRADINGPLOT_AUTHENTICODE_CERT_SHA1", certificate);
     }
 }
 
@@ -641,10 +643,13 @@ fn release_binary_paths(repository: &Path) -> ReleaseBinaries {
     let release = target.join("release");
     ReleaseBinaries {
         launcher: release.join(format!(
-            "axiusflow_launcher{}",
+            "tradingplot_launcher{}",
             std::env::consts::EXE_SUFFIX
         )),
-        desktop: release.join(format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX)),
+        desktop: release.join(format!(
+            "tradingplot_desktop{}",
+            std::env::consts::EXE_SUFFIX
+        )),
     }
 }
 
@@ -738,9 +743,9 @@ fn package_release(
     fs::create_dir_all(&release_directory)
         .map_err(|_| "release output directory could not be created".to_string())?;
 
-    let setup_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
-    let launcher_name = format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX);
-    let desktop_name = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
+    let setup_name = format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX);
+    let launcher_name = format!("tradingplot_launcher{}", std::env::consts::EXE_SUFFIX);
+    let desktop_name = format!("tradingplot_desktop{}", std::env::consts::EXE_SUFFIX);
     let rollback_compatibility_name = ROLLBACK_COMPATIBILITY_FILENAME;
     let setup_path = release_directory.join(&setup_name);
     let launcher_path = release_directory.join(&launcher_name);
@@ -1102,10 +1107,10 @@ fn validate_release_provenance(provenance: &ReleaseProvenance) -> Result<(), Str
         return Err("release provenance shape is invalid".to_string());
     }
     let expected_names = BTreeSet::from([
-        format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX),
+        format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX),
         "manifest.json".to_string(),
-        format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX),
-        format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX),
+        format!("tradingplot_launcher{}", std::env::consts::EXE_SUFFIX),
+        format!("tradingplot_desktop{}", std::env::consts::EXE_SUFFIX),
         ROLLBACK_COMPATIBILITY_FILENAME.to_string(),
     ]);
     let mut actual_names = BTreeSet::new();
@@ -1180,8 +1185,8 @@ fn verify_authenticode_file(config: &PublisherConfig, path: &Path) -> Result<(),
             "-Command",
             VERIFY_AUTHENTICODE_METADATA,
         ])
-        .env("AXIUSFLOW_AUTHENTICODE_PATH", path)
-        .env("AXIUSFLOW_AUTHENTICODE_CERT_SHA1", certificate)
+        .env("TRADINGPLOT_AUTHENTICODE_PATH", path)
+        .env("TRADINGPLOT_AUTHENTICODE_CERT_SHA1", certificate)
         .stdin(Stdio::null())
         .status()
         .map_err(|_| "Authenticode metadata verification could not be started".to_string())?;
@@ -1204,8 +1209,8 @@ fn compile_windows_installer(
     rollback_compatibility_path: &Path,
     setup_path: &Path,
 ) -> Result<(), String> {
-    let script = repository.join("tools/windows/axiusflow_setup.iss");
-    let icon = repository.join("apps/desktop/assets/axiusflow_assets/axiusflow.ico");
+    let script = repository.join("tools/windows/tradingplot_setup.iss");
+    let icon = repository.join("apps/desktop/assets/tradingplot_assets/tradingplot.ico");
     for input in [
         script.as_path(),
         icon.as_path(),
@@ -1247,7 +1252,7 @@ fn compile_windows_installer(
         return Err("Inno Setup compiler failed".to_string());
     }
     let metadata = fs::symlink_metadata(setup_path)
-        .map_err(|_| "Inno Setup did not emit Axiusflow-Setup.exe".to_string())?;
+        .map_err(|_| "Inno Setup did not emit TradingPlot-Setup.exe".to_string())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() == 0 {
         return Err("Inno Setup emitted an invalid installer".to_string());
     }
@@ -1641,7 +1646,7 @@ fn validate_predecessor_channel_shape(
     if channel.manifest_url != expected_manifest_url {
         return Err("existing stable channel manifest URL is inconsistent".to_string());
     }
-    let expected_installer_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+    let expected_installer_name = format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX);
     let expected_installer_url = format!(
         "{}/{}/{}/{}-{}/{}",
         config.base_url,
@@ -1852,7 +1857,7 @@ fn predecessor_release_object_keys(predecessor: &SignedReleaseManifest) -> Vec<S
         keys.insert(format!("{root}/{}", file.path));
     }
     keys.insert(format!(
-        "{root}/Axiusflow-Setup{}",
+        "{root}/TradingPlot-Setup{}",
         std::env::consts::EXE_SUFFIX
     ));
     keys.insert(format!("{root}/provenance.json"));
@@ -2553,7 +2558,7 @@ fn verify_public_object(config: &PublisherConfig, object: &UploadObject) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axiusflow_platform_runtime::{
+    use tradingplot_platform_runtime::{
         ReleasePolicy, SignedReleaseManifest, verify_release_manifest,
     };
 
@@ -2585,7 +2590,7 @@ mod tests {
             generation,
             release_version: "0.2.2".to_string(),
             minimum_version: "0.2.0".to_string(),
-            base_url: "https://auth.axiusflow.test/releases".to_string(),
+            base_url: "https://auth.tradingplot.test/releases".to_string(),
             published_at: "2026-09-07T00:00:00Z".to_string(),
             channel: "stable".to_string(),
             rollout_cohort: "stable".to_string(),
@@ -2617,7 +2622,7 @@ mod tests {
         assert_eq!(
             local
                 .get_envs()
-                .find(|(name, _)| *name == "AXIUSFLOW_LOCAL_PACKAGE")
+                .find(|(name, _)| *name == "TRADINGPLOT_LOCAL_PACKAGE")
                 .and_then(|(_, value)| value),
             Some(std::ffi::OsStr::new("1"))
         );
@@ -2635,7 +2640,7 @@ mod tests {
         assert_eq!(
             production
                 .get_envs()
-                .find(|(name, _)| *name == "AXIUSFLOW_LOCAL_PACKAGE")
+                .find(|(name, _)| *name == "TRADINGPLOT_LOCAL_PACKAGE")
                 .map(|(_, value)| value),
             Some(None)
         );
@@ -2646,7 +2651,7 @@ mod tests {
         ReleaseFile {
             role: ReleaseFileRole::Desktop,
             path: path.to_string(),
-            url: format!("https://releases.axiusflow.test/{path}"),
+            url: format!("https://releases.tradingplot.test/{path}"),
             size: bytes.len() as u64,
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
             executable: true,
@@ -2659,7 +2664,7 @@ mod tests {
         generation: u64,
         identity: &str,
     ) -> ReleaseChannelPointer {
-        let file_path = format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX);
+        let file_path = format!("tradingplot_desktop{}", std::env::consts::EXE_SUFFIX);
         let file = ReleaseFile {
             url: format!(
                 "{}/{}/{}/{}-{identity}/{file_path}",
@@ -2688,7 +2693,7 @@ mod tests {
             key,
         )
         .expect("release signs");
-        let installer_name = format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX);
+        let installer_name = format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX);
         ReleaseChannelPointer {
             schema_version: RELEASE_CHANNEL_SCHEMA_VERSION,
             channel: config.channel.clone(),
@@ -2898,9 +2903,9 @@ mod tests {
             ),
             signed_release,
             installer: ReleaseInstallerMetadata {
-                filename: format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX),
+                filename: format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX),
                 url: format!(
-                    "{}/{}/{}/7-{identity}/Axiusflow-Setup{}",
+                    "{}/{}/{}/7-{identity}/TradingPlot-Setup{}",
                     config.base_url,
                     std::env::consts::OS,
                     std::env::consts::ARCH,
@@ -2918,7 +2923,7 @@ mod tests {
         // a bounded, cross-bound block-reuse source. Keep accepting such a
         // predecessor after current candidate policy retires the old role.
         let mut legacy = channel.clone();
-        let engine_path = "axiusflow_engine.exe";
+        let engine_path = "tradingplot_engine.exe";
         legacy.signed_release.manifest.files.push(ReleaseFile {
             role: ReleaseFileRole::Engine,
             path: engine_path.to_string(),
@@ -3058,11 +3063,11 @@ mod tests {
             install_generation: 7,
             version: "0.2.0".to_string(),
             published_at: "2026-09-07T00:00:00Z".to_string(),
-            manifest_url: "https://releases.axiusflow.test/manifest.json".to_string(),
+            manifest_url: "https://releases.tradingplot.test/manifest.json".to_string(),
             signed_release: source,
             installer: ReleaseInstallerMetadata {
                 filename: "setup.exe".to_string(),
-                url: "https://releases.axiusflow.test/setup.exe".to_string(),
+                url: "https://releases.tradingplot.test/setup.exe".to_string(),
                 size: 1,
                 sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
             },
@@ -3142,7 +3147,7 @@ mod tests {
             generation: 41,
             release_version: "7.8.9".to_string(),
             minimum_version: "0.2.0".to_string(),
-            base_url: "https://auth.axiusflow.test/releases".to_string(),
+            base_url: "https://auth.tradingplot.test/releases".to_string(),
             published_at: "2026-09-07T00:00:00Z".to_string(),
             channel: "stable".to_string(),
             rollout_cohort: "stable".to_string(),
@@ -3184,7 +3189,7 @@ mod tests {
         );
         assert!(signed.manifest.files.iter().any(|file| {
             file.role == ReleaseFileRole::RuntimeAsset
-                && file.path == format!("axiusflow_launcher{suffix}")
+                && file.path == format!("tradingplot_launcher{suffix}")
         }));
         assert!(signed.manifest.files.iter().any(|file| {
             file.role == ReleaseFileRole::RuntimeAsset
@@ -3203,7 +3208,7 @@ mod tests {
         assert_eq!(
             channel.manifest_url,
             format!(
-                "https://auth.axiusflow.test/releases/{}/{}/41-0123456789abcdef0123456789abcdef01234567/manifest.json",
+                "https://auth.tradingplot.test/releases/{}/{}/41-0123456789abcdef0123456789abcdef01234567/manifest.json",
                 std::env::consts::OS,
                 std::env::consts::ARCH
             )
@@ -3224,12 +3229,12 @@ mod tests {
             published
                 .immutable_objects
                 .iter()
-                .any(|object| object.object_key.contains("Axiusflow-Setup"))
+                .any(|object| object.object_key.contains("TradingPlot-Setup"))
         );
         assert!(published.immutable_objects.iter().any(|object| {
             object
                 .object_key
-                .ends_with(&format!("axiusflow_launcher{suffix}"))
+                .ends_with(&format!("tradingplot_launcher{suffix}"))
         }));
         let provenance_object = published
             .immutable_objects
@@ -3252,10 +3257,10 @@ mod tests {
         assert_eq!(provenance.provenance.rollout.percentage, 25);
         assert_eq!(provenance.provenance.artifacts.len(), 5);
         for name in [
-            format!("Axiusflow-Setup{suffix}"),
+            format!("TradingPlot-Setup{suffix}"),
             "manifest.json".to_string(),
-            format!("axiusflow_launcher{suffix}"),
-            format!("axiusflow_desktop{suffix}"),
+            format!("tradingplot_launcher{suffix}"),
+            format!("tradingplot_desktop{suffix}"),
             "rollback-compatibility.json".to_string(),
         ] {
             assert!(
@@ -3295,8 +3300,8 @@ mod tests {
 
     #[test]
     fn base_url_and_identifiers_fail_closed() {
-        assert!(normalize_base_url("http://releases.axiusflow.test").is_err());
-        assert!(normalize_base_url("https://releases.axiusflow.test/path?x=1").is_err());
+        assert!(normalize_base_url("http://releases.tradingplot.test").is_err());
+        assert!(normalize_base_url("https://releases.tradingplot.test/path?x=1").is_err());
         assert!(valid_identifier("stable", 32));
         assert!(!valid_identifier("stable/channel", 32));
         assert!(valid_release_identity("0123456789abcdef"));
@@ -3329,7 +3334,7 @@ mod tests {
             ("GITHUB_EVENT_NAME", "workflow_dispatch"),
             ("GITHUB_REF", "refs/heads/main"),
             (
-                "AXIUSFLOW_RELEASE_ENVIRONMENT",
+                "TRADINGPLOT_RELEASE_ENVIRONMENT",
                 "self-hosted-release-station",
             ),
         ];
@@ -3359,7 +3364,7 @@ mod tests {
                 OsString::from("--minimum-version"),
                 OsString::from("0.2.0"),
                 OsString::from("--base-url"),
-                OsString::from("https://auth.axiusflow.test/releases"),
+                OsString::from("https://auth.tradingplot.test/releases"),
                 OsString::from("--published-at"),
                 OsString::from("2026-09-07T00:00:00Z"),
                 OsString::from("--rollout-cohort"),
@@ -3395,7 +3400,7 @@ mod tests {
                 OsString::from("--minimum-version"),
                 OsString::from("0.2.0"),
                 OsString::from("--base-url"),
-                OsString::from("https://auth.axiusflow.test/releases"),
+                OsString::from("https://auth.tradingplot.test/releases"),
                 OsString::from("--published-at"),
                 OsString::from("2026-09-17T00:00:00Z"),
             ]
@@ -3437,7 +3442,7 @@ mod tests {
             },
             artifacts: vec![
                 ReleaseProvenanceArtifact {
-                    name: format!("Axiusflow-Setup{}", std::env::consts::EXE_SUFFIX),
+                    name: format!("TradingPlot-Setup{}", std::env::consts::EXE_SUFFIX),
                     size: 1,
                     sha256_b64url: URL_SAFE_NO_PAD.encode([1_u8; 32]),
                 },
@@ -3447,12 +3452,12 @@ mod tests {
                     sha256_b64url: URL_SAFE_NO_PAD.encode([2_u8; 32]),
                 },
                 ReleaseProvenanceArtifact {
-                    name: format!("axiusflow_launcher{}", std::env::consts::EXE_SUFFIX),
+                    name: format!("tradingplot_launcher{}", std::env::consts::EXE_SUFFIX),
                     size: 3,
                     sha256_b64url: URL_SAFE_NO_PAD.encode([3_u8; 32]),
                 },
                 ReleaseProvenanceArtifact {
-                    name: format!("axiusflow_desktop{}", std::env::consts::EXE_SUFFIX),
+                    name: format!("tradingplot_desktop{}", std::env::consts::EXE_SUFFIX),
                     size: 4,
                     sha256_b64url: URL_SAFE_NO_PAD.encode([4_u8; 32]),
                 },
@@ -3488,7 +3493,7 @@ mod tests {
 
     #[test]
     fn windows_authenticode_contract_is_rfc3161_sha256_and_verifies_timestamp_metadata() {
-        let source = include_str!("axiusflow_release_publisher.rs");
+        let source = include_str!("tradingplot_release_publisher.rs");
         for required in [
             "\"/sha1\"",
             "\"/fd\"",
@@ -3524,19 +3529,19 @@ mod tests {
 
     #[test]
     fn windows_installer_script_keeps_standard_registration_and_signed_install_boundary() {
-        let script = include_str!("../../../../tools/windows/axiusflow_setup.iss");
+        let script = include_str!("../../../../tools/windows/tradingplot_setup.iss");
         for required in [
             "PrivilegesRequired=lowest",
-            "DefaultDirName={localappdata}\\Programs\\Axiusflow",
-            "UninstallFilesDir={localappdata}\\Programs\\Axiusflow-Uninstall",
+            "DefaultDirName={localappdata}\\Programs\\TradingPlot",
+            "UninstallFilesDir={localappdata}\\Programs\\TradingPlot-Uninstall",
             "SetupIconFile={#IconPath}",
-            "UninstallDisplayIcon={app}\\axiusflow_launcher.exe",
+            "UninstallDisplayIcon={app}\\tradingplot_launcher.exe",
             "[Icons]",
             "procedure RegisterExtraCloseApplicationsResources;",
             "RegisterExtraCloseApplicationsResource",
             "function PrepareToInstall(var NeedsRestart: Boolean): String;",
-            "{localappdata}\\Programs\\.Axiusflow-lifecycle\\uninstall.json",
-            "Finishing the previous Axiusflow uninstall...",
+            "{localappdata}\\Programs\\.TradingPlot-lifecycle\\uninstall.json",
+            "Finishing the previous TradingPlot uninstall...",
             "Setup has not replaced the recovery launcher",
             "procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);",
             "--remove-all-local-data",

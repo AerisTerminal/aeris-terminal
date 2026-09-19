@@ -2,7 +2,7 @@ use super::*;
 
 fn active_header_state(
     workspace: &WorkspaceSurface,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     chart_has_market_data: bool,
     cx: &App,
 ) -> HeaderState {
@@ -100,7 +100,7 @@ impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_market_wake_listener(window, cx);
         self.schedule_market_frame(window, cx);
-        if !axiusflow_desktop::account::DesktopAccount::shared()
+        if !tradingplot_desktop::account::DesktopAccount::shared()
             .is_some_and(|account| account.authenticated())
         {
             return onboarding::onboarding_surface(window, &self.theme, None);
@@ -180,7 +180,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::close_window))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
-            .font_family(axiusflow_design_system::platform_font_family())
+            .font_family(tradingplot_design_system::platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .children(title_bar)
             .child(header)
@@ -244,7 +244,7 @@ struct WorkspaceTabRenderState<'a> {
     market_summaries: &'a BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     drag_enabled: bool,
     drag_translation: Option<f32>,
-    theme: AxiusflowTheme,
+    theme: TradingPlotTheme,
 }
 
 const fn workspace_tab_close_drag_enabled(workspace_count: usize) -> bool {
@@ -255,7 +255,7 @@ fn workspace_tab_close_button(
     terminal: Entity<TerminalApp>,
     tab_id: u64,
     label: &str,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let key_terminal = terminal.clone();
@@ -329,7 +329,7 @@ fn handle_workspace_tab_key(
 fn workspace_add_button(
     terminal: Entity<TerminalApp>,
     enabled: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let key_terminal = terminal.clone();
@@ -377,7 +377,7 @@ fn workspace_add_button(
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
     market_summaries: &BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     cx: &App,
 ) -> (String, String, Div) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);

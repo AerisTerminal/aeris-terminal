@@ -11,10 +11,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axiusflow_account::{AccountId, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::Deserialize;
+use tradingplot_account::{AccountId, PlanId};
 
 /// Authorization URL parameters for one login transaction.
 pub struct AuthorizationRequest<'a> {
@@ -32,7 +32,7 @@ pub struct AuthorizationRequest<'a> {
     pub code_challenge: &'a str,
 }
 
-/// OIDC endpoints resolved from discovery plus the Axiusflow link route.
+/// OIDC endpoints resolved from discovery plus the `TradingPlot` link route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OidcEndpoints {
     /// Verified issuer identity.
@@ -45,9 +45,9 @@ pub struct OidcEndpoints {
     pub jwks_uri: String,
     /// Revocation endpoint from discovery metadata.
     pub revocation_endpoint: String,
-    /// Axiusflow subject-link route on the control-plane origin.
+    /// Subject-link route on the control-plane origin.
     pub link_endpoint: String,
-    /// Axiusflow lease-issue route on the control-plane origin.
+    /// Lease-issue route on the control-plane origin.
     pub lease_endpoint: String,
 }
 
@@ -55,8 +55,8 @@ pub struct OidcEndpoints {
 ///
 /// Fetches `{issuer}/.well-known/openid-configuration`, requires the echoed
 /// issuer to match the configured value exactly, requires every endpoint to
-/// stay on the issuer origin, and derives the Axiusflow link route from the
-/// control-plane origin.
+/// stay on the issuer origin, and derives the provisioned account routes from
+/// the control-plane origin.
 ///
 /// # Errors
 ///
@@ -141,8 +141,8 @@ pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<
 
 /// Derives the control-plane origin from the OIDC issuer.
 ///
-/// The Axiusflow issuer is the Better Auth mount (`{origin}/api/auth`); the
-/// Axiusflow-owned link route lives on the origin beside it.
+/// The `TradingPlot` issuer is the Better Auth mount (`{origin}/api/auth`); the
+/// `TradingPlot`-owned link route lives on the origin beside it.
 ///
 /// # Errors
 ///
@@ -388,7 +388,7 @@ pub struct AccountProfile {
     pub photo_url: String,
 }
 
-/// Links one verified OIDC subject to the canonical Axiusflow account.
+/// Links one verified OIDC subject to the canonical `TradingPlot` account.
 ///
 /// The ID token travels as the proof: the control plane verifies it
 /// server-side and never trusts the client-claimed subject. The verified
@@ -430,12 +430,15 @@ pub fn link_subject(
         AccountProfile {
             display_name: clip_profile(
                 &link.display_name,
-                axiusflow_account::MAXIMUM_PROFILE_NAME_BYTES,
+                tradingplot_account::MAXIMUM_PROFILE_NAME_BYTES,
             ),
-            email: clip_profile(&link.email, axiusflow_account::MAXIMUM_PROFILE_EMAIL_BYTES),
+            email: clip_profile(
+                &link.email,
+                tradingplot_account::MAXIMUM_PROFILE_EMAIL_BYTES,
+            ),
             photo_url: clip_profile(
                 &link.photo_url,
-                axiusflow_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
+                tradingplot_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
             ),
         },
     ))

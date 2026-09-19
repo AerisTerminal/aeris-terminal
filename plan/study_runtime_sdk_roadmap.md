@@ -1,10 +1,10 @@
-# AxiusFlow Study Runtime + Rust SDK Roadmap
+# TradingPlot Study Runtime + Rust SDK Roadmap
 
 ## Purpose
 
-AxiusFlow is building a native Rust Study Runtime and Rust Study SDK with one product-level goal:
+TradingPlot is building a native Rust Study Runtime and Rust Study SDK with one product-level goal:
 
-> Almost any Pine Script **indicator** whose required input data exists inside AxiusFlow should be portable to Rust through generic AxiusFlow Study SDK capabilities, without indicator-specific changes to the core product.
+> Almost any Pine Script **indicator** whose required input data exists inside TradingPlot should be portable to Rust through generic TradingPlot Study SDK capabilities, without indicator-specific changes to the core product.
 
 The target is extensive maturity, not a small built-in indicator catalog. A complex TradingView-style indicator should be able to combine multi-timeframe and cross-symbol data, stateful calculations, dynamic styling, drawings, labels, tables, chart context, alerts, and other bounded presentation semantics through the same public Rust study model.
 
@@ -21,13 +21,13 @@ The intended ownership split is:
 - Desktop owns durable workspace configuration, product UX, restore/reinitialize/remove commands, and visibility.
 - Nucleus Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that Axius intentionally consumes.
 
-## Product direction: Rust is the language; AxiusFlow supplies the Pine-class host contract
+## Product direction: Rust is the language; TradingPlot supplies the Pine-class host contract
 
-AxiusFlow should **not** build a Pine clone as the primary path to indicator maturity. Rust is already the authoring language. The product work should concentrate on the part Rust does not provide: market/chart execution semantics and a rich, bounded indicator host API.
+TradingPlot should **not** build a Pine clone as the primary path to indicator maturity. Rust is already the authoring language. The product work should concentrate on the part Rust does not provide: market/chart execution semantics and a rich, bounded indicator host API.
 
-Building a new language would force AxiusFlow to own and mature a parser, syntax, type checker, compiler/interpreter or VM, diagnostics, formatter, language server, package/import system, debugger story, versioning rules, migration rules, sandboxing story, standard library, and long-term source compatibility. None of that improves market-data ownership, drawing semantics, table rendering, MTF requests, recovery, or indicator correctness by itself.
+Building a new language would force TradingPlot to own and mature a parser, syntax, type checker, compiler/interpreter or VM, diagnostics, formatter, language server, package/import system, debugger story, versioning rules, migration rules, sandboxing story, standard library, and long-term source compatibility. None of that improves market-data ownership, drawing semantics, table rendering, MTF requests, recovery, or indicator correctness by itself.
 
-Rust already provides the general-purpose language layer: functions, modules, crates, structs, enums, traits, generics, iterators, collections, tests, compiler diagnostics, IDE tooling, linting, profiling, native performance, and a mature package ecosystem. AxiusFlow therefore gets to solve the easier and more valuable problem: expose Pine-class **host capabilities** through stable Rust contracts.
+Rust already provides the general-purpose language layer: functions, modules, crates, structs, enums, traits, generics, iterators, collections, tests, compiler diagnostics, IDE tooling, linting, profiling, native performance, and a mature package ecosystem. TradingPlot therefore gets to solve the easier and more valuable problem: expose Pine-class **host capabilities** through stable Rust contracts.
 
 The intended long-term stack is:
 
@@ -35,7 +35,7 @@ The intended long-term stack is:
 Rust study code
     |
     v
-AxiusFlow Study SDK
+TradingPlot Study SDK
     |  settings, requests, execution context, outputs, scene objects, alerts
     v
 Study Runtime
@@ -47,15 +47,15 @@ MarketEngine + chart integration
 Nucleus Charts
 ```
 
-A future simplified AxiusFlow scripting language is optional, not foundational. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
+A future simplified TradingPlot scripting language is optional, not foundational. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
 
 ## Definition of Pine-class indicator maturity
 
-The goal is not syntax compatibility with Pine. The goal is capability compatibility at the host boundary. AxiusFlow reaches Pine-class maturity when representative advanced TradingView indicators can be translated to Rust using only generic Study SDK primitives, with no indicator-specific edits to `market_runtime`, desktop, chart integration, or Nucleus ownership code.
+The goal is not syntax compatibility with Pine. The goal is capability compatibility at the host boundary. TradingPlot reaches Pine-class maturity when representative advanced TradingView indicators can be translated to Rust using only generic Study SDK primitives, with no indicator-specific edits to `market_runtime`, desktop, chart integration, or Nucleus ownership code.
 
 The target capability families are:
 
-| Capability family | AxiusFlow target |
+| Capability family | TradingPlot target |
 | --- | --- |
 | Numeric/series computation | Canonical OHLCV, fixed-point access, recursive/stateful execution, hard gaps, dirty ranges, study-on-study inputs. |
 | Market contexts | Same-symbol MTF, cross-symbol, sessions/time zones, lower-timeframe/intrabar data, bounded request contexts, and setting-driven dependency rebinding. |
@@ -75,10 +75,10 @@ Not every Pine API must be copied literally. Equivalent Rust-native abstractions
 
 ### Pine capability inventory that drives this roadmap
 
-Compatibility planning must track the current official Pine indicator surface rather than a remembered subset of `plot()`. At minimum, periodic research/review must cover these Pine capability families and map them to an AxiusFlow equivalent or an explicit non-goal:
+Compatibility planning must track the current official Pine indicator surface rather than a remembered subset of `plot()`. At minimum, periodic research/review must cover these Pine capability families and map them to an TradingPlot equivalent or an explicit non-goal:
 
 - Execution model and bar states: historical versus realtime execution, rollback/confirmation, intrabar persistence, recalculation triggers, and repainting-sensitive time semantics.
-- Chart/market data: OHLCV, symbols, timeframes, sessions, time zones, lower-timeframe data, cross-context requests, and specialized data contexts where AxiusFlow has a canonical source.
+- Chart/market data: OHLCV, symbols, timeframes, sessions, time zones, lower-timeframe data, cross-context requests, and specialized data contexts where TradingPlot has a canonical source.
 - Inputs: numeric/text/bool/enum plus color, symbol, timeframe, session, time, price, and source selection.
 - Plot outputs: lines, histograms/columns, areas, step/discontinuous forms, shapes/chars/arrows, levels, fills, candles/bars, background coloring, and candle/bar coloring.
 - Mutable visual objects: lines, line fills, boxes, polylines, labels, and tables with bounded object lifecycles.
@@ -230,9 +230,9 @@ Completed additions:
 
 ### Completed — recursive EMA without O(history) conversion
 
-The recursive EMA implementation is complete across the local sibling Nucleus and Axiusflow trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Axiusflow wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
+The recursive EMA implementation is complete across the local sibling Nucleus and TradingPlot trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. TradingPlot wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
 
-The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Axiusflow.
+The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by TradingPlot.
 
 Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Axius.
 
@@ -350,13 +350,13 @@ Expose the runtime context advanced indicators need without allowing arbitrary w
 - Read-only visible-range/chart-window context for visible-range studies, with deliberate bounded recalculation semantics.
 - Typed alert conditions/events routed through product-owned alert delivery.
 
-### Planned expansion — advanced data where AxiusFlow has real sources
+### Planned expansion — advanced data where TradingPlot has real sources
 
-Pine-class maturity means the SDK should not be structurally blocked from advanced indicator categories, but AxiusFlow must never pretend data exists when providers do not supply it. Add generic contracts only when there is a legitimate canonical source for the data, for example:
+Pine-class maturity means the SDK should not be structurally blocked from advanced indicator categories, but TradingPlot must never pretend data exists when providers do not supply it. Add generic contracts only when there is a legitimate canonical source for the data, for example:
 
 - Lower-timeframe/intrabar arrays.
 - Volume profile/footprint/order-flow data.
-- Corporate-action/fundamental/economic/currency contexts if AxiusFlow later owns trustworthy sources for them.
+- Corporate-action/fundamental/economic/currency contexts if TradingPlot later owns trustworthy sources for them.
 
 Provider-specific handles or payloads must not leak into study APIs. Canonicalize data at the owning market/data boundary first.
 
@@ -389,12 +389,12 @@ The final combined tree was qualified with the repository-pinned toolchain and l
 - `cargo fmt --all -- --check` — pass.
 - `git diff --check` — pass apart from local LF-to-CRLF conversion warnings emitted by Git on Windows.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` — pass.
-- `axiusflow_market_runtime` — 112 tests passed, 4 intentional release-soak tests ignored in the normal debug suite.
-- `axiusflow_desktop` — 66 library tests plus 209 main-target tests passed; the intentional live Hyperliquid test remains ignored in the normal suite.
-- `axiusflow_study_sdk` — 21 unit tests plus 3 SDK-facade integration tests passed; its explicit release soak remains ignored in the normal suite.
+- `tradingplot_market_runtime` — 112 tests passed, 4 intentional release-soak tests ignored in the normal debug suite.
+- `tradingplot_desktop` — 66 library tests plus 209 main-target tests passed; the intentional live Hyperliquid test remains ignored in the normal suite.
+- `tradingplot_study_sdk` — 21 unit tests plus 3 SDK-facade integration tests passed; its explicit release soak remains ignored in the normal suite.
 - Explicit optimized release soaks pass for 10,000,000 one-row EMA revisions, 16 concurrent stateful studies over one shared engine lease, 2,000 reinitialize/historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events.
 
-The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `axiusflow_chart_integration` theme assertions outside this roadmap: `nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
+The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `tradingplot_chart_integration` theme assertions outside this roadmap: `nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
 
 This qualification is source/runtime qualification, not a production deployment claim. No release was published or installed as part of this roadmap completion, and no credentialed Rithmic live session was used as evidence for these Study Runtime/SDK completion claims. Provider recovery and generation statements above are backed by deterministic owner-boundary/runtime tests unless a separate live-market gate is explicitly cited.
 
@@ -449,7 +449,7 @@ This qualification is source/runtime qualification, not a production deployment 
 ### Phase E — SDK productization
 
 - [x] Define native study packaging/loading trust model.
-  - Approved external native studies are statically linked into the signed product build and listed in one immutable bounded product allowlist; Axiusflow does not discover or load arbitrary native libraries at runtime.
+  - Approved external native studies are statically linked into the signed product build and listed in one immutable bounded product allowlist; TradingPlot does not discover or load arbitrary native libraries at runtime.
   - This is a source/dependency review trust boundary, not a sandbox: untrusted/user-installable native code would require a separate sandboxed architecture.
 - [x] Define SDK compatibility and implementation-revision migration policy.
   - Source/API compatibility follows the Study SDK crate version; a separate SDK compatibility epoch fences incompatible durable host/package contracts.
@@ -508,7 +508,7 @@ This qualification is source/runtime qualification, not a production deployment 
 
 - [ ] Add typed study alert condition/event contracts with bounded payloads and stable durable identity.
 - [ ] Keep alert delivery/product UX outside native calculation code; studies emit semantics, product owns notification side effects.
-- [ ] Add canonical advanced data contracts only for data AxiusFlow actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
+- [ ] Add canonical advanced data contracts only for data TradingPlot actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
 - [ ] Keep provider wire types, credentials, sessions, and raw adapter ownership outside the SDK.
 
 ### Phase K — Pine compatibility corpus and maturity qualification
@@ -542,7 +542,7 @@ Qualification must include:
 ### Phase L — authoring UX and optional future DSL
 
 - [ ] Improve Rust author ergonomics with higher-level SDK builders/macros/helpers only where they reduce boilerplate without hiding ownership or bounds.
-- [ ] Add an AxiusFlow Study Editor/workspace when product priority warrants it: Rust source editing, compiler diagnostics, formatting, tests, package qualification, and controlled compile/reload workflow.
+- [ ] Add an TradingPlot Study Editor/workspace when product priority warrants it: Rust source editing, compiler diagnostics, formatting, tests, package qualification, and controlled compile/reload workflow.
 - [ ] Keep the current trusted static-native package model until a separate untrusted-code execution design is deliberately built.
 - [ ] If broad non-programmer scripting becomes a product requirement, design a small Pine-like/Axius-specific DSL as **syntax over the same runtime contracts**, not a second study engine.
 - [ ] Any future DSL must lower to the same settings, dependencies/request contexts, execution state, semantic outputs/scene, alerts, persistence, bounds, and recovery semantics used by Rust studies.
@@ -591,10 +591,10 @@ Release qualification on the final combined tree verifies the real recursive EMA
 
 The strategic direction is now explicit: Phases A-E are the completed **foundation**, not the end of indicator productization. Phases F-L expand that foundation into a Pine-class Rust indicator platform. The immediate focus is generic visual/style channels, transactional semantic drawings/tables, resource-aware settings and dependency rebinding, richer market/execution/chart context, alerts, and compatibility-corpus qualification.
 
-The maturity target is intentionally ambitious: if AxiusFlow has the underlying data required by an indicator, the default expectation should be that the indicator can be ported to Rust without changing core product code. Exceptions should be explainable by missing data, a deliberately unsupported product class such as strategy/broker emulation, or a clearly documented host capability that is still on this roadmap—not by arbitrary SDK limitations.
+The maturity target is intentionally ambitious: if TradingPlot has the underlying data required by an indicator, the default expectation should be that the indicator can be ported to Rust without changing core product code. Exceptions should be explainable by missing data, a deliberately unsupported product class such as strategy/broker emulation, or a clearly documented host capability that is still on this roadmap—not by arbitrary SDK limitations.
 
-Rust is the reason this target is tractable. AxiusFlow does not need to invent and mature an entire programming language before it can support advanced indicators. Rust supplies the language/compiler/tooling ecosystem; AxiusFlow concentrates engineering effort on the host capabilities TradingView indicators depend on. That makes broad indicator compatibility materially easier to reach and maintain than building a Pine clone first.
+Rust is the reason this target is tractable. TradingPlot does not need to invent and mature an entire programming language before it can support advanced indicators. Rust supplies the language/compiler/tooling ecosystem; TradingPlot concentrates engineering effort on the host capabilities TradingView indicators depend on. That makes broad indicator compatibility materially easier to reach and maintain than building a Pine clone first.
 
-The proof standard is the Phase K compatibility corpus. KSR6 is a first representative composite acceptance case, not a special-case implementation target. ZigZag/drawing-heavy, FVG/box-heavy, dashboard, visible-range, custom-candle, lower-timeframe, alert-heavy, and eventually order-flow/footprint studies must exercise the same generic primitives. When those studies can be ported through public Rust SDK APIs without named-study core changes, AxiusFlow can credibly describe the platform as broadly Pine-class for indicators.
+The proof standard is the Phase K compatibility corpus. KSR6 is a first representative composite acceptance case, not a special-case implementation target. ZigZag/drawing-heavy, FVG/box-heavy, dashboard, visible-range, custom-candle, lower-timeframe, alert-heavy, and eventually order-flow/footprint studies must exercise the same generic primitives. When those studies can be ported through public Rust SDK APIs without named-study core changes, TradingPlot can credibly describe the platform as broadly Pine-class for indicators.
 
 User-installable/untrusted executable studies remain a separate trust problem. If they become a product requirement, design a sandboxed/WASM/process model or other explicit isolation boundary. Do not weaken the current trusted-native contract to fake arbitrary-code safety.

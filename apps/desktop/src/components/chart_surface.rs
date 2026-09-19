@@ -1,16 +1,15 @@
 use super::{
-    AxiusflowTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
-    Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
-    IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
-    OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin, RadiusToken,
-    ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH,
-    SIDE_PANEL_RESIZE_HANDLE_WIDTH, ScrollHandle, SidePanel, SidePanelVisibility,
-    StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH,
-    WORKSPACE_TAB_ICON_HIT, WatchlistDragState, WatchlistRow, Window, WorkspaceSurface,
-    animate_popup_from_origin, chart_chrome, chart_surface_notice, chrome_close_button,
-    chrome_tooltip, div, exchange_mark, gpui_color, header_icon, market_summary_change,
-    market_summary_price, market_summary_values, platform_tabular_numerals, px,
-    watchlist_drag_translation,
+    ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context, Div, Entity,
+    FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement, IntoElement, Loader,
+    MenuRow, MouseButton, NucleusChartView, OrderBookColumn, OrderBookColumnVisibility,
+    ParentElement, PopupAnimationOrigin, RadiusToken, ReadOnlyOrderBookView, Render, Role,
+    SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_RESIZE_HANDLE_WIDTH,
+    ScrollHandle, SidePanel, SidePanelVisibility, StatefulInteractiveElement, Styled, TerminalApp,
+    ToPrimitive, TradingPlotTheme, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
+    WatchlistDragState, WatchlistRow, Window, WorkspaceSurface, animate_popup_from_origin,
+    chart_chrome, chart_surface_notice, chrome_close_button, chrome_tooltip, div, exchange_mark,
+    gpui_color, header_icon, market_summary_change, market_summary_price, market_summary_values,
+    platform_tabular_numerals, px, watchlist_drag_translation,
 };
 use gpui::{AppContext, Stateful};
 
@@ -31,7 +30,7 @@ pub(super) struct MarketWorkspaceState<'a> {
     pub(super) chart_is_superseded: bool,
     pub(super) chart_state: ChartState,
     pub(super) chart_status_detail: String,
-    pub(super) theme: &'a AxiusflowTheme,
+    pub(super) theme: &'a TradingPlotTheme,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -70,7 +69,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
-    pub(super) theme: &'a AxiusflowTheme,
+    pub(super) theme: &'a TradingPlotTheme,
 }
 
 pub(super) struct WatchlistPanelState {
@@ -84,7 +83,7 @@ fn order_book_side_panel(
     order_book: &Entity<ReadOnlyOrderBookView>,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Div {
     div()
         .relative()
@@ -115,7 +114,7 @@ fn watchlist_side_panel(
     app: Entity<WorkspaceSurface>,
     terminal: &Entity<TerminalApp>,
     watchlist: WatchlistPanelState,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Div {
     let WatchlistPanelState { rows, drag, scroll } = watchlist;
     div()
@@ -372,7 +371,7 @@ fn watchlist_table(
     rows: Vec<WatchlistRow>,
     watchlist_drag: Option<&WatchlistDragState>,
     watchlist_scroll: &ScrollHandle,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let mut body = div()
@@ -427,7 +426,7 @@ fn watchlist_table(
         )
 }
 
-fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
+fn watchlist_columns(theme: &TradingPlotTheme) -> impl IntoElement + use<> {
     let colors = theme.colors;
     div()
         .h(px(WATCHLIST_COLUMNS_HEIGHT))
@@ -467,7 +466,7 @@ fn watchlist_columns(theme: &AxiusflowTheme) -> impl IntoElement + use<> {
 fn watchlist_header_cell(
     value: impl Into<gpui::SharedString>,
     width: f32,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> Div {
     div()
         .w(px(width))
@@ -500,7 +499,7 @@ fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div
         .child(value.into())
 }
 
-fn watchlist_asset_cell(row: &WatchlistRow, theme: &AxiusflowTheme) -> Div {
+fn watchlist_asset_cell(row: &WatchlistRow, theme: &TradingPlotTheme) -> Div {
     let colors = theme.colors;
     let asset_tone = if row.message.is_some() {
         colors.text_muted
@@ -531,7 +530,7 @@ fn watchlist_asset_cell(row: &WatchlistRow, theme: &AxiusflowTheme) -> Div {
         )
 }
 
-fn watchlist_row_content(row: &WatchlistRow, theme: &AxiusflowTheme) -> Stateful<Div> {
+fn watchlist_row_content(row: &WatchlistRow, theme: &TradingPlotTheme) -> Stateful<Div> {
     let colors = theme.colors;
     let scale = row.instrument.price_scale;
     let values = market_summary_values(row.last, row.previous_close);
@@ -602,7 +601,7 @@ fn watchlist_row(
     row: &WatchlistRow,
     index: usize,
     drag: Option<&WatchlistDragState>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let instrument = row.instrument.clone();
@@ -698,7 +697,7 @@ pub(super) fn side_panel_header(
     panel: SidePanel,
     app: Entity<WorkspaceSurface>,
     order_book_column_menu_open: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let settings_app = app.clone();
@@ -771,7 +770,7 @@ pub(super) fn side_panel_header(
 
 fn watchlist_add_symbol_control(
     app: Entity<WorkspaceSurface>,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     chrome_tooltip(
@@ -806,7 +805,7 @@ pub(super) fn order_book_column_menu_layer(
     app: Entity<WorkspaceSurface>,
     order_book: &Entity<ReadOnlyOrderBookView>,
     columns: OrderBookColumnVisibility,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let dismiss_app = app;
@@ -858,7 +857,7 @@ pub(super) fn order_book_column_menu_item(
     checked: bool,
     first: bool,
     last: bool,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement {
     let available = column.available();
     let label = if available {
@@ -895,7 +894,7 @@ pub(super) fn order_book_column_menu_item(
 }
 pub(super) fn chart_notice(
     notice: ChartSurfaceNotice,
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     if notice.label == ChartState::Loading.label() {

@@ -1,8 +1,8 @@
 # AGENTS.md
 
-Instructions for coding agents working in the Axiusflow native repository.
+Instructions for coding agents working in the TradingPlot native repository.
 
-Axiusflow is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
+TradingPlot is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
 In-process `market_runtime` and `account_runtime` own provider sessions, canonical market/account state,
 and bounded background work; GPUI owns presentation scheduling only. A secondary local market process must not return.
 

@@ -1,9 +1,9 @@
-use axiusflow_design_system::{
-    AxiusflowTheme, RadiusToken, ThemeColor, ThemeMode, TypographyRole, platform_font_family,
-    platform_typography,
-};
 use gpui::{FontWeight, Hsla, Pixels, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
+use tradingplot_design_system::{
+    RadiusToken, ThemeColor, ThemeMode, TradingPlotTheme, TypographyRole, platform_font_family,
+    platform_typography,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ButtonVariant {
@@ -23,7 +23,7 @@ pub(crate) struct ButtonAppearance {
 }
 
 pub(crate) fn button_appearance(
-    theme: &AxiusflowTheme,
+    theme: &TradingPlotTheme,
     variant: ButtonVariant,
 ) -> ButtonAppearance {
     let colors = theme.colors;
@@ -46,7 +46,7 @@ pub(crate) fn button_appearance(
     }
 }
 
-pub(crate) fn input_appearance(theme: &AxiusflowTheme) -> (ThemeColor, ThemeColor, ThemeColor) {
+pub(crate) fn input_appearance(theme: &TradingPlotTheme) -> (ThemeColor, ThemeColor, ThemeColor) {
     (
         theme.colors.input_fill,
         theme.colors.input_border,
@@ -59,14 +59,14 @@ pub(crate) fn gpui_color(color: ThemeColor) -> Hsla {
     Hsla { h, s, l, a }
 }
 
-pub(crate) fn platform_border_width(theme: &AxiusflowTheme) -> Pixels {
+pub(crate) fn platform_border_width(theme: &TradingPlotTheme) -> Pixels {
     px(theme.dimensions.border_width)
 }
 
-/// Projects Axiusflow's semantic design contract into the unstyled Base
+/// Projects `TradingPlot`'s semantic design contract into the unstyled Base
 /// foundation. Base behavior modules can then resolve unset semantics without
 /// introducing a second palette or typography source.
-pub(crate) fn base_theme(theme: &AxiusflowTheme) -> Theme {
+pub(crate) fn base_theme(theme: &TradingPlotTheme) -> Theme {
     let colors = theme.colors;
     let mut base = Theme {
         appearance: match theme.mode {
@@ -123,13 +123,13 @@ pub(crate) fn base_theme(theme: &AxiusflowTheme) -> Theme {
 
 #[cfg(test)]
 mod tests {
-    use axiusflow_design_system::AxiusflowTheme;
+    use tradingplot_design_system::TradingPlotTheme;
 
     use super::{ButtonVariant, base_theme, button_appearance, gpui_color, input_appearance};
 
     #[test]
     fn semantic_appearances_follow_platform_aliases_in_both_modes() {
-        for theme in [AxiusflowTheme::light(), AxiusflowTheme::dark()] {
+        for theme in [TradingPlotTheme::light(), TradingPlotTheme::dark()] {
             let filled = button_appearance(&theme, ButtonVariant::Filled);
             assert_eq!(filled.fill, theme.colors.button_fill);
             assert_eq!(filled.foreground, theme.colors.surface);
@@ -150,8 +150,8 @@ mod tests {
     }
 
     #[test]
-    fn base_semantics_are_projected_from_axiusflow_tokens() {
-        for theme in [AxiusflowTheme::light(), AxiusflowTheme::dark()] {
+    fn base_semantics_are_projected_from_tradingplot_tokens() {
+        for theme in [TradingPlotTheme::light(), TradingPlotTheme::dark()] {
             let base = base_theme(&theme);
             assert_eq!(
                 base.tokens.colors.foreground,
@@ -162,12 +162,12 @@ mod tests {
             assert_eq!(
                 base.tokens.radius.md,
                 gpui::px(f32::from(
-                    axiusflow_design_system::RadiusToken::Default.logical_pixels()
+                    tradingplot_design_system::RadiusToken::Default.logical_pixels()
                 ))
             );
             assert_eq!(
                 base.tokens.typography.sans.as_ref(),
-                axiusflow_design_system::platform_font_family()
+                tradingplot_design_system::platform_font_family()
             );
         }
     }
