@@ -2,13 +2,13 @@
 
 ## Purpose
 
-TradingPlot is building a native Rust Study Runtime and Rust Study SDK with one product-level goal:
+TradingPlot is building a native Rust Study Runtime, Rust Study SDK, and in-app Rust Study Editor with one product-level goal:
 
 > Almost any Pine Script **indicator** whose required input data exists inside TradingPlot should be portable to Rust through generic TradingPlot Study SDK capabilities, without indicator-specific changes to the core product.
 
-The target is extensive maturity, not a small built-in indicator catalog. A complex TradingView-style indicator should be able to combine multi-timeframe and cross-symbol data, stateful calculations, dynamic styling, drawings, labels, tables, chart context, alerts, and other bounded presentation semantics through the same public Rust study model.
+The target is extensive maturity, not a small built-in indicator catalog or an SDK limited to TradingPlot developers. A user should be able to open TradingPlot, write normal Rust in a purpose-built Study Editor, compile it through a controlled toolchain, add it to a chart, inspect diagnostics, and iterate without rebuilding or replacing the application. A complex TradingView-style indicator should be able to combine multi-timeframe and cross-symbol data, stateful calculations, dynamic styling, drawings, labels, tables, chart context, alerts, and other bounded presentation semantics through the same public Rust study model.
 
-This is a long-running architecture project, not a one-off indicator patch. The runtime must keep market ownership, execution, persistence, rendering, recovery, dependency behavior, and resource bounds correct while allowing trusted native studies to evolve independently of the desktop shell.
+This is a long-running architecture project, not a one-off indicator patch. The runtime must keep market ownership, execution, persistence, rendering, recovery, dependency behavior, and resource bounds correct while supporting two deliberate execution tiers: statically linked trusted-native studies for TradingPlot and reviewed partners, and sandboxed user-authored studies produced by the in-app editor. Both tiers share one semantic Study SDK/runtime contract; neither may create a second market or rendering architecture.
 
 This roadmap is specifically about **indicators/studies**. TradingView-style strategies add broker emulation, orders, fills, positions, commissions, risk, backtesting, and performance reporting; that is a separate product/runtime program and must not be smuggled into the indicator SDK.
 
@@ -16,10 +16,12 @@ The intended ownership split is:
 
 - `market_runtime` owns study scheduling, dependency execution, runtime state, market-data leases, invalidation, rollback, and publication.
 - `market_engine` remains the single owner of market demand and canonical bar retention.
-- `study_sdk` owns the stable author-facing native Rust study contract and built-in study registrations.
+- `study_sdk` owns the stable author-facing Rust study semantics and built-in native study registrations; a future sandbox adapter must preserve those semantics without exposing process-native Rust types as its ABI.
+- The Study Editor owns Rust source authoring, diagnostics, formatting, tests, package metadata, and controlled build/reload UX; it does not execute calculations or own market state.
+- A versioned sandbox boundary owns admission and isolation of user-authored executable studies. User code receives only explicit Study SDK capabilities and bounded inputs; it is never loaded as an arbitrary native library.
 - `chart_integration` projects serial/semantic study outputs and future scene deltas into Nucleus; studies never receive render handles or Nucleus engine ownership.
 - Desktop owns durable workspace configuration, product UX, restore/reinitialize/remove commands, and visibility.
-- Nucleus Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that Axius intentionally consumes.
+- Nucleus Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that TradingPlot intentionally consumes.
 
 ## Product direction: Rust is the language; TradingPlot supplies the Pine-class host contract
 
@@ -32,10 +34,14 @@ Rust already provides the general-purpose language layer: functions, modules, cr
 The intended long-term stack is:
 
 ```text
-Rust study code
-    |
-    v
-TradingPlot Study SDK
+In-app Rust Study Editor               Trusted TradingPlot/partner crates
+    | source, diagnostics, tests             | reviewed source/dependencies
+    v                                        v
+Pinned controlled Rust toolchain        Static native build
+    | sandboxed component/package            |
+    +-------------------+--------------------+
+                        v
+              TradingPlot Study SDK semantics
     |  settings, requests, execution context, outputs, scene objects, alerts
     v
 Study Runtime
@@ -47,7 +53,7 @@ MarketEngine + chart integration
 Nucleus Charts
 ```
 
-A future simplified TradingPlot scripting language is optional, not foundational. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
+The Study Editor and safe user-code execution are foundational product requirements. A future simplified TradingPlot scripting language is optional. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
 
 ## Definition of Pine-class indicator maturity
 
@@ -69,13 +75,14 @@ The target capability families are:
 | Chart context | Visible-range/window information and other read-only chart context that can deliberately trigger recalculation without transferring chart ownership to the study. |
 | Alerts | Typed, bounded alert conditions/events emitted by studies and owned/presented by the product. |
 | Durability/recovery | Exact revision restore, dependency rebinding, bounded state/output/scene memory, provider-generation fencing, and no duplicate demand. |
-| Authoring/productization | Rust SDK examples, package/revision policy, compatibility corpus, diagnostics, and eventually editor/compile-reload UX. |
+| Authoring/productization | In-app Rust source editor, templates, SDK-aware completion/documentation, compiler diagnostics, formatting, tests, controlled build/reload, package/revision policy, compatibility corpus, and reproducible user-study packages. |
+| User-code isolation | A versioned sandbox boundary with explicit capabilities, deterministic host inputs, CPU/time/memory/output/object limits, cancellation, failure isolation, and no implicit filesystem/network/process access. |
 
 Not every Pine API must be copied literally. Equivalent Rust-native abstractions are preferred when they preserve the same authoring power with clearer ownership and stronger typing.
 
 ### Pine capability inventory that drives this roadmap
 
-Compatibility planning must track the current official Pine indicator surface rather than a remembered subset of `plot()`. At minimum, periodic research/review must cover these Pine capability families and map them to an TradingPlot equivalent or an explicit non-goal:
+Compatibility planning must track the current official Pine indicator surface rather than a remembered subset of `plot()`. At minimum, periodic research/review must cover these Pine capability families and map them to a TradingPlot equivalent or an explicit non-goal:
 
 - Execution model and bar states: historical versus realtime execution, rollback/confirmation, intrabar persistence, recalculation triggers, and repainting-sensitive time semantics.
 - Chart/market data: OHLCV, symbols, timeframes, sessions, time zones, lower-timeframe data, cross-context requests, and specialized data contexts where TradingPlot has a canonical source.
@@ -105,20 +112,21 @@ Research baseline reviewed against TradingView's official Pine v6 documentation 
 
 Every new Pine-class capability must fit one ownership-correct lifecycle. The intended end-to-end path is:
 
-1. **Authoring:** a trusted Rust package defines stable study identity/revision, typed settings, dependency/request declarations, outputs/scene capabilities, invalidation semantics, calculation code, and optional transactional state.
-2. **Durable configuration:** desktop/workspace persistence stores only durable identity, revision, settings, stable dependency/source references, visibility, and other reconstructible product state. Runtime IDs, provider sessions, renderer handles, transient checkpoints, and object implementation IDs are not persisted.
-3. **Restore/validation:** the trusted package registry resolves the exact implementation revision and validates settings/dependency shape without silently rewriting durable state.
-4. **Resource resolution:** semantic Symbol/Timeframe/Session/Source settings resolve to canonical market/study references. Resolution failure leaves the previous authoritative configuration intact.
-5. **Demand reconciliation:** `market_runtime` derives the required market leases/request contexts; `MarketEngine` remains the only owner that creates/diffs upstream provider demand and canonical retention.
-6. **History/readiness:** required histories/contexts load through the existing bounded history machinery. Provider/session generations and per-series recovery state fence calculation until every required canonical dependency is ready.
-7. **Execution:** `StudyRuntime` schedules the study in dependency order and supplies immutable/bounded market views, upstream study outputs, settings, execution/chart context, and a transactional candidate state/output/scene.
-8. **Commit/rollback:** calculation success plus resource validation atomically commits candidate state, scalar outputs, semantic scene, and other study-owned result state. Error/panic/memory overflow discards the candidate and preserves the last committed result.
-9. **Publication:** runtime emits bounded semantic changes: scalar output generations plus future scene/style/table/alert deltas. Slow or unavailable consumers must not create unbounded queues.
-10. **Projection:** `chart_integration` maps semantic output/scene contracts into Nucleus-owned series/drawings/layout without giving study code renderer handles or geometry ownership.
-11. **Live change/recovery:** bar revisions/appends, quote/trade/depth changes, viewport/context changes, provider reconnects, history repairs, and setting rebinds invalidate only the required study ranges/subtrees and remain generation-fenced.
-12. **Removal:** runtime study removal is authoritative; durable descendant cleanup follows runtime acknowledgement, while canceled pending registrations remain hidden/non-durable and are cleaned up with bounded retry semantics.
+1. **Authoring:** a Rust package defines stable study identity/revision, typed settings, dependency/request declarations, outputs/scene capabilities, invalidation semantics, calculation code, and optional transactional state. TradingPlot-owned/reviewed packages use the trusted-native build path; users author the same semantics through the in-app Study Editor.
+2. **Build/admission:** trusted-native packages are reviewed and statically linked. User-authored source is compiled by a pinned, controlled toolchain into a versioned sandbox component/package, validated for SDK compatibility and declared capabilities, and admitted only after structural and resource-policy checks. Compilation is cancellable background work and never runs on the GPUI thread.
+3. **Durable configuration:** desktop/workspace persistence stores only durable identity, revision, settings, stable dependency/source references, visibility, package identity/content hash, and other reconstructible product state. Runtime IDs, provider sessions, renderer handles, transient checkpoints, and object implementation IDs are not persisted.
+4. **Restore/validation:** the appropriate trusted-native registry or sandboxed package registry resolves the exact implementation revision and validates settings/dependency shape, package integrity, SDK compatibility, and capability policy without silently rewriting durable state.
+5. **Resource resolution:** semantic Symbol/Timeframe/Session/Source settings resolve to canonical market/study references. Resolution failure leaves the previous authoritative configuration intact.
+6. **Demand reconciliation:** `market_runtime` derives the required market leases/request contexts; `MarketEngine` remains the only owner that creates/diffs upstream provider demand and canonical retention.
+7. **History/readiness:** required histories/contexts load through the existing bounded history machinery. Provider/session generations and per-series recovery state fence calculation until every required canonical dependency is ready.
+8. **Execution:** `StudyRuntime` schedules the study in dependency order and supplies immutable/bounded market views, upstream study outputs, settings, execution/chart context, and a transactional candidate state/output/scene. Sandboxed studies cross a versioned transport-safe boundary rather than borrowing native Rust process memory.
+9. **Commit/rollback:** calculation success plus resource validation atomically commits candidate state, scalar outputs, semantic scene, and other study-owned result state. Error, trap, panic, cancellation, timeout, or memory overflow discards the candidate and preserves the last committed result.
+10. **Publication:** runtime emits bounded semantic changes: scalar output generations plus future scene/style/table/alert deltas. Slow or unavailable consumers must not create unbounded queues.
+11. **Projection:** `chart_integration` maps semantic output/scene contracts into Nucleus-owned series/drawings/layout without giving study code renderer handles or geometry ownership.
+12. **Live change/recovery:** bar revisions/appends, quote/trade/depth changes, viewport/context changes, provider reconnects, history repairs, and setting rebinds invalidate only the required study ranges/subtrees and remain generation-fenced.
+13. **Removal:** runtime study removal is authoritative; durable descendant cleanup follows runtime acknowledgement, while canceled pending registrations remain hidden/non-durable and are cleaned up with bounded retry semantics.
 
-The same lifecycle must remain true if a future DSL is added. A new authoring syntax may change step 1 only; steps 2-12 remain shared infrastructure.
+The same lifecycle must remain true if a future DSL is added. A new authoring syntax may change authoring and compilation only; admission, runtime ownership, persistence, execution, publication, rendering, and recovery remain shared infrastructure.
 
 ### Current capability boundary versus target
 
@@ -133,13 +141,14 @@ The same lifecycle must remain true if a future DSL is added. A new authoring sy
 | Execution context | Canonical timestamps/generations and existing live invalidation. | Historical/realtime/new/confirmed, deterministic evaluation time, intrabar-persistent state, richer session/bar metadata. |
 | Chart context | Study outputs project to chart panes/scales. | Read-only visible-range/window context and deliberate recalculation triggers. |
 | Alerts | Not a first-class Study SDK result. | Stable typed alert conditions/events with product-owned delivery. |
-| Trust/distribution | Reviewed statically linked trusted Rust packages. | Better Rust editor/compile-reload UX; separate sandbox only if arbitrary untrusted code becomes a requirement. |
+| Authoring | README/examples and external Cargo workflows for reviewed packages. | First-class in-app Rust Study Editor, templates, SDK-aware completion/docs, diagnostics, formatting, tests, package management, and controlled live reload. |
+| Trust/distribution | Reviewed statically linked trusted Rust packages. | Required sandboxed user-study package format, versioned ABI, capability policy, resource enforcement, integrity/version metadata, import/export, and safe local installation. |
 
 ## Current completion state
 
 The runtime/SDK **foundation through Phase E is implemented and qualified**. It proves the ownership model, transactional native execution, persistence, recovery, MTF/study dependencies, bar-aligned quote/trade/depth access, settings/editor contract, scalar chart projection, and sustained bounded execution.
 
-That foundation is not the final Pine-class product surface. The next program is to broaden the generic host contract until complex TradingView-style indicators can be ported without core changes. Dynamic drawings, tables, semantic resource inputs, richer style/output channels, broader request contexts, execution/chart context, alerts, and compatibility qualification are now first-class roadmap work rather than optional polish.
+That foundation is not the final Pine-class product surface or the final user product. The next program is to broaden the generic host contract until complex TradingView-style indicators can be ported without core changes, while proving the author workflow through an early vertical slice of the in-app Study Editor. Dynamic drawings, tables, semantic resource inputs, richer style/output channels, broader request contexts, execution/chart context, alerts, compatibility qualification, safe user-code execution, and editor productization are first-class roadmap work rather than optional polish.
 
 Final integrated qualification closed the residual correctness gaps found by read-only review: transitive recovery readiness through prior-study outputs, exact fixed-time internal-gap containment for non-bar events, bounded output-primary incremental mapping without retained-history timestamp materialization, runtime-first durable study removal, and bounded automatic cleanup retry for registrations canceled before acknowledgement.
 
@@ -206,7 +215,7 @@ Final integrated qualification closed the residual correctness gaps found by rea
 ### Completed: initial shared TA proof
 
 - Built-in SMA, WMA, and Bollinger registrations use the same native SDK/runtime contract exposed to external trusted Rust studies.
-- WMA and Bollinger delegate formula work to pinned `nucleuscharts_indicators` instead of duplicating formula implementations in Axius.
+- WMA and Bollinger delegate formula work to pinned `nucleuscharts_indicators` instead of duplicating formula implementations in TradingPlot.
 - Window/gap behavior and output contracts have focused tests.
 
 ## Completed foundation and Pine-class expansion
@@ -234,7 +243,7 @@ The recursive EMA implementation is complete across the local sibling Nucleus an
 
 The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by TradingPlot.
 
-Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Axius.
+Do **not** copy Nucleus private EMA recurrence/checkpoint logic into TradingPlot.
 
 The preferred narrow Nucleus addition is an indexed optional-sample API roughly shaped as:
 
@@ -415,7 +424,7 @@ This qualification is source/runtime qualification, not a production deployment 
 ### Phase B — recursive indicator proof
 
 - [x] Land/review the narrow indexed optional-sample EMA API in Nucleus.
-- [x] Wrap Nucleus incremental EMA state in Axius-owned `NativeStudyState`.
+- [x] Wrap Nucleus incremental EMA state in TradingPlot-owned `NativeStudyState`.
 - [x] Prove market-backed fixed-point EMA without O(history) conversion.
 - [x] Prove output-backed EMA with `Option<f64>` hard gaps.
 - [x] Add live append, same-tail revision, historical repair, rollback, and memory-bound tests.
@@ -428,8 +437,8 @@ This qualification is source/runtime qualification, not a production deployment 
   - RSI/Stochastic/MACD follow only with their existing threshold-band / histogram semantics preserved through product-owned richer output metadata.
 - [x] Reuse Nucleus/shared primitives for every migrated formula that already exists.
   - [x] EMA Ribbon uses five Nucleus `IncrementalEmaState` instances.
-  - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; Axius lazily converts only replayed fixed-point rows.
-  - [x] RSI/MACD/Stochastic use owner-correct indexed Nucleus states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into Axius.
+  - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; TradingPlot lazily converts only replayed fixed-point rows.
+  - [x] RSI/MACD/Stochastic use owner-correct indexed Nucleus states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into TradingPlot.
 - [x] Add durable implementation revisions and migration tests per migrated built-in.
   - [x] SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, and VWAP have exact revision binding plus legacy-picker migration coverage.
   - [x] RSI/MACD/Stochastic have the same exact revision binding, durable restore, unsupported-revision rejection, and legacy-picker migration contract.
@@ -450,7 +459,7 @@ This qualification is source/runtime qualification, not a production deployment 
 
 - [x] Define native study packaging/loading trust model.
   - Approved external native studies are statically linked into the signed product build and listed in one immutable bounded product allowlist; TradingPlot does not discover or load arbitrary native libraries at runtime.
-  - This is a source/dependency review trust boundary, not a sandbox: untrusted/user-installable native code would require a separate sandboxed architecture.
+  - This is a source/dependency review trust boundary, not a sandbox. User-installable studies must use the separate sandboxed architecture in Phase L; arbitrary user-native loading remains prohibited.
 - [x] Define SDK compatibility and implementation-revision migration policy.
   - Source/API compatibility follows the Study SDK crate version; a separate SDK compatibility epoch fences incompatible durable host/package contracts.
   - Persisted implementation revisions resolve explicitly. Packages may not silently rewrite persisted dependency graphs/settings; incompatible revisions remain durable and fail restore until a compatible signed build is present.
@@ -539,35 +548,84 @@ Qualification must include:
 - [ ] Large-history and high-object-count optimized soaks.
 - [ ] No duplicate provider demand and no renderer/provider ownership leakage.
 
-### Phase L — authoring UX and optional future DSL
+### Phase L — in-app Rust Study Editor and sandboxed user studies
 
-- [ ] Improve Rust author ergonomics with higher-level SDK builders/macros/helpers only where they reduce boilerplate without hiding ownership or bounds.
-- [ ] Add an TradingPlot Study Editor/workspace when product priority warrants it: Rust source editing, compiler diagnostics, formatting, tests, package qualification, and controlled compile/reload workflow.
-- [ ] Keep the current trusted static-native package model until a separate untrusted-code execution design is deliberately built.
-- [ ] If broad non-programmer scripting becomes a product requirement, design a small Pine-like/Axius-specific DSL as **syntax over the same runtime contracts**, not a second study engine.
-- [ ] Any future DSL must lower to the same settings, dependencies/request contexts, execution state, semantic outputs/scene, alerts, persistence, bounds, and recovery semantics used by Rust studies.
+Phase L is a required product program, not optional polish and not merely an external developer SDK. It should begin with an early end-to-end vertical slice while Phases F-K broaden the host contract. The editor may initially expose a smaller qualified capability subset, but it must use the same durable identities, settings, dependencies, runtime ownership, semantic outputs, and recovery model that the completed platform will use.
 
-The architecture should therefore support both of these eventually:
+#### Rust authoring experience
+
+- [ ] Add a first-class TradingPlot Study Editor for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
+- [ ] Provide starter templates for stateless, stateful, overlay, oscillator, multi-output, multi-timeframe, drawing, table, and alert studies as those capabilities qualify.
+- [ ] Improve Rust author ergonomics with higher-level SDK builders, attributes/macros, prelude types, and helpers where they reduce boilerplate without hiding ownership, determinism, or bounds.
+- [ ] Provide syntax highlighting, bracket/navigation support, search, SDK-aware completion, hover documentation, go-to-definition where practical, and direct links to relevant Study SDK documentation.
+- [ ] Surface compiler, formatter, test, package-validation, and runtime diagnostics at exact source locations with understandable TradingPlot context; do not expose only raw build logs.
+- [ ] Support explicit Build, Test, Add to Chart, Reload, Stop, and Revert to Last Working Build actions, with clear build/runtime status and cancellation.
+- [ ] Preserve source and last-known-good executable state across restart. A failed build or reload must not replace the last working study on a chart.
+- [ ] Provide deterministic preview fixtures and author tests without opening provider sessions or inventing a second market-data owner.
+
+#### Controlled Rust toolchain
+
+- [ ] Define a pinned, reproducible Rust toolchain, formatter, analysis integration, sandbox target, SDK version, lockfile policy, and package metadata schema for user studies.
+- [ ] Deliver authoring tools as an optional, versioned TradingPlot Study Development Pack installed on demand, so users who do not author studies do not pay the installer/update size of a compiler toolchain.
+- [ ] Make installation, integrity verification, repair, compatibility selection, and removal of the Development Pack product-owned and recoverable.
+- [ ] Run compilation, formatting, analysis, and tests as bounded, cancellable background work outside the GPUI thread. Compiler workers must not own provider sessions, canonical market state, or a second study runtime.
+- [ ] Define dependency policy deliberately. Start with the Study SDK, Rust standard/core facilities supported by the sandbox target, and a small pinned allowlist; do not permit arbitrary build scripts, native dependencies, network fetching, or uncontrolled Cargo execution.
+- [ ] Bound concurrent builds, CPU, memory, disk/cache growth, diagnostic volume, logs, and retained artifacts, with explicit cancellation and cleanup behavior.
+- [ ] Version source format, SDK compatibility, compiler/toolchain identity, package manifest, dependency lock, and generated artifact hash so a study is reproducible and diagnosable after upgrades.
+
+#### Sandboxed package and execution boundary
+
+- [ ] Select and document a portable sandbox component/package format for user studies. Prefer a WebAssembly component-style boundary with a versioned transport-safe interface; do not expose Rust references, trait objects, function pointers, native layout, or a Rust DLL ABI across the boundary.
+- [ ] Define the smallest versioned guest interface for metadata, settings, dependency declarations, initialization/restore, calculation, state checkpointing, scalar outputs, future semantic scene/table outputs, alerts, and structured errors.
+- [ ] Keep the existing statically linked native path for TradingPlot-owned and reviewed partner studies. User-authored executable code must never be loaded as an arbitrary native library into the TradingPlot process.
+- [ ] Grant sandbox capabilities explicitly. Filesystem, network, subprocess, environment, credentials, provider adapters, system time, randomness, clipboard, and native UI access are denied unless a future reviewed capability has a concrete product requirement.
+- [ ] Enforce per-invocation and aggregate CPU/instruction, deadline, memory, stack, state, dependency, output-point, scene-object, table/cell/text, alert, log, and publication limits.
+- [ ] Support cancellation and deterministic trapping of runaway studies. A timeout, trap, invalid output, or resource overflow must preserve the last committed result and must not stall the UI thread, market engine, unrelated studies, or shutdown.
+- [ ] Validate package structure, SDK/ABI compatibility, declared capabilities, artifact integrity, and resource declarations before registration. Runtime registration remains transactional.
+- [ ] Batch or columnarize market inputs and outputs where needed so sandbox crossings do not turn one calculation into per-bar/per-value host-call overhead.
+- [ ] Define safe cache invalidation and migration across TradingPlot, Study SDK, toolchain, and package-format upgrades. Incompatible studies remain recoverable as source and fail explicitly rather than being silently rewritten.
+
+#### Product lifecycle and qualification
+
+- [ ] Add a sandboxed package registry distinct from the immutable trusted-native allowlist while preserving one durable study identity/revision model.
+- [ ] Make editor source, manifests, build results, diagnostics, installation state, chart instances, and workspace references survive restart and partial failure without persisting transient runtime IDs.
+- [ ] Make compile/reload transactional: validate and initialize a candidate package, acquire/reconcile dependencies through `MarketEngine`, generation-fence readiness, then atomically replace the running implementation or retain the previous one.
+- [ ] Qualify malicious and accidental failure cases: infinite loops, excessive allocation, output/object floods, invalid encodings, corrupted packages, dependency abuse, panics/traps, compiler cancellation, disk exhaustion, and app restart during build/reload.
+- [ ] Measure editor startup, completion latency, incremental build latency, reload latency, runtime overhead, and sustained multi-study workloads before claiming production scalability.
+- [ ] Complete an end-to-end acceptance path in which a user creates a Rust indicator inside TradingPlot, receives diagnostics for an error, fixes it, tests it, adds it to a chart, edits and reloads it, restarts TradingPlot, and restores the exact working source/package/chart state.
+
+### Phase M — optional simplified authoring syntax
+
+- [ ] Consider a simplified TradingPlot-specific language only if measured user research shows that Rust ergonomics remain a material adoption barrier after the Study Editor, templates, macros, documentation, and diagnostics are mature.
+- [ ] Any future simplified language is **syntax over the same runtime contracts**, not a second study engine.
+- [ ] It must lower to the same settings, dependencies/request contexts, execution state, semantic outputs/scene, alerts, persistence, bounds, sandbox package model, and recovery semantics used by Rust studies.
+
+The architecture may therefore support both authoring syntaxes eventually:
 
 ```text
-Rust SDK ---------------------+
-                              |
-Future simple Axius DSL ------+--> one Study Runtime --> one MarketEngine --> one chart host
+In-app Rust Study Editor --------+
+                                 |
+Future simplified syntax --------+--> one sandbox contract --> one Study Runtime
+                                                               --> one MarketEngine
+                                                               --> one chart host
 ```
 
-Rust remains the maximum-capability reference path. The future DSL, if built, exists for ease of authoring rather than to unlock capabilities that the Rust SDK/runtime cannot already express.
+Rust remains the primary and maximum-capability authoring path. A future simplified syntax, if built, exists for ease of authoring rather than to unlock capabilities that the Rust SDK/runtime cannot already express.
 
 ## Guardrails that must not regress
 
 - `MarketEngine` remains the single market-demand owner.
 - Studies do not open provider sessions or own canonical market/account state.
 - The desktop does not become an alternate calculation runtime.
-- Nucleus owns rendering/layout/geometry; Axius owns study orchestration and durable product semantics.
+- Nucleus owns rendering/layout/geometry; TradingPlot owns study orchestration and durable product semantics.
 - New Pine-class capabilities are added as generic semantic SDK/runtime primitives, never as named-indicator special cases.
 - Semantic scene objects use study-local identities; studies never receive Nucleus/GPUI object IDs or mutable render handles.
 - Resource settings and request contexts reconcile through `MarketEngine`; dynamic authoring power must not create a second demand registry.
+- The Study Editor owns source and authoring UX only. It does not calculate studies, retain canonical market state, open provider sessions, or mutate GPUI state from background workers.
+- User-authored executable studies run only through the versioned sandbox boundary. They are never loaded as arbitrary native libraries and receive no ambient operating-system authority.
+- Compiler/analysis/test work stays cancellable, bounded, and off the UI thread; compiler workers are tooling, not a second market process or calculation owner.
 - State, scalar outputs, scene objects, tables/cells/text, request contexts, alerts, queues, retries, and publication all remain explicitly bounded.
-- Rust SDK and any future DSL share one runtime/persistence/request/output model. A future scripting language must not introduce a parallel engine.
+- Rust SDK and any future simplified syntax share one runtime/persistence/request/output model. A future syntax must not introduce a parallel engine.
 - Built-ins and SDK studies use one formula source when a shared Nucleus primitive exists.
 - Runtime state/checkpoints are transient; durable settings/dependencies/implementation revision are the reconstruction source.
 - Panics/errors/reinitialization failures cannot partially commit study state or output.
@@ -581,7 +639,7 @@ Rust remains the maximum-capability reference path. The future DSL, if built, ex
 
 ## Current checkpoint
 
-The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Axius retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
+The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; TradingPlot retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
 Phase E is implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; transactional state candidates require mutation-isolated cloning; runtime tail output preparation structurally shares unchanged history; output-primary incremental mapping remains bounded without retained-history timestamp materialization; actual provider-returned ranged repairs reuse dirty-range execution; and independent calculation failures remain isolated.
 
@@ -589,7 +647,7 @@ Recovery and desktop lifecycle qualification now cover the final ownership-sensi
 
 Release qualification on the final combined tree verifies the real recursive EMA path plus bounded concurrent/shared-lease, reinitialization/repair, and quote/trade/depth burst workloads. Workspace Clippy, formatting, Study Runtime, Study SDK, and desktop gates are green. The only known repository-wide test failures are the two separate chart-theme assertions documented in **Qualification status** above; they are not Study Runtime/SDK regressions and are not counted as completed roadmap work.
 
-The strategic direction is now explicit: Phases A-E are the completed **foundation**, not the end of indicator productization. Phases F-L expand that foundation into a Pine-class Rust indicator platform. The immediate focus is generic visual/style channels, transactional semantic drawings/tables, resource-aware settings and dependency rebinding, richer market/execution/chart context, alerts, and compatibility-corpus qualification.
+The strategic direction is now explicit: Phases A-E are the completed **foundation**, not the end of indicator productization. Phases F-K expand the generic Pine-class host contract. Phase L turns that contract into the required in-app Rust authoring product and begins as a vertical slice before every F-K capability is complete. Phase M is optional and cannot displace the Rust-first plan. The immediate engineering focus is generic visual/style channels, transactional semantic drawings/tables, resource-aware settings and dependency rebinding, richer market/execution/chart context, alerts, compatibility-corpus qualification, and the first safe editor-to-chart Rust workflow.
 
 The maturity target is intentionally ambitious: if TradingPlot has the underlying data required by an indicator, the default expectation should be that the indicator can be ported to Rust without changing core product code. Exceptions should be explainable by missing data, a deliberately unsupported product class such as strategy/broker emulation, or a clearly documented host capability that is still on this roadmap—not by arbitrary SDK limitations.
 
@@ -597,4 +655,4 @@ Rust is the reason this target is tractable. TradingPlot does not need to invent
 
 The proof standard is the Phase K compatibility corpus. KSR6 is a first representative composite acceptance case, not a special-case implementation target. ZigZag/drawing-heavy, FVG/box-heavy, dashboard, visible-range, custom-candle, lower-timeframe, alert-heavy, and eventually order-flow/footprint studies must exercise the same generic primitives. When those studies can be ported through public Rust SDK APIs without named-study core changes, TradingPlot can credibly describe the platform as broadly Pine-class for indicators.
 
-User-installable/untrusted executable studies remain a separate trust problem. If they become a product requirement, design a sandboxed/WASM/process model or other explicit isolation boundary. Do not weaken the current trusted-native contract to fake arbitrary-code safety.
+User-installable Rust studies are a confirmed product requirement and remain a separate trust domain from reviewed native studies. Phase L must deliver the editor, controlled toolchain, package format, and explicit sandbox boundary before TradingPlot accepts arbitrary user-authored executable studies. Do not weaken the current trusted-native contract, load user DLLs, or describe panic catching as arbitrary-code safety.
