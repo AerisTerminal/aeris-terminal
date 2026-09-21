@@ -375,8 +375,8 @@ mod tests {
         assert!(!rithmic_adapter.contains("pub mod generated"));
 
         let root_manifest = manifest("Cargo.toml");
-        let expected_source = "https://github.com/NucleusCharts/financial-charts.git";
-        let expected_revision = "d452630b67fe7cd2886dfa4b752fdbfd0428a6b0";
+        let expected_source = "https://github.com/Axiusflowhq/financial-charts.git";
+        let expected_revision = "534f2244930ab7581d4bfc459bedb97c0096bbac";
         for dependency in [
             "nucleuscharts_engine",
             "nucleuscharts_indicators",

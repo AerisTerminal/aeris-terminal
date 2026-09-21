@@ -4099,8 +4099,8 @@ dependencies = [
 
 [[package]]
 name = "nucleuscharts_core"
-version = "0.2.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=d452630b67fe7cd2886dfa4b752fdbfd0428a6b0#d452630b67fe7cd2886dfa4b752fdbfd0428a6b0"
+version = "0.3.0"
+source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
 dependencies = [
  "serde",
  "serde_json",
@@ -4108,8 +4108,8 @@ dependencies = [
 
 [[package]]
 name = "nucleuscharts_engine"
-version = "0.2.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=d452630b67fe7cd2886dfa4b752fdbfd0428a6b0#d452630b67fe7cd2886dfa4b752fdbfd0428a6b0"
+version = "0.3.0"
+source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
 dependencies = [
  "nucleuscharts_core",
  "nucleuscharts_indicators",
@@ -4120,21 +4120,21 @@ dependencies = [
 
 [[package]]
 name = "nucleuscharts_indicators"
-version = "0.2.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=d452630b67fe7cd2886dfa4b752fdbfd0428a6b0#d452630b67fe7cd2886dfa4b752fdbfd0428a6b0"
+version = "0.3.0"
+source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
 
 [[package]]
 name = "nucleuscharts_render"
-version = "0.2.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=d452630b67fe7cd2886dfa4b752fdbfd0428a6b0#d452630b67fe7cd2886dfa4b752fdbfd0428a6b0"
+version = "0.3.0"
+source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
 dependencies = [
  "nucleuscharts_core",
 ]
 
 [[package]]
 name = "nucleuscharts_render_gpui"
-version = "0.2.0"
-source = "git+https://github.com/NucleusCharts/financial-charts.git?rev=d452630b67fe7cd2886dfa4b752fdbfd0428a6b0#d452630b67fe7cd2886dfa4b752fdbfd0428a6b0"
+version = "0.3.0"
+source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
 dependencies = [
  "gpui",
  "image",

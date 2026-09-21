@@ -9,7 +9,7 @@ It belongs in the same product category as MotiveWave and ATAS: a workstation th
 - Native Windows, macOS, and Linux desktop
 - One in-process market runtime that owns provider sessions, canonical series, bounded history, realtime handoff, and publication
 - One in-process account runtime for native authentication and entitlement state
-- Professional charting through [Nucleus Charts](https://github.com/NucleusCharts/financial-charts), consumed as a pinned Git dependency
+- Professional charting through [financial-charts](https://github.com/Axiusflowhq/financial-charts), consumed as a pinned Git dependency
 - Rithmic and Hyperliquid market-data integrations
 - Chart types, drawings, indicators, order-book workflows, and multi-pane workspaces
 - Bounded, on-demand provider history with no persisted market-history cache
