@@ -397,6 +397,7 @@ const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
+const CHROME_OVERLAY_EXIT_DURATION: Duration = Duration::from_millis(100);
 const COPY_PRICE_FEEDBACK_DURATION: Duration = Duration::from_millis(600);
 const COPY_PRICE_SUCCESS_ANIMATION_DURATION: Duration = Duration::from_millis(180);
 

@@ -326,13 +326,17 @@ pub(super) fn chrome_overlay_panel(
         }))
         .with_animation(
             ("chrome_overlay_transition", generation),
-            Animation::new(CHROME_OVERLAY_TRANSITION_DURATION).with_easing(ease_out_quint()),
+            Animation::new(if closing {
+                CHROME_OVERLAY_EXIT_DURATION
+            } else {
+                CHROME_OVERLAY_TRANSITION_DURATION
+            })
+            .with_easing(ease_out_quint()),
             move |panel, delta| {
                 let progress = chrome_overlay_progress(phase, delta);
                 panel
-                    .opacity(progress)
-                    .ml(px(enter_offset.x * (1.0 - progress)))
-                    .mt(px(enter_offset.y * (1.0 - progress)))
+                    .opacity(0.3 + 0.7 * progress)
+                    .top(px(enter_offset.y * (1.0 - progress)))
             },
         )
 }

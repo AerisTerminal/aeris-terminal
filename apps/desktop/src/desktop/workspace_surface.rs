@@ -1633,7 +1633,7 @@ impl WorkspaceSurface {
         let generation = self.chrome_overlay_generation;
         cx.spawn_in(window, async move |app, cx| {
             cx.background_executor()
-                .timer(CHROME_OVERLAY_TRANSITION_DURATION)
+                .timer(CHROME_OVERLAY_EXIT_DURATION)
                 .await;
             let _ = app.update_in(cx, |app, _, app_cx| {
                 if should_finish_chrome_overlay_close(

@@ -23,15 +23,13 @@ const COMPACT_ROW_HEIGHT: Pixels = px(32.0);
 const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
 const SEPARATOR_HEIGHT: Pixels = px(1.0);
 const POPUP_ENTER_DURATION: Duration = Duration::from_millis(130);
-const POPUP_ENTER_TRAVEL: f32 = 6.0;
+const POPUP_ENTER_TRAVEL: f32 = 2.0;
 
-/// Normalized origin used to make native menu motion come from its trigger.
+/// Normalized origin used to choose the direction of native menu motion.
 ///
 /// GPUI 0.2 does not expose a general affine transform for element trees, so
-/// `Asceify` uses the equivalent native presentation available at this layer:
-/// a short fade/translation whose direction is derived from the same origin a
-/// CSS `transform-origin` would use. The trigger-facing edge therefore stays
-/// visually pinned instead of every popup drifting from its center.
+/// `Asceify` uses a short vertical fade/translation. The vertical direction
+/// follows the trigger so menus above and below it settle toward their anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PopupAnimationOrigin {
     x: f32,
@@ -72,10 +70,7 @@ impl PopupAnimationOrigin {
     }
 
     pub(crate) fn enter_offset(self) -> Point<f32> {
-        point(
-            (self.x - 0.5) * 2.0 * POPUP_ENTER_TRAVEL,
-            (self.y - 0.5) * 2.0 * POPUP_ENTER_TRAVEL,
-        )
+        point(0.0, (self.y - 0.5) * 2.0 * POPUP_ENTER_TRAVEL)
     }
 }
 
@@ -94,8 +89,7 @@ pub(crate) fn animate_popup_from_origin(
         move |panel, progress| {
             let remaining = 1.0 - progress;
             panel
-                .opacity(progress)
-                .ml(px(offset.x * remaining))
+                .opacity(0.3 + 0.7 * progress)
                 .mt(px(offset.y * remaining))
         },
     )
@@ -504,18 +498,18 @@ mod tests {
     }
 
     #[test]
-    fn popup_entry_offset_points_back_toward_the_trigger_origin() {
+    fn popup_entry_offset_moves_only_toward_the_trigger_edge() {
         assert_eq!(
             PopupAnimationOrigin::TOP_LEFT.enter_offset(),
-            point(-POPUP_ENTER_TRAVEL, -POPUP_ENTER_TRAVEL)
+            point(0.0, -POPUP_ENTER_TRAVEL)
         );
         assert_eq!(
             PopupAnimationOrigin::TOP_RIGHT.enter_offset(),
-            point(POPUP_ENTER_TRAVEL, -POPUP_ENTER_TRAVEL)
+            point(0.0, -POPUP_ENTER_TRAVEL)
         );
         assert_eq!(
             PopupAnimationOrigin::BOTTOM_LEFT.enter_offset(),
-            point(-POPUP_ENTER_TRAVEL, POPUP_ENTER_TRAVEL)
+            point(0.0, POPUP_ENTER_TRAVEL)
         );
     }
 }
