@@ -1,6 +1,6 @@
 use std::{env, error::Error, fs, path::PathBuf};
 
-const KIT_DISABLED_ENV: &str = "TRADINGPLOT_RITHMIC_KIT_DISABLED";
+const KIT_DISABLED_ENV: &str = "ASCEIFY_RITHMIC_KIT_DISABLED";
 const LOGIN_TEMPLATE_VERSION: &str = "3.9";
 
 fn main() -> Result<(), Box<dyn Error>> {

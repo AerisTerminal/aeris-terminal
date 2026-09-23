@@ -1,4 +1,4 @@
-//! `TradingPlot`-owned account, plan, and feature identity.
+//! `Asceify`-owned account, plan, and feature identity.
 //!
 //! Pure provider-neutral contracts for phase 5 authentication. No HTTP, no
 //! GPUI, no vault, no Better Auth, no billing SDK, no provider wire types.
@@ -23,8 +23,8 @@ pub const LEASE_SCHEMA_VERSION: u32 = 1;
 /// Audience currently provisioned for leases minted by the control plane.
 ///
 /// This is an external signed-token contract and remains stable across the
-/// `TradingPlot` product-name migration until the issuer moves to a new audience.
-pub const LEASE_AUDIENCE: &str = "axiusflow-engine";
+/// `Asceify` product-name migration until the issuer moves to a new audience.
+pub const LEASE_AUDIENCE: &str = "asceify-desktop";
 /// Maximum compact lease size accepted for validation.
 pub const MAXIMUM_LEASE_BYTES: usize = 2048;
 /// Maximum device identifier length accepted in a lease.
@@ -32,7 +32,7 @@ pub const MAXIMUM_DEVICE_ID_BYTES: usize = 128;
 /// Maximum signing-key identifier length accepted in a lease.
 pub const MAXIMUM_KEY_ID_BYTES: usize = 64;
 
-/// Canonical `TradingPlot` account identity. External identifiers (identity-provider
+/// Canonical `Asceify` account identity. External identifiers (identity-provider
 /// user ID, email, billing-vendor customer, Rithmic account) are links, never
 /// this value.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -541,7 +541,7 @@ mod tests {
                 1_700_000_000,
                 1_700_000_000,
                 1_700_259_200,
-                "axiusflow-engine",
+                "asceify-desktop",
                 "ent1",
                 &account,
                 "device-01",
@@ -567,7 +567,7 @@ mod tests {
                 1_700_000_000,
                 1_700_000_000,
                 1_700_259_200,
-                "axiusflow-engine",
+                "asceify-desktop",
                 "ent1",
                 &account,
                 "device-01",
@@ -587,7 +587,7 @@ mod tests {
                 1_700_000_000,
                 1_700_000_000,
                 1_700_259_200,
-                "axiusflow-engine",
+                "asceify-desktop",
                 "ent1",
                 &account,
                 "device-01",

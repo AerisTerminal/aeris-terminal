@@ -1,6 +1,6 @@
 //! System-browser opening for account-runtime authentication URLs.
 //!
-//! The in-process account runtime returns an `TradingPlot` authentication URL.
+//! The in-process account runtime returns an `Asceify` authentication URL.
 //! This boundary opens that URL in the user's
 //! system browser. It performs process work, so callers must keep it off the
 //! UI thread on background workers. It never handles credentials or tokens.
@@ -141,7 +141,7 @@ mod launcher_tests {
     /// no shell can split the authorization query.
     #[test]
     fn authorization_query_never_enters_launcher_argv() {
-        let url = "https://auth.axiusflow.com/api/auth/oauth2/authorize?response_type=code&client_id=axiusflow-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback&scope=openid%20offline_access&state=abc%7Cdef&nonce=xyz";
+        let url = "https://auth.example.test/api/auth/oauth2/authorize?response_type=code&client_id=asceify-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback&scope=openid%20offline_access&state=abc%7Cdef&nonce=xyz";
         super::validate_authorization_url(url).expect("real authorization URL validates");
         let command = launcher_command("powershell.exe", LAUNCHER_SCRIPT);
         assert_eq!(command.get_program(), "powershell.exe");
@@ -159,9 +159,9 @@ mod launcher_tests {
 
     #[test]
     fn missing_launcher_reports_failure() {
-        let command = launcher_command("tradingplot-definitely-missing-launcher", LAUNCHER_SCRIPT);
+        let command = launcher_command("asceify-definitely-missing-launcher", LAUNCHER_SCRIPT);
         assert_eq!(
-            run_launcher(command, "https://auth.axiusflow.com/sign-in?x=1&y=2"),
+            run_launcher(command, "https://auth.example.test/sign-in?x=1&y=2"),
             Err("system browser could not be opened".to_string())
         );
     }
@@ -170,7 +170,7 @@ mod launcher_tests {
     fn nonzero_launcher_exit_reports_failure() {
         let command = launcher_command("powershell.exe", "exit 7");
         assert_eq!(
-            run_launcher(command, "https://auth.axiusflow.com/sign-in?x=1&y=2"),
+            run_launcher(command, "https://auth.example.test/sign-in?x=1&y=2"),
             Err("system browser could not be opened".to_string())
         );
     }
@@ -184,7 +184,7 @@ mod launcher_tests {
             "[Console]::WriteLine([Console]::In.ReadLine())",
         );
         assert_eq!(
-            run_launcher(command, "https://auth.axiusflow.com/sign-in?x=1&y=2"),
+            run_launcher(command, "https://auth.example.test/sign-in?x=1&y=2"),
             Ok(())
         );
     }
@@ -194,7 +194,7 @@ mod launcher_tests {
         let command = launcher_command("powershell.exe", "Start-Sleep -Seconds 120");
         let started = std::time::Instant::now();
         assert_eq!(
-            run_launcher(command, "https://auth.axiusflow.com/sign-in?x=1&y=2"),
+            run_launcher(command, "https://auth.example.test/sign-in?x=1&y=2"),
             Err("system browser could not be opened".to_string())
         );
         assert!(
@@ -212,10 +212,10 @@ mod tests {
     fn non_https_and_malformed_urls_fail_closed_without_spawning() {
         for url in [
             "",
-            "http://auth.axiusflow.com/authorize",
+            "http://auth.example.test/authorize",
             "file:///etc/passwd",
             "javascript:alert(1)",
-            "https://auth.axiusflow.com/has space",
+            "https://auth.example.test/has space",
             "127.0.0.1:8080/callback",
         ] {
             assert!(
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn overlong_urls_fail_closed() {
         let long = format!(
-            "https://auth.axiusflow.com/{}",
+            "https://auth.example.test/{}",
             "a".repeat(MAXIMUM_AUTHORIZATION_URL_BYTES)
         );
         assert!(open_system_browser(&long).is_err());

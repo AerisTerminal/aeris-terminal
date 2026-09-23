@@ -41,7 +41,7 @@ try {
         --manifest-path (Join-Path $repoRoot "Cargo.toml") `
         --locked `
         --target-dir $evidenceTarget `
-        --package tradingplot_rithmic_protocol_adapter `
+        --package asceify_rithmic_protocol_adapter `
         --bin rithmic_test_smoke
     if ($LASTEXITCODE -ne 0) {
         throw "The immutable provider-evidence binary did not build."

@@ -20,27 +20,27 @@ use crate::{
         StudyRuntime, StudyRuntimeConfig, StudyTradeSample,
     },
 };
-use tradingplot_contracts::{
+use asceify_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
     SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
 };
-use tradingplot_hyperliquid_market_adapter::{
+use asceify_hyperliquid_market_adapter::{
     HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
 };
-use tradingplot_market_data::{
+use asceify_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
     TopOfBookQuote,
 };
-use tradingplot_market_engine::{
+use asceify_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
     MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig,
     ProviderGeneration, ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation,
     StreamRequirements, Viewport, WorkspaceId,
 };
-use tradingplot_provider_history::HistoryRange;
-use tradingplot_rithmic_protocol_adapter::{
+use asceify_provider_history::HistoryRange;
+use asceify_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
 

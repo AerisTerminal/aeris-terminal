@@ -7,7 +7,7 @@ use gpui::{
 
 use super::icon::Icon;
 
-/// A looping activity spinner whose SVG is owned by `TradingPlot`'s asset bundle.
+/// A looping activity spinner whose SVG is owned by `Asceify`'s asset bundle.
 #[derive(IntoElement)]
 pub(crate) struct Loader {
     id: ElementId,

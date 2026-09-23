@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_observability"
+name = "asceify_observability"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

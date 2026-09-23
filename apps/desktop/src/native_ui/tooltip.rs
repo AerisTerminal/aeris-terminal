@@ -1,11 +1,9 @@
 use std::time::Duration;
 
+use asceify_design_system::{AsceifyTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     AnyView, App, Context, ElementId, IntoElement, Render, SharedString, Window, div, prelude::*,
     px,
-};
-use tradingplot_design_system::{
-    RadiusToken, TradingPlotTheme, TypographyRole, platform_font_family,
 };
 
 use super::{
@@ -18,12 +16,12 @@ use super::{
 #[derive(Clone)]
 pub(crate) struct TooltipSpec {
     label: SharedString,
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
     show_delay: Duration,
 }
 
 impl TooltipSpec {
-    pub(crate) fn new(label: impl Into<SharedString>, theme: &TradingPlotTheme) -> Self {
+    pub(crate) fn new(label: impl Into<SharedString>, theme: &AsceifyTheme) -> Self {
         Self {
             label: label.into(),
             theme: *theme,
@@ -55,7 +53,7 @@ impl TooltipSpec {
 
 struct TooltipView {
     label: SharedString,
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
 }
 
 impl Render for TooltipView {
@@ -99,14 +97,14 @@ pub(crate) fn with_tooltip(
 mod tests {
     use std::time::Duration;
 
-    use tradingplot_design_system::TradingPlotTheme;
+    use asceify_design_system::AsceifyTheme;
 
     use super::TooltipSpec;
 
     #[test]
     fn tooltip_delay_is_explicit_and_bounded_by_the_owner() {
-        let tooltip = TooltipSpec::new("Close", &TradingPlotTheme::dark())
-            .show_delay(Duration::from_millis(275));
+        let tooltip =
+            TooltipSpec::new("Close", &AsceifyTheme::dark()).show_delay(Duration::from_millis(275));
         assert_eq!(tooltip.delay(), Duration::from_millis(275));
     }
 }

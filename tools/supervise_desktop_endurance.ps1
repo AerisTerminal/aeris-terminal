@@ -45,7 +45,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class TradingPlotEndurancePower
+public static class AsceifyEndurancePower
 {
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern uint SetThreadExecutionState(uint executionState);
@@ -98,7 +98,7 @@ try {
         throw "Desktop-endurance executable hash changed before launch."
     }
 
-    $executionState = [TradingPlotEndurancePower]::SetThreadExecutionState([uint32]2147483649)
+    $executionState = [AsceifyEndurancePower]::SetThreadExecutionState([uint32]2147483649)
     if ($executionState -eq 0) {
         throw "Desktop-endurance supervisor could not inhibit system sleep."
     }
@@ -129,7 +129,7 @@ try {
         $manifest.finalization_mode = "supervised"
     }
     finally {
-        $releaseState = [TradingPlotEndurancePower]::SetThreadExecutionState([uint32]2147483648)
+        $releaseState = [AsceifyEndurancePower]::SetThreadExecutionState([uint32]2147483648)
         $manifest.system_sleep_inhibition_released = $releaseState -ne 0
         $manifest.sleep_inhibition_release_evidence = if ($releaseState -ne 0) {
             "explicit_es_continuous"

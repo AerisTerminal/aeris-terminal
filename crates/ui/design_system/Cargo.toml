@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_design_system"
+name = "asceify_design_system"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

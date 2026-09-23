@@ -235,7 +235,7 @@ mod tests {
                 .unwrap_or_default();
             for dependency in forbidden {
                 // Whole dependency names only: a substring match would ban
-                // tradingplot_hyperliquid_market_adapter through "hyper" while
+                // asceify_hyperliquid_market_adapter through "hyper" while
                 // the gate targets public server frameworks.
                 assert!(
                     name != *dependency
@@ -278,11 +278,7 @@ mod tests {
 
     #[test]
     fn cargo_dependency_direction_excludes_ui_from_backend_layers() {
-        let ui = [
-            "gpui",
-            "tradingplot_chart_integration",
-            "tradingplot_terminal_ui",
-        ];
+        let ui = ["gpui", "asceify_chart_integration", "asceify_terminal_ui"];
         for relative in [
             "crates/market_engine/Cargo.toml",
             "crates/market_runtime/Cargo.toml",
@@ -297,8 +293,8 @@ mod tests {
         assert_excludes(
             "crates/ui/chart_integration/Cargo.toml",
             &[
-                "tradingplot_rithmic_protocol_adapter",
-                "tradingplot_hyperliquid_market_adapter",
+                "asceify_rithmic_protocol_adapter",
+                "asceify_hyperliquid_market_adapter",
             ],
         );
     }
@@ -360,7 +356,7 @@ mod tests {
         );
         assert!(
             application_sources.is_empty(),
-            "provider_kit must not gain TradingPlot Rust/application source: {:?}",
+            "provider_kit must not gain Asceify Rust/application source: {:?}",
             application_sources
                 .iter()
                 .map(|path| relative_string(path))
@@ -397,7 +393,7 @@ mod tests {
             if contents.contains("nucleuscharts_indicators.workspace") {
                 assert_eq!(
                     relative, "crates/study_sdk/Cargo.toml",
-                    "pure Nucleus TA must enter TradingPlot only through the Study SDK facade"
+                    "pure Nucleus TA must enter Asceify only through the Study SDK facade"
                 );
             }
             if contents.contains("nucleuscharts_engine.workspace")
@@ -414,11 +410,11 @@ mod tests {
         assert_excludes(
             "crates/study_sdk/Cargo.toml",
             &[
-                "tradingplot_market_engine",
-                "tradingplot_account_runtime",
-                "tradingplot_chart_integration",
-                "tradingplot_rithmic_protocol_adapter",
-                "tradingplot_hyperliquid_market_adapter",
+                "asceify_market_engine",
+                "asceify_account_runtime",
+                "asceify_chart_integration",
+                "asceify_rithmic_protocol_adapter",
+                "asceify_hyperliquid_market_adapter",
                 "nucleuscharts_engine",
                 "nucleuscharts_render",
                 "nucleuscharts_render_gpui",
@@ -445,12 +441,12 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "tradingplot_rithmic_protocol_adapter",
-                    "tradingplot_hyperliquid_market_adapter",
-                    "tradingplot_local_history",
-                    "tradingplot_local_storage",
-                    "tradingplot_market_engine",
-                    "tradingplot_provider_history",
+                    "asceify_rithmic_protocol_adapter",
+                    "asceify_hyperliquid_market_adapter",
+                    "asceify_local_history",
+                    "asceify_local_storage",
+                    "asceify_market_engine",
+                    "asceify_provider_history",
                     "rusqlite",
                 ],
             );
@@ -554,20 +550,20 @@ mod tests {
         assert_excludes(
             "apps/desktop/Cargo.toml",
             &[
-                "tradingplot_desktop_market_runtime",
-                "tradingplot_desktop_provider_runtime",
-                "tradingplot_rithmic_protocol_adapter",
-                "tradingplot_hyperliquid_market_adapter",
-                "tradingplot_provider_history",
-                "tradingplot_local_storage",
-                "tradingplot_local_history",
-                "tradingplot_market_engine",
+                "asceify_desktop_market_runtime",
+                "asceify_desktop_provider_runtime",
+                "asceify_rithmic_protocol_adapter",
+                "asceify_hyperliquid_market_adapter",
+                "asceify_provider_history",
+                "asceify_local_storage",
+                "asceify_local_history",
+                "asceify_market_engine",
             ],
         );
     }
 
     #[test]
-    fn workspace_uses_only_tradingplot_owned_gpui_controls() {
+    fn workspace_uses_only_asceify_owned_gpui_controls() {
         const RETIRED_COMPONENT_IDENTITIES: &[&str] = &[
             concat!("gpui", "-component"),
             concat!("gpui", "_component"),
@@ -690,12 +686,9 @@ mod tests {
     fn market_core_manifests_exclude_process_and_runtime_dependencies() {
         assert_dependencies_are(
             "crates/application/Cargo.toml",
-            &["tradingplot_instruments", "tradingplot_market_data", "sha2"],
+            &["asceify_instruments", "asceify_market_data", "sha2"],
         );
-        assert_dependencies_are(
-            "crates/market_engine/Cargo.toml",
-            &["tradingplot_market_data"],
-        );
+        assert_dependencies_are("crates/market_engine/Cargo.toml", &["asceify_market_data"]);
         assert_dependencies_are("crates/domain/instruments/Cargo.toml", &[]);
         assert_dependencies_are("crates/domain/market_data/Cargo.toml", &[]);
     }
@@ -706,10 +699,10 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "tradingplot_desktop_market_runtime",
-                    "tradingplot_desktop_provider_runtime",
-                    "tradingplot_local_engine_client",
-                    "tradingplot_local_history",
+                    "asceify_desktop_market_runtime",
+                    "asceify_desktop_provider_runtime",
+                    "asceify_local_engine_client",
+                    "asceify_local_history",
                 ],
             );
         }
@@ -775,7 +768,7 @@ mod tests {
         assert_eq!(
             applications,
             ["desktop".to_string()].into(),
-            "TradingPlot must have exactly one application process"
+            "Asceify must have exactly one application process"
         );
     }
     #[test]
@@ -1007,10 +1000,10 @@ mod tests {
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
-                "tradingplot_local_storage",
-                "tradingplot_local_history",
-                "tradingplot_chart_integration",
-                "tradingplot_terminal_ui",
+                "asceify_local_storage",
+                "asceify_local_history",
+                "asceify_chart_integration",
+                "asceify_terminal_ui",
                 "gpui",
             ] {
                 assert!(
@@ -1025,11 +1018,11 @@ mod tests {
     fn engine_manifest_owns_backend_composition_without_ui() {
         let market = manifest("crates/market_runtime/Cargo.toml");
         for dependency in [
-            "tradingplot_rithmic_protocol_adapter",
-            "tradingplot_hyperliquid_market_adapter",
-            "tradingplot_market_engine",
-            "tradingplot_provider_history",
-            "tradingplot_platform_runtime",
+            "asceify_rithmic_protocol_adapter",
+            "asceify_hyperliquid_market_adapter",
+            "asceify_market_engine",
+            "asceify_provider_history",
+            "asceify_platform_runtime",
         ] {
             assert!(
                 market.contains(dependency),
@@ -1037,7 +1030,7 @@ mod tests {
             );
         }
         let account = manifest("crates/account_runtime/Cargo.toml");
-        for dependency in ["tradingplot_account", "tradingplot_platform_runtime"] {
+        for dependency in ["asceify_account", "asceify_platform_runtime"] {
             assert!(
                 account.contains(dependency),
                 "account_runtime must compose {dependency}"
@@ -1049,11 +1042,7 @@ mod tests {
         ] {
             assert_excludes(
                 relative,
-                &[
-                    "gpui",
-                    "tradingplot_chart_integration",
-                    "tradingplot_terminal_ui",
-                ],
+                &["gpui", "asceify_chart_integration", "asceify_terminal_ui"],
             );
         }
     }
@@ -1067,11 +1056,11 @@ mod tests {
         }
         let market = manifest("crates/market_runtime/Cargo.toml");
         assert!(
-            market.contains("tradingplot_provider_history"),
+            market.contains("asceify_provider_history"),
             "market runtime lost provider-history adapter boundary"
         );
         assert!(
-            !market.contains("tradingplot_local_storage"),
+            !market.contains("asceify_local_storage"),
             "market runtime must not persist market history"
         );
         let module = manifest("crates/market_runtime/src/market_service/mod.rs");
@@ -1272,7 +1261,7 @@ mod tests {
         let cleanup = &update[cleanup_start..cleanup_end];
         assert!(
             workspace_tabs.contains("drop(cleanup);")
-                && cleanup.contains("tradingplot-update-restart-cleanup")
+                && cleanup.contains("asceify-update-restart-cleanup")
                 && cleanup.contains(".spawn(move || {")
                 && cleanup.contains("child.kill()")
                 && cleanup.contains("child.wait()"),
@@ -1346,7 +1335,7 @@ mod tests {
             .expect("update restart preparation boundary");
         let prepare = &workspace_tabs[prepare_start..prepare_end];
         assert!(
-            prepare.contains("tradingplot_desktop::account::begin_refresh_quiesce()")
+            prepare.contains("asceify_desktop::account::begin_refresh_quiesce()")
                 && prepare.contains("account_refresh.wait()?")
                 && prepare.contains("drop(account_refresh)"),
             "update restart must quiesce account refresh and release its claim on cancellation"
@@ -1368,7 +1357,7 @@ mod tests {
 
         let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
         assert!(
-            lifecycle.contains("tradingplot_desktop::account::begin_refresh_quiesce()")
+            lifecycle.contains("asceify_desktop::account::begin_refresh_quiesce()")
                 && lifecycle.contains("quiesce.wait()")
                 && lifecycle.contains("quiesce.retain_until_process_exit()")
                 && lifecycle.contains("blocks_exit: true")
@@ -1376,92 +1365,11 @@ mod tests {
                 && lifecycle.contains("duplicate request must not bypass its durability fences"),
             "normal desktop shutdown must await account refresh durability off GPUI and block unsafe exit"
         );
-
-        let desktop = manifest("apps/desktop/src/desktop.rs");
-        let account_quit_start = desktop
-            .find("fn quit_after_account_refresh_quiesce")
-            .expect("account-only quit path");
-        let account_quit_end = desktop[account_quit_start..]
-            .find("#[derive(Default)]")
-            .map(|offset| account_quit_start + offset)
-            .expect("account-only quit boundary");
-        let account_quit = &desktop[account_quit_start..account_quit_end];
-        assert!(
-            account_quit.contains("tradingplot_desktop::account::begin_refresh_quiesce()")
-                && account_quit.contains("cx.background_executor().spawn")
-                && account_quit.contains("if let Err(first_error) = quiesce.wait()")
-                && account_quit.contains("quiesce.wait()?;")
-                && account_quit.contains("quiesce.retain_until_process_exit()")
-                && account_quit.contains("cx.update(|cx| cx.quit())"),
-            "account-only quit must keep one quiesce claim across its bounded retry and reach refresh durability off GPUI before process exit"
-        );
-        let account_install = desktop
-            .find("let account = match tradingplot_desktop::account::DesktopAccount::install()")
-            .expect("production account installation");
-        let after_account_install = &desktop[account_install..];
-        assert!(
-            !after_account_install.contains("std::process::exit(")
-                && after_account_install.contains("exit_after_account_refresh_quiesce(0)")
-                && after_account_install.contains("exit_after_account_refresh_quiesce(1)"),
-            "post-account startup exits must pass through refresh-token durability fencing"
-        );
-        assert!(
-            account_quit.contains("fn exit_after_account_refresh_quiesce")
-                && account_quit.matches("quiesce.wait()").count() >= 3
-                && account_quit.contains("std::thread::park()"),
-            "non-GPUI process exit must use bounded quiesce waits and fail closed"
-        );
-
-        let onboarding_start = desktop
-            .find("fn run_onboarding()")
-            .expect("onboarding path");
-        let onboarding_end = desktop[onboarding_start..]
-            .find("fn run_desktop")
-            .map(|offset| onboarding_start + offset)
-            .expect("onboarding boundary");
-        let onboarding = &desktop[onboarding_start..onboarding_end];
-        assert!(
-            onboarding.contains("cx.on_window_closed")
-                && onboarding.contains("quit_after_account_refresh_quiesce(cx)"),
-            "closing onboarding must enter the account durability path before quit"
-        );
-        assert!(
-            manifest("apps/desktop/src/onboarding.rs")
-                .contains("quit_after_account_refresh_quiesce(screen_cx)"),
-            "onboarding diagnostic completion must use the account durability path"
-        );
-        assert!(
-            manifest("apps/desktop/src/components/terminal_chrome.rs")
-                .contains("Self::Close => window.remove_window()"),
-            "onboarding caption close must funnel through the window-closed durability owner"
-        );
     }
 
     #[test]
     fn account_refresh_rotation_remains_native_session_fenced() {
         let desktop = manifest("apps/desktop/src/desktop.rs");
-        let run_start = desktop
-            .find("pub(super) fn run()")
-            .expect("desktop process entrypoint");
-        let run_end = desktop[run_start..]
-            .find("fn schedule_versioned_launcher_promotion")
-            .map(|offset| run_start + offset)
-            .expect("desktop process entrypoint boundary");
-        let run = &desktop[run_start..run_end];
-        let prepare = run
-            .find("prepare_for_process_lifecycle()")
-            .expect("account process-lifecycle preparation");
-        let guard = run
-            .find("native_account_session_shutdown_guard(")
-            .expect("native account session shutdown guard");
-        let install = run
-            .find("DesktopAccount::install()")
-            .expect("desktop account installation");
-        assert!(
-            prepare < guard && guard < install,
-            "native session shutdown fencing must be ready before production saved-session restoration starts"
-        );
-
         let readiness_start = desktop
             .find("fn run_desktop_readiness_command")
             .expect("candidate readiness path");
@@ -1519,7 +1427,7 @@ mod tests {
                 "platform lifecycle lost {contract}"
             );
         }
-        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/asceify_launcher.rs");
         for contract in [
             "--check-update",
             "--prepare-update",
@@ -1567,285 +1475,41 @@ mod tests {
                 .join("crates/platform_runtime/src/background_service.rs")
                 .exists()
         );
-        let publisher =
-            manifest("crates/platform_runtime/src/bin/tradingplot_release_publisher.rs");
-        let release_script = manifest("tools/publish_release.ps1");
-        assert!(
-            publisher.contains("--minimum-version")
-                && publisher.contains("config.minimum_version.clone()")
-                && release_script.contains("MinimumLauncherVersion")
-                && release_script.contains("\"--minimum-version\", $MinimumLauncherVersion"),
-            "release compatibility floor must be explicit and independent of the new app version"
-        );
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn protected_release_and_non_blocking_update_contracts_remain_owned() {
-        let publisher =
-            manifest("crates/platform_runtime/src/bin/tradingplot_release_publisher.rs");
-        let release_script = manifest("tools/publish_release.ps1");
-        for contract in [
-            "AuthenticodeCertificateSha1",
-            "AuthenticodeTimestampUrl",
-            "AllowUnsignedWindowsRelease",
-            "TrustResetFromGeneration",
-            "TrustResetFromReleaseIdentity",
-            "WranglerPath",
-            "RolloutCohort",
-            "RolloutPercentage",
-            "PackageOnly",
-            "GITHUB_ACTIONS",
-            "TRADINGPLOT_RELEASE_ENVIRONMENT",
-            "https://auth.axiusflow.com/releases",
-            "axiusflow-releases",
-            "Axiusflow\\release-signing-key.b64",
-            "axiusflow-website\\node_modules\\.bin\\wrangler.cmd",
-            "git rev-parse origin/main",
-            "\"--authenticode-certificate-sha1\", $AuthenticodeCertificateSha1",
-            "\"--authenticode-timestamp-url\", $AuthenticodeTimestampUrl",
-            "\"--allow-unsigned-windows-release\"",
-            "--trust-reset-from-generation",
-            "--trust-reset-from-release-identity",
-            "--rollout-cohort",
-            "--rollout-percentage",
-            "if ($PackageOnly -and $SkipBuild)",
-            "-PackageOnly must use the repository release publisher",
+    fn development_build_has_no_cloud_publisher_or_login_gate() {
+        for path in [
+            "tools/publish_release.ps1",
+            ".github/workflows/release.yml",
+            "crates/platform_runtime/src/bin/asceify_release_publisher.rs",
         ] {
             assert!(
-                release_script.contains(contract),
-                "release qualification script lost {contract}"
+                !repository_root().join(path).exists(),
+                "retired publisher remains: {path}"
             );
         }
-        for contract in [
-            "--authenticode-certificate-sha1",
-            "--authenticode-timestamp-url",
-            "--allow-unsigned-windows-release",
-            "--trust-reset-from-generation",
-            "--trust-reset-from-release-identity",
-            "--skip-build",
-            "--expected-verifying-key",
-            "sign_authenticode_file(config, &launcher_path)",
-            "sign_authenticode_file(config, &desktop_path)",
-            "sign_authenticode_file(config, &setup_path)",
-            "TimeStamperCertificate",
-            "verify_authenticode_file(config, downloaded)",
-            "verify_public_object(config, &release.channel_object)",
-            "verify_current_installer_alias",
-            "retire_predecessor_release",
-            "RELEASE_RETIREMENT_FILENAME",
-            "wrangler_delete",
-            "AXIUSFLOW_RELEASE_PROVENANCE_V1\\0",
-            "AXIUSFLOW_RELEASE_RETIREMENT_V1\\0",
-            "provenance.json",
-            "requires_provenance_signature",
-            "verify_production_publication_context",
-            "TRADINGPLOT_AUTHENTICODE_CERT_SHA1",
-            "rollback-compatibility.json",
-        ] {
-            assert!(
-                publisher.contains(contract),
-                "release publisher lost {contract}"
-            );
-        }
-        let release_workflow = manifest(".github/workflows/release.yml");
-        for contract in [
-            "workflow_dispatch:",
-            "runs-on: [self-hosted, axiusflow, windows, release-build]",
-            "runs-on: [self-hosted, axiusflow, windows, release-signing]",
-            "cancel-in-progress: false",
-            "persist-credentials: false",
-            "ref: ${{ github.sha }}",
-            "refs/heads/main",
-            "git checkout -B main $env:GITHUB_SHA",
-            "git rev-parse origin/main",
-            "health_gate_approved:",
-            "rollout_cohort:",
-            "rollout_percentage:",
-            "allow_unsigned_windows_release:",
-            "trust_reset_from_generation:",
-            "trust_reset_from_release_identity:",
-            "TRADINGPLOT_RELEASE_ENVIRONMENT: self-hosted-release-station",
-            "RELEASE_VERIFYING_KEY_B64URL",
-            "AxiusflowReleaseHandoff",
-            "Axiusflow\\release-signing-key.b64",
-            "needs.qualify-windows.outputs.launcher_sha256",
-            "needs.qualify-windows.outputs.desktop_sha256",
-            "QUALIFIED_RELEASE_VERIFYING_KEY",
-            "QUALIFIED_WINDOWS_SIGNING_MODE",
-            "windows_signing_mode",
-            "ALLOW_UNSIGNED_WINDOWS_RELEASE",
-            "signer-authoritative repository value",
-            "Get-FileHash",
-            "RELEASE_PUBLISHER_PATH",
-            "RELEASE_PUBLISHER_SHA256",
-            "RELEASE_SIGNING_KEY_FILE",
-            "AUTHENTICODE_TOOL_SHA256",
-            "WRANGLER_SHA256",
-            "ISCC_SHA256",
-            "CLOUDFLARE_ACCOUNT_ID",
-            "whoami --json",
-            "FileAttributes]::ReparsePoint",
-            "SkipQualification = $true",
-            "SkipBuild = $true",
-            "PublisherPath = $env:RELEASE_PUBLISHER_PATH",
-            "PublisherSha256 = $env:RELEASE_PUBLISHER_SHA256",
-            "Remove build-runner release material",
-            "Remove signing-runner release material",
-            "target\\release-publish",
-        ] {
-            assert!(
-                release_workflow.contains(contract),
-                "protected release workflow lost {contract}"
-            );
-        }
-        assert!(
-            !release_workflow.contains("runs-on: ubuntu-latest")
-                && !release_workflow.contains("runs-on: windows-latest")
-                && !release_workflow.contains("environment: production-release")
-                && !release_workflow.contains("actions/upload-artifact")
-                && !release_workflow.contains("actions/download-artifact")
-                && !release_workflow.contains("secrets.RELEASE_SIGNING_KEY_B64URL")
-                && !release_workflow.contains("secrets.CLOUDFLARE_ACCOUNT_ID")
-                && !release_workflow.contains("secrets.CLOUDFLARE_API_TOKEN"),
-            "production release must stay on zero-cost self-hosted runners without a paid environment, Actions binary artifact handoff, or GitHub-held publication authority"
-        );
-        let cleanup_workflow = manifest(".github/workflows/release_handoff_cleanup.yml");
-        assert!(
-            cleanup_workflow.contains("runs-on: [self-hosted, axiusflow, windows, release-build]")
-                && cleanup_workflow.contains("AxiusflowReleaseHandoff")
-                && cleanup_workflow.contains("AddHours(-24)")
-                && !cleanup_workflow.contains("runs-on: ubuntu-latest")
-                && !cleanup_workflow.contains("runs-on: windows-latest"),
-            "release handoff cleanup must stay bounded and self-hosted"
-        );
-        let release_script = manifest("tools/publish_release.ps1");
-        let prebuild_start = release_script
-            .find("if ($PrebuildOnly)")
-            .expect("prebuild-only path");
-        let prebuild_end = release_script[prebuild_start..]
-            .find("$publishedAt")
-            .map(|offset| prebuild_start + offset)
-            .expect("prebuild path boundary");
-        assert!(
-            !release_script[prebuild_start..prebuild_end]
-                .contains("--bin tradingplot_release_publisher"),
-            "unprivileged prebuild must not manufacture the trusted release publisher"
-        );
-        assert!(
-            release_script[prebuild_start..prebuild_end]
-                .contains("Remove-Item Env:TRADINGPLOT_LOCAL_PACKAGE"),
-            "production prebuild must clear the local-package updater-disable marker"
-        );
-
-        let desktop_update = manifest("apps/desktop/src/update.rs");
-        assert!(
-            desktop_update.contains("option_env!(\"TRADINGPLOT_LOCAL_PACKAGE\")"),
-            "desktop updater must honor the compile-time local-package marker"
-        );
-        assert!(
-            desktop_update.contains("AXIUSFLOW_UPDATE_RESTART_READY_V2")
-                && desktop_update.contains("TRADINGPLOT_UPDATE_RESTART_READY_V2")
-                && desktop_update.contains("AXIUSFLOW_UPDATE_RESTART_COMMIT_V1"),
-            "desktop updater must preserve the pre-rename restart wire protocol while accepting transition builds"
-        );
-        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
-        assert!(
-            launcher.contains("AXIUSFLOW_UPDATE_RESTART_READY_V2")
-                && launcher.contains("AXIUSFLOW_UPDATE_RESTART_COMMIT_V1")
-                && launcher.contains("TRADINGPLOT_UPDATE_RESTART_COMMIT_V1"),
-            "launcher must preserve the pre-rename restart wire protocol while accepting transition builds"
-        );
-        assert!(
-            manifest("crates/platform_runtime/src/release_delivery.rs")
-                .contains("AXIUSFLOW_RELEASE_BLOCK_PLAN_V1\\0"),
-            "release block-plan signing domain must remain stable across the TradingPlot rename"
-        );
-        assert!(
-            publisher.contains("command.env(\"TRADINGPLOT_LOCAL_PACKAGE\", \"1\")")
-                && publisher.contains("command.env_remove(\"TRADINGPLOT_LOCAL_PACKAGE\")"),
-            "release publisher must mark local package builds and clear inherited markers from production builds"
-        );
-
         let desktop = manifest("apps/desktop/src/desktop.rs");
-        assert!(
-            desktop.contains("run_desktop_readiness_command")
-                && desktop.contains("load_workspace_for_readiness")
-                && desktop.contains("schedule_versioned_launcher_promotion()")
-        );
-        let readiness = desktop.find("--desktop-readiness").expect("readiness gate");
-        let account = desktop
-            .find("DesktopAccount::install()")
-            .expect("account startup");
-        assert!(
-            readiness < account,
-            "headless readiness must run before interactive account startup"
-        );
-        let readiness_fn_start = desktop
-            .find("fn run_desktop_readiness_command")
-            .expect("desktop readiness command");
-        let readiness_fn_end = desktop[readiness_fn_start..]
-            .find("#[derive(serde::Serialize)]")
-            .map(|offset| readiness_fn_start + offset)
-            .expect("desktop readiness command boundary");
-        let readiness_fn = &desktop[readiness_fn_start..readiness_fn_end];
-        assert!(
-            readiness_fn.contains("AccountService::new(")
-                && readiness_fn.contains("native_account_session_shutdown_guard")
-                && readiness_fn.contains("account_service.start_restore()")
-                && readiness_fn.contains("wait_for_account_restore_readiness")
-                && readiness_fn.contains("restore_readiness()")
-                && readiness_fn.contains("validate_workspace_boot_for_readiness"),
-            "release readiness must install process-lifecycle fencing before production saved-session restore and use bounded local readiness"
-        );
-
-        let update = manifest("apps/desktop/src/update.rs");
-        assert!(
-            update.contains("--check-update")
-                && update.contains("--prepare-update")
-                && update.contains("--update-and-restart")
-                && update.contains("UpdateState::Downloading")
-                && update.contains("UpdateState::ReadyToRestart")
-                && update.contains("updater.request_check()?")
-                && update.contains("PERIODIC_CHECK_INTERVAL")
-                && update.contains("CHECK_RETRY_MAXIMUM")
-                && !update.contains("ReleaseInstaller")
-        );
-        assert!(
-            !repository_root()
-                .join("tools/build_clean_break_installer.ps1")
-                .exists()
-                && !repository_root()
-                    .join("tools/windows/tradingplot_clean_break_setup.iss")
-                    .exists(),
-            "obsolete clean-break installer path must stay retired"
-        );
-        assert!(
-            !update.contains("report.current_version != env!(\"CARGO_PKG_VERSION\")"),
-            "rolled-back desktops must not reject a newer trusted launcher solely for package semver"
-        );
-        let about = manifest("apps/desktop/src/components/about_dialog.rs");
-        assert!(
-            about.contains("Restart to update") && !about.contains("Update now"),
-            "About must expose explicit restart only after background preparation"
-        );
-        let workspace_tabs = manifest("apps/desktop/src/desktop/workspace_tabs.rs");
-        let about_open_start = workspace_tabs
-            .find("pub(super) fn open_about_dialog")
-            .expect("About open function");
-        let about_open_end = workspace_tabs[about_open_start..]
-            .find("pub(super) fn close_about_dialog")
-            .map(|offset| about_open_start + offset)
-            .expect("About close function");
-        assert!(
-            !workspace_tabs[about_open_start..about_open_end].contains("request_check"),
-            "opening About must not be the update discovery trigger"
-        );
+        let run_start = desktop
+            .find("pub(super) fn run()")
+            .expect("desktop entrypoint");
+        let run_end = desktop[run_start..]
+            .find("fn schedule_versioned_launcher_promotion")
+            .map(|offset| run_start + offset)
+            .expect("entrypoint boundary");
+        let run = &desktop[run_start..run_end];
+        assert!(run.contains("run_desktop(configured, lifecycle)"));
+        assert!(!run.contains("DesktopAccount::install()"));
+        assert!(!run.contains("run_onboarding()"));
+        let updater = manifest("apps/desktop/src/update.rs");
+        assert!(updater.contains("const UPDATE_BACKEND_CONFIGURED: bool = false"));
+        let account = manifest("apps/desktop/src/account.rs");
+        assert!(account.contains("const AUTH_BACKEND_CONFIGURED: bool = cfg!(test)"));
     }
 
     #[test]
     fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
-        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/asceify_launcher.rs");
         for contract in [
             "rollout_eligible",
             "current_update_check_report",
@@ -1884,29 +1548,27 @@ mod tests {
     fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
         for path in [
             "apps/desktop/src/main.rs",
-            "crates/platform_runtime/src/bin/tradingplot_launcher.rs",
+            "crates/platform_runtime/src/bin/asceify_launcher.rs",
         ] {
             assert!(
                 manifest(path).contains("windows_subsystem = \"windows\""),
                 "Windows GUI binary {path} lost subsystem marker"
             );
         }
-        let setup = manifest("tools/windows/tradingplot_setup.iss");
+        let setup = manifest("tools/windows/asceify_setup.iss");
         for contract in [
             "PrivilegesRequired=lowest",
-            "AppPublisherURL=https://axiusflow.com",
-            "AppSupportURL=https://axiusflow.com",
-            "DefaultDirName={localappdata}\\Programs\\TradingPlot",
-            "UninstallDisplayIcon={app}\\tradingplot_launcher.exe",
-            "AppUserModelID: \"com.tradingplot.desktop\"",
-            "DestName: \"tradingplot_launcher.exe\"",
+            "DefaultDirName={localappdata}\\Programs\\Asceify",
+            "UninstallDisplayIcon={app}\\asceify_launcher.exe",
+            "AppUserModelID: \"com.asceify.desktop\"",
+            "DestName: \"asceify_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
-            "ValueName: \"TradingPlot Engine\"; Flags: deletevalue",
+            "ValueName: \"Asceify Engine\"; Flags: deletevalue",
             "RollbackCompatibilityPath",
             "DestName: \"rollback-compatibility.json\"",
             "function PrepareToInstall(var NeedsRestart: Boolean): String;",
-            "{localappdata}\\Programs\\.TradingPlot-lifecycle\\uninstall.json",
-            "Finishing the previous TradingPlot uninstall...",
+            "{localappdata}\\Programs\\.Asceify-lifecycle\\uninstall.json",
+            "Finishing the previous Asceify uninstall...",
         ] {
             assert!(
                 setup.contains(contract),
@@ -1924,14 +1586,6 @@ mod tests {
             "pending uninstall cleanup must run before the bundled release installation hook"
         );
         assert!(!setup.contains("EnginePath"));
-        let publisher =
-            manifest("crates/platform_runtime/src/bin/tradingplot_release_publisher.rs");
-        assert!(
-            publisher.contains("compile_windows_installer")
-                && publisher.contains("ReleaseFileRole::RuntimeAsset")
-                && publisher.contains("tradingplot_launcher")
-        );
-        assert!(!production_prefix(&publisher).contains("ReleaseFileRole::Engine"));
     }
     #[test]
     fn platform_filesystem_assumptions_remain_explicitly_guarded() {
@@ -1964,7 +1618,7 @@ mod tests {
             for forbidden in [
                 "/proc/",
                 "\"/tmp",
-                "/opt/tradingplot",
+                "/opt/asceify",
                 "/Applications/",
                 "C:\\Program",
                 "C:/Program",
@@ -2057,9 +1711,9 @@ mod tests {
         );
         for production_release_contract in [
             "release-pair",
-            "TRADINGPLOT_RELEASE_IDENTITY",
-            "TRADINGPLOT_INSTALL_GENERATION",
-            "TRADINGPLOT_RELEASE_VERIFYING_KEY",
+            "ASCEIFY_RELEASE_IDENTITY",
+            "ASCEIFY_INSTALL_GENERATION",
+            "ASCEIFY_RELEASE_VERIFYING_KEY",
         ] {
             assert!(
                 !workflow.contains(production_release_contract),
@@ -2183,7 +1837,7 @@ mod tests {
     }
     #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
-        let launcher = manifest("crates/platform_runtime/src/bin/tradingplot_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/asceify_launcher.rs");
         // The launcher runs from inside the tree uninstall deletes, and
         // Windows refuses to delete a running executable: uninstall must
         // rename the image to a sibling staging dir first so the original
@@ -2259,7 +1913,7 @@ mod tests {
         }
         assert!(
             workflow.contains("AXIUSFLOW_RITHMIC_KIT_ROOT")
-                && workflow.contains("TRADINGPLOT_RITHMIC_KIT_ROOT")
+                && workflow.contains("ASCEIFY_RITHMIC_KIT_ROOT")
                 && workflow.contains("C:\\axiusflow-deps\\provider-kit"),
             "live-market gates must keep the provisioned Rithmic kit location and accept both env names"
         );
@@ -2274,7 +1928,7 @@ mod tests {
     #[test]
     fn rithmic_application_name_has_one_canonical_source() {
         let adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
-        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"TradingPlot\";"));
+        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Asceify\";"));
         for relative in [
             "crates/adapters/rithmic_protocol/src/provider_session.rs",
             "crates/adapters/rithmic_protocol/src/protocol.rs",
@@ -2285,7 +1939,7 @@ mod tests {
         ] {
             let source = manifest(relative);
             assert!(
-                !source.contains("\"TradingPlot\""),
+                !source.contains("\"Asceify\""),
                 "{relative} reintroduced non-canonical identity"
             );
             assert!(
@@ -2345,8 +1999,6 @@ mod tests {
                 "stripe::",
                 "Dodo",
                 "dodo::",
-                "cloudflare",
-                "Cloudflare",
             ] {
                 assert!(
                     !production.contains(forbidden),
@@ -2361,10 +2013,8 @@ mod tests {
                 "market coordinator must not own account state {identifier}"
             );
         }
-        assert!(manifest("apps/desktop/Cargo.toml").contains("tradingplot_account_runtime"));
-        assert!(
-            !manifest("crates/ui/chart_integration/Cargo.toml").contains("tradingplot_account")
-        );
+        assert!(manifest("apps/desktop/Cargo.toml").contains("asceify_account_runtime"));
+        assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("asceify_account"));
     }
     #[test]
     fn account_contracts_remain_plain_bounded_values() {

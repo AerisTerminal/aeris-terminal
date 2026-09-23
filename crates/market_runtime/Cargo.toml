@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_market_runtime"
+name = "asceify_market_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,13 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tradingplot_contracts = { path = "../contracts" }
-tradingplot_market_data = { path = "../domain/market_data" }
-tradingplot_market_engine = { path = "../market_engine" }
-tradingplot_platform_runtime = { path = "../platform_runtime" }
-tradingplot_provider_history = { path = "../provider_history" }
-tradingplot_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
-tradingplot_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
+asceify_contracts = { path = "../contracts" }
+asceify_market_data = { path = "../domain/market_data" }
+asceify_market_engine = { path = "../market_engine" }
+asceify_platform_runtime = { path = "../platform_runtime" }
+asceify_provider_history = { path = "../provider_history" }
+asceify_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
+asceify_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 serde_json.workspace = true
 zeroize.workspace = true
 

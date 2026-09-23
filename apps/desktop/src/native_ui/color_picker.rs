@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
+use asceify_design_system::{AsceifyTheme, RadiusToken, TypographyRole};
 use gpui::{
     App, ElementId, Entity, Hsla, IntoElement, MouseButton, RenderOnce, Rgba, SharedString, Window,
     checkerboard, div, hsla, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use num_traits::ToPrimitive;
-use tradingplot_design_system::{RadiusToken, TradingPlotTheme, TypographyRole};
 
 use super::{
     input::{Input, InputState},
@@ -44,7 +44,7 @@ pub(crate) struct ColorPicker {
     current: String,
     input: Entity<InputState>,
     error: Option<SharedString>,
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
     on_select: Option<SelectionHandler>,
 }
 
@@ -53,7 +53,7 @@ impl ColorPicker {
         id: impl Into<ElementId>,
         current: impl Into<String>,
         input: &Entity<InputState>,
-        theme: &TradingPlotTheme,
+        theme: &AsceifyTheme,
     ) -> Self {
         Self {
             id: id.into(),
@@ -184,7 +184,7 @@ fn saturation_value_field(
     selected: Hsva,
     input: &Entity<InputState>,
     handler: Option<&SelectionHandler>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let pure_hue = hsla(selected.hue, 1.0, 0.5, 1.0);
     let transparent_white = hsla(0.0, 0.0, 1.0, 0.0);
@@ -271,7 +271,7 @@ fn hue_slider(
     selected: Hsva,
     input: &Entity<InputState>,
     handler: Option<&SelectionHandler>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let stops = [
         hsla(0.0, 1.0, 0.5, 1.0),
@@ -335,7 +335,7 @@ fn alpha_slider(
     selected: Hsva,
     input: &Entity<InputState>,
     handler: Option<&SelectionHandler>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let opaque = selected_color(Hsva {
         alpha: 1.0,
@@ -392,7 +392,7 @@ fn alpha_slider(
         ))
 }
 
-fn slider_shell(theme: &TradingPlotTheme) -> gpui::Div {
+fn slider_shell(theme: &AsceifyTheme) -> gpui::Div {
     div()
         .relative()
         .w(px(FIELD_WIDTH))
@@ -402,7 +402,7 @@ fn slider_shell(theme: &TradingPlotTheme) -> gpui::Div {
         .border_color(gpui_color(theme.colors.border_secondary))
 }
 
-fn selection_handle(x: f32, y: f32, color: Hsla, theme: &TradingPlotTheme) -> impl IntoElement {
+fn selection_handle(x: f32, y: f32, color: Hsla, theme: &AsceifyTheme) -> impl IntoElement {
     div()
         .absolute()
         .left(px((x - 7.0).clamp(-1.0, FIELD_WIDTH - 13.0)))
@@ -415,7 +415,7 @@ fn selection_handle(x: f32, y: f32, color: Hsla, theme: &TradingPlotTheme) -> im
         .shadow_sm()
 }
 
-fn slider_handle(x: f32, color: Hsla, theme: &TradingPlotTheme) -> impl IntoElement {
+fn slider_handle(x: f32, color: Hsla, theme: &AsceifyTheme) -> impl IntoElement {
     div()
         .absolute()
         .left(px((x - 6.0).clamp(-1.0, FIELD_WIDTH - 11.0)))
@@ -432,7 +432,7 @@ fn hex_input_row(
     input: &Entity<InputState>,
     selected: Hsva,
     handler: Option<&SelectionHandler>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let submit_input = input.clone();
     let submit_handler = handler.cloned();
@@ -493,7 +493,7 @@ fn recommended_colors(
     current: &str,
     input: &Entity<InputState>,
     handler: Option<&SelectionHandler>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let mut row = div().flex().items_center().gap_3();
     for (index, value) in RECOMMENDED_COLORS.into_iter().enumerate() {

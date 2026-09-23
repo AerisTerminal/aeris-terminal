@@ -468,7 +468,7 @@ mod tests {
             } => {
                 assert_eq!(coin, "BTC");
                 assert_eq!(interval, "15m");
-                let period = tradingplot_market_data::BarPeriod::time(900).expect("period");
+                let period = asceify_market_data::BarPeriod::time(900).expect("period");
                 let page = crate::candles::decode_candle_page(
                     &candles,
                     period,
@@ -501,7 +501,7 @@ mod tests {
             } => {
                 assert_eq!(coin, "BTC");
                 assert_eq!(interval, "15m");
-                let period = tradingplot_market_data::BarPeriod::time(900).expect("period");
+                let period = asceify_market_data::BarPeriod::time(900).expect("period");
                 let page = crate::candles::decode_candle_page(
                     &candles,
                     period,

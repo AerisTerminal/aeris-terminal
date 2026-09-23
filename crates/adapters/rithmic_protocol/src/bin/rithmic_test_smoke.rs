@@ -1,14 +1,7 @@
-use std::{
-    io::{self, Write},
-    num::{NonZeroU64, NonZeroUsize},
-    sync::mpsc::{self, RecvTimeoutError},
-    thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-use tradingplot_platform_runtime::{
+use asceify_platform_runtime::{
     CredentialVault, LiveMarketGateOutcome, LiveMarketGateRecorder, NativeCredentialVault,
 };
-use tradingplot_rithmic_protocol_adapter::{
+use asceify_rithmic_protocol_adapter::{
     AuthenticationState, CollectionProgress, DecodedCatalogMessage, DecodedControlMessage,
     DecodedMarketMessage, DecodedTimeBarType, DepthByOrderSnapshotMessage,
     DepthByOrderSnapshotRequest, DepthByOrderSubscription, HistoryBars, HistoryCollectionRequest,
@@ -22,6 +15,13 @@ use tradingplot_rithmic_protocol_adapter::{
     SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
     TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
     collect_rithmic_covering_recovery_evidence,
+};
+use std::{
+    io::{self, Write},
+    num::{NonZeroU64, NonZeroUsize},
+    sync::mpsc::{self, RecvTimeoutError},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroize;
 
@@ -255,7 +255,7 @@ fn login_and_select(
     application: RithmicApplication<'_>,
 ) -> Result<
     (
-        tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+        asceify_rithmic_protocol_adapter::RithmicTickerConnection,
         SelectedInstrument,
     ),
     String,
@@ -276,7 +276,7 @@ fn login_and_select(
 }
 
 fn test_heartbeat(
-    ticker: &mut tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+    ticker: &mut asceify_rithmic_protocol_adapter::RithmicTickerConnection,
 ) -> Result<(), String> {
     ticker
         .send_heartbeat()
@@ -298,7 +298,7 @@ fn test_heartbeat(
 }
 
 fn search_and_reference(
-    ticker: &mut tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+    ticker: &mut asceify_rithmic_protocol_adapter::RithmicTickerConnection,
 ) -> Result<SelectedInstrument, String> {
     ticker
         .search_symbols(SymbolSearchRequest {
@@ -391,7 +391,7 @@ fn search_and_reference(
 }
 
 fn test_subscription(
-    ticker: &mut tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+    ticker: &mut asceify_rithmic_protocol_adapter::RithmicTickerConnection,
     selected: &SelectedInstrument,
 ) -> Result<bool, String> {
     ticker
@@ -458,7 +458,7 @@ fn test_subscription(
 }
 
 fn test_depth_by_order(
-    ticker: &mut tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+    ticker: &mut asceify_rithmic_protocol_adapter::RithmicTickerConnection,
     selected: &SelectedInstrument,
 ) -> Result<(), String> {
     ticker
@@ -497,7 +497,7 @@ fn test_depth_by_order(
 }
 
 fn await_depth_by_order_subscription(
-    ticker: &mut tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+    ticker: &mut asceify_rithmic_protocol_adapter::RithmicTickerConnection,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -531,7 +531,7 @@ struct MboSnapshotEvidence {
 }
 
 fn collect_depth_by_order_snapshot(
-    ticker: &mut tradingplot_rithmic_protocol_adapter::RithmicTickerConnection,
+    ticker: &mut asceify_rithmic_protocol_adapter::RithmicTickerConnection,
     selected: &SelectedInstrument,
 ) -> Result<MboSnapshotEvidence, String> {
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -712,7 +712,7 @@ fn run_history(
 }
 
 fn run_tick_history(
-    history: &mut tradingplot_rithmic_protocol_adapter::RithmicHistoryConnection,
+    history: &mut asceify_rithmic_protocol_adapter::RithmicHistoryConnection,
     selected: &SelectedInstrument,
     start: i32,
     finish: i32,
@@ -938,7 +938,7 @@ fn wait_for_provider_observed_silence(
                         _ => None,
                     };
                     evidence.observed_retry = callback.retry.and_then(|retry| {
-                        (retry == tradingplot_rithmic_protocol_adapter::RetryDisposition::Transient)
+                        (retry == asceify_rithmic_protocol_adapter::RetryDisposition::Transient)
                             .then_some(ObservedRetry::Transient)
                     });
                     evidence.observation_method.provider_path_observed =
@@ -947,9 +947,7 @@ fn wait_for_provider_observed_silence(
                         && evidence.observation.instruments_discovered
                         && evidence.observed_invalidation == Some(expected)
                         && callback.retry
-                            == Some(
-                                tradingplot_rithmic_protocol_adapter::RetryDisposition::Transient,
-                            )
+                            == Some(asceify_rithmic_protocol_adapter::RetryDisposition::Transient)
                     {
                         Ok(())
                     } else {
@@ -1183,9 +1181,7 @@ fn wait_for_silence_invalidation(
                         && instruments_discovered
                         && reason == expected
                         && callback.retry
-                            == Some(
-                                tradingplot_rithmic_protocol_adapter::RetryDisposition::Transient,
-                            )
+                            == Some(asceify_rithmic_protocol_adapter::RetryDisposition::Transient)
                     {
                         return Ok(());
                     }

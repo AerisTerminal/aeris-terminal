@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_terminal_ui"
+name = "asceify_terminal_ui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,12 @@ publish.workspace = true
 
 [features]
 default = ["gpui"]
-gpui = ["dep:tradingplot_design_system", "dep:gpui"]
+gpui = ["dep:asceify_design_system", "dep:gpui"]
 
 [dependencies]
-tradingplot_instruments = { path = "../../domain/instruments" }
-tradingplot_design_system = { path = "../design_system", optional = true }
-tradingplot_market_data = { path = "../../domain/market_data" }
+asceify_instruments = { path = "../../domain/instruments" }
+asceify_design_system = { path = "../design_system", optional = true }
+asceify_market_data = { path = "../../domain/market_data" }
 gpui = { workspace = true, optional = true }
 
 [lints]

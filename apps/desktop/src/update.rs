@@ -33,11 +33,12 @@ const MAXIMUM_LAUNCHER_BYTES: u64 = 64 * 1024 * 1024;
 // renamed launchers can complete an update; accept the short-lived renamed
 // values below for compatibility with builds produced during the transition.
 const UPDATE_RESTART_READY: &str = "AXIUSFLOW_UPDATE_RESTART_READY_V2\n";
-const TRANSITIONAL_UPDATE_RESTART_READY: &str = "TRADINGPLOT_UPDATE_RESTART_READY_V2\n";
+const TRANSITIONAL_UPDATE_RESTART_READY: &str = "ASCEIFY_UPDATE_RESTART_READY_V2\n";
 const UPDATE_RESTART_COMMIT: &[u8] = b"AXIUSFLOW_UPDATE_RESTART_COMMIT_V1\n";
 
 static UPDATE_RESTART_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-const LOCAL_PACKAGE_BUILD: bool = option_env!("TRADINGPLOT_LOCAL_PACKAGE").is_some();
+const UPDATE_BACKEND_CONFIGURED: bool = false;
+const LOCAL_PACKAGE_BUILD: bool = option_env!("ASCEIFY_LOCAL_PACKAGE").is_some();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UpdateState {
@@ -110,13 +111,15 @@ pub struct DesktopUpdater {
 
 impl DesktopUpdater {
     pub fn new() -> Result<Self, String> {
-        if LOCAL_PACKAGE_BUILD {
-            return Err("update checking is unavailable for local package builds".to_string());
+        if !UPDATE_BACKEND_CONFIGURED || LOCAL_PACKAGE_BUILD {
+            return Err(
+                "automatic updates are disabled until a release backend is configured".to_string(),
+            );
         }
         let (request_tx, request_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);
         thread::Builder::new()
-            .name("tradingplot-update-client".to_string())
+            .name("asceify-update-client".to_string())
             .spawn(move || run_update_worker(&request_rx, &result_tx))
             .map_err(|_| "update client could not start".to_string())?;
         let mut updater = Self {
@@ -161,7 +164,7 @@ impl DesktopUpdater {
             return Err("an update request is already pending".to_string());
         }
         if !matches!(self.presentation.state, UpdateState::ReadyToRestart { .. }) {
-            return Err("no prepared TradingPlot update is ready to restart".to_string());
+            return Err("no prepared Asceify update is ready to restart".to_string());
         }
         self.requests
             .try_send(UpdateRequest::Restart)
@@ -374,21 +377,18 @@ fn run_update_worker(requests: &Receiver<UpdateRequest>, results: &SyncSender<Up
 
 fn stable_launcher() -> Result<PathBuf, String> {
     let install_root =
-        tradingplot_platform_runtime::native_install_root().map_err(|error| error.to_string())?;
-    let launcher = install_root.join(format!(
-        "tradingplot_launcher{}",
-        std::env::consts::EXE_SUFFIX
-    ));
+        asceify_platform_runtime::native_install_root().map_err(|error| error.to_string())?;
+    let launcher = install_root.join(format!("asceify_launcher{}", std::env::consts::EXE_SUFFIX));
     let metadata = std::fs::symlink_metadata(&launcher)
-        .map_err(|_| "installed TradingPlot launcher is unavailable".to_string())?;
+        .map_err(|_| "installed Asceify launcher is unavailable".to_string())?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.len() == 0
         || metadata.len() > MAXIMUM_LAUNCHER_BYTES
     {
-        return Err("installed TradingPlot launcher is invalid".to_string());
+        return Err("installed Asceify launcher is invalid".to_string());
     }
-    let release = tradingplot_platform_runtime::current_release_identity();
+    let release = asceify_platform_runtime::current_release_identity();
     if release.install_generation == 0
         || release.release_identity.is_empty()
         || release.release_identity.len() > 128
@@ -397,7 +397,7 @@ fn stable_launcher() -> Result<PathBuf, String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
-        return Err("installed TradingPlot release identity is invalid".to_string());
+        return Err("installed Asceify release identity is invalid".to_string());
     }
     let signed_launcher = install_root
         .join("versions")
@@ -405,22 +405,19 @@ fn stable_launcher() -> Result<PathBuf, String> {
             "{:020}-{}",
             release.install_generation, release.release_identity
         ))
-        .join(format!(
-            "tradingplot_launcher{}",
-            std::env::consts::EXE_SUFFIX
-        ));
+        .join(format!("asceify_launcher{}", std::env::consts::EXE_SUFFIX));
     if !launcher_is_trusted(&launcher, &signed_launcher)? {
-        return Err("installed TradingPlot launcher is not the active signed launcher".to_string());
+        return Err("installed Asceify launcher is not the active signed launcher".to_string());
     }
     Ok(launcher)
 }
 
 fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result<bool, String> {
-    let active = tradingplot_platform_runtime::current_release_identity();
+    let active = asceify_platform_runtime::current_release_identity();
     launcher_is_trusted_with(launcher, active_signed_launcher, |path| {
         #[cfg(target_os = "windows")]
         {
-            if tradingplot_platform_runtime::verify_windows_publisher_signature(path).is_err() {
+            if asceify_platform_runtime::verify_windows_publisher_signature(path).is_err() {
                 return false;
             }
             launcher_identity(path).is_ok_and(|launcher| {
@@ -465,7 +462,7 @@ fn launcher_identity(launcher: &Path) -> Result<LauncherIdentityReport, String> 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| "installed TradingPlot launcher identity could not be queried".to_string())?;
+        .map_err(|_| "installed Asceify launcher identity could not be queried".to_string())?;
     let deadline = Instant::now() + CHECK_TIMEOUT;
     let status = loop {
         match child.try_wait() {
@@ -474,35 +471,35 @@ fn launcher_identity(launcher: &Path) -> Result<LauncherIdentityReport, String> 
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("installed TradingPlot launcher identity query timed out".to_string());
+                return Err("installed Asceify launcher identity query timed out".to_string());
             }
             Err(_) => {
-                return Err("installed TradingPlot launcher identity query failed".to_string());
+                return Err("installed Asceify launcher identity query failed".to_string());
             }
         }
     };
     if !status.success() {
-        return Err("installed TradingPlot launcher identity query was rejected".to_string());
+        return Err("installed Asceify launcher identity query was rejected".to_string());
     }
     let mut output = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         stdout
             .take(1025)
             .read_to_end(&mut output)
-            .map_err(|_| "installed TradingPlot launcher identity could not be read".to_string())?;
+            .map_err(|_| "installed Asceify launcher identity could not be read".to_string())?;
     }
     if output.len() > 1024 {
-        return Err("installed TradingPlot launcher identity exceeded its size bound".to_string());
+        return Err("installed Asceify launcher identity exceeded its size bound".to_string());
     }
     serde_json::from_slice(&output)
-        .map_err(|_| "installed TradingPlot launcher identity was invalid".to_string())
+        .map_err(|_| "installed Asceify launcher identity was invalid".to_string())
 }
 
 fn launcher_files_match(left: &Path, right: &Path) -> Result<bool, String> {
     let left_metadata = std::fs::symlink_metadata(left)
-        .map_err(|_| "installed TradingPlot launcher is unavailable".to_string())?;
+        .map_err(|_| "installed Asceify launcher is unavailable".to_string())?;
     let right_metadata = std::fs::symlink_metadata(right)
-        .map_err(|_| "active signed TradingPlot launcher is unavailable".to_string())?;
+        .map_err(|_| "active signed Asceify launcher is unavailable".to_string())?;
     if !left_metadata.is_file()
         || left_metadata.file_type().is_symlink()
         || !right_metadata.is_file()
@@ -514,18 +511,18 @@ fn launcher_files_match(left: &Path, right: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     let mut left = File::open(left)
-        .map_err(|_| "installed TradingPlot launcher could not be verified".to_string())?;
+        .map_err(|_| "installed Asceify launcher could not be verified".to_string())?;
     let mut right = File::open(right)
-        .map_err(|_| "active signed TradingPlot launcher could not be verified".to_string())?;
+        .map_err(|_| "active signed Asceify launcher could not be verified".to_string())?;
     let mut left_buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut right_buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let left_count = left
             .read(&mut left_buffer)
-            .map_err(|_| "installed TradingPlot launcher could not be verified".to_string())?;
+            .map_err(|_| "installed Asceify launcher could not be verified".to_string())?;
         let right_count = right
             .read(&mut right_buffer)
-            .map_err(|_| "active signed TradingPlot launcher could not be verified".to_string())?;
+            .map_err(|_| "active signed Asceify launcher could not be verified".to_string())?;
         if left_count != right_count || left_buffer[..left_count] != right_buffer[..right_count] {
             return Ok(false);
         }
@@ -613,7 +610,7 @@ fn run_launcher_report(
 }
 
 fn validate_launcher_report(report: LauncherUpdateCheck) -> Result<LauncherUpdateCheck, String> {
-    let current = tradingplot_platform_runtime::current_release_identity().install_generation;
+    let current = asceify_platform_runtime::current_release_identity().install_generation;
     if report.schema_version != 2
         || report.current_generation != current
         || report.latest_generation < report.current_generation
@@ -702,7 +699,7 @@ impl Drop for PreparedRestart {
             // closing this value on GPUI must never wait for process exit. Keep
             // the single-flight slot until that old helper has actually gone.
             let _ = thread::Builder::new()
-                .name("tradingplot-update-restart-cleanup".to_string())
+                .name("asceify-update-restart-cleanup".to_string())
                 .spawn(move || {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -768,7 +765,7 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let reader = thread::Builder::new()
-        .name("tradingplot-update-restart-ack".to_string())
+        .name("asceify-update-restart-ack".to_string())
         .spawn(move || {
             let mut line = String::new();
             let mut reader =
@@ -918,13 +915,13 @@ mod tests {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!("tradingplot-update-{name}-{nanos}"));
+        let path = std::env::temp_dir().join(format!("asceify-update-{name}-{nanos}"));
         fs::create_dir_all(&path).expect("temporary base");
         path
     }
 
     fn update_report(update_available: bool) -> LauncherUpdateCheck {
-        let current = tradingplot_platform_runtime::current_release_identity().install_generation;
+        let current = asceify_platform_runtime::current_release_identity().install_generation;
         LauncherUpdateCheck {
             schema_version: 2,
             current_generation: current,
@@ -1069,7 +1066,7 @@ mod tests {
 
     #[test]
     fn launcher_report_requires_generation_consistency() {
-        let current = tradingplot_platform_runtime::current_release_identity().install_generation;
+        let current = asceify_platform_runtime::current_release_identity().install_generation;
         let valid = LauncherUpdateCheck {
             schema_version: 2,
             current_generation: current,

@@ -1,10 +1,10 @@
 //! Validation failures at the replay application boundary.
 
 use crate::stream::StreamProtocolError;
+use asceify_instruments::InstrumentValidationError;
+use asceify_market_data::MarketDataValidationError;
 use core::fmt;
 use std::error::Error;
-use tradingplot_instruments::InstrumentValidationError;
-use tradingplot_market_data::MarketDataValidationError;
 
 /// Validation failures at the replay application boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]

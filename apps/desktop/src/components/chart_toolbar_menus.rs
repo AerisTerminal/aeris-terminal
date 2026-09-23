@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
     cx: &App,
@@ -171,7 +171,7 @@ pub(super) fn chrome_overlay_content(
     overlay: ChromeOverlay,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     cx: &App,
 ) -> AnyElement {
     let pending = app_state.rithmic_switch.in_progress();
@@ -268,7 +268,7 @@ pub(super) struct ChromeOverlayPanelStyle {
 
 pub(super) fn chrome_overlay_panel(
     content: AnyElement,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     style: ChromeOverlayPanelStyle,
     closing: bool,
     generation: u64,
@@ -381,7 +381,7 @@ pub(super) fn timeframe_overlay_content(
     app: &Entity<WorkspaceSurface>,
     intervals: &[ChartInterval],
     state: TimeframeOverlayState,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let groups = timeframe_menu_groups(intervals);
@@ -482,7 +482,7 @@ fn timeframe_flyout_host(
     group: TimeframeMenuGroup,
     index: usize,
     flyout_height: f32,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let animation_origin = PopupAnimationOrigin::new(
         0.0,
@@ -518,7 +518,7 @@ pub(super) fn timeframe_flyout_panel(
     group: TimeframeMenuGroup,
     keyboard_index: Option<usize>,
     pending: bool,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let hover_panel = app.clone();
@@ -596,7 +596,7 @@ pub(super) fn chart_type_overlay_content(
     app: &Entity<WorkspaceSurface>,
     selected: ChartType,
     keyboard_selection: usize,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let mut panel = div()
@@ -623,7 +623,7 @@ pub(super) fn chart_type_overlay_content(
 
 pub(super) fn quick_timeframe_overlay_content(
     input: &Entity<InputState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     div()
         .w(px(QUICK_TIMEFRAME_POPUP_WIDTH))
@@ -780,7 +780,7 @@ pub(super) fn timeframe_group_row(
     app: &Entity<WorkspaceSurface>,
     group: TimeframeMenuGroup,
     state: TimeframeGroupRowState,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let hover_app = app.clone();
@@ -850,7 +850,7 @@ pub(super) fn timeframe_overlay_row(
     index: usize,
     state: TimeframeRowState,
     style: TimeframeRowStyle,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
     let mut row = MenuRow::compact(
@@ -898,7 +898,7 @@ pub(super) fn chart_type_overlay_row(
     chart_type: ChartType,
     index: usize,
     state: ChartTypeRowState,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
     let mut row = MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)

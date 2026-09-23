@@ -1,4 +1,4 @@
-//! Typed native mapping of the `TradingPlot` `platform.css` contract.
+//! Typed native mapping of the `Asceify` `platform.css` contract.
 //!
 //! Token source expressions and resolved sRGB values share one registry. The
 //! checked CSS manifest uses generated custom-property names, while painting
@@ -327,15 +327,15 @@ pub struct ThemeDimensions {
     pub border_width: f32,
 }
 
-/// A fully resolved `TradingPlot` theme suitable for a single paint revision.
+/// A fully resolved `Asceify` theme suitable for a single paint revision.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TradingPlotTheme {
+pub struct AsceifyTheme {
     pub mode: ThemeMode,
     pub colors: ThemeColors,
     pub dimensions: ThemeDimensions,
 }
 
-impl TradingPlotTheme {
+impl AsceifyTheme {
     /// Resolves all foundational tokens for a mode.
     #[must_use]
     pub fn for_mode(mode: ThemeMode) -> Self {
@@ -404,7 +404,7 @@ impl TradingPlotTheme {
     }
 }
 
-impl Default for TradingPlotTheme {
+impl Default for AsceifyTheme {
     fn default() -> Self {
         Self::dark()
     }
@@ -489,8 +489,8 @@ impl RadiusToken {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorToken, RadiusToken, ThemeColor, TradingPlotTheme, TypographyRole,
-        platform_font_family, platform_font_stack, platform_typography,
+        AsceifyTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+        platform_font_stack, platform_typography,
     };
 
     fn token_source<'a>(tokens: &'a [ColorToken], identifier: &str) -> &'a str {
@@ -503,8 +503,8 @@ mod tests {
 
     #[test]
     fn native_palettes_match_the_platform_contract() {
-        let light = TradingPlotTheme::light().colors;
-        let dark = TradingPlotTheme::dark().colors;
+        let light = AsceifyTheme::light().colors;
+        let dark = AsceifyTheme::dark().colors;
 
         assert_eq!(light.surface, ThemeColor::from_rgb8(255, 255, 255));
         assert_eq!(
@@ -567,8 +567,8 @@ mod tests {
         assert!((light.hover_bg.over(light.surface).red() - light.surface.red()).abs() > 0.01);
         assert!((dark.hover_bg.over(dark.surface).red() - dark.surface.red()).abs() > 0.01);
 
-        let light_tokens = TradingPlotTheme::light().color_tokens();
-        let dark_tokens = TradingPlotTheme::dark().color_tokens();
+        let light_tokens = AsceifyTheme::light().color_tokens();
+        let dark_tokens = AsceifyTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
         assert_eq!(token_source(&light_tokens, "border"), "#1414140f");
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
@@ -606,8 +606,8 @@ mod tests {
     #[test]
     fn border_width_matches_the_platform_contract() {
         let css = include_str!("../platform.css");
-        assert!((TradingPlotTheme::light().dimensions.border_width - 0.5).abs() < f32::EPSILON);
-        assert!((TradingPlotTheme::dark().dimensions.border_width - 0.5).abs() < f32::EPSILON);
+        assert!((AsceifyTheme::light().dimensions.border_width - 0.5).abs() < f32::EPSILON);
+        assert!((AsceifyTheme::dark().dimensions.border_width - 0.5).abs() < f32::EPSILON);
         assert_eq!(css.matches("--border-width: 0.5px;").count(), 2);
     }
 
@@ -642,7 +642,7 @@ mod tests {
     fn css_manifest_contains_every_rust_color_token_and_mode_value() {
         let css = include_str!("../platform.css");
 
-        for theme in [TradingPlotTheme::light(), TradingPlotTheme::dark()] {
+        for theme in [AsceifyTheme::light(), AsceifyTheme::dark()] {
             for token in theme.color_tokens() {
                 let declaration = format!(
                     "{}: {};",

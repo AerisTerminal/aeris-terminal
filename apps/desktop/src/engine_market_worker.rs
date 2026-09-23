@@ -14,32 +14,32 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tradingplot_application::{
+use asceify_application::{
     MarketEventProvenance, Provenanced, ReplayProvenance, ReplayRecoveryCommand, ReplaySnapshot,
     ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
 };
-use tradingplot_contracts::{
+use asceify_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
     ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
     SeriesCadence, SeriesKey, SeriesLoadState, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
-use tradingplot_contracts::{WorkspacePaneState, WorkspaceTabState};
-use tradingplot_instruments::{
+use asceify_contracts::{WorkspacePaneState, WorkspaceTabState};
+use asceify_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use tradingplot_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
-pub(super) use tradingplot_market_runtime::{
+use asceify_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
+pub(super) use asceify_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError,
     MarketOrderBookSnapshot, MarketPriceAlert, MarketPriceAlertTrigger, MarketRuntimeEvent,
     MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService, MarketStream,
     SeriesTailOperation, StreamRequirements,
 };
-use tradingplot_observability::FeedConnectionState;
+use asceify_observability::FeedConnectionState;
 
 #[cfg(test)]
-use tradingplot_desktop::market_worker::ProviderCatalogEvent;
-use tradingplot_desktop::market_worker::{
+use asceify_desktop::market_worker::ProviderCatalogEvent;
+use asceify_desktop::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
     MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
     MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
@@ -409,9 +409,9 @@ struct WorkerEndpoint {
     commands: mpsc::Receiver<MarketWorkerCommand>,
     pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
     pending_depth_visible: Arc<Mutex<Option<bool>>>,
-    pending_provider_selection: Arc<Mutex<Option<tradingplot_contracts::SelectProviderInstrument>>>,
+    pending_provider_selection: Arc<Mutex<Option<asceify_contracts::SelectProviderInstrument>>>,
     pending_engine_selection:
-        Arc<Mutex<Option<Box<tradingplot_desktop::market_worker::EngineSelectionRequest>>>>,
+        Arc<Mutex<Option<Box<asceify_desktop::market_worker::EngineSelectionRequest>>>>,
     pending_price_alerts: Arc<Mutex<Option<Vec<MarketPriceAlert>>>>,
     shutdown: mpsc::SyncSender<()>,
     pending_recovery: Option<ReplayRecoveryCommand>,
@@ -481,7 +481,7 @@ fn worker_endpoint(
 ) -> (WorkspaceMarketPane, EndpointRecord) {
     let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
     let startup = MarketWorkerStartup::Loading(Box::new(
-        tradingplot_desktop::market_worker::EngineWorkerStartup {
+        asceify_desktop::market_worker::EngineWorkerStartup {
             product: product.clone(),
             interval,
             restored_viewport,
@@ -555,7 +555,7 @@ fn spawn_group(
     // workspace group. Tab selection and layout edits only change endpoint
     // resource classes or membership; provider sessions remain runtime-owned.
     thread::Builder::new()
-        .name("tradingplot-engine-market-client".to_string())
+        .name("asceify-engine-market-client".to_string())
         .spawn(move || {
             if let Err(error) = run_workers(client_id, &mut endpoints, additions) {
                 for record in &endpoints {
@@ -716,16 +716,16 @@ use publications::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use tradingplot_chart_integration::{NucleusChartTheme, NucleusChartView};
-    use tradingplot_contracts::{
+    use asceify_chart_integration::{NucleusChartTheme, NucleusChartView};
+    use asceify_contracts::{
         ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
-    use tradingplot_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
-    use tradingplot_market_runtime::{
+    use asceify_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
+    use asceify_market_runtime::{
         CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
         MarketProviderGeneration, MarketProviderInstrumentSelection,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn depth_visible_chart_explicitly_demands_real_trades() {
@@ -1103,10 +1103,7 @@ mod tests {
                 .exchange_timestamp_unix_nanos,
             1_700_000_000_123_456_789
         );
-        assert_eq!(
-            snapshot.bars()[0].provenance().producer,
-            "tradingplot_engine"
-        );
+        assert_eq!(snapshot.bars()[0].provenance().producer, "asceify_engine");
     }
 
     #[test]
@@ -1142,7 +1139,7 @@ mod tests {
     }
 
     fn drained_states(
-        receiver: &tradingplot_desktop::market_worker::MarketWorkerReceiver,
+        receiver: &asceify_desktop::market_worker::MarketWorkerReceiver,
     ) -> Vec<(ChartState, String)> {
         receiver
             .drain()
@@ -1332,7 +1329,7 @@ mod tests {
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
             request_id: 9,
-            reason: tradingplot_application::ResnapshotReason::QueueOverflow,
+            reason: asceify_application::ResnapshotReason::QueueOverflow,
         });
         let snapshot = MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
             41,
@@ -1378,7 +1375,7 @@ mod tests {
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
         record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
             request_id: 9,
-            reason: tradingplot_application::ResnapshotReason::QueueOverflow,
+            reason: asceify_application::ResnapshotReason::QueueOverflow,
         });
 
         cancel_pending_recovery(
@@ -1431,7 +1428,7 @@ mod tests {
         pane.worker
             .try_send_recovery(ReplayRecoveryCommand {
                 request_id: 10,
-                reason: tradingplot_application::ResnapshotReason::QueueOverflow,
+                reason: asceify_application::ResnapshotReason::QueueOverflow,
             })
             .expect("recovery queues under generation seven");
         assert_eq!(
@@ -1483,7 +1480,7 @@ mod tests {
 
         let current = ReplayRecoveryCommand {
             request_id: 11,
-            reason: tradingplot_application::ResnapshotReason::QueueOverflow,
+            reason: asceify_application::ResnapshotReason::QueueOverflow,
         };
         assert_eq!(
             selection_commands::fence_recovery_command(&record.endpoint, Some(8), current)

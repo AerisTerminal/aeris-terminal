@@ -6,10 +6,10 @@ use crate::provenance::{
 };
 use crate::replay_snapshot::ReplaySnapshot;
 use crate::stream::{MAX_STREAM_SNAPSHOT_ITEMS, StreamDelta, StreamProtocolError};
-use tradingplot_instruments::{
+use asceify_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use tradingplot_market_data::{BarDefinition, MarketBar};
+use asceify_market_data::{BarDefinition, MarketBar};
 
 /// Maximum bars accepted by the embedded replay boundary.
 pub const MAX_EMBEDDED_REPLAY_BARS: usize = MAX_STREAM_SNAPSHOT_ITEMS;

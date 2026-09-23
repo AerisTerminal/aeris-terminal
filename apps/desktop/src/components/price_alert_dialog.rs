@@ -43,7 +43,7 @@ pub(super) fn replace_chart_price_alert_lines(
         .collect();
     chart.update(cx, |chart, chart_cx| {
         if let Err(error) = chart.replace_price_alert_lines(ChartAlertSnapshot { lines }) {
-            eprintln!("TradingPlot chart alert indicators could not be installed: {error}");
+            eprintln!("Asceify chart alert indicators could not be installed: {error}");
         }
         chart_cx.notify();
     });
@@ -374,7 +374,7 @@ fn dropdown_trigger(
     id: &'static str,
     label: &'static str,
     open: bool,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let toggle = app.clone();
     let colors = theme.colors;
@@ -411,7 +411,7 @@ fn dropdown_trigger(
         .child(header_icon(HugeIcon::ChevronDown).with_size(px(14.0)))
 }
 
-fn dropdown_panel(id: &'static str, theme: &TradingPlotTheme) -> Stateful<Div> {
+fn dropdown_panel(id: &'static str, theme: &AsceifyTheme) -> Stateful<Div> {
     let colors = theme.colors;
     div()
         .id(id)
@@ -431,7 +431,7 @@ fn dropdown_panel(id: &'static str, theme: &TradingPlotTheme) -> Stateful<Div> {
 fn condition_dropdown(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Div {
     let open = dialog.open_dropdown == Some(PriceAlertDropdown::Condition);
     let mut field = div()
@@ -484,7 +484,7 @@ const fn frequency_label(frequency: PriceAlertFrequency) -> &'static str {
 fn frequency_dropdown(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Div {
     const FREQUENCIES: [PriceAlertFrequency; 2] = [
         PriceAlertFrequency::OnlyOnce,
@@ -551,7 +551,7 @@ fn alerts_for_instrument(
 fn price_alert_existing_rows(
     app: &Entity<WorkspaceSurface>,
     existing: &[WorkspacePriceAlertState],
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let mut rows = div().flex().flex_col().gap_1();
@@ -585,7 +585,7 @@ fn price_alert_existing_rows(
                         .child(format!("{condition} ·"))
                         .child(
                             div()
-                                .font_family(tradingplot_design_system::platform_font_family())
+                                .font_family(asceify_design_system::platform_font_family())
                                 .font_features(platform_tabular_numerals())
                                 .child(alert_price),
                         ),
@@ -612,7 +612,7 @@ fn price_alert_dialog_header(
     close: Entity<WorkspaceSurface>,
     symbol: &str,
     price: &str,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     div()
@@ -643,7 +643,7 @@ fn price_alert_dialog_header(
                         .child(format!("{symbol} at"))
                         .child(
                             div()
-                                .font_family(tradingplot_design_system::platform_font_family())
+                                .font_family(asceify_design_system::platform_font_family())
                                 .font_features(platform_tabular_numerals())
                                 .child(price.to_string()),
                         ),
@@ -663,7 +663,7 @@ fn price_alert_dialog_footer(
     cancel: Entity<WorkspaceSurface>,
     create: Entity<WorkspaceSurface>,
     capacity_reached: bool,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     div()
@@ -699,7 +699,7 @@ fn price_alert_dialog_body(
     dialog: &PriceAlertDialogState,
     existing: &[WorkspacePriceAlertState],
     message: Option<&str>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     div()
@@ -736,7 +736,7 @@ fn price_alert_dialog_body(
                 .bg(gpui_color(colors.surface))
                 .text_sm()
                 .text_color(gpui_color(colors.text_secondary))
-                .child("TradingPlot monitors accepted live trades and sends an operating-system notification while the desktop app is running."),
+                .child("Asceify monitors accepted live trades and sends an operating-system notification while the desktop app is running."),
         )
         .children(message.map(|message| {
             div()
@@ -775,7 +775,7 @@ pub(super) fn price_alert_dialog_layer(
     dialog: &PriceAlertDialogState,
     alerts: &[WorkspacePriceAlertState],
     message: Option<&str>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let dismiss = app.clone();

@@ -22,12 +22,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use tradingplot_account::{
+use asceify_account::{
     AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
     MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
 };
-use tradingplot_contracts::{AccountSessionState, AccountView, LoginAuthorization};
-use tradingplot_platform_runtime::{CredentialVault, NativeCredentialVault};
+use asceify_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+use asceify_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
 use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, device_id_for_key};
@@ -43,13 +43,13 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Native public client identifier currently registered with the control plane.
 ///
 /// This is an external deployment contract and remains stable across the
-/// `TradingPlot` product-name migration until the control plane provisions a new
+/// `Asceify` product-name migration until the control plane provisions a new
 /// client identifier.
-pub const NATIVE_CLIENT_ID: &str = "axiusflow-desktop";
+pub const NATIVE_CLIENT_ID: &str = "asceify-desktop";
 /// Currently provisioned control-plane OIDC issuer (the Better Auth mount).
-pub const DEFAULT_AUTH_ISSUER: &str = "https://auth.axiusflow.com/api/auth";
+pub const DEFAULT_AUTH_ISSUER: &str = "";
 
-const ACCOUNT_VAULT_SERVICE: &str = "com.tradingplot.account";
+const ACCOUNT_VAULT_SERVICE: &str = "com.asceify.account";
 const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
 const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
@@ -129,9 +129,7 @@ impl AccountServiceConfig {
 }
 
 fn configured_auth_issuer(mut read: impl FnMut(&str) -> Option<String>) -> String {
-    read("TRADINGPLOT_AUTH_ISSUER")
-        .or_else(|| read("AXIUSFLOW_AUTH_ISSUER"))
-        .unwrap_or_else(|| DEFAULT_AUTH_ISSUER.to_string())
+    read("ASCEIFY_AUTH_ISSUER").unwrap_or_else(|| DEFAULT_AUTH_ISSUER.to_string())
 }
 
 struct PendingLogin {
@@ -274,7 +272,7 @@ impl AccountService {
     /// Creates an account session starting signed out.
     #[must_use]
     pub fn new(config: AccountServiceConfig) -> Self {
-        let rejected_restore_marker = tradingplot_platform_runtime::native_data_root()
+        let rejected_restore_marker = asceify_platform_runtime::native_data_root()
             .map_or(RejectedRestoreMarker::Unavailable, |root| {
                 RejectedRestoreMarker::Path(root.join(REJECTED_RESTORE_MARKER_FILE))
             });
@@ -406,7 +404,7 @@ impl AccountService {
         }
         let restoring = self.clone();
         if std::thread::Builder::new()
-            .name("tradingplot-account-restore".to_string())
+            .name("asceify-account-restore".to_string())
             .spawn(move || restoring.restore_online_session())
             .is_err()
         {
@@ -766,7 +764,7 @@ impl AccountService {
     fn spawn_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
         let service = self.clone();
         std::thread::Builder::new()
-            .name("tradingplot-account-cached-expiry".to_string())
+            .name("asceify-account-cached-expiry".to_string())
             .spawn(move || service.run_cached_lease_expiry_worker(expires_at_unix_seconds))
             .ok();
     }
@@ -1192,7 +1190,7 @@ impl AccountService {
         );
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("tradingplot-account-login".to_string())
+            .name("asceify-account-login".to_string())
             .spawn(move || service.run_login_transaction(request_generation, &listener))
             .is_err()
         {
@@ -1275,7 +1273,7 @@ impl AccountService {
 
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("tradingplot-account-profile-refresh".to_string())
+            .name("asceify-account-profile-refresh".to_string())
             .spawn(move || {
                 service.run_profile_refresh(generation);
                 service
@@ -1358,10 +1356,10 @@ impl AccountService {
         };
         if let Some((endpoints, token)) = revocation {
             std::thread::Builder::new()
-                .name("tradingplot-account-revoke".to_string())
+                .name("asceify-account-revoke".to_string())
                 .spawn(move || {
                     if oidc::revoke_refresh(&endpoints, &token).is_err() {
-                        eprintln!("TradingPlot sign-out revocation degraded");
+                        eprintln!("Asceify sign-out revocation degraded");
                     }
                 })
                 .ok();
@@ -1521,7 +1519,7 @@ impl AccountService {
                     // retired state or weakening enforcement.
                     let service = self.clone();
                     std::thread::Builder::new()
-                        .name("tradingplot-account-lease-warmup".to_string())
+                        .name("asceify-account-lease-warmup".to_string())
                         .spawn(move || {
                             if let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) {
                                 service.refresh_lease_once(
@@ -1605,7 +1603,7 @@ impl AccountService {
         };
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("tradingplot-account-lease".to_string())
+            .name("asceify-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .is_err()
         {
@@ -1644,7 +1642,7 @@ impl AccountService {
     fn spawn_lease_worker(&self, generation: u64) -> bool {
         let service = self.clone();
         std::thread::Builder::new()
-            .name("tradingplot-account-lease".to_string())
+            .name("asceify-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .is_ok()
     }
@@ -1928,7 +1926,7 @@ fn lock_state(
 
 /// Redacted lease observation: outcome class only, never identities.
 fn note_lease(outcome: &str) {
-    eprintln!("TradingPlot lease: {outcome}");
+    eprintln!("Asceify lease: {outcome}");
 }
 
 /// Sleeps until the next lease round in interruptible slices. Returns false
@@ -2739,6 +2737,9 @@ mod tests {
         RejectedRestoreMarker, UnavailableVault, claim_profile_refresh, configured_auth_issuer,
         oidc::{self, AccountProfile, VerifiedTokens},
     };
+    use asceify_account::{AccountId, PlanId};
+    use asceify_contracts::{AccountSessionState, AccountView};
+    use asceify_platform_runtime::CredentialVault;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::{
@@ -2752,16 +2753,13 @@ mod tests {
         },
         time::Duration,
     };
-    use tradingplot_account::{AccountId, PlanId};
-    use tradingplot_contracts::{AccountSessionState, AccountView};
-    use tradingplot_platform_runtime::CredentialVault;
 
     static MARKER_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn auth_issuer_prefers_tradingplot_override_then_legacy_override_then_default() {
+    fn auth_issuer_uses_asceify_override_or_remains_unconfigured() {
         let preferred = configured_auth_issuer(|name| match name {
-            "TRADINGPLOT_AUTH_ISSUER" => Some("https://preferred.example/api/auth".to_string()),
+            "ASCEIFY_AUTH_ISSUER" => Some("https://preferred.example/api/auth".to_string()),
             "AXIUSFLOW_AUTH_ISSUER" => Some("https://legacy.example/api/auth".to_string()),
             _ => None,
         });
@@ -2771,7 +2769,7 @@ mod tests {
             "AXIUSFLOW_AUTH_ISSUER" => Some("https://legacy.example/api/auth".to_string()),
             _ => None,
         });
-        assert_eq!(legacy, "https://legacy.example/api/auth");
+        assert!(legacy.is_empty());
 
         assert_eq!(configured_auth_issuer(|_| None), super::DEFAULT_AUTH_ISSUER);
     }
@@ -3017,11 +3015,8 @@ mod tests {
         use super::oidc::OidcEndpoints;
 
         let service = AccountService::new_with_rejected_restore_marker(
-            AccountServiceConfig::try_new(
-                "https://auth.axiusflow.com/api/auth",
-                "axiusflow-desktop",
-            )
-            .expect("test config builds"),
+            AccountServiceConfig::try_new("https://auth.example.test/api/auth", "asceify-desktop")
+                .expect("test config builds"),
             rejected_restore_marker,
         );
         // Stub discovery so unit tests never touch the network.
@@ -3030,15 +3025,14 @@ mod tests {
             .lock()
             .expect("endpoint cache locks")
             .replace(OidcEndpoints {
-                issuer: "https://auth.axiusflow.com/api/auth".to_string(),
-                authorization_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/authorize"
+                issuer: "https://auth.example.test/api/auth".to_string(),
+                authorization_endpoint: "https://auth.example.test/api/auth/oauth2/authorize"
                     .to_string(),
-                token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
-                jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
-                revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke"
-                    .to_string(),
-                link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
-                lease_endpoint: "https://auth.axiusflow.com/api/axiusflow/lease".to_string(),
+                token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
+                jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
+                revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
+                link_endpoint: "https://auth.example.test/api/asceify/link".to_string(),
+                lease_endpoint: "https://auth.example.test/api/asceify/lease".to_string(),
             });
         service
     }
@@ -3057,7 +3051,7 @@ mod tests {
     fn marker_fixture() -> (PathBuf, PathBuf) {
         let sequence = MARKER_FIXTURE_SEQUENCE.fetch_add(1, Ordering::AcqRel);
         let root = std::env::temp_dir().join(format!(
-            "tradingplot-account-restore-marker-{}-{sequence}",
+            "asceify-account-restore-marker-{}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("marker fixture directory creates");
@@ -3103,7 +3097,7 @@ mod tests {
             "iat": now.saturating_sub(1),
             "nbf": now.saturating_sub(1),
             "exp": expires_at,
-            "aud": "axiusflow-engine",
+            "aud": "asceify-desktop",
             "kid": key_id,
         });
         let encode = |value: &serde_json::Value| {
@@ -5297,7 +5291,7 @@ mod tests {
     fn unconfigured_control_plane_fails_closed() {
         let service = AccountService::new(AccountServiceConfig {
             issuer: String::new(),
-            client_id: "axiusflow-desktop".to_string(),
+            client_id: "asceify-desktop".to_string(),
         });
         assert!(service.begin_login(1).is_err());
         assert_eq!(
@@ -5310,7 +5304,7 @@ mod tests {
     fn unconfigured_restore_fails_local_readiness_without_network() {
         let service = AccountService::new_restoring(AccountServiceConfig {
             issuer: String::new(),
-            client_id: "axiusflow-desktop".to_string(),
+            client_id: "asceify-desktop".to_string(),
         });
         assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
         assert_eq!(
@@ -5323,7 +5317,7 @@ mod tests {
     fn restore_can_be_started_once_after_process_lifecycle_fencing() {
         let service = AccountService::new(AccountServiceConfig {
             issuer: String::new(),
-            client_id: "axiusflow-desktop".to_string(),
+            client_id: "asceify-desktop".to_string(),
         });
         assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
         assert_eq!(
@@ -5444,7 +5438,7 @@ mod tests {
         super::oidc::AccountProfile {
             display_name: name.to_string(),
             email: email.to_string(),
-            photo_url: format!("https://auth.axiusflow.com/photo/{name}.png"),
+            photo_url: format!("https://auth.example.test/photo/{name}.png"),
         }
     }
 
@@ -5495,7 +5489,7 @@ mod tests {
         assert_eq!(view.plan_id, "pro");
         assert_eq!(view.display_name, "ada");
         assert_eq!(view.email, "ada@example.com");
-        assert_eq!(view.photo_url, "https://auth.axiusflow.com/photo/ada.png");
+        assert_eq!(view.photo_url, "https://auth.example.test/photo/ada.png");
     }
 
     #[test]
@@ -5535,17 +5529,23 @@ mod tests {
             &vault,
         );
         assert_eq!(service.account_status().display_name, "ada");
-        service
+        let fixture_endpoints = service
             .endpoints
             .lock()
             .expect("endpoint cache locks")
-            .take();
+            .take()
+            .expect("fixture endpoints are cached");
         let signed_out = service
             .sign_out_with(&vault)
             .expect("first account signs out durably");
         assert!(signed_out.display_name.is_empty());
         assert!(signed_out.email.is_empty());
         assert!(signed_out.photo_url.is_empty());
+        service
+            .endpoints
+            .lock()
+            .expect("endpoint cache locks")
+            .replace(fixture_endpoints);
         service.begin_login(32).expect("second login starts");
         service.complete_with_tokens(
             32,
@@ -5571,7 +5571,7 @@ mod tests {
     #[test]
     fn sign_out_clears_state_and_deletes_vault_material() {
         use super::{DEVICE_VAULT_KEY, LEASE_VAULT_KEY, PROFILE_VAULT_KEY, REFRESH_VAULT_KEY};
-        use tradingplot_platform_runtime::CredentialVault as _;
+        use asceify_platform_runtime::CredentialVault as _;
 
         let service = service();
         let vault = MemoryVault::default();

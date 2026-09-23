@@ -1,14 +1,14 @@
-# TradingPlot Study Runtime + Rust SDK Roadmap
+# Asceify Study Runtime + Rust SDK Roadmap
 
 ## Purpose
 
-TradingPlot is building a native Rust Study Runtime, Rust Study SDK, and in-app Rust Study Editor with one product-level goal:
+Asceify is building a native Rust Study Runtime, Rust Study SDK, and in-app Rust Study Editor with one product-level goal:
 
-> Almost any Pine Script **indicator** whose required input data exists inside TradingPlot should be portable to Rust through generic TradingPlot Study SDK capabilities, without indicator-specific changes to the core product.
+> Almost any Pine Script **indicator** whose required input data exists inside Asceify should be portable to Rust through generic Asceify Study SDK capabilities, without indicator-specific changes to the core product.
 
-The target is extensive maturity, not a small built-in indicator catalog or an SDK limited to TradingPlot developers. A user should be able to open TradingPlot, write normal Rust in a purpose-built Study Editor, compile it through a controlled toolchain, add it to a chart, inspect diagnostics, and iterate without rebuilding or replacing the application. A complex TradingView-style indicator should be able to combine multi-timeframe and cross-symbol data, stateful calculations, dynamic styling, drawings, labels, tables, chart context, alerts, and other bounded presentation semantics through the same public Rust study model.
+The target is extensive maturity, not a small built-in indicator catalog or an SDK limited to Asceify developers. A user should be able to open Asceify, write normal Rust in a purpose-built Study Editor, compile it through a controlled toolchain, add it to a chart, inspect diagnostics, and iterate without rebuilding or replacing the application. A complex TradingView-style indicator should be able to combine multi-timeframe and cross-symbol data, stateful calculations, dynamic styling, drawings, labels, tables, chart context, alerts, and other bounded presentation semantics through the same public Rust study model.
 
-This is a long-running architecture project, not a one-off indicator patch. The runtime must keep market ownership, execution, persistence, rendering, recovery, dependency behavior, and resource bounds correct while supporting two deliberate execution tiers: statically linked trusted-native studies for TradingPlot and reviewed partners, and sandboxed user-authored studies produced by the in-app editor. Both tiers share one semantic Study SDK/runtime contract; neither may create a second market or rendering architecture.
+This is a long-running architecture project, not a one-off indicator patch. The runtime must keep market ownership, execution, persistence, rendering, recovery, dependency behavior, and resource bounds correct while supporting two deliberate execution tiers: statically linked trusted-native studies for Asceify and reviewed partners, and sandboxed user-authored studies produced by the in-app editor. Both tiers share one semantic Study SDK/runtime contract; neither may create a second market or rendering architecture.
 
 This roadmap is specifically about **indicators/studies**. TradingView-style strategies add broker emulation, orders, fills, positions, commissions, risk, backtesting, and performance reporting; that is a separate product/runtime program and must not be smuggled into the indicator SDK.
 
@@ -21,27 +21,27 @@ The intended ownership split is:
 - A versioned sandbox boundary owns admission and isolation of user-authored executable studies. User code receives only explicit Study SDK capabilities and bounded inputs; it is never loaded as an arbitrary native library.
 - `chart_integration` projects serial/semantic study outputs and future scene deltas into Nucleus; studies never receive render handles or Nucleus engine ownership.
 - Desktop owns durable workspace configuration, product UX, restore/reinitialize/remove commands, and visibility.
-- Nucleus Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that TradingPlot intentionally consumes.
+- Nucleus Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that Asceify intentionally consumes.
 
-## Product direction: Rust is the language; TradingPlot supplies the Pine-class host contract
+## Product direction: Rust is the language; Asceify supplies the Pine-class host contract
 
-TradingPlot should **not** build a Pine clone as the primary path to indicator maturity. Rust is already the authoring language. The product work should concentrate on the part Rust does not provide: market/chart execution semantics and a rich, bounded indicator host API.
+Asceify should **not** build a Pine clone as the primary path to indicator maturity. Rust is already the authoring language. The product work should concentrate on the part Rust does not provide: market/chart execution semantics and a rich, bounded indicator host API.
 
-Building a new language would force TradingPlot to own and mature a parser, syntax, type checker, compiler/interpreter or VM, diagnostics, formatter, language server, package/import system, debugger story, versioning rules, migration rules, sandboxing story, standard library, and long-term source compatibility. None of that improves market-data ownership, drawing semantics, table rendering, MTF requests, recovery, or indicator correctness by itself.
+Building a new language would force Asceify to own and mature a parser, syntax, type checker, compiler/interpreter or VM, diagnostics, formatter, language server, package/import system, debugger story, versioning rules, migration rules, sandboxing story, standard library, and long-term source compatibility. None of that improves market-data ownership, drawing semantics, table rendering, MTF requests, recovery, or indicator correctness by itself.
 
-Rust already provides the general-purpose language layer: functions, modules, crates, structs, enums, traits, generics, iterators, collections, tests, compiler diagnostics, IDE tooling, linting, profiling, native performance, and a mature package ecosystem. TradingPlot therefore gets to solve the easier and more valuable problem: expose Pine-class **host capabilities** through stable Rust contracts.
+Rust already provides the general-purpose language layer: functions, modules, crates, structs, enums, traits, generics, iterators, collections, tests, compiler diagnostics, IDE tooling, linting, profiling, native performance, and a mature package ecosystem. Asceify therefore gets to solve the easier and more valuable problem: expose Pine-class **host capabilities** through stable Rust contracts.
 
 The intended long-term stack is:
 
 ```text
-In-app Rust Study Editor               Trusted TradingPlot/partner crates
+In-app Rust Study Editor               Trusted Asceify/partner crates
     | source, diagnostics, tests             | reviewed source/dependencies
     v                                        v
 Pinned controlled Rust toolchain        Static native build
     | sandboxed component/package            |
     +-------------------+--------------------+
                         v
-              TradingPlot Study SDK semantics
+              Asceify Study SDK semantics
     |  settings, requests, execution context, outputs, scene objects, alerts
     v
 Study Runtime
@@ -53,15 +53,15 @@ MarketEngine + chart integration
 Nucleus Charts
 ```
 
-The Study Editor and safe user-code execution are foundational product requirements. A future simplified TradingPlot scripting language is optional. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
+The Study Editor and safe user-code execution are foundational product requirements. A future simplified Asceify scripting language is optional. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
 
 ## Definition of Pine-class indicator maturity
 
-The goal is not syntax compatibility with Pine. The goal is capability compatibility at the host boundary. TradingPlot reaches Pine-class maturity when representative advanced TradingView indicators can be translated to Rust using only generic Study SDK primitives, with no indicator-specific edits to `market_runtime`, desktop, chart integration, or Nucleus ownership code.
+The goal is not syntax compatibility with Pine. The goal is capability compatibility at the host boundary. Asceify reaches Pine-class maturity when representative advanced TradingView indicators can be translated to Rust using only generic Study SDK primitives, with no indicator-specific edits to `market_runtime`, desktop, chart integration, or Nucleus ownership code.
 
 The target capability families are:
 
-| Capability family | TradingPlot target |
+| Capability family | Asceify target |
 | --- | --- |
 | Numeric/series computation | Canonical OHLCV, fixed-point access, recursive/stateful execution, hard gaps, dirty ranges, study-on-study inputs. |
 | Market contexts | Same-symbol MTF, cross-symbol, sessions/time zones, lower-timeframe/intrabar data, bounded request contexts, and setting-driven dependency rebinding. |
@@ -82,10 +82,10 @@ Not every Pine API must be copied literally. Equivalent Rust-native abstractions
 
 ### Pine capability inventory that drives this roadmap
 
-Compatibility planning must track the current official Pine indicator surface rather than a remembered subset of `plot()`. At minimum, periodic research/review must cover these Pine capability families and map them to a TradingPlot equivalent or an explicit non-goal:
+Compatibility planning must track the current official Pine indicator surface rather than a remembered subset of `plot()`. At minimum, periodic research/review must cover these Pine capability families and map them to a Asceify equivalent or an explicit non-goal:
 
 - Execution model and bar states: historical versus realtime execution, rollback/confirmation, intrabar persistence, recalculation triggers, and repainting-sensitive time semantics.
-- Chart/market data: OHLCV, symbols, timeframes, sessions, time zones, lower-timeframe data, cross-context requests, and specialized data contexts where TradingPlot has a canonical source.
+- Chart/market data: OHLCV, symbols, timeframes, sessions, time zones, lower-timeframe data, cross-context requests, and specialized data contexts where Asceify has a canonical source.
 - Inputs: numeric/text/bool/enum plus color, symbol, timeframe, session, time, price, and source selection.
 - Plot outputs: lines, histograms/columns, areas, step/discontinuous forms, shapes/chars/arrows, levels, fills, candles/bars, background coloring, and candle/bar coloring.
 - Mutable visual objects: lines, line fills, boxes, polylines, labels, and tables with bounded object lifecycles.
@@ -112,7 +112,7 @@ Research baseline reviewed against TradingView's official Pine v6 documentation 
 
 Every new Pine-class capability must fit one ownership-correct lifecycle. The intended end-to-end path is:
 
-1. **Authoring:** a Rust package defines stable study identity/revision, typed settings, dependency/request declarations, outputs/scene capabilities, invalidation semantics, calculation code, and optional transactional state. TradingPlot-owned/reviewed packages use the trusted-native build path; users author the same semantics through the in-app Study Editor.
+1. **Authoring:** a Rust package defines stable study identity/revision, typed settings, dependency/request declarations, outputs/scene capabilities, invalidation semantics, calculation code, and optional transactional state. Asceify-owned/reviewed packages use the trusted-native build path; users author the same semantics through the in-app Study Editor.
 2. **Build/admission:** trusted-native packages are reviewed and statically linked. User-authored source is compiled by a pinned, controlled toolchain into a versioned sandbox component/package, validated for SDK compatibility and declared capabilities, and admitted only after structural and resource-policy checks. Compilation is cancellable background work and never runs on the GPUI thread.
 3. **Durable configuration:** desktop/workspace persistence stores only durable identity, revision, settings, stable dependency/source references, visibility, package identity/content hash, and other reconstructible product state. Runtime IDs, provider sessions, renderer handles, transient checkpoints, and object implementation IDs are not persisted.
 4. **Restore/validation:** the appropriate trusted-native registry or sandboxed package registry resolves the exact implementation revision and validates settings/dependency shape, package integrity, SDK compatibility, and capability policy without silently rewriting durable state.
@@ -215,7 +215,7 @@ Final integrated qualification closed the residual correctness gaps found by rea
 ### Completed: initial shared TA proof
 
 - Built-in SMA, WMA, and Bollinger registrations use the same native SDK/runtime contract exposed to external trusted Rust studies.
-- WMA and Bollinger delegate formula work to pinned `nucleuscharts_indicators` instead of duplicating formula implementations in TradingPlot.
+- WMA and Bollinger delegate formula work to pinned `nucleuscharts_indicators` instead of duplicating formula implementations in Asceify.
 - Window/gap behavior and output contracts have focused tests.
 
 ## Completed foundation and Pine-class expansion
@@ -239,11 +239,11 @@ Completed additions:
 
 ### Completed — recursive EMA without O(history) conversion
 
-The recursive EMA implementation is complete across the local sibling Nucleus and TradingPlot trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. TradingPlot wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
+The recursive EMA implementation is complete across the local sibling Nucleus and Asceify trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Asceify wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
 
-The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by TradingPlot.
+The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Asceify.
 
-Do **not** copy Nucleus private EMA recurrence/checkpoint logic into TradingPlot.
+Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Asceify.
 
 The preferred narrow Nucleus addition is an indexed optional-sample API roughly shaped as:
 
@@ -359,13 +359,13 @@ Expose the runtime context advanced indicators need without allowing arbitrary w
 - Read-only visible-range/chart-window context for visible-range studies, with deliberate bounded recalculation semantics.
 - Typed alert conditions/events routed through product-owned alert delivery.
 
-### Planned expansion — advanced data where TradingPlot has real sources
+### Planned expansion — advanced data where Asceify has real sources
 
-Pine-class maturity means the SDK should not be structurally blocked from advanced indicator categories, but TradingPlot must never pretend data exists when providers do not supply it. Add generic contracts only when there is a legitimate canonical source for the data, for example:
+Pine-class maturity means the SDK should not be structurally blocked from advanced indicator categories, but Asceify must never pretend data exists when providers do not supply it. Add generic contracts only when there is a legitimate canonical source for the data, for example:
 
 - Lower-timeframe/intrabar arrays.
 - Volume profile/footprint/order-flow data.
-- Corporate-action/fundamental/economic/currency contexts if TradingPlot later owns trustworthy sources for them.
+- Corporate-action/fundamental/economic/currency contexts if Asceify later owns trustworthy sources for them.
 
 Provider-specific handles or payloads must not leak into study APIs. Canonicalize data at the owning market/data boundary first.
 
@@ -398,12 +398,12 @@ The final combined tree was qualified with the repository-pinned toolchain and l
 - `cargo fmt --all -- --check` — pass.
 - `git diff --check` — pass apart from local LF-to-CRLF conversion warnings emitted by Git on Windows.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` — pass.
-- `tradingplot_market_runtime` — 112 tests passed, 4 intentional release-soak tests ignored in the normal debug suite.
-- `tradingplot_desktop` — 66 library tests plus 209 main-target tests passed; the intentional live Hyperliquid test remains ignored in the normal suite.
-- `tradingplot_study_sdk` — 21 unit tests plus 3 SDK-facade integration tests passed; its explicit release soak remains ignored in the normal suite.
+- `asceify_market_runtime` — 112 tests passed, 4 intentional release-soak tests ignored in the normal debug suite.
+- `asceify_desktop` — 66 library tests plus 209 main-target tests passed; the intentional live Hyperliquid test remains ignored in the normal suite.
+- `asceify_study_sdk` — 21 unit tests plus 3 SDK-facade integration tests passed; its explicit release soak remains ignored in the normal suite.
 - Explicit optimized release soaks pass for 10,000,000 one-row EMA revisions, 16 concurrent stateful studies over one shared engine lease, 2,000 reinitialize/historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events.
 
-The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `tradingplot_chart_integration` theme assertions outside this roadmap: `nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
+The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `asceify_chart_integration` theme assertions outside this roadmap: `nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
 
 This qualification is source/runtime qualification, not a production deployment claim. No release was published or installed as part of this roadmap completion, and no credentialed Rithmic live session was used as evidence for these Study Runtime/SDK completion claims. Provider recovery and generation statements above are backed by deterministic owner-boundary/runtime tests unless a separate live-market gate is explicitly cited.
 
@@ -424,7 +424,7 @@ This qualification is source/runtime qualification, not a production deployment 
 ### Phase B — recursive indicator proof
 
 - [x] Land/review the narrow indexed optional-sample EMA API in Nucleus.
-- [x] Wrap Nucleus incremental EMA state in TradingPlot-owned `NativeStudyState`.
+- [x] Wrap Nucleus incremental EMA state in Asceify-owned `NativeStudyState`.
 - [x] Prove market-backed fixed-point EMA without O(history) conversion.
 - [x] Prove output-backed EMA with `Option<f64>` hard gaps.
 - [x] Add live append, same-tail revision, historical repair, rollback, and memory-bound tests.
@@ -437,8 +437,8 @@ This qualification is source/runtime qualification, not a production deployment 
   - RSI/Stochastic/MACD follow only with their existing threshold-band / histogram semantics preserved through product-owned richer output metadata.
 - [x] Reuse Nucleus/shared primitives for every migrated formula that already exists.
   - [x] EMA Ribbon uses five Nucleus `IncrementalEmaState` instances.
-  - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; TradingPlot lazily converts only replayed fixed-point rows.
-  - [x] RSI/MACD/Stochastic use owner-correct indexed Nucleus states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into TradingPlot.
+  - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; Asceify lazily converts only replayed fixed-point rows.
+  - [x] RSI/MACD/Stochastic use owner-correct indexed Nucleus states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into Asceify.
 - [x] Add durable implementation revisions and migration tests per migrated built-in.
   - [x] SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, and VWAP have exact revision binding plus legacy-picker migration coverage.
   - [x] RSI/MACD/Stochastic have the same exact revision binding, durable restore, unsupported-revision rejection, and legacy-picker migration contract.
@@ -458,7 +458,7 @@ This qualification is source/runtime qualification, not a production deployment 
 ### Phase E — SDK productization
 
 - [x] Define native study packaging/loading trust model.
-  - Approved external native studies are statically linked into the signed product build and listed in one immutable bounded product allowlist; TradingPlot does not discover or load arbitrary native libraries at runtime.
+  - Approved external native studies are statically linked into the signed product build and listed in one immutable bounded product allowlist; Asceify does not discover or load arbitrary native libraries at runtime.
   - This is a source/dependency review trust boundary, not a sandbox. User-installable studies must use the separate sandboxed architecture in Phase L; arbitrary user-native loading remains prohibited.
 - [x] Define SDK compatibility and implementation-revision migration policy.
   - Source/API compatibility follows the Study SDK crate version; a separate SDK compatibility epoch fences incompatible durable host/package contracts.
@@ -517,7 +517,7 @@ This qualification is source/runtime qualification, not a production deployment 
 
 - [ ] Add typed study alert condition/event contracts with bounded payloads and stable durable identity.
 - [ ] Keep alert delivery/product UX outside native calculation code; studies emit semantics, product owns notification side effects.
-- [ ] Add canonical advanced data contracts only for data TradingPlot actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
+- [ ] Add canonical advanced data contracts only for data Asceify actually owns: intrabar arrays, footprint/profile/order-flow, and later corporate/fundamental/economic/currency contexts if trustworthy sources exist.
 - [ ] Keep provider wire types, credentials, sessions, and raw adapter ownership outside the SDK.
 
 ### Phase K — Pine compatibility corpus and maturity qualification
@@ -554,11 +554,11 @@ Phase L is a required product program, not optional polish and not merely an ext
 
 #### Rust authoring experience
 
-- [ ] Add a first-class TradingPlot Study Editor for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
+- [ ] Add a first-class Asceify Study Editor for creating, opening, renaming, duplicating, saving, deleting, importing, and exporting Rust study projects.
 - [ ] Provide starter templates for stateless, stateful, overlay, oscillator, multi-output, multi-timeframe, drawing, table, and alert studies as those capabilities qualify.
 - [ ] Improve Rust author ergonomics with higher-level SDK builders, attributes/macros, prelude types, and helpers where they reduce boilerplate without hiding ownership, determinism, or bounds.
 - [ ] Provide syntax highlighting, bracket/navigation support, search, SDK-aware completion, hover documentation, go-to-definition where practical, and direct links to relevant Study SDK documentation.
-- [ ] Surface compiler, formatter, test, package-validation, and runtime diagnostics at exact source locations with understandable TradingPlot context; do not expose only raw build logs.
+- [ ] Surface compiler, formatter, test, package-validation, and runtime diagnostics at exact source locations with understandable Asceify context; do not expose only raw build logs.
 - [ ] Support explicit Build, Test, Add to Chart, Reload, Stop, and Revert to Last Working Build actions, with clear build/runtime status and cancellation.
 - [ ] Preserve source and last-known-good executable state across restart. A failed build or reload must not replace the last working study on a chart.
 - [ ] Provide deterministic preview fixtures and author tests without opening provider sessions or inventing a second market-data owner.
@@ -566,7 +566,7 @@ Phase L is a required product program, not optional polish and not merely an ext
 #### Controlled Rust toolchain
 
 - [ ] Define a pinned, reproducible Rust toolchain, formatter, analysis integration, sandbox target, SDK version, lockfile policy, and package metadata schema for user studies.
-- [ ] Deliver authoring tools as an optional, versioned TradingPlot Study Development Pack installed on demand, so users who do not author studies do not pay the installer/update size of a compiler toolchain.
+- [ ] Deliver authoring tools as an optional, versioned Asceify Study Development Pack installed on demand, so users who do not author studies do not pay the installer/update size of a compiler toolchain.
 - [ ] Make installation, integrity verification, repair, compatibility selection, and removal of the Development Pack product-owned and recoverable.
 - [ ] Run compilation, formatting, analysis, and tests as bounded, cancellable background work outside the GPUI thread. Compiler workers must not own provider sessions, canonical market state, or a second study runtime.
 - [ ] Define dependency policy deliberately. Start with the Study SDK, Rust standard/core facilities supported by the sandbox target, and a small pinned allowlist; do not permit arbitrary build scripts, native dependencies, network fetching, or uncontrolled Cargo execution.
@@ -577,13 +577,13 @@ Phase L is a required product program, not optional polish and not merely an ext
 
 - [ ] Select and document a portable sandbox component/package format for user studies. Prefer a WebAssembly component-style boundary with a versioned transport-safe interface; do not expose Rust references, trait objects, function pointers, native layout, or a Rust DLL ABI across the boundary.
 - [ ] Define the smallest versioned guest interface for metadata, settings, dependency declarations, initialization/restore, calculation, state checkpointing, scalar outputs, future semantic scene/table outputs, alerts, and structured errors.
-- [ ] Keep the existing statically linked native path for TradingPlot-owned and reviewed partner studies. User-authored executable code must never be loaded as an arbitrary native library into the TradingPlot process.
+- [ ] Keep the existing statically linked native path for Asceify-owned and reviewed partner studies. User-authored executable code must never be loaded as an arbitrary native library into the Asceify process.
 - [ ] Grant sandbox capabilities explicitly. Filesystem, network, subprocess, environment, credentials, provider adapters, system time, randomness, clipboard, and native UI access are denied unless a future reviewed capability has a concrete product requirement.
 - [ ] Enforce per-invocation and aggregate CPU/instruction, deadline, memory, stack, state, dependency, output-point, scene-object, table/cell/text, alert, log, and publication limits.
 - [ ] Support cancellation and deterministic trapping of runaway studies. A timeout, trap, invalid output, or resource overflow must preserve the last committed result and must not stall the UI thread, market engine, unrelated studies, or shutdown.
 - [ ] Validate package structure, SDK/ABI compatibility, declared capabilities, artifact integrity, and resource declarations before registration. Runtime registration remains transactional.
 - [ ] Batch or columnarize market inputs and outputs where needed so sandbox crossings do not turn one calculation into per-bar/per-value host-call overhead.
-- [ ] Define safe cache invalidation and migration across TradingPlot, Study SDK, toolchain, and package-format upgrades. Incompatible studies remain recoverable as source and fail explicitly rather than being silently rewritten.
+- [ ] Define safe cache invalidation and migration across Asceify, Study SDK, toolchain, and package-format upgrades. Incompatible studies remain recoverable as source and fail explicitly rather than being silently rewritten.
 
 #### Product lifecycle and qualification
 
@@ -592,11 +592,11 @@ Phase L is a required product program, not optional polish and not merely an ext
 - [ ] Make compile/reload transactional: validate and initialize a candidate package, acquire/reconcile dependencies through `MarketEngine`, generation-fence readiness, then atomically replace the running implementation or retain the previous one.
 - [ ] Qualify malicious and accidental failure cases: infinite loops, excessive allocation, output/object floods, invalid encodings, corrupted packages, dependency abuse, panics/traps, compiler cancellation, disk exhaustion, and app restart during build/reload.
 - [ ] Measure editor startup, completion latency, incremental build latency, reload latency, runtime overhead, and sustained multi-study workloads before claiming production scalability.
-- [ ] Complete an end-to-end acceptance path in which a user creates a Rust indicator inside TradingPlot, receives diagnostics for an error, fixes it, tests it, adds it to a chart, edits and reloads it, restarts TradingPlot, and restores the exact working source/package/chart state.
+- [ ] Complete an end-to-end acceptance path in which a user creates a Rust indicator inside Asceify, receives diagnostics for an error, fixes it, tests it, adds it to a chart, edits and reloads it, restarts Asceify, and restores the exact working source/package/chart state.
 
 ### Phase M — optional simplified authoring syntax
 
-- [ ] Consider a simplified TradingPlot-specific language only if measured user research shows that Rust ergonomics remain a material adoption barrier after the Study Editor, templates, macros, documentation, and diagnostics are mature.
+- [ ] Consider a simplified Asceify-specific language only if measured user research shows that Rust ergonomics remain a material adoption barrier after the Study Editor, templates, macros, documentation, and diagnostics are mature.
 - [ ] Any future simplified language is **syntax over the same runtime contracts**, not a second study engine.
 - [ ] It must lower to the same settings, dependencies/request contexts, execution state, semantic outputs/scene, alerts, persistence, bounds, sandbox package model, and recovery semantics used by Rust studies.
 
@@ -617,7 +617,7 @@ Rust remains the primary and maximum-capability authoring path. A future simplif
 - `MarketEngine` remains the single market-demand owner.
 - Studies do not open provider sessions or own canonical market/account state.
 - The desktop does not become an alternate calculation runtime.
-- Nucleus owns rendering/layout/geometry; TradingPlot owns study orchestration and durable product semantics.
+- Nucleus owns rendering/layout/geometry; Asceify owns study orchestration and durable product semantics.
 - New Pine-class capabilities are added as generic semantic SDK/runtime primitives, never as named-indicator special cases.
 - Semantic scene objects use study-local identities; studies never receive Nucleus/GPUI object IDs or mutable render handles.
 - Resource settings and request contexts reconcile through `MarketEngine`; dynamic authoring power must not create a second demand registry.
@@ -639,7 +639,7 @@ Rust remains the primary and maximum-capability authoring path. A future simplif
 
 ## Current checkpoint
 
-The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; TradingPlot retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
+The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Asceify retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
 Phase E is implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; transactional state candidates require mutation-isolated cloning; runtime tail output preparation structurally shares unchanged history; output-primary incremental mapping remains bounded without retained-history timestamp materialization; actual provider-returned ranged repairs reuse dirty-range execution; and independent calculation failures remain isolated.
 
@@ -649,10 +649,10 @@ Release qualification on the final combined tree verifies the real recursive EMA
 
 The strategic direction is now explicit: Phases A-E are the completed **foundation**, not the end of indicator productization. Phases F-K expand the generic Pine-class host contract. Phase L turns that contract into the required in-app Rust authoring product and begins as a vertical slice before every F-K capability is complete. Phase M is optional and cannot displace the Rust-first plan. The immediate engineering focus is generic visual/style channels, transactional semantic drawings/tables, resource-aware settings and dependency rebinding, richer market/execution/chart context, alerts, compatibility-corpus qualification, and the first safe editor-to-chart Rust workflow.
 
-The maturity target is intentionally ambitious: if TradingPlot has the underlying data required by an indicator, the default expectation should be that the indicator can be ported to Rust without changing core product code. Exceptions should be explainable by missing data, a deliberately unsupported product class such as strategy/broker emulation, or a clearly documented host capability that is still on this roadmap—not by arbitrary SDK limitations.
+The maturity target is intentionally ambitious: if Asceify has the underlying data required by an indicator, the default expectation should be that the indicator can be ported to Rust without changing core product code. Exceptions should be explainable by missing data, a deliberately unsupported product class such as strategy/broker emulation, or a clearly documented host capability that is still on this roadmap—not by arbitrary SDK limitations.
 
-Rust is the reason this target is tractable. TradingPlot does not need to invent and mature an entire programming language before it can support advanced indicators. Rust supplies the language/compiler/tooling ecosystem; TradingPlot concentrates engineering effort on the host capabilities TradingView indicators depend on. That makes broad indicator compatibility materially easier to reach and maintain than building a Pine clone first.
+Rust is the reason this target is tractable. Asceify does not need to invent and mature an entire programming language before it can support advanced indicators. Rust supplies the language/compiler/tooling ecosystem; Asceify concentrates engineering effort on the host capabilities TradingView indicators depend on. That makes broad indicator compatibility materially easier to reach and maintain than building a Pine clone first.
 
-The proof standard is the Phase K compatibility corpus. KSR6 is a first representative composite acceptance case, not a special-case implementation target. ZigZag/drawing-heavy, FVG/box-heavy, dashboard, visible-range, custom-candle, lower-timeframe, alert-heavy, and eventually order-flow/footprint studies must exercise the same generic primitives. When those studies can be ported through public Rust SDK APIs without named-study core changes, TradingPlot can credibly describe the platform as broadly Pine-class for indicators.
+The proof standard is the Phase K compatibility corpus. KSR6 is a first representative composite acceptance case, not a special-case implementation target. ZigZag/drawing-heavy, FVG/box-heavy, dashboard, visible-range, custom-candle, lower-timeframe, alert-heavy, and eventually order-flow/footprint studies must exercise the same generic primitives. When those studies can be ported through public Rust SDK APIs without named-study core changes, Asceify can credibly describe the platform as broadly Pine-class for indicators.
 
-User-installable Rust studies are a confirmed product requirement and remain a separate trust domain from reviewed native studies. Phase L must deliver the editor, controlled toolchain, package format, and explicit sandbox boundary before TradingPlot accepts arbitrary user-authored executable studies. Do not weaken the current trusted-native contract, load user DLLs, or describe panic catching as arbitrary-code safety.
+User-installable Rust studies are a confirmed product requirement and remain a separate trust domain from reviewed native studies. Phase L must deliver the editor, controlled toolchain, package format, and explicit sandbox boundary before Asceify accepts arbitrary user-authored executable studies. Do not weaken the current trusted-native contract, load user DLLs, or describe panic catching as arbitrary-code safety.

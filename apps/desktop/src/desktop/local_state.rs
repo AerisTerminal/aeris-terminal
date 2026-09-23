@@ -4,14 +4,14 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use prost::Message as _;
-use tradingplot_contracts::{
+use asceify_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
     WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
     WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream,
     WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
+use prost::Message as _;
 
 const WORKSPACE_FILE: &str = "workspace-state.pb";
 const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
@@ -40,7 +40,7 @@ mod legacy_workspace_envelope {
 
 pub(super) fn load_workspace() -> WorkspaceState {
     load_workspace_result().unwrap_or_else(|error| {
-        eprintln!("TradingPlot workspace restore skipped: {error}");
+        eprintln!("Asceify workspace restore skipped: {error}");
         default_workspace()
     })
 }
@@ -78,13 +78,11 @@ fn load_workspace_result() -> Result<WorkspaceState, String> {
             if let Err(error) = fs::remove_file(&legacy)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
-                eprintln!("TradingPlot legacy workspace cleanup deferred: {error}");
+                eprintln!("Asceify legacy workspace cleanup deferred: {error}");
             }
         }
         Err(error) => {
-            eprintln!(
-                "TradingPlot workspace migration could not persist the current format: {error}"
-            );
+            eprintln!("Asceify workspace migration could not persist the current format: {error}");
         }
     }
     Ok(workspace)
@@ -247,7 +245,7 @@ pub(super) fn save_workspace_fixture(
 }
 
 fn workspace_path() -> Result<PathBuf, String> {
-    tradingplot_platform_runtime::native_data_root()
+    asceify_platform_runtime::native_data_root()
         .map(|root| root.join(WORKSPACE_FILE))
         .map_err(|error| error.to_string())
 }
@@ -391,7 +389,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         });
         chart
             .price_alerts
-            .truncate(tradingplot_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
+            .truncate(asceify_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
         chart.studies = sanitize_studies(std::mem::take(&mut chart.studies));
         if chart
             .appearance
@@ -457,7 +455,7 @@ fn rebase_durable_instrument(instrument: &mut InstallProviderInstrument) {
     instrument.session_generation = 1;
     instrument.selection_generation = 1;
     if let Some(display) =
-        tradingplot_market_runtime::migrate_retained_provider_display_symbol(instrument)
+        asceify_market_runtime::migrate_retained_provider_display_symbol(instrument)
     {
         instrument.display_symbol = display;
     }
@@ -483,7 +481,7 @@ fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState)
     !name.is_empty()
         && name.len() <= MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
         && !template.name.chars().any(char::is_control)
-        && tradingplot_chart_integration::ChartType::from_identifier(&template.chart_type).is_some()
+        && asceify_chart_integration::ChartType::from_identifier(&template.chart_type).is_some()
         && template.crosshair_mode <= 3
         && template
             .appearance
@@ -546,14 +544,13 @@ fn sanitize_studies(studies: Vec<WorkspaceChartStudyState>) -> Vec<WorkspaceChar
 fn valid_study_header(study: &WorkspaceChartStudyState, last_local_id: u64) -> bool {
     study.local_id > last_local_id
         && !study.identifier.is_empty()
-        && study.identifier.len()
-            <= tradingplot_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
+        && study.identifier.len() <= asceify_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
         && study.implementation_revision != 0
-        && study.settings.len() <= tradingplot_market_runtime::study::MAXIMUM_STUDY_SETTINGS
+        && study.settings.len() <= asceify_market_runtime::study::MAXIMUM_STUDY_SETTINGS
         && study.dependencies.len()
-            <= tradingplot_market_runtime::study::MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE
+            <= asceify_market_runtime::study::MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE
         && study.output_identifiers.len()
-            <= tradingplot_market_runtime::study::MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE
+            <= asceify_market_runtime::study::MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE
 }
 
 fn valid_study_settings(study: &WorkspaceChartStudyState) -> bool {
@@ -561,7 +558,7 @@ fn valid_study_settings(study: &WorkspaceChartStudyState) -> bool {
     study.settings.iter().all(|setting| {
         !setting.identifier.is_empty()
             && setting.identifier.len()
-                <= tradingplot_market_runtime::study::MAXIMUM_STUDY_SETTING_IDENTIFIER_BYTES
+                <= asceify_market_runtime::study::MAXIMUM_STUDY_SETTING_IDENTIFIER_BYTES
             && identifiers.insert(setting.identifier.as_str())
             && setting.value.as_ref().is_some_and(|value| match value {
                 workspace_study_setting_state::Value::Boolean(_)
@@ -569,13 +566,12 @@ fn valid_study_settings(study: &WorkspaceChartStudyState) -> bool {
                 workspace_study_setting_state::Value::Decimal(value) => {
                     value.scale
                         <= u32::from(
-                            tradingplot_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE,
+                            asceify_market_runtime::study::MAXIMUM_STUDY_SETTING_DECIMAL_SCALE,
                         )
                 }
                 workspace_study_setting_state::Value::Text(value)
                 | workspace_study_setting_state::Value::Choice(value) => {
-                    value.len()
-                        <= tradingplot_market_runtime::study::MAXIMUM_STUDY_SETTING_TEXT_BYTES
+                    value.len() <= asceify_market_runtime::study::MAXIMUM_STUDY_SETTING_TEXT_BYTES
                 }
             })
     })
@@ -588,7 +584,7 @@ fn valid_study_outputs(study: &WorkspaceChartStudyState) -> bool {
     let mut identifiers = std::collections::BTreeSet::new();
     study.output_identifiers.iter().all(|identifier| {
         !identifier.is_empty()
-            && identifier.len() <= tradingplot_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
+            && identifier.len() <= asceify_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
             && identifiers.insert(identifier.as_str())
     })
 }
@@ -652,7 +648,7 @@ fn valid_study_series(series: &SeriesKey) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tradingplot_contracts::{
+    use asceify_contracts::{
         WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
         WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceStudyDecimalState,
         WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
@@ -661,7 +657,7 @@ mod tests {
 
     fn temporary_workspace_path() -> PathBuf {
         let unique = format!(
-            "tradingplot-workspace-state-{}-{}",
+            "asceify-workspace-state-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -702,10 +698,10 @@ mod tests {
     fn persisted_sma_study(local_id: u64, period: i64, visible: bool) -> WorkspaceChartStudyState {
         WorkspaceChartStudyState {
             local_id,
-            identifier: tradingplot_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
-            implementation_revision: tradingplot_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+            identifier: asceify_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
+            implementation_revision: asceify_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
             settings: vec![WorkspaceStudySettingState {
-                identifier: tradingplot_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                identifier: asceify_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
                 value: Some(workspace_study_setting_state::Value::Integer(period)),
             }],
             dependencies: vec![WorkspaceStudyDependencyState {
@@ -714,26 +710,22 @@ mod tests {
                 ..WorkspaceStudyDependencyState::default()
             }],
             visible,
-            output_identifiers: vec![
-                tradingplot_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string(),
-            ],
+            output_identifiers: vec![asceify_study_sdk::BUILTIN_SMA_OUTPUT_IDENTIFIER.to_string()],
         }
     }
 
     fn persisted_bollinger_study(local_id: u64, visible: bool) -> WorkspaceChartStudyState {
         WorkspaceChartStudyState {
             local_id,
-            identifier: tradingplot_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER.to_string(),
-            implementation_revision:
-                tradingplot_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
+            identifier: asceify_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER.to_string(),
+            implementation_revision: asceify_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
             settings: vec![
                 WorkspaceStudySettingState {
-                    identifier: tradingplot_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING.to_string(),
+                    identifier: asceify_study_sdk::BUILTIN_BOLLINGER_PERIOD_SETTING.to_string(),
                     value: Some(workspace_study_setting_state::Value::Integer(20)),
                 },
                 WorkspaceStudySettingState {
-                    identifier: tradingplot_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING
-                        .to_string(),
+                    identifier: asceify_study_sdk::BUILTIN_BOLLINGER_DEVIATION_SETTING.to_string(),
                     value: Some(workspace_study_setting_state::Value::Decimal(
                         WorkspaceStudyDecimalState {
                             mantissa: 2,
@@ -749,9 +741,9 @@ mod tests {
             }],
             visible,
             output_identifiers: vec![
-                tradingplot_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
-                tradingplot_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
-                tradingplot_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
+                asceify_study_sdk::BUILTIN_BOLLINGER_UPPER_OUTPUT_IDENTIFIER.to_string(),
+                asceify_study_sdk::BUILTIN_BOLLINGER_MIDDLE_OUTPUT_IDENTIFIER.to_string(),
+                asceify_study_sdk::BUILTIN_BOLLINGER_LOWER_OUTPUT_IDENTIFIER.to_string(),
             ],
         }
     }
@@ -1182,10 +1174,10 @@ mod tests {
             persisted_sma_study(1, 20, true),
             WorkspaceChartStudyState {
                 local_id: 2,
-                identifier: tradingplot_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
-                implementation_revision: tradingplot_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+                identifier: asceify_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
+                implementation_revision: asceify_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
                 settings: vec![WorkspaceStudySettingState {
-                    identifier: tradingplot_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                    identifier: asceify_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
                     value: Some(workspace_study_setting_state::Value::Integer(5)),
                 }],
                 dependencies: vec![WorkspaceStudyDependencyState {
@@ -1199,10 +1191,10 @@ mod tests {
             },
             WorkspaceChartStudyState {
                 local_id: 3,
-                identifier: tradingplot_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
-                implementation_revision: tradingplot_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
+                identifier: asceify_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
+                implementation_revision: asceify_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
                 settings: vec![WorkspaceStudySettingState {
-                    identifier: tradingplot_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
+                    identifier: asceify_study_sdk::BUILTIN_SMA_PERIOD_SETTING.to_string(),
                     value: Some(workspace_study_setting_state::Value::Integer(5)),
                 }],
                 dependencies: vec![WorkspaceStudyDependencyState {

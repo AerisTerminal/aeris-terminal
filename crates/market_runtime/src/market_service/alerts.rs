@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use tradingplot_contracts::{InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency};
-use tradingplot_market_engine::ConsumerId;
+use asceify_contracts::{InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency};
+use asceify_market_engine::ConsumerId;
 
 use crate::{MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger};
 

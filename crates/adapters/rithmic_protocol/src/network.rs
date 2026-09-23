@@ -1,4 +1,5 @@
 use crate::{RithmicSessionError, RithmicSessionLimits, endpoint::RithmicEndpoint};
+use asceify_platform_runtime::cancel_tcp_stream_io;
 use rustls::{ClientConfig, RootCertStore};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -12,7 +13,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tradingplot_platform_runtime::cancel_tcp_stream_io;
 use tungstenite::{Connector, WebSocket, protocol::WebSocketConfig, stream::MaybeTlsStream};
 
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);

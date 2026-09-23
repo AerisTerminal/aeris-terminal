@@ -125,9 +125,9 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::new(ProviderRuntimeLifecycle::default());
         let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
         let history_name: &'static str = if spec.provider_id == "hyperliquid" {
-            "tradingplot-hyperliquid-history"
+            "asceify-hyperliquid-history"
         } else {
-            "tradingplot-rithmic-history"
+            "asceify-rithmic-history"
         };
         let history_worker = spawn_history_worker(
             history_name,
@@ -197,12 +197,10 @@ impl ProviderRuntimeRegistry {
             };
             let worker_activity = Arc::clone(active_workers);
             let provider = thread::Builder::new()
-                .name("tradingplot-rithmic-provider".to_string())
+                .name("asceify-rithmic-provider".to_string())
                 .spawn(move || {
-                    let _activity = ActiveWorkerGuard::register(
-                        "tradingplot-rithmic-provider",
-                        worker_activity,
-                    );
+                    let _activity =
+                        ActiveWorkerGuard::register("asceify-rithmic-provider", worker_activity);
                     crate::rithmic_realtime::run(
                         &catalog_controls_rx,
                         &catalog_events_tx,
@@ -353,17 +351,17 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::clone(&started.lifecycle);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("tradingplot-hyperliquid-catalog".to_string())
+            .name("asceify-hyperliquid-catalog".to_string())
             .spawn(move || {
                 let _activity =
-                    ActiveWorkerGuard::register("tradingplot-hyperliquid-catalog", activity);
+                    ActiveWorkerGuard::register("asceify-hyperliquid-catalog", activity);
                 crate::hyperliquid_realtime::run_catalog(
                     &controls,
                     &events,
                     &ws_generation,
                     &cancellation,
                     &wake,
-                    tradingplot_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
+                    asceify_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
                 );
                 if !cancellation.load(Ordering::Acquire) {
                     lifecycle
@@ -388,10 +386,10 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::clone(&started.lifecycle);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("tradingplot-hyperliquid-provider".to_string())
+            .name("asceify-hyperliquid-provider".to_string())
             .spawn(move || {
                 let _activity =
-                    ActiveWorkerGuard::register("tradingplot-hyperliquid-provider", activity);
+                    ActiveWorkerGuard::register("asceify-hyperliquid-provider", activity);
                 crate::hyperliquid_realtime::run(
                     &controls,
                     &events,
@@ -421,10 +419,10 @@ impl ProviderRuntimeRegistry {
         let cancellation = Arc::clone(&started.cancellation);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("tradingplot-hyperliquid-display-depth".to_string())
+            .name("asceify-hyperliquid-display-depth".to_string())
             .spawn(move || {
                 let _activity =
-                    ActiveWorkerGuard::register("tradingplot-hyperliquid-display-depth", activity);
+                    ActiveWorkerGuard::register("asceify-hyperliquid-display-depth", activity);
                 crate::hyperliquid_display_depth::run(
                     &controls,
                     &events,
@@ -1338,7 +1336,7 @@ mod tests {
         StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
         StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettings,
     };
-    use tradingplot_market_data::{BarPeriod, MarketBar};
+    use asceify_market_data::{BarPeriod, MarketBar};
 
     struct RecordingStudyHistory {
         calls: Arc<Mutex<Vec<String>>>,

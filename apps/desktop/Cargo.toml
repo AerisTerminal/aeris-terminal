@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_desktop"
+name = "asceify_desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,26 +7,26 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-diagnostics = ["tradingplot_chart_integration/diagnostics"]
+diagnostics = ["asceify_chart_integration/diagnostics"]
 
 [dependencies]
-tradingplot_application = { path = "../../crates/application" }
-tradingplot_account_runtime = { path = "../../crates/account_runtime" }
-tradingplot_chart_integration = { path = "../../crates/ui/chart_integration" }
-tradingplot_design_system = { path = "../../crates/ui/design_system" }
-tradingplot_instruments = { path = "../../crates/domain/instruments" }
-tradingplot_market_data = { path = "../../crates/domain/market_data" }
-tradingplot_market_runtime = { path = "../../crates/market_runtime" }
-tradingplot_study_sdk = { path = "../../crates/study_sdk" }
-tradingplot_contracts = { path = "../../crates/contracts" }
-tradingplot_observability = { path = "../../crates/observability" }
-tradingplot_platform_runtime = { path = "../../crates/platform_runtime" }
+asceify_application = { path = "../../crates/application" }
+asceify_account_runtime = { path = "../../crates/account_runtime" }
+asceify_chart_integration = { path = "../../crates/ui/chart_integration" }
+asceify_design_system = { path = "../../crates/ui/design_system" }
+asceify_instruments = { path = "../../crates/domain/instruments" }
+asceify_market_data = { path = "../../crates/domain/market_data" }
+asceify_market_runtime = { path = "../../crates/market_runtime" }
+asceify_study_sdk = { path = "../../crates/study_sdk" }
+asceify_contracts = { path = "../../crates/contracts" }
+asceify_observability = { path = "../../crates/observability" }
+asceify_platform_runtime = { path = "../../crates/platform_runtime" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
-tradingplot_terminal_ui = { path = "../../crates/ui/terminal_ui" }
+asceify_terminal_ui = { path = "../../crates/ui/terminal_ui" }
 gpui.workspace = true
 gpui-base.workspace = true
 gpui_platform.workspace = true

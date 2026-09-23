@@ -7242,11 +7242,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "tradingplot_account"
+name = "asceify_account"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_account_runtime"
+name = "asceify_account_runtime"
 version = "0.2.3"
 dependencies = [
  "base64 0.23.1",
@@ -7255,24 +7255,24 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tradingplot_account",
- "tradingplot_contracts",
- "tradingplot_platform_runtime",
+ "asceify_account",
+ "asceify_contracts",
+ "asceify_platform_runtime",
  "ureq",
  "zeroize",
 ]
 
 [[package]]
-name = "tradingplot_application"
+name = "asceify_application"
 version = "0.2.3"
 dependencies = [
  "sha2 0.11.0",
- "tradingplot_instruments",
- "tradingplot_market_data",
+ "asceify_instruments",
+ "asceify_market_data",
 ]
 
 [[package]]
-name = "tradingplot_chart_integration"
+name = "asceify_chart_integration"
 version = "0.2.3"
 dependencies = [
  "gpui",
@@ -7281,24 +7281,24 @@ dependencies = [
  "nucleuscharts_render_gpui",
  "num-traits",
  "serde_json",
- "tradingplot_application",
- "tradingplot_design_system",
- "tradingplot_terminal_ui",
+ "asceify_application",
+ "asceify_design_system",
+ "asceify_terminal_ui",
 ]
 
 [[package]]
-name = "tradingplot_contracts"
+name = "asceify_contracts"
 version = "0.2.3"
 dependencies = [
  "prost",
 ]
 
 [[package]]
-name = "tradingplot_design_system"
+name = "asceify_design_system"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_desktop"
+name = "asceify_desktop"
 version = "0.2.3"
 dependencies = [
  "embed-resource",
@@ -7313,76 +7313,76 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sysinfo 0.39.6",
- "tradingplot_account_runtime",
- "tradingplot_application",
- "tradingplot_chart_integration",
- "tradingplot_contracts",
- "tradingplot_design_system",
- "tradingplot_instruments",
- "tradingplot_market_data",
- "tradingplot_market_runtime",
- "tradingplot_observability",
- "tradingplot_platform_runtime",
- "tradingplot_study_sdk",
- "tradingplot_terminal_ui",
+ "asceify_account_runtime",
+ "asceify_application",
+ "asceify_chart_integration",
+ "asceify_contracts",
+ "asceify_design_system",
+ "asceify_instruments",
+ "asceify_market_data",
+ "asceify_market_runtime",
+ "asceify_observability",
+ "asceify_platform_runtime",
+ "asceify_study_sdk",
+ "asceify_terminal_ui",
  "unicode-segmentation",
 ]
 
 [[package]]
-name = "tradingplot_hyperliquid_market_adapter"
+name = "asceify_hyperliquid_market_adapter"
 version = "0.2.3"
 dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "tradingplot_market_data",
+ "asceify_market_data",
  "tungstenite",
  "ureq",
  "webpki-roots 1.0.9",
 ]
 
 [[package]]
-name = "tradingplot_instruments"
+name = "asceify_instruments"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_market_data"
+name = "asceify_market_data"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_market_engine"
+name = "asceify_market_engine"
 version = "0.2.3"
 dependencies = [
  "serde_json",
  "sha2 0.11.0",
- "tradingplot_market_data",
+ "asceify_market_data",
 ]
 
 [[package]]
-name = "tradingplot_market_runtime"
+name = "asceify_market_runtime"
 version = "0.2.3"
 dependencies = [
  "serde_json",
- "tradingplot_contracts",
- "tradingplot_hyperliquid_market_adapter",
- "tradingplot_market_data",
- "tradingplot_market_engine",
- "tradingplot_platform_runtime",
- "tradingplot_provider_history",
- "tradingplot_rithmic_protocol_adapter",
+ "asceify_contracts",
+ "asceify_hyperliquid_market_adapter",
+ "asceify_market_data",
+ "asceify_market_engine",
+ "asceify_platform_runtime",
+ "asceify_provider_history",
+ "asceify_rithmic_protocol_adapter",
  "zeroize",
 ]
 
 [[package]]
-name = "tradingplot_naming_check"
+name = "asceify_naming_check"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_observability"
+name = "asceify_observability"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_platform_runtime"
+name = "asceify_platform_runtime"
 version = "0.2.3"
 dependencies = [
  "base64 0.23.1",
@@ -7406,11 +7406,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "tradingplot_provider_history"
+name = "asceify_provider_history"
 version = "0.2.3"
 
 [[package]]
-name = "tradingplot_rithmic_protocol_adapter"
+name = "asceify_rithmic_protocol_adapter"
 version = "0.2.3"
 dependencies = [
  "prost",
@@ -7423,33 +7423,33 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "socket2",
- "tradingplot_market_data",
- "tradingplot_observability",
- "tradingplot_platform_runtime",
- "tradingplot_provider_history",
+ "asceify_market_data",
+ "asceify_observability",
+ "asceify_platform_runtime",
+ "asceify_provider_history",
  "tungstenite",
  "webpki-roots 1.0.9",
  "zeroize",
 ]
 
 [[package]]
-name = "tradingplot_study_sdk"
+name = "asceify_study_sdk"
 version = "0.2.3"
 dependencies = [
  "nucleuscharts_indicators",
  "num-traits",
- "tradingplot_market_data",
- "tradingplot_market_runtime",
+ "asceify_market_data",
+ "asceify_market_runtime",
 ]
 
 [[package]]
-name = "tradingplot_terminal_ui"
+name = "asceify_terminal_ui"
 version = "0.2.3"
 dependencies = [
  "gpui",
- "tradingplot_design_system",
- "tradingplot_instruments",
- "tradingplot_market_data",
+ "asceify_design_system",
+ "asceify_instruments",
+ "asceify_market_data",
 ]
 
 [[package]]

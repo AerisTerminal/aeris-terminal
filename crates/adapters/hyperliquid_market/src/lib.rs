@@ -4,7 +4,7 @@
 //! HTTPS/WebSocket requests, JSON decoding, metadata mapping, decimal to
 //! fixed-point conversion, and connection mechanics. Provider wire types stay
 //! private; the public surface returns normalized domain events
-//! ([`tradingplot_market_data`]) plus adapter metadata.
+//! ([`asceify_market_data`]) plus adapter metadata.
 //!
 //! Market data only: no orders, wallet signing, execution, or paper trading.
 //! Supported markets are core perpetuals, spot pairs, and builder-deployed

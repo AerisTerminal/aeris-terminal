@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_instruments"
+name = "asceify_instruments"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

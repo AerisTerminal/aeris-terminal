@@ -1,8 +1,8 @@
 # AGENTS.md
 
-Instructions for coding agents working in the TradingPlot native repository.
+Instructions for coding agents working in the Asceify native repository.
 
-TradingPlot is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
+Asceify is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
 In-process `market_runtime` and `account_runtime` own provider sessions, canonical market/account state,
 and bounded background work; GPUI owns presentation scheduling only. A secondary local market process must not return.
 
@@ -101,17 +101,9 @@ only the `nucleuscharts_*` revisions required by that update; do not update GPUI
 
 ## Authentication and website coordination
 
-Authentication is an end-to-end system shared with:
-`C:\Users\devraj\Downloads\Devlopment\axiusflow-website`.
+Authentication is disabled for the current development build because no Asceify account backend is deployed. Desktop startup must reach the workspace without opening a browser or creating an account session. Do not restore sign-in, sign-up, profile, billing, or lease traffic until an Asceify backend is provisioned and the full browser to callback to account runtime to vault to desktop path is verified.
 
-- Native ownership: desktop account presentation plus in-process `account_runtime` PKCE, loopback
-  callback, token exchange/verification, native vault material, account linking, and lease validation.
-- Website ownership: `workers/auth` Better Auth/OIDC, browser sign-in/account pages, D1 account and
-  billing state, OAuth/email entry points, native link/lease endpoints, checkout/portal, and webhooks.
-- Any auth/profile/subscription/entitlement change must inspect both repositories and verify the full
-  browser -> callback -> account runtime -> vault -> desktop path when relevant.
-- Browser success alone is not native authentication success.
-- Keep OAuth tokens, provider cookies, refresh material, and credentials out of desktop UI and logs.
+The sibling website is at `C:\Users\devraj\Downloads\Axiusflow-Org\axiusflow-website`. Inspect both repositories for future auth/profile/subscription changes, and preserve unrelated edits there. Keep tokens and credentials out of UI and logs.
 
 ## Design system coordination
 
@@ -149,47 +141,9 @@ independent baseline failures precisely.
 
 ## Release workflow
 
-Only publish/install when the maintainer asks for a release or end-to-end installed validation.
+Production release publication is disabled while the Asceify domain and AWS backend are unconfigured. Do not publish, install, or point clients at the former Axiusflow endpoint. The retired publication workflow must not be restored. Design and verify a new AWS release path when the maintainer requests deployment.
 
-- Before release, signer-provisioning, or release-tooling work, read the maintainer-machine checkpoint in
-  the `Readme` update-pipeline section. It records the current self-hosted runner identities, protected
-  tool paths, recovered trust root, missing production trust material, and the exact rule for when a trust
-  reset is allowed. Verify volatile runner/tool state against the machine before acting, and update that
-  checkpoint when provisioning materially changes.
-- Release from a clean, pushed `main` worktree only.
-- Read the current public stable channel first and choose the next install generation.
-- Production publication is CI-authoritative: dispatch `.github/workflows/release.yml` from `main`. Both
-  release jobs run on maintainer-owned Windows runners on the maintainer's machine; GitHub is the
-  trigger/audit layer and no GitHub-hosted runner, protected environment, or Actions binary artifact is
-  part of the release path. The `release-build` identity owns qualification only. A distinct
-  `release-signing` Windows identity owns the Ed25519 key file and authenticated Wrangler session; any
-  future production Authenticode certificate also belongs only to that identity. Production
-  signing/deployment secrets are not stored in GitHub. The
-  signer receives candidate binaries only after their hashes have been frozen and handed across the local shared directory. The
-  signing job must use an independently provisioned publisher whose SHA-256 is anchored outside the build
-  runner, and every external signing/deployment tool must be pinned by SHA-256 and live outside build-runner
-  write authority. Do not publish the stable channel from an ordinary shell or invoke the release publisher
-  outside that workflow.
-- `tools/publish_release.ps1 -Generation <N> -PackageOnly ...` is the local qualification/package path.
-  The production workflow uses `-PrebuildOnly` on the build runner, validates the locally handed-off binaries
-  against GitHub-controlled qualification hashes, and then uses the independently provisioned publisher with
-  `-SkipQualification -SkipBuild -PublisherPath -PublisherSha256`; do not bypass qualification,
-  trusted-publisher digest verification, public-key binding, manifest/provenance signing, immutable
-  upload, rollout policy, or public-channel verification. Windows publication must select exactly one
-  explicit mode: Authenticode plus RFC 3161 timestamping, or the maintainer-approved unsigned mode that
-  omits the embedded publisher thumbprint and truthfully accepts Windows `Unknown publisher` UX.
-- A signing-key trust reset must be explicitly bound to the exact public predecessor generation and
-  release identity and must publish a strictly newer generation. Treat that predecessor as
-  unauthenticated: do not use it for block reuse, retirement, or a claimed continuity chain. Existing
-  installations require a one-time reinstall unless an already-trusted rotation path exists.
-- After publishing, verify the live stable channel and installer hash before installing.
-- For installed-app validation, verify the active lifecycle pointer, signed manifest, installed binary
-  hashes, rollback-compatibility asset, stable/versioned launcher byte equality, and that the running
-  desktop path points at the intended immutable generation with no secondary market process or retired
-  market autostart registration. In Authenticode mode also verify publisher/timestamp; in explicit unsigned
-  mode verify that all shipped executables are actually unsigned and that the website does not claim a
-  trusted Windows publisher.
-- Never claim live provider, account, or visual behavior was tested unless that exact path was exercised.
+The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 
 ## Rust and documentation conventions
 

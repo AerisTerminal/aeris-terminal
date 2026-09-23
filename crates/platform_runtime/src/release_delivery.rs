@@ -34,7 +34,7 @@ pub const MAXIMUM_BLOCK_PLAN_BLOCKS: usize = 4096;
 /// Maximum number of network range requests a valid plan may require.
 pub const MAXIMUM_BLOCK_PLAN_DOWNLOAD_BLOCKS: usize = 256;
 
-// Stable wire-domain identifier. This predates the TradingPlot product rename
+// Stable wire-domain identifier. This predates the Asceify product rename
 // and must remain unchanged so existing signed block plans stay verifiable.
 const BLOCK_PLAN_SIGNING_DOMAIN: &[u8] = b"AXIUSFLOW_RELEASE_BLOCK_PLAN_V1\0";
 
@@ -373,8 +373,8 @@ mod tests {
             architecture: std::env::consts::ARCH.to_string(),
             files: vec![ReleaseFile {
                 role: ReleaseFileRole::Desktop,
-                path: "tradingplot_desktop".to_string(),
-                url: format!("https://releases.tradingplot.test/{generation}/tradingplot_desktop"),
+                path: "asceify_desktop".to_string(),
+                url: format!("https://releases.asceify.test/{generation}/asceify_desktop"),
                 size,
                 sha256: digest(digest_byte),
                 executable: true,

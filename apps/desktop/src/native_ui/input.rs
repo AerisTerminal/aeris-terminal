@@ -1,11 +1,9 @@
+use asceify_design_system::{AsceifyTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     App, BoxShadow, Entity, Focusable, Hsla, IntoElement, Pixels, RenderOnce, Window, div,
     prelude::*, px,
 };
 use gpui_base::input::{Input as BaseInput, InputEditorStyle};
-use tradingplot_design_system::{
-    RadiusToken, TradingPlotTheme, TypographyRole, platform_font_family,
-};
 
 pub(crate) use gpui_base::input::{InputEvent, InputState};
 
@@ -14,9 +12,9 @@ use super::{
     theme::{gpui_color, input_appearance, platform_border_width},
 };
 
-/// `TradingPlot`'s presentation wrapper around `gpui-base`'s single-line editing
+/// `Asceify`'s presentation wrapper around `gpui-base`'s single-line editing
 /// engine. Base owns text editing, selection, IME, clipboard, focus, keyboard,
-/// and accessibility behavior; `TradingPlot` owns every visual decision here.
+/// and accessibility behavior; `Asceify` owns every visual decision here.
 #[derive(IntoElement)]
 pub(crate) struct Input {
     state: Entity<InputState>,
@@ -47,7 +45,7 @@ impl Input {
         }
     }
 
-    pub(crate) fn platform(mut self, theme: &TradingPlotTheme) -> Self {
+    pub(crate) fn platform(mut self, theme: &AsceifyTheme) -> Self {
         let (fill, border, focus) = input_appearance(theme);
         self.fill = Some(gpui_color(fill));
         self.border_color = Some(gpui_color(border));

@@ -1,5 +1,4 @@
-use prost::Message as _;
-use tradingplot_contracts::{
+use asceify_contracts::{
     AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
     ProviderState, SeriesCadence, SeriesKey, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
@@ -7,6 +6,7 @@ use tradingplot_contracts::{
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
+use prost::Message as _;
 
 fn workspace_tab() -> WorkspaceTabState {
     let instrument = InstallProviderInstrument {
@@ -99,7 +99,7 @@ fn account_view_is_a_strongly_typed_in_process_contract() {
         request_generation: 3,
         display_name: "Ada Trader".into(),
         email: "ada@example.com".into(),
-        photo_url: "https://auth.axiusflow.com/photo/ada.png".into(),
+        photo_url: "https://auth.example.test/photo/ada.png".into(),
     };
     assert_eq!(view.state, AccountSessionState::Active);
     assert_eq!(view.display_name, "Ada Trader");

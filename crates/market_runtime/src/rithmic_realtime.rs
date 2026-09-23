@@ -8,17 +8,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tradingplot_contracts::{
+use asceify_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
 };
-use tradingplot_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
-use tradingplot_platform_runtime::{
+use asceify_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
+use asceify_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
-use tradingplot_rithmic_protocol_adapter::{
+use asceify_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
     ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
     RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
@@ -171,14 +171,14 @@ impl EnvironmentMonitors {
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            panicked.push("tradingplot-engine-rithmic-network-monitor");
+            panicked.push("asceify-engine-rithmic-network-monitor");
         }
         if self
             .power_worker
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            panicked.push("tradingplot-engine-rithmic-power-monitor");
+            panicked.push("asceify-engine-rithmic-power-monitor");
         }
         panicked
     }
@@ -1313,7 +1313,7 @@ fn drain_live_events(
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("TradingPlot Rithmic live session failed: {reason:?}");
+                eprintln!("Asceify Rithmic live session failed: {reason:?}");
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
                 let _ = runtime.stop();
@@ -1327,7 +1327,7 @@ fn drain_live_events(
             }
             Err(error) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("TradingPlot Rithmic live callback failed: {error}");
+                eprintln!("Asceify Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
                 return Some(wait_for_replacement(
@@ -1501,7 +1501,7 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
     let (sender, receiver) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
     let mut network = network;
     let network_worker = spawn_environment_monitor(
-        "tradingplot-engine-rithmic-network-monitor",
+        "asceify-engine-rithmic-network-monitor",
         sender.clone(),
         move || {
             network
@@ -1511,25 +1511,22 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
         },
     )?;
     let mut power = power;
-    let power_worker = match spawn_environment_monitor(
-        "tradingplot-engine-rithmic-power-monitor",
-        sender,
-        move || {
+    let power_worker =
+        match spawn_environment_monitor("asceify-engine-rithmic-power-monitor", sender, move || {
             power
                 .next_event()
                 .map(RithmicEnvironmentEvent::Power)
                 .map_err(|_| ())
-        },
-    ) {
-        Ok(worker) => worker,
-        Err(error) => {
-            drop(receiver);
-            network_cancellation.cancel();
-            power_cancellation.cancel();
-            let _ = network_worker.join();
-            return Err(error);
-        }
-    };
+        }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                drop(receiver);
+                network_cancellation.cancel();
+                power_cancellation.cancel();
+                let _ = network_worker.join();
+                return Err(error);
+            }
+        };
     Ok(EnvironmentMonitors {
         events: Some(receiver),
         state: EnvironmentState {
@@ -1666,9 +1663,9 @@ mod tests {
         publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
         reject_pending_catalog, retire_pending_catalog_generation,
     };
-    use tradingplot_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
-    use tradingplot_platform_runtime::{NetworkEvent, PowerEvent};
-    use tradingplot_rithmic_protocol_adapter::{
+    use asceify_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
+    use asceify_platform_runtime::{NetworkEvent, PowerEvent};
+    use asceify_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
     };
 

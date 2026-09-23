@@ -525,7 +525,7 @@ mod tests {
             .expect("test clock is valid")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "tradingplot-{name}-{}-{nonce}.json",
+            "asceify-{name}-{}-{nonce}.json",
             std::process::id()
         ))
     }

@@ -285,7 +285,7 @@ impl Coordinator<'_> {
             return;
         }
         self.hyperliquid_catalog_degraded = Some(generation);
-        eprintln!("TradingPlot engine Hyperliquid catalog refresh degraded: {detail}");
+        eprintln!("Asceify engine Hyperliquid catalog refresh degraded: {detail}");
     }
 
     /// Clears catalog degradation after a success from the same provider
@@ -311,7 +311,7 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_catalog_search(
         &mut self,
-        result: tradingplot_contracts::ProviderInstrumentSearchResult,
+        result: asceify_contracts::ProviderInstrumentSearchResult,
     ) {
         if result.consumer_id == 0 {
             return;

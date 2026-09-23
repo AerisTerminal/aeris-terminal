@@ -97,7 +97,7 @@ pub(super) fn chart_context_menu_layer(
     menu: &ChartContextMenu,
     state: ChartContextMenuState,
     viewport: gpui::Size<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
     let popup_bounds = Bounds::new(
@@ -133,7 +133,7 @@ pub(super) fn chart_context_menu_panel(
     menu: &ChartContextMenu,
     state: ChartContextMenuState,
     origin: gpui::Point<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "chart_context_menu",
@@ -223,7 +223,7 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
 pub(super) fn chart_context_menu_item(
     terminal: &Entity<TerminalApp>,
     item: ChartContextMenuItem,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     menu: ChartContextMenu,
     first: bool,
     last: bool,
@@ -307,7 +307,7 @@ pub(super) fn chart_context_menu_item(
 pub(super) fn copy_price_chip(
     price: SharedString,
     enabled: bool,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let ink = if enabled {
@@ -325,7 +325,7 @@ pub(super) fn copy_price_chip(
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
-        .font_family(tradingplot_design_system::platform_font_family())
+        .font_family(asceify_design_system::platform_font_family())
         .font_features(platform_tabular_numerals())
         .text_xs()
         .text_color(gpui_color(ink))
@@ -337,7 +337,7 @@ pub(super) fn price_axis_menu_layer(
     menu: &ChartContextMenu,
     state: PriceAxisMenuState,
     viewport: gpui::Size<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let origin = clamp_price_axis_menu_origin(menu.position, viewport, state.left);
     let root_bounds = Bounds::new(
@@ -400,7 +400,7 @@ pub(super) fn price_axis_menu_panel(
     menu: &ChartContextMenu,
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "price_axis_menu",
@@ -432,7 +432,7 @@ pub(super) fn price_axis_flyout_panel(
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "price_axis_flyout",
@@ -655,7 +655,7 @@ pub(super) fn price_axis_menu_item(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     row: PriceAxisMenuRow,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     first: bool,
     last: bool,
 ) -> impl IntoElement {
@@ -708,7 +708,7 @@ pub(super) fn chart_settings_menu_layer(
     menu: &ChartContextMenu,
     view: ChartSettingsView<'_>,
     viewport: gpui::Size<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let panel_size = chart_settings_panel_size(viewport);
     let origin = chart_settings_centered_origin(viewport, panel_size);
@@ -769,7 +769,7 @@ fn chart_settings_panel(
     panel_size: gpui::Size<Pixels>,
     content: AnyElement,
     view: ChartSettingsView<'_>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
@@ -786,7 +786,7 @@ fn chart_settings_panel(
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface))
-        .font_family(tradingplot_design_system::platform_font_family())
+        .font_family(asceify_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_primary))
         .occlude()
@@ -843,7 +843,7 @@ fn chart_settings_panel(
 fn chart_settings_actions(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let close_terminal = terminal.clone();
     let reset_terminal = terminal.clone();
@@ -905,7 +905,7 @@ fn chart_settings_sidebar(
     menu: &ChartContextMenu,
     selected: ChartSettingsSection,
     templates: ChartSettingsTemplateView<'_>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels())
@@ -972,7 +972,7 @@ fn chart_settings_template_control(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     state: ChartSettingsTemplateView<'_>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let toggle = terminal.clone();
@@ -1066,7 +1066,7 @@ fn chart_settings_template_save_dialog(
     menu: &ChartContextMenu,
     input: Option<&Entity<InputState>>,
     error: Option<&str>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let cancel = terminal.clone();
@@ -1140,7 +1140,7 @@ fn chart_series_settings(
     menu: &ChartContextMenu,
     snapshot: &ChartSettingsSnapshot,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let body = match snapshot.chart_type {
         ChartType::Candles => {
@@ -1178,7 +1178,7 @@ fn candle_series_settings(
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     div()
         .child(settings_group_heading(
@@ -1268,7 +1268,7 @@ fn bar_series_settings(
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     div()
         .child(settings_group_heading(
@@ -1317,7 +1317,7 @@ fn line_series_settings(
     appearance: &ChartAppearanceSettings,
     color_picker: Option<&ChartColorPickerState>,
     brushable: bool,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     div()
         .child(settings_group_heading(
@@ -1351,7 +1351,7 @@ fn area_series_settings(
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     div()
         .child(settings_group_heading(
@@ -1385,7 +1385,7 @@ fn baseline_series_settings(
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     div()
         .child(settings_group_heading(
@@ -1423,7 +1423,7 @@ fn chart_canvas_settings(
     menu: &ChartContextMenu,
     snapshot: &ChartSettingsSnapshot,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     settings_content_header(
         "Canvas",
@@ -1452,7 +1452,7 @@ fn canvas_grid_settings(
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     div()
         .child(settings_group_heading("Grid", "Pane grid lines", theme))
@@ -1502,7 +1502,7 @@ fn canvas_crosshair_settings(
     menu: &ChartContextMenu,
     snapshot: &ChartSettingsSnapshot,
     color_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let appearance = &snapshot.appearance;
     div()
@@ -1598,7 +1598,7 @@ fn canvas_crosshair_settings(
 fn settings_content_header(
     title: &'static str,
     description: &'static str,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Div {
     div()
         .flex()
@@ -1624,7 +1624,7 @@ fn settings_content_header(
 fn settings_group_heading(
     title: &'static str,
     description: &'static str,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     div()
         .mt_3()
@@ -1653,7 +1653,7 @@ fn settings_toggle_row(
     label: &'static str,
     enabled: bool,
     action: ChartSettingsAction,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let terminal = terminal.clone();
@@ -1708,7 +1708,7 @@ fn settings_color_row(
     setting: ChartColorSetting,
     value: &str,
     open_picker: Option<&ChartColorPickerState>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let terminal_for_toggle = terminal.clone();
@@ -1764,7 +1764,7 @@ fn settings_color_row(
                         .child(
                             div()
                                 .w(px(62.0))
-                                .font_family(tradingplot_design_system::platform_font_family())
+                                .font_family(asceify_design_system::platform_font_family())
                                 .text_xs()
                                 .text_color(gpui_color(colors.text_muted))
                                 .child(value.to_ascii_uppercase()),
@@ -1796,7 +1796,7 @@ fn settings_line_controls(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     appearance: &ChartAppearanceSettings,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -1859,7 +1859,7 @@ fn settings_choice_row(
     menu: &ChartContextMenu,
     label: &'static str,
     choices: &[(&'static str, bool, ChartSettingsAction)],
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let mut controls = div()
@@ -1939,8 +1939,8 @@ fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
 /// every frame, and the cache keys by URI.
 pub(super) fn account_avatar_button(
     terminal: &Entity<TerminalApp>,
-    account: &tradingplot_desktop::account::AccountMenuState,
-    theme: &TradingPlotTheme,
+    account: &asceify_desktop::account::AccountMenuState,
+    theme: &AsceifyTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let presentation = &account.presentation;
@@ -1988,8 +1988,8 @@ pub(super) fn account_avatar_button(
 }
 
 fn account_avatar_face(
-    account: &tradingplot_desktop::account::AccountMenuState,
-    theme: &TradingPlotTheme,
+    account: &asceify_desktop::account::AccountMenuState,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     if !account.signed_in() {
@@ -2022,13 +2022,13 @@ fn account_avatar_face(
                 .text_xs()
                 .font_weight(platform_font_weight(TypographyRole::Normal))
                 .text_color(gpui_color(colors.text_primary))
-                .child(tradingplot_desktop::account::profile_initials(
+                .child(asceify_desktop::account::profile_initials(
                     &presentation.display_name,
                     &presentation.email,
                 )),
         )
         .children(
-            tradingplot_desktop::account::has_profile_photo(&presentation.photo_url).then(|| {
+            asceify_desktop::account::has_profile_photo(&presentation.photo_url).then(|| {
                 img(presentation.photo_url.as_str())
                     .absolute()
                     .inset_0()
@@ -2048,10 +2048,10 @@ fn account_avatar_face(
 /// profile/About actions use the same compact menu primitives as chart menus.
 pub(super) fn account_menu_layer(
     terminal: &Entity<TerminalApp>,
-    account: &tradingplot_desktop::account::AccountMenuState,
+    account: &asceify_desktop::account::AccountMenuState,
     anchor: Option<gpui::Point<Pixels>>,
     viewport: gpui::Size<Pixels>,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let colors = theme.colors;
     let dismiss = terminal.clone();
@@ -2123,8 +2123,8 @@ pub(super) fn account_menu_layer(
 /// verified name and avatar; other visible states name themselves with their detail. A plain
 /// signed-out session shows no identity header.
 fn account_menu_header(
-    account: &tradingplot_desktop::account::AccountMenuState,
-    theme: &TradingPlotTheme,
+    account: &asceify_desktop::account::AccountMenuState,
+    theme: &AsceifyTheme,
 ) -> Option<AnyElement> {
     let colors = theme.colors;
     let presentation = &account.presentation;
@@ -2224,8 +2224,16 @@ struct AccountMenuRowEdges {
 type AccountMenuActionRow = Option<(&'static str, &'static str, bool, AccountMenuClick)>;
 
 fn account_menu_action_rows(
-    account: &tradingplot_desktop::account::AccountMenuState,
+    account: &asceify_desktop::account::AccountMenuState,
 ) -> Vec<AccountMenuActionRow> {
+    if !asceify_desktop::account::AUTH_BACKEND_CONFIGURED {
+        return vec![Some((
+            "account_menu_about",
+            "About Asceify",
+            false,
+            AccountMenuClick::About,
+        ))];
+    }
     if account.authorizing() {
         return vec![
             Some((
@@ -2243,7 +2251,7 @@ fn account_menu_action_rows(
             None,
             Some((
                 "account_menu_about",
-                "About TradingPlot",
+                "About Asceify",
                 false,
                 AccountMenuClick::About,
             )),
@@ -2259,7 +2267,7 @@ fn account_menu_action_rows(
             )),
             Some((
                 "account_menu_about",
-                "About TradingPlot",
+                "About Asceify",
                 false,
                 AccountMenuClick::About,
             )),
@@ -2289,7 +2297,7 @@ fn account_menu_action_rows(
             None,
             Some((
                 "account_menu_about",
-                "About TradingPlot",
+                "About Asceify",
                 false,
                 AccountMenuClick::About,
             )),
@@ -2305,7 +2313,7 @@ fn account_menu_action_rows(
         None,
         Some((
             "account_menu_about",
-            "About TradingPlot",
+            "About Asceify",
             false,
             AccountMenuClick::About,
         )),
@@ -2314,8 +2322,8 @@ fn account_menu_action_rows(
 
 fn account_menu_actions(
     action_terminal: &Entity<TerminalApp>,
-    account: &tradingplot_desktop::account::AccountMenuState,
-    theme: &TradingPlotTheme,
+    account: &asceify_desktop::account::AccountMenuState,
+    theme: &AsceifyTheme,
 ) -> Vec<AnyElement> {
     // While the browser holds the transaction there are two recovery exits.
     // Global profile/About actions share the same compact row geometry, while
@@ -2359,7 +2367,7 @@ fn account_menu_actions(
 fn account_menu_row(
     action_terminal: Entity<TerminalApp>,
     spec: AccountMenuRowSpec,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> AnyElement {
     let icon = match spec.click {
         AccountMenuClick::ManageProfile => HugeIcon::User,
@@ -2405,8 +2413,8 @@ fn account_menu_row(
                         terminal.close_account_menu(terminal_cx);
                     }
                     AccountMenuClick::ManageProfile => {
-                        if let Err(error) = tradingplot_desktop::account::open_manage_profile() {
-                            eprintln!("TradingPlot profile browser open degraded: {error}");
+                        if let Err(error) = asceify_desktop::account::open_manage_profile() {
+                            eprintln!("Asceify profile browser open degraded: {error}");
                         } else {
                             terminal.arm_profile_refresh_after_browser();
                         }
@@ -2461,7 +2469,7 @@ mod tests {
     #[test]
     fn chart_color_trigger_preserves_picker_alpha() {
         let rgba =
-            chart_css_color("#335CFF80", TradingPlotTheme::dark().colors.text_secondary).to_rgb();
+            chart_css_color("#335CFF80", AsceifyTheme::dark().colors.text_secondary).to_rgb();
         assert!((rgba.r - f32::from(0x33_u8) / 255.0).abs() < 0.001);
         assert!((rgba.g - f32::from(0x5C_u8) / 255.0).abs() < 0.001);
         assert!((rgba.b - 1.0).abs() < 0.001);
@@ -2469,19 +2477,16 @@ mod tests {
     }
 
     #[test]
-    fn failed_durable_sign_out_exposes_a_retry_action() {
-        let mut account = tradingplot_desktop::account::unavailable_menu_state();
-        account.presentation.state = "Signed out";
-        account.retry_sign_out = true;
-        account.error = Some("sign-out cleanup failed".to_string());
-
+    fn development_menu_has_no_authentication_actions() {
+        let account = asceify_desktop::account::unavailable_menu_state();
         let rows = account_menu_action_rows(&account);
+        assert_eq!(rows.len(), 1);
         let Some((id, label, destructive, click)) = rows[0] else {
-            panic!("retry sign-out row must be present");
+            panic!("About row must be present");
         };
-        assert_eq!(id, "account_menu_retry_sign_out");
-        assert_eq!(label, "Retry sign-out");
-        assert!(destructive);
-        assert!(matches!(click, AccountMenuClick::SignOut));
+        assert_eq!(id, "account_menu_about");
+        assert_eq!(label, "About Asceify");
+        assert!(!destructive);
+        assert!(matches!(click, AccountMenuClick::About));
     }
 }

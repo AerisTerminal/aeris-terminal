@@ -11,10 +11,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use asceify_account::{AccountId, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::Deserialize;
-use tradingplot_account::{AccountId, PlanId};
 
 /// Authorization URL parameters for one login transaction.
 pub struct AuthorizationRequest<'a> {
@@ -32,7 +32,7 @@ pub struct AuthorizationRequest<'a> {
     pub code_challenge: &'a str,
 }
 
-/// OIDC endpoints resolved from discovery plus the `TradingPlot` link route.
+/// OIDC endpoints resolved from discovery plus the `Asceify` link route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OidcEndpoints {
     /// Verified issuer identity.
@@ -105,8 +105,8 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
         token_endpoint: metadata.token_endpoint.clone(),
         jwks_uri: metadata.jwks_uri.clone(),
         revocation_endpoint: metadata.revocation_endpoint.clone(),
-        link_endpoint: format!("{origin}/api/axiusflow/link"),
-        lease_endpoint: format!("{origin}/api/axiusflow/lease"),
+        link_endpoint: format!("{origin}/api/asceify/link"),
+        lease_endpoint: format!("{origin}/api/asceify/lease"),
     })
 }
 
@@ -141,8 +141,8 @@ pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<
 
 /// Derives the control-plane origin from the OIDC issuer.
 ///
-/// The `TradingPlot` issuer is the Better Auth mount (`{origin}/api/auth`); the
-/// `TradingPlot`-owned link route lives on the origin beside it.
+/// The `Asceify` issuer is the Better Auth mount (`{origin}/api/auth`); the
+/// `Asceify`-owned link route lives on the origin beside it.
 ///
 /// # Errors
 ///
@@ -388,7 +388,7 @@ pub struct AccountProfile {
     pub photo_url: String,
 }
 
-/// Links one verified OIDC subject to the canonical `TradingPlot` account.
+/// Links one verified OIDC subject to the canonical `Asceify` account.
 ///
 /// The ID token travels as the proof: the control plane verifies it
 /// server-side and never trusts the client-claimed subject. The verified
@@ -430,15 +430,12 @@ pub fn link_subject(
         AccountProfile {
             display_name: clip_profile(
                 &link.display_name,
-                tradingplot_account::MAXIMUM_PROFILE_NAME_BYTES,
+                asceify_account::MAXIMUM_PROFILE_NAME_BYTES,
             ),
-            email: clip_profile(
-                &link.email,
-                tradingplot_account::MAXIMUM_PROFILE_EMAIL_BYTES,
-            ),
+            email: clip_profile(&link.email, asceify_account::MAXIMUM_PROFILE_EMAIL_BYTES),
             photo_url: clip_profile(
                 &link.photo_url,
-                tradingplot_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
+                asceify_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
             ),
         },
     ))
@@ -652,14 +649,14 @@ mod tests {
 
     fn endpoints() -> OidcEndpoints {
         OidcEndpoints {
-            issuer: "https://auth.axiusflow.com/api/auth".to_string(),
-            authorization_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/authorize"
+            issuer: "https://auth.example.test/api/auth".to_string(),
+            authorization_endpoint: "https://auth.example.test/api/auth/oauth2/authorize"
                 .to_string(),
-            token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
-            jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
-            revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke".to_string(),
-            link_endpoint: "https://auth.axiusflow.com/api/axiusflow/link".to_string(),
-            lease_endpoint: "https://auth.axiusflow.com/api/axiusflow/lease".to_string(),
+            token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
+            jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
+            revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
+            link_endpoint: "https://auth.example.test/api/asceify/link".to_string(),
+            lease_endpoint: "https://auth.example.test/api/asceify/lease".to_string(),
         }
     }
 
@@ -709,19 +706,19 @@ mod tests {
 
     fn discovery_fixture() -> super::DiscoveryMetadata {
         super::DiscoveryMetadata {
-            issuer: "https://auth.axiusflow.com/api/auth".to_string(),
-            authorization_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/authorize"
+            issuer: "https://auth.example.test/api/auth".to_string(),
+            authorization_endpoint: "https://auth.example.test/api/auth/oauth2/authorize"
                 .to_string(),
-            token_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/token".to_string(),
-            jwks_uri: "https://auth.axiusflow.com/api/auth/jwks".to_string(),
-            revocation_endpoint: "https://auth.axiusflow.com/api/auth/oauth2/revoke".to_string(),
+            token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
+            jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
+            revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
         }
     }
 
     #[test]
     fn discovery_fixture_matches_the_live_worker_layout() {
         let endpoints =
-            super::parse_discovery("https://auth.axiusflow.com/api/auth", &discovery_fixture())
+            super::parse_discovery("https://auth.example.test/api/auth", &discovery_fixture())
                 .expect("fixture parses");
         assert_eq!(endpoints, self::endpoints());
     }
@@ -730,7 +727,7 @@ mod tests {
     fn discovery_rejects_mismatched_issuer_and_off_origin_endpoints() {
         assert!(
             super::parse_discovery(
-                "https://auth.axiusflow.com/api/auth",
+                "https://auth.example.test/api/auth",
                 &super::DiscoveryMetadata {
                     issuer: "https://evil.example.com/api/auth".to_string(),
                     ..discovery_fixture()
@@ -739,14 +736,14 @@ mod tests {
             .is_err()
         );
         for jwks_uri in [
-            "https://auth.axiusflow.com.evil.example/jwks",
-            "https://auth.axiusflow.com@evil.example/jwks",
-            "https://auth.axiusflow.com:444/jwks",
-            "http://auth.axiusflow.com/jwks",
+            "https://auth.example.test.evil.example/jwks",
+            "https://auth.example.test@evil.example/jwks",
+            "https://auth.example.test:444/jwks",
+            "http://auth.example.test/jwks",
         ] {
             assert!(
                 super::parse_discovery(
-                    "https://auth.axiusflow.com/api/auth",
+                    "https://auth.example.test/api/auth",
                     &super::DiscoveryMetadata {
                         jwks_uri: jwks_uri.to_string(),
                         ..discovery_fixture()
@@ -758,20 +755,20 @@ mod tests {
         }
 
         let endpoints = super::parse_discovery(
-            "https://auth.axiusflow.com/api/auth",
+            "https://auth.example.test/api/auth",
             &super::DiscoveryMetadata {
-                jwks_uri: "https://AUTH.AXIUSFLOW.COM:443/api/auth/jwks".to_string(),
+                jwks_uri: "https://AUTH.EXAMPLE.TEST:443/api/auth/jwks".to_string(),
                 ..discovery_fixture()
             },
         )
         .expect("host case and the explicit default HTTPS port preserve the same origin");
         assert_eq!(
             endpoints.jwks_uri,
-            "https://AUTH.AXIUSFLOW.COM:443/api/auth/jwks"
+            "https://AUTH.EXAMPLE.TEST:443/api/auth/jwks"
         );
         assert!(
             super::parse_discovery(
-                "https://auth.axiusflow.com/api/auth",
+                "https://auth.example.test/api/auth",
                 &super::DiscoveryMetadata {
                     jwks_uri: "https://evil.example.com/jwks".to_string(),
                     ..discovery_fixture()
@@ -786,20 +783,20 @@ mod tests {
         let endpoints = endpoints();
         let request = AuthorizationRequest {
             endpoints: &endpoints,
-            client_id: "axiusflow-desktop",
+            client_id: "asceify-desktop",
             redirect_uri: "http://127.0.0.1:43129/callback",
             state: "state-value",
             nonce: "nonce-value",
             code_challenge: "challenge-value",
         };
         let url = authorization_url(&request).expect("URL builds");
-        assert!(url.starts_with("https://auth.axiusflow.com/api/auth/oauth2/authorize?"));
+        assert!(url.starts_with("https://auth.example.test/api/auth/oauth2/authorize?"));
         assert!(url.contains("scope=openid%20offline_access"));
         assert!(url.contains("prompt=consent"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback"));
         let mut plain = endpoints.clone();
-        plain.authorization_endpoint = "http://auth.axiusflow.com/oauth2/authorize".to_string();
+        plain.authorization_endpoint = "http://auth.example.test/oauth2/authorize".to_string();
         assert!(
             authorization_url(&AuthorizationRequest {
                 endpoints: &plain,
@@ -812,14 +809,14 @@ mod tests {
     #[test]
     fn control_plane_origin_requires_the_expected_mount() {
         assert_eq!(
-            control_plane_origin("https://auth.axiusflow.com/api/auth"),
-            Ok("https://auth.axiusflow.com".to_string())
+            control_plane_origin("https://auth.example.test/api/auth"),
+            Ok("https://auth.example.test".to_string())
         );
-        assert!(control_plane_origin("https://auth.axiusflow.com").is_err());
-        assert!(control_plane_origin("http://auth.axiusflow.com/api/auth").is_err());
-        assert!(control_plane_origin("https://auth.axiusflow.com.evil/api/auth").is_ok());
-        assert!(control_plane_origin("https://auth.axiusflow.com/api/auth?next=evil").is_err());
-        assert!(control_plane_origin("https://user@auth.axiusflow.com/api/auth").is_err());
+        assert!(control_plane_origin("https://auth.example.test").is_err());
+        assert!(control_plane_origin("http://auth.example.test/api/auth").is_err());
+        assert!(control_plane_origin("https://auth.example.test.evil/api/auth").is_ok());
+        assert!(control_plane_origin("https://auth.example.test/api/auth?next=evil").is_err());
+        assert!(control_plane_origin("https://user@auth.example.test/api/auth").is_err());
     }
 
     #[test]
@@ -849,11 +846,11 @@ mod tests {
 
     #[test]
     fn audience_matching_covers_string_and_array() {
-        let single = serde_json::Value::String("axiusflow-desktop".to_string());
-        assert!(audience_matches(&single, "axiusflow-desktop"));
+        let single = serde_json::Value::String("asceify-desktop".to_string());
+        assert!(audience_matches(&single, "asceify-desktop"));
         assert!(!audience_matches(&single, "other"));
         let many = serde_json::Value::Array(vec![serde_json::Value::String("other".to_string())]);
-        assert!(!audience_matches(&many, "axiusflow-desktop"));
+        assert!(!audience_matches(&many, "asceify-desktop"));
     }
 
     #[test]

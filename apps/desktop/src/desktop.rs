@@ -26,8 +26,6 @@ mod indicator_menu;
 mod local_state;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
-#[path = "onboarding.rs"]
-mod onboarding;
 #[path = "components/price_alert_dialog.rs"]
 mod price_alert_dialog;
 #[cfg(any(test, feature = "diagnostics"))]
@@ -51,6 +49,49 @@ mod update;
 mod workspace_layout;
 
 use about_dialog::about_dialog_layer;
+use asceify_application::ReplayStreamUpdate;
+use asceify_chart_integration::{
+    ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
+    ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
+    ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
+    ChartDrawingTool, ChartIndicator, ChartIndicatorState, ChartSplitDirection,
+    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, ChartWorkspaceLayout,
+    NucleusChartTheme, NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
+};
+use asceify_contracts::{
+    InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
+    ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
+    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
+    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
+};
+use asceify_design_system::{
+    AsceifyTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
+};
+use asceify_desktop::market_worker::{
+    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
+    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
+};
+use asceify_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
+use asceify_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
+use asceify_market_runtime::study::{
+    NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
+    StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettingCondition,
+    StudySettingControl, StudySettingSpec, StudySettingValue, StudyThresholdRegion,
+};
+use asceify_market_runtime::{
+    MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,
+    StreamRequirements,
+};
+use asceify_observability::FeedConnectionState;
+use asceify_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
 use assets::UiIcon as HugeIcon;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
@@ -148,49 +189,6 @@ use terminal_chrome::{
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
 };
-use tradingplot_application::ReplayStreamUpdate;
-use tradingplot_chart_integration::{
-    ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
-    ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
-    ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingTool, ChartIndicator, ChartIndicatorState, ChartSplitDirection,
-    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
-    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, ChartWorkspaceLayout,
-    NucleusChartTheme, NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
-};
-use tradingplot_contracts::{
-    InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
-    ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
-    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
-    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
-};
-use tradingplot_design_system::{
-    PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TradingPlotTheme, TypographyRole,
-};
-use tradingplot_desktop::market_worker::{
-    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
-    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
-};
-use tradingplot_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
-use tradingplot_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
-use tradingplot_market_runtime::study::{
-    NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
-    StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettingCondition,
-    StudySettingControl, StudySettingSpec, StudySettingValue, StudyThresholdRegion,
-};
-use tradingplot_market_runtime::{
-    MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,
-    StreamRequirements,
-};
-use tradingplot_observability::FeedConnectionState;
-use tradingplot_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use workspace_layout::workspace_market_area;
 #[cfg(test)]
@@ -200,49 +198,21 @@ use workspace_layout::workspace_split_ratio;
 use std::time::Instant;
 
 fn install_platform_http_client(cx: &mut App) {
-    match ReqwestClient::user_agent(concat!("TradingPlot/", env!("CARGO_PKG_VERSION"))) {
+    match ReqwestClient::user_agent(concat!("Asceify/", env!("CARGO_PKG_VERSION"))) {
         Ok(client) => cx.set_http_client(Arc::new(client)),
-        Err(error) => eprintln!("TradingPlot image networking degraded: {error}"),
+        Err(error) => eprintln!("Asceify image networking degraded: {error}"),
     }
-}
-
-static ACCOUNT_ONLY_QUIT_STARTED: AtomicBool = AtomicBool::new(false);
-
-pub(super) fn quit_after_account_refresh_quiesce(cx: &mut App) {
-    if ACCOUNT_ONLY_QUIT_STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let account_refresh = tradingplot_desktop::account::begin_refresh_quiesce();
-    let shutdown = cx.background_executor().spawn(async move {
-        let quiesce = account_refresh?;
-        if let Err(first_error) = quiesce.wait() {
-            eprintln!("TradingPlot account shutdown retrying after: {first_error}");
-            quiesce.wait()?;
-        }
-        quiesce.retain_until_process_exit();
-        Ok::<(), String>(())
-    });
-    cx.spawn(async move |cx| match shutdown.await {
-        Ok(()) => {
-            cx.update(|cx| cx.quit());
-        }
-        Err(error) => {
-            ACCOUNT_ONLY_QUIT_STARTED.store(false, Ordering::Release);
-            eprintln!("TradingPlot account shutdown failed: {error}");
-        }
-    })
-    .detach();
 }
 
 fn retain_account_refresh_quiesce_for_exit(
-    account_refresh: Result<tradingplot_account_runtime::AccountRefreshQuiesce, String>,
+    account_refresh: Result<asceify_account_runtime::AccountRefreshQuiesce, String>,
     context: &str,
 ) {
     let quiesce = match account_refresh {
         Ok(quiesce) => quiesce,
         Err(error) => {
             eprintln!(
-                "TradingPlot refused {context} because account refresh could not be quiesced: {error}"
+                "Asceify refused {context} because account refresh could not be quiesced: {error}"
             );
             loop {
                 std::thread::park();
@@ -257,7 +227,7 @@ fn retain_account_refresh_quiesce_for_exit(
         }
         Err(error) => error,
     };
-    eprintln!("TradingPlot account shutdown retrying after: {first_error}");
+    eprintln!("Asceify account shutdown retrying after: {first_error}");
     let second_error = match quiesce.wait() {
         Ok(()) => {
             quiesce.retain_until_process_exit();
@@ -266,7 +236,7 @@ fn retain_account_refresh_quiesce_for_exit(
         Err(error) => error,
     };
     eprintln!(
-        "TradingPlot refused {context} because durable account refresh did not settle: {second_error}"
+        "Asceify refused {context} because durable account refresh did not settle: {second_error}"
     );
     // This startup/background path has no GPUI lifecycle to return to. Keep the
     // existing quiesce claim alive after the bounded retries so a forced exit
@@ -278,7 +248,7 @@ fn retain_account_refresh_quiesce_for_exit(
 
 fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
     retain_account_refresh_quiesce_for_exit(
-        tradingplot_desktop::account::begin_refresh_quiesce(),
+        asceify_desktop::account::begin_refresh_quiesce(),
         "process exit",
     );
     std::process::exit(exit_code);
@@ -286,23 +256,25 @@ fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
 
 #[cfg(target_os = "windows")]
 fn native_account_session_shutdown_guard(
-    begin_quiesce: impl Fn() -> Result<tradingplot_account_runtime::AccountRefreshQuiesce, String>
+    begin_quiesce: impl Fn() -> Result<asceify_account_runtime::AccountRefreshQuiesce, String>
     + Send
     + Sync
     + 'static,
-) -> Result<tradingplot_platform_runtime::NativeSessionShutdownGuard, String> {
-    tradingplot_platform_runtime::NativeSessionShutdownGuard::connect(move || {
+) -> Result<asceify_platform_runtime::NativeSessionShutdownGuard, String> {
+    asceify_platform_runtime::NativeSessionShutdownGuard::connect(move || {
         let quiesce = match begin_quiesce() {
             Ok(quiesce) => quiesce,
             Err(error) => {
-                eprintln!("TradingPlot session shutdown was blocked: {error}");
+                eprintln!("Asceify session shutdown was blocked: {error}");
                 return None;
             }
         };
         match quiesce.wait() {
-            Ok(()) => Some(tradingplot_platform_runtime::NativeSessionShutdownPermit::new(quiesce)),
+            Ok(()) => Some(asceify_platform_runtime::NativeSessionShutdownPermit::new(
+                quiesce,
+            )),
             Err(error) => {
-                eprintln!("TradingPlot session shutdown was blocked: {error}");
+                eprintln!("Asceify session shutdown was blocked: {error}");
                 None
             }
         }
@@ -435,7 +407,7 @@ mod workspace_persistence;
 use workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceLayoutShutdownWait};
 
 actions!(
-    tradingplot,
+    asceify,
     [
         MinimizeWindow,
         ZoomWindow,
@@ -656,7 +628,7 @@ struct WorkspaceSurface {
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
     replay_label: String,
     worker_label: String,
     subscription_id: String,
@@ -1257,7 +1229,7 @@ fn should_autoload_rithmic_catalog(
 }
 
 struct HeaderState {
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
     provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
@@ -1916,16 +1888,16 @@ const ACCOUNT_RESTORE_READINESS_POLL_INTERVAL: std::time::Duration =
 
 fn wait_for_account_restore_readiness(
     timeout: std::time::Duration,
-    mut readiness: impl FnMut() -> tradingplot_account_runtime::AccountRestoreReadiness,
+    mut readiness: impl FnMut() -> asceify_account_runtime::AccountRestoreReadiness,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match readiness() {
-            tradingplot_account_runtime::AccountRestoreReadiness::Ready => return Ok(()),
-            tradingplot_account_runtime::AccountRestoreReadiness::Failed => {
+            asceify_account_runtime::AccountRestoreReadiness::Ready => return Ok(()),
+            asceify_account_runtime::AccountRestoreReadiness::Failed => {
                 return Err("candidate account restore failed local readiness".to_string());
             }
-            tradingplot_account_runtime::AccountRestoreReadiness::Pending => {}
+            asceify_account_runtime::AccountRestoreReadiness::Pending => {}
         }
         if std::time::Instant::now() >= deadline {
             return Err("candidate account restore local readiness timed out".to_string());
@@ -1943,8 +1915,8 @@ fn validate_workspace_boot_for_readiness(workspace: &WorkspaceState) -> Result<(
 #[cfg(test)]
 mod desktop_readiness_account_tests {
     use super::wait_for_account_restore_readiness;
+    use asceify_account_runtime::AccountRestoreReadiness;
     use std::{cell::Cell, time::Duration};
-    use tradingplot_account_runtime::AccountRestoreReadiness;
 
     #[test]
     fn account_restore_readiness_accepts_ready_without_network_or_ui() {
@@ -1994,7 +1966,7 @@ mod desktop_readiness_account_tests {
 #[cfg(test)]
 mod desktop_readiness_workspace_tests {
     use super::validate_workspace_boot_for_readiness;
-    use tradingplot_contracts::WorkspacePaneKind;
+    use asceify_contracts::WorkspacePaneKind;
 
     #[test]
     fn readiness_reuses_the_production_workspace_boot_planner() {
@@ -2017,7 +1989,7 @@ mod desktop_readiness_workspace_tests {
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
-    let usage = "usage: tradingplot_desktop --desktop-readiness <report-path>";
+    let usage = "usage: asceify_desktop --desktop-readiness <report-path>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     if arguments.next().is_some() {
         return Err(usage.to_string());
@@ -2025,8 +1997,8 @@ fn run_desktop_readiness_command(
     let workspace = local_state::load_workspace_for_readiness()
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
     validate_workspace_boot_for_readiness(&workspace)?;
-    let account_service = tradingplot_account_runtime::AccountService::new(
-        tradingplot_account_runtime::AccountServiceConfig::from_environment(),
+    let account_service = asceify_account_runtime::AccountService::new(
+        asceify_account_runtime::AccountServiceConfig::from_environment(),
     );
     #[cfg(target_os = "windows")]
     let _session_shutdown_guard = {
@@ -2048,12 +2020,12 @@ fn run_desktop_readiness_command(
         wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
             account_service.restore_readiness()
         })?;
-        let market = tradingplot_market_runtime::MarketService::start()?;
+        let market = asceify_market_runtime::MarketService::start()?;
         let status = market.status()?;
         if status.providers.is_empty() {
             return Err("candidate market service did not reach readiness".to_string());
         }
-        let release = tradingplot_platform_runtime::current_release_identity();
+        let release = asceify_platform_runtime::current_release_identity();
         let report = LifecycleReadinessReport {
             schema_version: 2,
             release_identity: release.release_identity,
@@ -2098,7 +2070,7 @@ struct LifecycleReadinessReport {
 fn run_desktop_conformance_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
-    let usage = "usage: tradingplot_desktop --desktop-conformance <report-path>";
+    let usage = "usage: asceify_desktop --desktop-conformance <report-path>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     if arguments.next().is_some() {
         return Err(usage.to_string());
@@ -2111,7 +2083,7 @@ fn run_desktop_conformance_command(
 fn run_desktop_endurance_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
-    let usage = "usage: tradingplot_desktop --desktop-endurance <report-path> <duration-seconds>";
+    let usage = "usage: asceify_desktop --desktop-endurance <report-path> <duration-seconds>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     let duration_seconds = arguments
         .next()
@@ -2160,7 +2132,7 @@ fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("TradingPlot".into()),
+            title: Some("Asceify".into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(9.0), px(9.0))),
         }),
@@ -2593,7 +2565,7 @@ enum WorkspaceShellKind {
 struct TerminalApp {
     workspaces: Vec<WorkspaceTab>,
     active: usize,
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
     drawing_toolbar: DrawingToolbarVisibility,
     window_active: bool,
     frame_poll_gate: frame_poll_gate::FramePollGate,
@@ -2963,7 +2935,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
-                eprintln!("usage: tradingplot_desktop --rithmic-test");
+                eprintln!("usage: asceify_desktop --rithmic-test");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -2974,7 +2946,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             )
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
-                eprintln!("usage: tradingplot_desktop --multi-chart");
+                eprintln!("usage: asceify_desktop --multi-chart");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -2985,7 +2957,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             )
         } else if argument == "--workspace-tabs" {
             if arguments.next().is_some() {
-                eprintln!("usage: tradingplot_desktop --workspace-tabs");
+                eprintln!("usage: asceify_desktop --workspace-tabs");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -3022,47 +2994,24 @@ pub(super) fn run() {
     let mut lifecycle_arguments = std::env::args_os().skip(1);
     if lifecycle_arguments.next().as_deref() == Some(std::ffi::OsStr::new("--desktop-readiness")) {
         if let Err(error) = run_desktop_readiness_command(lifecycle_arguments) {
-            eprintln!("TradingPlot desktop readiness failed: {error}");
+            eprintln!("Asceify desktop readiness failed: {error}");
             std::process::exit(1);
         }
         return;
     }
-    if let Err(error) = tradingplot_platform_runtime::migrate_legacy_native_data_root() {
-        eprintln!("TradingPlot legacy local state migration deferred: {error}");
+    if let Err(error) = asceify_platform_runtime::migrate_legacy_native_data_root() {
+        eprintln!("Asceify legacy local state migration deferred: {error}");
     }
     if std::env::args_os().len() == 1
         && let Err(error) = schedule_versioned_launcher_promotion()
     {
-        eprintln!("TradingPlot launcher promotion deferred: {error}");
-    }
-    tradingplot_desktop::account::prepare_for_process_lifecycle();
-    #[cfg(target_os = "windows")]
-    let _session_shutdown_guard = match native_account_session_shutdown_guard(
-        tradingplot_desktop::account::begin_refresh_quiesce,
-    ) {
-        Ok(guard) => guard,
-        Err(error) => {
-            eprintln!("TradingPlot account lifecycle could not start: {error}");
-            exit_after_account_refresh_quiesce(1);
-        }
-    };
-    let account = match tradingplot_desktop::account::DesktopAccount::install() {
-        Ok(account) => account,
-        Err(error) => {
-            eprintln!("TradingPlot account client could not start: {error}");
-            run_onboarding();
-            return;
-        }
-    };
-    if !account.authenticated() {
-        run_onboarding();
-        return;
+        eprintln!("Asceify launcher promotion deferred: {error}");
     }
     let configured = match configured_market_workers() {
         Ok(Some(configured)) => configured,
         Ok(None) => exit_after_account_refresh_quiesce(0),
         Err(error) => {
-            eprintln!("TradingPlot market worker could not start: {error}");
+            eprintln!("Asceify market worker could not start: {error}");
             exit_after_account_refresh_quiesce(1);
         }
     };
@@ -3076,10 +3025,7 @@ fn schedule_versioned_launcher_promotion() -> Result<(), String> {
     let release_root = executable
         .parent()
         .ok_or_else(|| "desktop release directory is unavailable".to_string())?;
-    let launcher = release_root.join(format!(
-        "tradingplot_launcher{}",
-        std::env::consts::EXE_SUFFIX
-    ));
+    let launcher = release_root.join(format!("asceify_launcher{}", std::env::consts::EXE_SUFFIX));
     let metadata = match std::fs::symlink_metadata(&launcher) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -3098,53 +3044,15 @@ fn schedule_versioned_launcher_promotion() -> Result<(), String> {
         .map_err(|_| "versioned launcher promotion could not be scheduled".to_string())
 }
 
-fn run_onboarding() {
-    application()
-        .with_assets(assets::TradingPlotAssets)
-        .with_quit_mode(QuitMode::Explicit)
-        .run(move |cx: &mut App| {
-            gpui_base::init(cx);
-            cx.set_global(base_theme(&TradingPlotTheme::dark()));
-            install_platform_http_client(cx);
-            cx.set_app_identity("com.tradingplot.desktop", "TradingPlot");
-            cx.text_system()
-                .add_fonts(
-                    PLATFORM_FONT_BYTES
-                        .iter()
-                        .map(|font| Cow::Borrowed(*font))
-                        .collect(),
-                )
-                .expect("the bundled platform font is valid");
-            let options = desktop_window_options(0, cx);
-            cx.open_window(options, |_window, cx| {
-                let screen = cx.new(|_| onboarding::OnboardingApp::new());
-                let closed_screen = screen.clone();
-                cx.on_window_closed(move |cx, _| {
-                    if cx.windows().is_empty() && !closed_screen.read(cx).has_terminal() {
-                        // Saved-session restore starts before onboarding and can
-                        // still be in the refresh-token rotation window here.
-                        // Explicit quit mode keeps the process alive while the
-                        // background account owner reaches its durability fence.
-                        quit_after_account_refresh_quiesce(cx);
-                    }
-                })
-                .detach();
-                screen
-            })
-            .expect("the TradingPlot onboarding window opens");
-            cx.activate(true);
-        });
-}
-
 fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
     application()
-        .with_assets(assets::TradingPlotAssets)
+        .with_assets(assets::AsceifyAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_base::init(cx);
-            cx.set_global(base_theme(&TradingPlotTheme::dark()));
+            cx.set_global(base_theme(&AsceifyTheme::dark()));
             install_platform_http_client(cx);
-            cx.set_app_identity("com.tradingplot.desktop", "TradingPlot");
+            cx.set_app_identity("com.asceify.desktop", "Asceify");
             cx.text_system()
                 .add_fonts(
                     PLATFORM_FONT_BYTES
@@ -3194,7 +3102,7 @@ fn mount_desktop(
             if let Some(quit) = quit
                 && let Err(error) = quit.await
             {
-                eprintln!("TradingPlot desktop shutdown failed: {error}");
+                eprintln!("Asceify desktop shutdown failed: {error}");
             }
         }
     })
@@ -3229,7 +3137,7 @@ fn mount_desktop(
                 } else {
                     let options = desktop_window_options(window_index, cx);
                     cx.open_window(options, build)
-                        .expect("the TradingPlot terminal window opens");
+                        .expect("the Asceify terminal window opens");
                 }
             }
         }
@@ -3252,7 +3160,7 @@ fn mount_desktop(
             } else {
                 let options = desktop_window_options(0, cx);
                 cx.open_window(options, build)
-                    .expect("the TradingPlot workspace window opens");
+                    .expect("the Asceify workspace window opens");
             }
         }
     }
@@ -3306,13 +3214,12 @@ mod http_wiring_tests {
                 request.starts_with("GET /avatar.gif "),
                 "GPUI image loader must issue a GET for the avatar resource: {request}"
             );
-            let expected_user_agent =
-                format!("user-agent: TradingPlot/{}", env!("CARGO_PKG_VERSION"));
+            let expected_user_agent = format!("user-agent: Asceify/{}", env!("CARGO_PKG_VERSION"));
             assert!(
                 request
                     .lines()
                     .any(|line| line.eq_ignore_ascii_case(&expected_user_agent)),
-                "installed ReqwestClient must carry the TradingPlot user agent: {request}"
+                "installed ReqwestClient must carry the Asceify user agent: {request}"
             );
 
             write!(

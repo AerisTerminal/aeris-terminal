@@ -1,10 +1,10 @@
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-use tradingplot_provider_history::{
+use asceify_provider_history::{
     CancelOutcome, Continuation, CoverageClass, CoverageSnapshot, DataClass, DatasetCapability,
     FetchFailureOutcome, HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest,
     HistoryRange, HistoryScheduler, PaginationStyle, ProviderHistoryError, RateLimit,
     RequestInterest, RequestPriority, SchedulerConfig,
 };
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 const NOW: i64 = 10_000;
 const MONOTONIC_NOW: u64 = 1_000;

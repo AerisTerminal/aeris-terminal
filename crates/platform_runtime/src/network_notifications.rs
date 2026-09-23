@@ -284,7 +284,7 @@ mod macos {
             let cancelled = Arc::clone(&events.cancelled);
             let (ready_tx, ready_rx) = sync_channel(1);
             let thread = thread::Builder::new()
-                .name("tradingplot-native-network-monitor".to_string())
+                .name("asceify-native-network-monitor".to_string())
                 .spawn(move || {
                     let result = run_monitor(&publisher, &run_loop, &cancelled, &ready_tx);
                     if let Err(error) = result {

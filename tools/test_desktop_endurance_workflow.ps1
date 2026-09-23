@@ -30,7 +30,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class TradingPlotEndurancePowerSmoke
+public static class AsceifyEndurancePowerSmoke
 {
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern uint SetThreadExecutionState(uint executionState);
@@ -39,13 +39,13 @@ public static class TradingPlotEndurancePowerSmoke
 $sleepInhibited = $false
 $sleepInhibitionReleased = $false
 try {
-    $sleepInhibited = [TradingPlotEndurancePowerSmoke]::SetThreadExecutionState([uint32]2147483649) -ne 0
+    $sleepInhibited = [AsceifyEndurancePowerSmoke]::SetThreadExecutionState([uint32]2147483649) -ne 0
     if (-not $sleepInhibited) {
         throw "SetThreadExecutionState could not inhibit system sleep."
     }
 }
 finally {
-    $sleepInhibitionReleased = [TradingPlotEndurancePowerSmoke]::SetThreadExecutionState([uint32]2147483648) -ne 0
+    $sleepInhibitionReleased = [AsceifyEndurancePowerSmoke]::SetThreadExecutionState([uint32]2147483648) -ne 0
 }
 if (-not $sleepInhibitionReleased) {
     throw "SetThreadExecutionState could not restore the continuous state."
@@ -59,7 +59,7 @@ function Write-Json {
     )
 }
 
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("tradingplot-endurance-workflow-" + [Guid]::NewGuid().ToString("N"))
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("asceify-endurance-workflow-" + [Guid]::NewGuid().ToString("N"))
 $null = New-Item -ItemType Directory -Path $testRoot
 try {
     $capturedSupervisor = Join-Path $testRoot "supervise_desktop_endurance.ps1"
@@ -69,7 +69,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "finalize_desktop_endurance.ps1") -Destination $capturedFinalizer
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "verify_desktop_endurance.ps1") -Destination $capturedVerifier
 
-    $binaryPath = Join-Path $testRoot "tradingplot_desktop.exe"
+    $binaryPath = Join-Path $testRoot "asceify_desktop.exe"
     $cargoLockPath = Join-Path $testRoot "Cargo.lock"
     $stdoutPath = Join-Path $testRoot "stdout.log"
     $stderrPath = Join-Path $testRoot "stderr.log"

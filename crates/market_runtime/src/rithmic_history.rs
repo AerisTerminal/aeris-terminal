@@ -9,16 +9,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tradingplot_contracts::InstallProviderInstrument;
-use tradingplot_market_data::{
+use asceify_contracts::InstallProviderInstrument;
+use asceify_market_data::{
     BarPeriod, BarSeriesKey, ChartAggregation, ChartInterval, MarketBar, RithmicChartAggregation,
     RithmicDailyAggregation,
 };
-use tradingplot_platform_runtime::{CredentialVault, NativeCredentialVault};
-use tradingplot_provider_history::HistoryRange;
+use asceify_platform_runtime::{CredentialVault, NativeCredentialVault};
+use asceify_provider_history::HistoryRange;
 
 use crate::market_service::{FormingBar, HistoryFetchWindow};
-use tradingplot_rithmic_protocol_adapter::{
+use asceify_rithmic_protocol_adapter::{
     InstrumentDescriptor, RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY,
     RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
     RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSessionLimits,
@@ -339,7 +339,7 @@ fn provider_instrument(
 
 fn connect(
     stop: Arc<AtomicBool>,
-) -> Result<tradingplot_rithmic_protocol_adapter::RithmicHistoryConnection, String> {
+) -> Result<asceify_rithmic_protocol_adapter::RithmicHistoryConnection, String> {
     let vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
         .map_err(|_| "native credential vault unavailable".to_string())?;
     let mut stored = vault

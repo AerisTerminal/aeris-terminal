@@ -9,8 +9,8 @@ use crate::stream::{
     SequenceDecision, SequenceTracker, SnapshotEvidence, StreamDelta, StreamProtocolError,
     StreamSnapshot,
 };
-use tradingplot_instruments::InstrumentRevision;
-use tradingplot_market_data::{BarDefinition, MarketBar};
+use asceify_instruments::InstrumentRevision;
+use asceify_market_data::{BarDefinition, MarketBar};
 
 /// A validated, bounded replay snapshot tied to one instrument revision.
 #[derive(Clone, Debug, Eq, PartialEq)]

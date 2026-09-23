@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn workspace_pane_grid(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     cx: &App,
 ) -> AnyElement {
     workspace_layout_element(terminal, workspace, &workspace.layout.layout(), theme, cx)
@@ -13,7 +13,7 @@ pub(super) fn workspace_layout_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     layout: &ChartWorkspaceLayout,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     cx: &App,
 ) -> AnyElement {
     if let ChartWorkspaceLayout::Pane { pane_id } = layout {
@@ -182,7 +182,7 @@ pub(super) fn workspace_pane_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     pane_id: u64,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     cx: &App,
 ) -> AnyElement {
     let Some(pane) = workspace.panes.iter().find(|pane| pane.id == pane_id) else {
@@ -263,7 +263,7 @@ pub(super) fn workspace_market_area(
     active_surface: &Entity<WorkspaceSurface>,
     drawing_toolbar_collapsed: bool,
     watchlist: WatchlistPanelState,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let grid = workspace_pane_grid(terminal, workspace, theme, cx);

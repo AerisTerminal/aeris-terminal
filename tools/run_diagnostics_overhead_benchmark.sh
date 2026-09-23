@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo run --locked --release --package tradingplot_diagnostics_overhead -- "$@"
+cargo run --locked --release --package asceify_diagnostics_overhead -- "$@"

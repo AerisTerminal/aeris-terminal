@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_contracts"
+name = "asceify_contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

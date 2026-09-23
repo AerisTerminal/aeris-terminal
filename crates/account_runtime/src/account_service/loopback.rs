@@ -25,8 +25,7 @@ const PLATFORM_MEDIUM_FONT: &[u8] =
     include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Medium.ttf");
 const PLATFORM_BOLD_FONT: &[u8] =
     include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Bold.ttf");
-const BRAND_MARK: &str =
-    include_str!("../../../../apps/desktop/assets/tradingplot_assets/logo.svg");
+const BRAND_MARK: &str = include_str!("../../../../apps/desktop/assets/asceify_assets/logo.svg");
 const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var d=q.matches;document.documentElement.classList.toggle('dark',d);document.documentElement.dataset.theme=d?'dark':'light';document.documentElement.style.colorScheme=d?'dark':'light'}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
 
 /// One bound loopback listener awaiting a single callback.
@@ -218,16 +217,16 @@ fn browser_font_faces() -> String {
 fn outcome_page(success: bool, detail: &str) -> String {
     let (title, heading, copy, mark) = if success {
         (
-            "Sign-in confirmed — TradingPlot",
+            "Sign-in confirmed — Asceify",
             "You’re signed in",
-            "Authentication is complete. Return to TradingPlot to continue.",
+            "Authentication is complete. Return to Asceify to continue.",
             r#"<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.8 12.4 3.2 3.2 7.2-7.2"/></svg>"#.to_string(),
         )
     } else {
         (
-            "Sign-in failed — TradingPlot",
+            "Sign-in failed — Asceify",
             "Sign-in wasn’t completed",
-            "Return to TradingPlot and try again.",
+            "Return to Asceify and try again.",
             "!".to_string(),
         )
     };
@@ -245,7 +244,7 @@ fn outcome_page(success: bool, detail: &str) -> String {
 {fonts}
 {platform}
 html,body{{margin:0;min-height:100%}}body{{min-height:100vh;display:grid;place-items:center;background:var(--surface);color:var(--text-primary);padding:24px}}main{{width:min(420px,100%);text-align:center}}.brand{{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:40px;color:var(--text-primary);font-size:17px;font-weight:700;letter-spacing:-.02em}}.brand-mark{{width:40px;height:40px;display:block;flex:none}}.brand-mark>svg{{display:block;width:40px;height:40px}}.mark{{width:64px;height:64px;margin:0 auto 24px;display:grid;place-items:center;border:1px solid var(--border);border-radius:var(--radius-large);background:var(--surface-secondary);font-size:27px;font-weight:700;animation:arrive .34s cubic-bezier(.2,.8,.2,1) both}}.success .mark{{color:var(--primary)}}.failure .mark{{color:var(--danger)}}.mark>svg{{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}}.mark>svg path{{stroke-dasharray:18;stroke-dashoffset:18;animation:draw .4s .18s ease-out forwards}}h1{{margin:0 0 9px;font-size:24px;font-weight:700;letter-spacing:-.025em}}p{{margin:0;color:var(--text-secondary);font-size:14px;line-height:1.55}}.detail{{margin:16px auto 0;max-width:360px;color:var(--danger);font-size:13px}}@keyframes arrive{{from{{opacity:0;transform:scale(.82)}}to{{opacity:1;transform:scale(1)}}}}@keyframes draw{{to{{stroke-dashoffset:0}}}}@media(prefers-reduced-motion:reduce){{.mark,.mark>svg path{{animation:none}}.mark>svg path{{stroke-dashoffset:0}}}}
-</style></head><body><main class="{state}"><div class="brand"><span class="brand-mark">{brand_mark}</span><span>TradingPlot</span></div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
+</style></head><body><main class="{state}"><div class="brand"><span class="brand-mark">{brand_mark}</span><span>Asceify</span></div><div class="mark">{mark}</div><h1>{heading}</h1><p>{copy}</p>{detail}</main></body></html>"#
     )
 }
 

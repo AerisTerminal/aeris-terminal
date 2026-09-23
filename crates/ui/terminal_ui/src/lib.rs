@@ -10,12 +10,12 @@ mod order_book;
 #[cfg(feature = "gpui")]
 mod order_book_view;
 
+pub use asceify_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
 pub use order_book::{OrderBookSelection, project_order_book};
 #[cfg(feature = "gpui")]
 pub use order_book_view::{
     OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, ReadOnlyOrderBookView,
 };
-pub use tradingplot_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
 
 /// A bounded queue that prevents background producers from growing UI work.
 #[derive(Debug)]

@@ -186,25 +186,23 @@ fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
         threshold,
         observed
     );
-    let notification = tradingplot_platform_runtime::NativeUserNotification::try_new(
-        "TradingPlot price alert",
-        body,
-    );
-    match notification.and_then(tradingplot_platform_runtime::try_send_user_notification) {
+    let notification =
+        asceify_platform_runtime::NativeUserNotification::try_new("Asceify price alert", body);
+    match notification.and_then(asceify_platform_runtime::try_send_user_notification) {
         Ok(()) => {}
-        Err(error) => eprintln!("TradingPlot price alert notification was not delivered: {error}"),
+        Err(error) => eprintln!("Asceify price alert notification was not delivered: {error}"),
     }
 }
 
 const fn price_alert_condition_phrase(
-    condition: tradingplot_contracts::PriceAlertCondition,
+    condition: asceify_contracts::PriceAlertCondition,
 ) -> &'static str {
     match condition {
-        tradingplot_contracts::PriceAlertCondition::Crossing => "crossed",
-        tradingplot_contracts::PriceAlertCondition::CrossingUp => "crossed up through",
-        tradingplot_contracts::PriceAlertCondition::CrossingDown => "crossed down through",
-        tradingplot_contracts::PriceAlertCondition::GreaterThan => "moved above",
-        tradingplot_contracts::PriceAlertCondition::LessThan => "moved below",
+        asceify_contracts::PriceAlertCondition::Crossing => "crossed",
+        asceify_contracts::PriceAlertCondition::CrossingUp => "crossed up through",
+        asceify_contracts::PriceAlertCondition::CrossingDown => "crossed down through",
+        asceify_contracts::PriceAlertCondition::GreaterThan => "moved above",
+        asceify_contracts::PriceAlertCondition::LessThan => "moved below",
     }
 }
 

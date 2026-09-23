@@ -21,17 +21,17 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use tradingplot_contracts::{
+use asceify_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
 };
-use tradingplot_hyperliquid_market_adapter::{
+use asceify_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig, HyperliquidLiveCandle,
     HyperliquidSocket, SocketEvent, WsClientEvent, decode_book_snapshot, decode_live_candle,
     decode_trades_batch, fetch_meta_bundle, is_read_timeout, parse_ws_frame,
 };
-use tradingplot_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
+use asceify_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 
 use crate::market_service::ProviderCoordinatorWake;
 
@@ -354,15 +354,15 @@ fn handle_catalog_search(
             name: None,
             product_code: None,
             instrument_type: Some(match &instrument.kind {
-                tradingplot_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp => {
+                asceify_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp => {
                     "perpetual".to_string()
                 }
-                tradingplot_hyperliquid_market_adapter::HyperliquidMarketKind::Spot { .. } => {
+                asceify_hyperliquid_market_adapter::HyperliquidMarketKind::Spot { .. } => {
                     "spot".to_string()
                 }
-                tradingplot_hyperliquid_market_adapter::HyperliquidMarketKind::BuilderPerp {
-                    dex,
-                } => format!("builder-perpetual:{dex}"),
+                asceify_hyperliquid_market_adapter::HyperliquidMarketKind::BuilderPerp { dex } => {
+                    format!("builder-perpetual:{dex}")
+                }
             }),
             expiration_date: None,
         })
@@ -476,7 +476,7 @@ fn handle_catalog_select(
 }
 
 fn instrument_matches_entitlement(
-    instrument: &tradingplot_hyperliquid_market_adapter::HyperliquidInstrument,
+    instrument: &asceify_hyperliquid_market_adapter::HyperliquidInstrument,
     entitlement_id: &str,
 ) -> bool {
     // The public feed has exactly one entitlement; anything else is stale.
@@ -776,7 +776,7 @@ fn heartbeat(socket: &mut HyperliquidSocket, state: &mut SessionState, now: Inst
     }
     if application_ping_due(state, now) {
         if socket
-            .send_text(&tradingplot_hyperliquid_market_adapter::build_ping())
+            .send_text(&asceify_hyperliquid_market_adapter::build_ping())
             .is_err()
         {
             return true;
@@ -831,7 +831,7 @@ fn reconcile_subscriptions(
                 coin: candle.instrument.wire_coin.clone(),
                 interval: candle.interval.clone(),
             },
-            tradingplot_hyperliquid_market_adapter::build_candle_subscription(
+            asceify_hyperliquid_market_adapter::build_candle_subscription(
                 &candle.instrument.wire_coin,
                 &candle.interval,
             ),
@@ -851,7 +851,7 @@ fn reconcile_subscriptions(
             SubscriptionKey::Trades {
                 coin: trade.wire_coin.clone(),
             },
-            tradingplot_hyperliquid_market_adapter::build_trades_subscription(&trade.wire_coin),
+            asceify_hyperliquid_market_adapter::build_trades_subscription(&trade.wire_coin),
         );
         instruments.insert(trade.wire_coin.clone(), trade.clone());
     }
@@ -865,7 +865,7 @@ fn reconcile_subscriptions(
             SubscriptionKey::Bbo {
                 coin: quote.wire_coin.clone(),
             },
-            tradingplot_hyperliquid_market_adapter::build_bbo_subscription(&quote.wire_coin),
+            asceify_hyperliquid_market_adapter::build_bbo_subscription(&quote.wire_coin),
         );
         instruments.insert(quote.wire_coin.clone(), quote.clone());
     }
@@ -879,7 +879,7 @@ fn reconcile_subscriptions(
             SubscriptionKey::Book {
                 coin: book.wire_coin.clone(),
             },
-            tradingplot_hyperliquid_market_adapter::build_l2_subscription(&book.wire_coin),
+            asceify_hyperliquid_market_adapter::build_l2_subscription(&book.wire_coin),
         );
         instruments.insert(book.wire_coin.clone(), book.clone());
     }
@@ -895,7 +895,7 @@ fn reconcile_subscriptions(
             && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&frame)
             && let Some(subscription) = raw.get("subscription")
         {
-            socket.send_text(&tradingplot_hyperliquid_market_adapter::build_unsubscribe(
+            socket.send_text(&asceify_hyperliquid_market_adapter::build_unsubscribe(
                 subscription,
             ))?;
         }
@@ -1000,7 +1000,7 @@ impl FrameDecoder<'_> {
             return Err(FrameError::Malformed);
         };
         let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
-        let Ok(quote) = tradingplot_hyperliquid_market_adapter::decode_bbo_quote(
+        let Ok(quote) = asceify_hyperliquid_market_adapter::decode_bbo_quote(
             bbo,
             coin,
             &mapping.instrument_id,
@@ -1137,7 +1137,7 @@ fn note_decode_failure(decode_failures: &mut u32) {
     *decode_failures = decode_failures.saturating_add(1);
     if *decode_failures == 1 || (*decode_failures).is_multiple_of(10) {
         eprintln!(
-            "TradingPlot engine Hyperliquid feed dropped malformed data ({} this connection)",
+            "Asceify engine Hyperliquid feed dropped malformed data ({} this connection)",
             *decode_failures
         );
     }
@@ -1154,7 +1154,7 @@ fn unix_nanos_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tradingplot_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
+    use asceify_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
 
     type FrameHarness = (
         BTreeMap<String, HyperliquidInstrumentDemand>,

@@ -157,7 +157,7 @@ impl NativeCredentialVault {
             &dyn NativeCredentialBackend,
             &str,
             &str,
-            Option<(&str, &str)>,
+            &[(String, String)],
         ) -> Result<T, NativeCredentialVaultError>,
     ) -> Result<T, NativeCredentialVaultError> {
         validate_identifier(key).map_err(|()| NativeCredentialVaultError::InvalidKey)?;
@@ -166,16 +166,16 @@ impl NativeCredentialVault {
             .map_err(|_| NativeCredentialVaultError::AccessSerialized)?;
         let service = backend_identifier("service", &self.service);
         let canonical_key = backend_identifier("key", key);
-        let legacy = legacy_service(&self.service).map(|legacy_service| {
-            (
-                legacy_backend_identifier("service", legacy_service),
-                legacy_backend_identifier("key", key),
-            )
-        });
-        let legacy = legacy
-            .as_ref()
-            .map(|(service, key)| (service.as_str(), key.as_str()));
-        operation(self.backend.as_ref(), &service, &canonical_key, legacy)
+        let legacy = legacy_services(&self.service)
+            .iter()
+            .map(|(namespace, service)| {
+                (
+                    previous_backend_identifier(namespace, "service", service),
+                    previous_backend_identifier(namespace, "key", key),
+                )
+            })
+            .collect::<Vec<_>>();
+        operation(self.backend.as_ref(), &service, &canonical_key, &legacy)
     }
 }
 
@@ -188,7 +188,7 @@ impl CredentialVault for NativeCredentialVault {
             backend
                 .store(service, key, secret)
                 .map_err(NativeCredentialVaultError::Platform)?;
-            if let Some((legacy_service, legacy_key)) = legacy {
+            for (legacy_service, legacy_key) in legacy {
                 match backend.delete(legacy_service, legacy_key) {
                     Ok(()) | Err(KeyringError::NoEntry) => {}
                     Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
@@ -205,21 +205,24 @@ impl CredentialVault for NativeCredentialVault {
                 Err(KeyringError::NoEntry) => {}
                 Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
             }
-            let Some((legacy_service, legacy_key)) = legacy else {
-                return Ok(None);
-            };
-            let secret = match backend.load(legacy_service, legacy_key) {
-                Ok(secret) => secret,
-                Err(KeyringError::NoEntry) => return Ok(None),
-                Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
-            };
-            backend
-                .store(service, key, &secret)
-                .map_err(NativeCredentialVaultError::Platform)?;
-            match backend.delete(legacy_service, legacy_key) {
-                Ok(()) | Err(KeyringError::NoEntry) => Ok(Some(secret)),
-                Err(error) => Err(NativeCredentialVaultError::Platform(error)),
+            for (legacy_service, legacy_key) in legacy {
+                let secret = match backend.load(legacy_service, legacy_key) {
+                    Ok(secret) => secret,
+                    Err(KeyringError::NoEntry) => continue,
+                    Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
+                };
+                backend
+                    .store(service, key, &secret)
+                    .map_err(NativeCredentialVaultError::Platform)?;
+                for (old_service, old_key) in legacy {
+                    match backend.delete(old_service, old_key) {
+                        Ok(()) | Err(KeyringError::NoEntry) => {}
+                        Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
+                    }
+                }
+                return Ok(Some(secret));
             }
+            Ok(None)
         })
     }
 
@@ -229,7 +232,7 @@ impl CredentialVault for NativeCredentialVault {
                 Ok(()) | Err(KeyringError::NoEntry) => {}
                 Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
             }
-            if let Some((legacy_service, legacy_key)) = legacy {
+            for (legacy_service, legacy_key) in legacy {
                 match backend.delete(legacy_service, legacy_key) {
                     Ok(()) | Err(KeyringError::NoEntry) => {}
                     Err(error) => return Err(NativeCredentialVaultError::Platform(error)),
@@ -265,24 +268,32 @@ fn validate_identifier(identifier: &str) -> Result<(), ()> {
 }
 
 fn backend_identifier(kind: &str, identifier: &str) -> String {
+    previous_backend_identifier("asceify", kind, identifier)
+}
+
+fn previous_backend_identifier(namespace: &str, kind: &str, identifier: &str) -> String {
     format!(
-        "tradingplot-v1-{kind}-{}",
+        "{namespace}-v1-{kind}-{}",
         URL_SAFE_NO_PAD.encode(identifier)
     )
 }
 
+#[cfg(test)]
 fn legacy_backend_identifier(kind: &str, identifier: &str) -> String {
-    format!("axiusflow-v1-{kind}-{}", URL_SAFE_NO_PAD.encode(identifier))
+    previous_backend_identifier("axiusflow", kind, identifier)
 }
 
-fn legacy_service(service: &str) -> Option<&'static str> {
-    // Only product-owned namespaces with a known one-to-one predecessor are
-    // eligible for migration. Arbitrary caller services must never silently
-    // alias another credential namespace.
+fn legacy_services(service: &str) -> &'static [(&'static str, &'static str)] {
     match service {
-        "com.tradingplot.account" => Some("com.axiusflow.account"),
-        "com.tradingplot.terminal" => Some("com.axiusflow.terminal"),
-        _ => None,
+        "com.asceify.account" => &[
+            ("tradingplot", "com.tradingplot.account"),
+            ("axiusflow", "com.axiusflow.account"),
+        ],
+        "com.asceify.terminal" => &[
+            ("tradingplot", "com.tradingplot.terminal"),
+            ("axiusflow", "com.axiusflow.terminal"),
+        ],
+        _ => &[],
     }
 }
 
@@ -340,10 +351,10 @@ mod tests {
             Err(NativeCredentialVaultError::InvalidService)
         ));
         assert!(matches!(
-            NativeCredentialVault::new("tradingplot\nterminal"),
+            NativeCredentialVault::new("asceify\nterminal"),
             Err(NativeCredentialVaultError::InvalidService)
         ));
-        assert!(NativeCredentialVault::new("com.tradingplot.terminal").is_ok());
+        assert!(NativeCredentialVault::new("com.asceify.terminal").is_ok());
         assert!(validate_identifier("").is_err());
         assert!(validate_identifier("session\0token").is_err());
         assert!(validate_identifier("session-token").is_ok());
@@ -352,7 +363,7 @@ mod tests {
     #[test]
     fn native_vault_round_trips_binary_secrets_and_treats_deletion_as_idempotent() {
         let vault = NativeCredentialVault::with_backend(
-            "com.tradingplot.terminal",
+            "com.asceify.terminal",
             MemoryCredentialBackend::default(),
         )
         .expect("valid service creates a native vault");
@@ -396,17 +407,17 @@ mod tests {
 
     #[test]
     fn native_vault_debug_never_contains_secret_material() {
-        let vault = NativeCredentialVault::new("com.tradingplot.terminal")
+        let vault = NativeCredentialVault::new("com.asceify.terminal")
             .expect("valid service creates a native vault");
         let debug = format!("{vault:?}");
-        assert!(debug.contains("com.tradingplot.terminal"));
+        assert!(debug.contains("com.asceify.terminal"));
         assert!(!debug.contains("secret"));
     }
 
     #[test]
     fn native_vault_migrates_legacy_service_and_backend_namespace_on_load() {
         let backend = MemoryCredentialBackend::default();
-        let vault = NativeCredentialVault::with_backend("com.tradingplot.account", backend.clone())
+        let vault = NativeCredentialVault::with_backend("com.asceify.account", backend.clone())
             .expect("canonical account service creates a vault");
         let legacy_service = legacy_backend_identifier("service", "com.axiusflow.account");
         let legacy_key = legacy_backend_identifier("key", "session");
@@ -418,7 +429,7 @@ mod tests {
             vault.load("session").expect("legacy credential migrates"),
             Some(b"legacy-secret".to_vec())
         );
-        let canonical_service = backend_identifier("service", "com.tradingplot.account");
+        let canonical_service = backend_identifier("service", "com.asceify.account");
         let canonical_key = backend_identifier("key", "session");
         assert_eq!(
             backend
@@ -433,11 +444,37 @@ mod tests {
     }
 
     #[test]
+    fn native_vault_migrates_tradingplot_provider_credential() {
+        let backend = MemoryCredentialBackend::default();
+        let vault = NativeCredentialVault::with_backend("com.asceify.terminal", backend.clone())
+            .expect("canonical terminal service creates a vault");
+        let legacy_service = super::previous_backend_identifier(
+            "tradingplot",
+            "service",
+            "com.tradingplot.terminal",
+        );
+        let legacy_key = super::previous_backend_identifier("tradingplot", "key", "provider");
+        backend
+            .store(&legacy_service, &legacy_key, b"provider-secret")
+            .expect("legacy provider credential");
+
+        assert_eq!(
+            vault
+                .load("provider")
+                .expect("provider credential migrates"),
+            Some(b"provider-secret".to_vec())
+        );
+        assert!(matches!(
+            backend.load(&legacy_service, &legacy_key),
+            Err(KeyringError::NoEntry)
+        ));
+    }
+
+    #[test]
     fn native_vault_delete_removes_legacy_credential_when_canonical_is_missing() {
         let backend = MemoryCredentialBackend::default();
-        let vault =
-            NativeCredentialVault::with_backend("com.tradingplot.terminal", backend.clone())
-                .expect("canonical terminal service creates a vault");
+        let vault = NativeCredentialVault::with_backend("com.asceify.terminal", backend.clone())
+            .expect("canonical terminal service creates a vault");
         let legacy_service = legacy_backend_identifier("service", "com.axiusflow.terminal");
         let legacy_key = legacy_backend_identifier("key", "provider");
         backend
@@ -456,7 +493,7 @@ mod tests {
     #[test]
     fn native_vault_store_retires_legacy_credential() {
         let backend = MemoryCredentialBackend::default();
-        let vault = NativeCredentialVault::with_backend("com.tradingplot.account", backend.clone())
+        let vault = NativeCredentialVault::with_backend("com.asceify.account", backend.clone())
             .expect("canonical account service creates a vault");
         let legacy_service = legacy_backend_identifier("service", "com.axiusflow.account");
         let legacy_key = legacy_backend_identifier("key", "session");

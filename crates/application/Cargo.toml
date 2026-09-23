@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_application"
+name = "asceify_application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tradingplot_instruments = { path = "../domain/instruments" }
-tradingplot_market_data = { path = "../domain/market_data" }
+asceify_instruments = { path = "../domain/instruments" }
+asceify_market_data = { path = "../domain/market_data" }
 sha2.workspace = true
 
 [lints]

@@ -1,5 +1,8 @@
 use std::rc::Rc;
 
+use asceify_design_system::{
+    AsceifyTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+};
 use gpui::{
     Animation, AnimationElement, AnimationExt, AnyElement, App, Bounds, ClickEvent, Div, ElementId,
     IntoElement, Pixels, Point, RenderOnce, SharedString, Stateful, Window, div, ease_out_quint,
@@ -7,9 +10,6 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use std::time::Duration;
-use tradingplot_design_system::{
-    RadiusToken, ThemeColor, TradingPlotTheme, TypographyRole, platform_font_family,
-};
 
 use super::{
     platform_font_weight,
@@ -28,7 +28,7 @@ const POPUP_ENTER_TRAVEL: f32 = 6.0;
 /// Normalized origin used to make native menu motion come from its trigger.
 ///
 /// GPUI 0.2 does not expose a general affine transform for element trees, so
-/// `TradingPlot` uses the equivalent native presentation available at this layer:
+/// `Asceify` uses the equivalent native presentation available at this layer:
 /// a short fade/translation whose direction is derived from the same origin a
 /// CSS `transform-origin` would use. The trigger-facing edge therefore stays
 /// visually pinned instead of every popup drifting from its center.
@@ -79,7 +79,7 @@ impl PopupAnimationOrigin {
     }
 }
 
-/// Applies the shared trigger-origin entry motion to an `TradingPlot` popup.
+/// Applies the shared trigger-origin entry motion to an `Asceify` popup.
 /// `with_animation` automatically collapses to its final frame for reduced
 /// motion, so every caller gets the accessibility behavior for free.
 pub(crate) fn animate_popup_from_origin(
@@ -118,12 +118,12 @@ const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
     !disabled && has_activation
 }
 
-/// `TradingPlot`'s shared selectable row for compact menus and search results.
+/// `Asceify`'s shared selectable row for compact menus and search results.
 #[derive(IntoElement)]
 pub(crate) struct MenuRow {
     id: ElementId,
     kind: RowKind,
-    theme: TradingPlotTheme,
+    theme: AsceifyTheme,
     resting_fill: ThemeColor,
     label: SharedString,
     leading: Option<AnyElement>,
@@ -164,7 +164,7 @@ impl MenuRow {
     pub(crate) fn compact(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        theme: &TradingPlotTheme,
+        theme: &AsceifyTheme,
     ) -> Self {
         Self::new(id, label, theme, RowKind::Compact)
     }
@@ -172,7 +172,7 @@ impl MenuRow {
     pub(crate) fn search_result(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        theme: &TradingPlotTheme,
+        theme: &AsceifyTheme,
     ) -> Self {
         let mut row = Self::new(id, label, theme, RowKind::SearchResult);
         row.resting_fill = theme.colors.surface;
@@ -182,7 +182,7 @@ impl MenuRow {
     fn new(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        theme: &TradingPlotTheme,
+        theme: &AsceifyTheme,
         kind: RowKind,
     ) -> Self {
         Self {
@@ -405,7 +405,7 @@ fn compact_menu_panel_with_elevation(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
     elevated: bool,
 ) -> Stateful<Div> {
     let colors = theme.colors;
@@ -431,7 +431,7 @@ pub(crate) fn compact_menu_panel(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     compact_menu_panel_with_elevation(id, origin, width, theme, true)
 }
@@ -443,12 +443,12 @@ pub(crate) fn flat_compact_menu_panel(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
-    theme: &TradingPlotTheme,
+    theme: &AsceifyTheme,
 ) -> Stateful<Div> {
     compact_menu_panel_with_elevation(id, origin, width, theme, false)
 }
 
-pub(crate) fn menu_separator(theme: &TradingPlotTheme) -> Div {
+pub(crate) fn menu_separator(theme: &AsceifyTheme) -> Div {
     div().h(SEPARATOR_HEIGHT).flex().items_center().child(
         div()
             .h_px()

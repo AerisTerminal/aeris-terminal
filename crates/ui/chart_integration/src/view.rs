@@ -7,6 +7,15 @@ use crate::nucleus_bridge::{
     replay_display_precision, replay_legend_title, replay_price_divisor, replay_quantity_divisor,
 };
 use crate::provenance::DisplayedProvenance;
+use asceify_application::ReplayRecoveryCommand;
+use asceify_application::{
+    EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
+    ReplayStreamUpdate, ReplayValidationError,
+};
+use asceify_design_system::{
+    AsceifyTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
+    platform_typography,
+};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
     KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -29,15 +38,6 @@ use std::sync::Arc;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tradingplot_application::ReplayRecoveryCommand;
-use tradingplot_application::{
-    EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
-    ReplayStreamUpdate, ReplayValidationError,
-};
-use tradingplot_design_system::{
-    ThemeColor, TradingPlotTheme, TypographyRole, platform_font_family, platform_font_stack,
-    platform_typography,
-};
 
 const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 /// How often the surface wakes itself so the candle countdown keeps moving.
@@ -49,10 +49,10 @@ const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
 const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 
-fn platform_theme(theme: ChartTheme) -> TradingPlotTheme {
+fn platform_theme(theme: ChartTheme) -> AsceifyTheme {
     match theme {
-        ChartTheme::Light => TradingPlotTheme::light(),
-        ChartTheme::Dark => TradingPlotTheme::dark(),
+        ChartTheme::Light => AsceifyTheme::light(),
+        ChartTheme::Dark => AsceifyTheme::dark(),
     }
 }
 
@@ -924,11 +924,11 @@ struct LegendPalette {
     danger: Rgba,
 }
 
-const LEGEND_VIEW_ICON: &str = "tradingplot/icons/ui/view.svg";
-const LEGEND_VIEW_OFF_ICON: &str = "tradingplot/icons/ui/view-off.svg";
-const LEGEND_SETTINGS_ICON: &str = "tradingplot/icons/ui/settings.svg";
-const LEGEND_REMOVE_ICON: &str = "tradingplot/icons/ui/close.svg";
-const LEGEND_LOADING_ICON: &str = "tradingplot/icons/ui/loader.svg";
+const LEGEND_VIEW_ICON: &str = "asceify/icons/ui/view.svg";
+const LEGEND_VIEW_OFF_ICON: &str = "asceify/icons/ui/view-off.svg";
+const LEGEND_SETTINGS_ICON: &str = "asceify/icons/ui/settings.svg";
+const LEGEND_REMOVE_ICON: &str = "asceify/icons/ui/close.svg";
+const LEGEND_LOADING_ICON: &str = "asceify/icons/ui/loader.svg";
 /// One rotation of the legend's loading glyph.
 const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
 
@@ -1122,7 +1122,7 @@ impl NucleusChartView {
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
-            live_evidence_enabled: std::env::var_os("TRADINGPLOT_LIVE_EVIDENCE").is_some(),
+            live_evidence_enabled: std::env::var_os("ASCEIFY_LIVE_EVIDENCE").is_some(),
             #[cfg(feature = "diagnostics")]
             live_evidence_rebuilds: 0,
             #[cfg(feature = "diagnostics")]
@@ -1222,7 +1222,7 @@ impl NucleusChartView {
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
-            live_evidence_enabled: std::env::var_os("TRADINGPLOT_LIVE_EVIDENCE").is_some(),
+            live_evidence_enabled: std::env::var_os("ASCEIFY_LIVE_EVIDENCE").is_some(),
             #[cfg(feature = "diagnostics")]
             live_evidence_rebuilds: 0,
             #[cfg(feature = "diagnostics")]
@@ -2696,7 +2696,7 @@ impl NucleusChartView {
             if self.live_evidence_enabled && self.live_evidence_rebuilds < 256 {
                 self.live_evidence_rebuilds = self.live_evidence_rebuilds.saturating_add(1);
                 eprintln!(
-                    "TRADINGPLOT_CHART_REBUILD {{\"micros\":{},\"layout\":{},\"data\":\"{}\"}}",
+                    "ASCEIFY_CHART_REBUILD {{\"micros\":{},\"layout\":{},\"data\":\"{}\"}}",
                     elapsed.as_micros(),
                     layout_recomputed,
                     mutation.label()

@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_market_data"
+name = "asceify_market_data"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

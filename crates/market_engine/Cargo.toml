@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_market_engine"
+name = "asceify_market_engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-tradingplot_market_data = { path = "../domain/market_data" }
+asceify_market_data = { path = "../domain/market_data" }
 
 [lints]
 workspace = true

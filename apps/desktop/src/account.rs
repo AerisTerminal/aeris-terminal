@@ -3,6 +3,8 @@
 //! Network and credential work stays off the GPUI thread, but there is no
 //! secondary process, local transport, or reconnect/replay layer.
 
+pub const AUTH_BACKEND_CONFIGURED: bool = cfg!(test);
+
 use std::{
     sync::{
         Arc, Mutex, OnceLock,
@@ -12,11 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tradingplot_account_runtime::{AccountRefreshQuiesce, AccountService, AccountServiceConfig};
-use tradingplot_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+use asceify_account_runtime::{AccountRefreshQuiesce, AccountService, AccountServiceConfig};
+use asceify_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
-pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section=profile";
+pub const MANAGE_PROFILE_URL: &str = "";
 
 /// Opens the production account hub on a background thread. The GPUI thread
 /// never performs browser/process work.
@@ -26,12 +28,10 @@ pub const MANAGE_PROFILE_URL: &str = "https://auth.axiusflow.com/account?section
 /// Returns an error when the background browser worker cannot be started.
 pub fn open_manage_profile() -> Result<(), String> {
     std::thread::Builder::new()
-        .name("tradingplot-open-profile".to_string())
+        .name("asceify-open-profile".to_string())
         .spawn(|| {
-            if let Err(error) =
-                tradingplot_platform_runtime::open_system_browser(MANAGE_PROFILE_URL)
-            {
-                eprintln!("TradingPlot profile browser open degraded: {error}");
+            if let Err(error) = asceify_platform_runtime::open_system_browser(MANAGE_PROFILE_URL) {
+                eprintln!("Asceify profile browser open degraded: {error}");
             }
         })
         .map(|_| ())
@@ -56,7 +56,7 @@ pub fn start_login(
     let authorization = service.begin_login(request_generation)?;
     if let Err(error) = open_login_browser_with(
         &authorization.authorization_url,
-        tradingplot_platform_runtime::open_system_browser,
+        asceify_platform_runtime::open_system_browser,
     ) {
         let _ = service.cancel_login(authorization.request_generation);
         return Err(error);
@@ -68,7 +68,7 @@ fn open_login_browser_with(
     url: &str,
     open_browser: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<(), String> {
-    if url.is_empty() || url.len() > tradingplot_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES {
+    if url.is_empty() || url.len() > asceify_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES {
         return Err("account service returned an invalid authorization URL".to_string());
     }
     open_browser(url).map_err(|_| "system browser could not be opened".to_string())
@@ -142,8 +142,8 @@ pub fn account_action_label(view: &AccountView) -> &'static str {
 #[must_use]
 pub fn unavailable_presentation() -> AccountPresentation {
     AccountPresentation {
-        action: "Sign in",
-        state: "Sign-in unavailable",
+        action: "Development",
+        state: "Development mode",
         plan: "No plan",
         detail: String::new(),
         display_name: String::new(),
@@ -507,7 +507,7 @@ impl DesktopAccount {
         let (request_tx, request_rx) = mpsc::sync_channel(2);
         let (result_tx, result_rx) = mpsc::sync_channel(2);
         std::thread::Builder::new()
-            .name("tradingplot-account-client".to_string())
+            .name("asceify-account-client".to_string())
             .spawn(move || run_account_client_with(&request_rx, &result_tx, handle))
             .map_err(|_| "desktop account client could not start".to_string())?;
         // Generations seed from the wall clock so a fresh desktop process
@@ -535,7 +535,7 @@ impl DesktopAccount {
         });
         let poller = Arc::clone(&shared);
         std::thread::Builder::new()
-            .name("tradingplot-account-poller".to_string())
+            .name("asceify-account-poller".to_string())
             .spawn(move || {
                 for response in result_rx {
                     apply_account_response(&poller, response);
@@ -640,6 +640,9 @@ impl DesktopAccount {
     /// Returns an error when the worker cannot be reached. The browser
     /// opens on the worker thread.
     pub fn request_sign_in(&self) -> Result<(), String> {
+        if !AUTH_BACKEND_CONFIGURED {
+            return Err("sign-in is disabled in development mode".to_string());
+        }
         if self.shared.pending.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -719,7 +722,7 @@ impl DesktopAccount {
             .and_then(|url| url.clone())
             .filter(|url| {
                 !url.is_empty()
-                    && url.len() <= tradingplot_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES
+                    && url.len() <= asceify_platform_runtime::MAXIMUM_AUTHORIZATION_URL_BYTES
             })
             .ok_or_else(|| "no sign-in page to reopen; start sign-in again".to_string())?;
         self.begin_request(
@@ -1079,7 +1082,7 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
         AccountRequest::ReopenBrowser { authorization_url } => {
             match open_login_browser_with(
                 &authorization_url,
-                tradingplot_platform_runtime::open_system_browser,
+                asceify_platform_runtime::open_system_browser,
             ) {
                 Ok(()) => AccountResponse::BrowserReopened,
                 Err(error) => AccountResponse::LoginActionFailed(error),
@@ -1128,10 +1131,10 @@ mod tests {
         account_state_label, open_login_browser_with, resolve_authoritative_authentication,
         sanitized_plan_label, unavailable_menu_state,
     };
+    use asceify_account_runtime::{AccountService, AccountServiceConfig};
+    use asceify_contracts::{AccountSessionState, AccountView};
     use std::sync::{Arc, Mutex, atomic::Ordering};
     use std::time::{Duration, Instant};
-    use tradingplot_account_runtime::{AccountService, AccountServiceConfig};
-    use tradingplot_contracts::{AccountSessionState, AccountView};
 
     /// Scripted fake runtime behind an isolated desktop session. The worker
     /// thread drives it exactly like production: Begin opens the browser
@@ -1194,7 +1197,7 @@ mod tests {
                     AccountResponse::Authorized(super::LoginAuthorization {
                         request_generation: generation,
                         authorization_url: format!(
-                            "https://auth.axiusflow.com/authorize?request={generation}"
+                            "https://auth.example.test/authorize?request={generation}"
                         ),
                         expires_unix_seconds: 1_800_000_003,
                     })
@@ -1248,7 +1251,7 @@ mod tests {
             view.plan_id = "pro".to_string();
             view.display_name = name.to_string();
             view.email = email.to_string();
-            view.photo_url = "https://auth.axiusflow.com/photo/ada.png".to_string();
+            view.photo_url = "https://auth.example.test/photo/ada.png".to_string();
             self.view = view;
         }
     }
@@ -1370,10 +1373,10 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_menu_state_invites_sign_in() {
+    fn unavailable_menu_state_explains_development_mode() {
         let menu = unavailable_menu_state();
-        assert_eq!(menu.presentation.action, "Sign in");
-        assert_eq!(menu.presentation.state, "Sign-in unavailable");
+        assert_eq!(menu.presentation.action, "Development");
+        assert_eq!(menu.presentation.state, "Development mode");
         assert!(menu.error.is_none());
     }
 
@@ -1450,38 +1453,35 @@ mod tests {
     fn only_https_photos_reach_the_image_loader() {
         use super::has_profile_photo;
 
-        assert!(has_profile_photo("https://auth.axiusflow.com/photo/a.png"));
+        assert!(has_profile_photo("https://auth.example.test/photo/a.png"));
         assert!(has_profile_photo(
             "https://lh3.googleusercontent.com/a/photo?x=1&y=2"
         ));
         for bad in [
             "",
-            "http://auth.axiusflow.com/photo/a.png",
+            "http://auth.example.test/photo/a.png",
             "file:///etc/passwd",
             "javascript:alert(1)",
-            "https://auth.axiusflow.com/has space",
+            "https://auth.example.test/has space",
             "data:image/png;base64,AAA",
         ] {
             assert!(!has_profile_photo(bad), "photo must not load: {bad}");
         }
         assert!(!has_profile_photo(&format!(
-            "https://auth.axiusflow.com/{}",
+            "https://auth.example.test/{}",
             "a".repeat(2048)
         )));
     }
 
     #[test]
-    fn manage_profile_targets_the_production_account_hub() {
-        assert_eq!(
-            MANAGE_PROFILE_URL,
-            "https://auth.axiusflow.com/account?section=profile"
-        );
+    fn manage_profile_has_no_unconfigured_endpoint() {
+        assert!(MANAGE_PROFILE_URL.is_empty());
     }
 
     #[test]
     fn initial_browser_launch_failure_is_actionable_and_redacted() {
         let error = open_login_browser_with(
-            "https://auth.axiusflow.com/api/auth/oauth2/authorize?request=1",
+            "https://auth.example.test/api/auth/oauth2/authorize?request=1",
             |_| Err("raw launcher failure detail".to_string()),
         )
         .expect_err("launcher failure must reach the account worker");
@@ -1503,7 +1503,7 @@ mod tests {
         active.plan_id = "pro".to_string();
         active.display_name = "Ada Trader".to_string();
         active.email = "ada@example.com".to_string();
-        active.photo_url = "https://auth.axiusflow.com/photo/ada.png".to_string();
+        active.photo_url = "https://auth.example.test/photo/ada.png".to_string();
         apply_account_response(
             &session.shared,
             AccountResponse::Status {
@@ -1518,7 +1518,7 @@ mod tests {
         assert_eq!(presentation.email, "ada@example.com");
         assert_eq!(
             presentation.photo_url,
-            "https://auth.axiusflow.com/photo/ada.png"
+            "https://auth.example.test/photo/ada.png"
         );
         // Sign-out status wipes the profile: no stale identity survives.
         apply_account_response(
@@ -1669,7 +1669,7 @@ mod tests {
     #[test]
     fn authoritative_runtime_authentication_overrides_stale_desktop_view() {
         let runtime = AccountService::new(
-            AccountServiceConfig::try_new("https://auth.tradingplot.test/api/auth", "desktop-test")
+            AccountServiceConfig::try_new("https://auth.asceify.test/api/auth", "desktop-test")
                 .expect("test account config builds"),
         );
         let session = DesktopAccount::spawn_with_runtime(inert_engine, Some(runtime))
@@ -1793,7 +1793,7 @@ mod tests {
         assert!(session.reopen_browser().is_err());
         let authorization = LoginAuthorization {
             request_generation: 3,
-            authorization_url: "https://auth.axiusflow.com/authorize?request=3".to_string(),
+            authorization_url: "https://auth.example.test/authorize?request=3".to_string(),
             expires_unix_seconds: 1_800_000_003,
         };
         apply_account_response(&session.shared, AccountResponse::Authorized(authorization));
@@ -1805,7 +1805,7 @@ mod tests {
             .clone();
         assert_eq!(
             stored.as_deref(),
-            Some("https://auth.axiusflow.com/authorize?request=3")
+            Some("https://auth.example.test/authorize?request=3")
         );
     }
 

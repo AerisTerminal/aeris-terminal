@@ -3,7 +3,7 @@ use gpui::{
     Transformation, Window, div, prelude::*, svg,
 };
 
-/// An `TradingPlot`-owned SVG icon loaded through the application's `AssetSource`.
+/// An `Asceify`-owned SVG icon loaded through the application's `AssetSource`.
 ///
 /// Keeping the path as data makes icon rendering independent of a UI toolkit
 /// library and lets the asset source remain the single authority for bundled
@@ -105,10 +105,10 @@ mod tests {
 
     #[test]
     fn icon_keeps_the_owned_asset_path() {
-        let icon = Icon::new("tradingplot/icons/ui/window-close.svg");
+        let icon = Icon::new("asceify/icons/ui/window-close.svg");
         assert_eq!(
             icon.path_ref().as_ref(),
-            "tradingplot/icons/ui/window-close.svg"
+            "asceify/icons/ui/window-close.svg"
         );
     }
 }

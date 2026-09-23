@@ -1,5 +1,5 @@
 [package]
-name = "tradingplot_platform_runtime"
+name = "asceify_platform_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

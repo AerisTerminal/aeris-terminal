@@ -92,7 +92,7 @@ pub fn try_send_user_notification(
 fn start_dispatcher() -> Result<NotificationDispatcher, NativeUserNotificationError> {
     let (sender, receiver) = mpsc::sync_channel(NOTIFICATION_CAPACITY);
     thread::Builder::new()
-        .name("tradingplot-user-notifications".to_string())
+        .name("asceify-user-notifications".to_string())
         .spawn(move || notification_worker(&receiver))
         .map_err(|_| NativeUserNotificationError::WorkerUnavailable)?;
     Ok(NotificationDispatcher { sender })
@@ -102,18 +102,16 @@ fn notification_worker(receiver: &mpsc::Receiver<NativeUserNotification>) {
     while let Ok(notification) = receiver.recv() {
         let mut native = notify_rust::Notification::new();
         native
-            .appname("TradingPlot")
+            .appname("Asceify")
             .summary(&notification.title)
             .body(&notification.body)
             .timeout(notify_rust::Timeout::Milliseconds(10_000));
         #[cfg(target_os = "windows")]
-        native
-            .app_id("com.tradingplot.desktop")
-            .sound_name("Default");
+        native.app_id("com.asceify.desktop").sound_name("Default");
         #[cfg(target_os = "macos")]
         native.sound_name("Default");
         if let Err(error) = native.show() {
-            eprintln!("TradingPlot operating-system notification failed: {error}");
+            eprintln!("Asceify operating-system notification failed: {error}");
         }
     }
 }

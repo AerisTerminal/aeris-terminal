@@ -11,8 +11,8 @@ pub(crate) mod tooltip;
 
 use std::sync::Arc;
 
+use asceify_design_system::{TypographyRole, platform_typography};
 use gpui::{FontFeatures, FontWeight};
-use tradingplot_design_system::{TypographyRole, platform_typography};
 
 /// GPUI adapter for the semantic weights owned by `platform.css`.
 pub(crate) fn platform_font_weight(role: TypographyRole) -> FontWeight {

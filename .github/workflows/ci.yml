@@ -16,7 +16,7 @@ permissions:
 # One maintainer machine serves the lanes. Keep manual runs for the same
 # ref from overlapping.
 concurrency:
-  group: tradingplot-ci-${{ github.ref }}
+  group: asceify-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
         # git configuration (a `--global` rewrite here once broke the owner's
         # own push access until it was removed by hand).
         run: |
-          config="$RUNNER_TEMP/tradingplot-job-gitconfig"
+          config="$RUNNER_TEMP/asceify-job-gitconfig"
           git config --file "$config" url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
           printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - name: Validate private chart credential
@@ -75,7 +75,7 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --all-features --locked
       - name: Check local market-data performance
-        run: cargo run -p tradingplot_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
+        run: cargo run -p asceify_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
       - name: Upload market-data baseline
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -86,7 +86,7 @@ jobs:
         # The per-job config file carries the chart token: always delete it,
         # even when the lane fails, so no secret lingers in runner temp.
         if: always()
-        run: rm -f "$RUNNER_TEMP/tradingplot-job-gitconfig"
+        run: rm -f "$RUNNER_TEMP/asceify-job-gitconfig"
 
   workspace-windows:
     runs-on: [self-hosted, axiusflow, windows]
@@ -105,7 +105,7 @@ jobs:
         # own push access until it was removed by hand).
         shell: pwsh
         run: |
-          $config = Join-Path $env:RUNNER_TEMP 'tradingplot-job-gitconfig'
+          $config = Join-Path $env:RUNNER_TEMP 'asceify-job-gitconfig'
           git config --file $config url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf 'https://github.com/'
           Add-Content -Path $env:GITHUB_ENV -Value "GIT_CONFIG_GLOBAL=$config"
       - name: Validate private chart credential
@@ -132,7 +132,7 @@ jobs:
           & ./tools/test_evidence_verifiers.ps1
           & ./tools/test_desktop_endurance_workflow.ps1
       - name: Check local market-data performance
-        run: cargo run -p tradingplot_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
+        run: cargo run -p asceify_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
       - name: Upload market-data baseline
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -144,4 +144,4 @@ jobs:
         # even when the lane fails, so no secret lingers in runner temp.
         if: always()
         shell: pwsh
-        run: Remove-Item -Force (Join-Path $env:RUNNER_TEMP 'tradingplot-job-gitconfig') -ErrorAction SilentlyContinue
+        run: Remove-Item -Force (Join-Path $env:RUNNER_TEMP 'asceify-job-gitconfig') -ErrorAction SilentlyContinue

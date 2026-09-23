@@ -6,6 +6,13 @@
 //! `market_service`. The runtime produces deterministic recalculation plans and shared upstream
 //! stream requirements without creating provider work itself.
 
+use asceify_market_data::{
+    AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, TopOfBookQuote,
+};
+use asceify_market_engine::{
+    ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesSnapshot,
+    StreamRequirements,
+};
 use std::{
     any::Any,
     array,
@@ -15,13 +22,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, OnceLock},
-};
-use tradingplot_market_data::{
-    AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, TopOfBookQuote,
-};
-use tradingplot_market_engine::{
-    ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesSnapshot,
-    StreamRequirements,
 };
 
 /// Maximum UTF-8 bytes accepted in one stable study identifier.
@@ -4182,11 +4182,11 @@ fn bounded_execution_detail(mut detail: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Mutex, time::Duration};
-    use tradingplot_market_data::{BarPeriod, DepthSnapshot, EventMetadata, QualifiedTimestamp};
-    use tradingplot_market_engine::{
+    use asceify_market_data::{BarPeriod, DepthSnapshot, EventMetadata, QualifiedTimestamp};
+    use asceify_market_engine::{
         MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
     };
+    use std::{sync::Mutex, time::Duration};
 
     fn bound(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test bounds are non-zero")

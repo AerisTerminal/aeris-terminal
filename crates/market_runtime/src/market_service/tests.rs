@@ -84,7 +84,7 @@ fn covering_snapshot_is_popped_before_live_state() {
         period: BarPeriod::time(60).expect("period"),
         definition_version: 1,
     };
-    let publication = tradingplot_market_engine::ConsumerPublication {
+    let publication = asceify_market_engine::ConsumerPublication {
         consumer_id,
         generation,
         publication_generation: 1,

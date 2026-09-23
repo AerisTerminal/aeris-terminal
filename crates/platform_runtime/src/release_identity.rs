@@ -14,10 +14,10 @@ pub struct ReleaseIdentity {
 #[must_use]
 pub fn current_release_identity() -> ReleaseIdentity {
     ReleaseIdentity {
-        release_identity: option_env!("TRADINGPLOT_RELEASE_IDENTITY")
+        release_identity: option_env!("ASCEIFY_RELEASE_IDENTITY")
             .unwrap_or(env!("CARGO_PKG_VERSION"))
             .to_string(),
-        install_generation: option_env!("TRADINGPLOT_INSTALL_GENERATION")
+        install_generation: option_env!("ASCEIFY_INSTALL_GENERATION")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0),
     }

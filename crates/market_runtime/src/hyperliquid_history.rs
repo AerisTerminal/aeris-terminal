@@ -13,13 +13,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tradingplot_contracts::InstallProviderInstrument;
-use tradingplot_hyperliquid_market_adapter::{
+use asceify_contracts::InstallProviderInstrument;
+use asceify_hyperliquid_market_adapter::{
     CandleSnapshotRequest, HyperliquidHttpConfig, NORMALIZED_PRICE_SCALE,
     NORMALIZED_QUANTITY_SCALE, fetch_candle_snapshot, hyperliquid_interval_for_period,
 };
-use tradingplot_market_data::{BarPeriod, BarSeriesKey};
-use tradingplot_provider_history::HistoryRange;
+use asceify_market_data::{BarPeriod, BarSeriesKey};
+use asceify_provider_history::HistoryRange;
 
 use crate::market_service::{FormingBar, HistoryFetchWindow};
 
@@ -29,7 +29,7 @@ pub(super) struct Snapshot {
     pub(super) price_scale: u8,
     pub(super) quantity_scale: u8,
     /// Periods the provider has closed. Only these become canonical history.
-    pub(super) bars: Vec<tradingplot_market_data::MarketBar>,
+    pub(super) bars: Vec<asceify_market_data::MarketBar>,
     /// The period that was still open when the page was served.
     pub(super) forming: Option<FormingBar>,
     pub(super) handoff_boundary_unix_nanos: i64,
@@ -72,7 +72,7 @@ pub(super) fn fetch(
     hyperliquid_interval_for_period(series.period)?;
     let maximum_bars = window.maximum_bars.clamp(
         1,
-        tradingplot_hyperliquid_market_adapter::MAXIMUM_HYPERLIQUID_CANDLES,
+        asceify_hyperliquid_market_adapter::MAXIMUM_HYPERLIQUID_CANDLES,
     );
     let now_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
