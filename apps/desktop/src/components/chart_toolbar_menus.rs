@@ -59,6 +59,14 @@ pub(super) fn chrome_overlay_layer(
                     dual_container,
                     primary_surface: quick_timeframe,
                     elevation: chrome_overlay_elevation(overlay),
+                    radius: if matches!(
+                        overlay,
+                        ChromeOverlay::Instrument | ChromeOverlay::Indicator
+                    ) {
+                        RadiusToken::Medium
+                    } else {
+                        RadiusToken::Default
+                    },
                 },
                 closing,
                 generation,
@@ -264,6 +272,7 @@ pub(super) struct ChromeOverlayPanelStyle {
     dual_container: bool,
     primary_surface: bool,
     elevation: ChromeOverlayElevation,
+    radius: RadiusToken,
 }
 
 pub(super) fn chrome_overlay_panel(
@@ -283,7 +292,7 @@ pub(super) fn chrome_overlay_panel(
         .flex_none()
         .when(!style.dual_container, |panel| {
             panel
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .rounded(px(f32::from(style.radius.logical_pixels())))
                 .border_1()
                 .border_color(gpui_color(if style.primary_surface {
                     colors.border

@@ -61,6 +61,7 @@
 
   /* Radius */
   --radius-default: 8px;
+  --radius-medium: 12px;
   --radius-small: 4px;
   --radius-large: 999px;
 
@@ -83,7 +84,7 @@
 
   /* Text */
   --text-primary: #f0f0f0;
-  --text-secondary: #f0f0f0bd;
+  --text-secondary: #AEAEB2;
   --text-muted: #f0f0f05c;
 
   /* Interaction states */

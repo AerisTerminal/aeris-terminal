@@ -88,6 +88,11 @@ fn compile_tokens() -> Result<(), String> {
     )?;
     emit_pixel_u16(
         &mut output,
+        "RADIUS_MEDIUM",
+        &resolve(&root, "radius-medium")?,
+    )?;
+    emit_pixel_u16(
+        &mut output,
         "RADIUS_LARGE",
         &resolve(&root, "radius-large")?,
     )?;

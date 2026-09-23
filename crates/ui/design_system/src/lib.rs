@@ -455,6 +455,7 @@ fn generated_colors(values: [[u8; 4]; 21]) -> ThemeColors {
 pub enum RadiusToken {
     Sm,
     Default,
+    Medium,
     Full,
 }
 
@@ -465,6 +466,7 @@ impl RadiusToken {
         match self {
             Self::Sm => "radius-small",
             Self::Default => "radius-default",
+            Self::Medium => "radius-medium",
             Self::Full => "radius-large",
         }
     }
@@ -481,6 +483,7 @@ impl RadiusToken {
         match self {
             Self::Sm => RADIUS_SMALL,
             Self::Default => RADIUS_DEFAULT,
+            Self::Medium => RADIUS_MEDIUM,
             Self::Full => RADIUS_LARGE,
         }
     }
@@ -527,10 +530,7 @@ mod tests {
         assert_eq!(light.text_primary, ThemeColor::from_rgb8(51, 51, 51));
         assert_eq!(light.text_secondary, ThemeColor::from_rgb8(123, 123, 123));
         assert_eq!(light.text_muted, ThemeColor::from_rgb8(209, 209, 209));
-        assert_eq!(
-            dark.text_secondary,
-            ThemeColor::from_rgba8(240, 240, 240, 0xbd)
-        );
+        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(174, 174, 178));
         assert_eq!(light.primary, ThemeColor::from_rgb8(22, 142, 247));
         assert_eq!(dark.primary, light.primary);
         assert_eq!(
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
         assert_eq!(token_source(&dark_tokens, "hover-bg"), "#f0f0f014");
         assert_eq!(token_source(&light_tokens, "text-muted"), "#D1D1D1");
-        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#f0f0f0bd");
+        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#AEAEB2");
         assert_eq!(
             token_source(&light_tokens, "input-fill"),
             "var(--surface-secondary)"
@@ -594,6 +594,7 @@ mod tests {
     fn radius_tokens_match_the_platform_contract() {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
         assert_eq!(RadiusToken::Default.logical_pixels(), 8);
+        assert_eq!(RadiusToken::Medium.logical_pixels(), 12);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
         assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius-small");
         assert_eq!(
@@ -601,6 +602,7 @@ mod tests {
             "--radius-default"
         );
         assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-large");
+        assert_eq!(RadiusToken::Medium.css_custom_property(), "--radius-medium");
     }
 
     #[test]
