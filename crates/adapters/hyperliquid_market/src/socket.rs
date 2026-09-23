@@ -133,11 +133,7 @@ impl HyperliquidSocket {
     ///
     /// Returns an error when the socket write fails or is cancelled.
     pub fn send_text(&mut self, text: &str) -> Result<(), String> {
-        match self.socket.get_mut() {
-            MaybeTlsStream::Plain(stream) => stream.set_write_deadline(write_deadline()),
-            MaybeTlsStream::Rustls(stream) => stream.get_mut().set_write_deadline(write_deadline()),
-            _ => {}
-        }
+        self.set_write_deadline(write_deadline());
         self.socket
             .send(Message::Text(text.to_owned().into()))
             .map_err(|_| "hyperliquid socket send failed".to_string())
@@ -162,10 +158,14 @@ impl HyperliquidSocket {
             match message {
                 Message::Text(text) => return Ok(SocketEvent::Text(text.as_str().to_owned())),
                 Message::Binary(_) => return Err("hyperliquid socket sent binary".to_string()),
-                Message::Ping(payload) => {
+                Message::Ping(_) => {
+                    // Tungstenite queues the matching pong automatically. Its
+                    // flush needs a fresh write deadline even when the socket
+                    // has been reading since the last application ping.
+                    self.set_write_deadline(write_deadline());
                     self.socket
-                        .send(Message::Pong(payload))
-                        .map_err(|_| "hyperliquid socket send failed".to_string())?;
+                        .flush()
+                        .map_err(|_| "hyperliquid socket pong failed".to_string())?;
                 }
                 Message::Pong(_) => return Ok(SocketEvent::Pong),
                 Message::Close(_) => return Err("hyperliquid socket closed".to_string()),
@@ -187,6 +187,14 @@ impl HyperliquidSocket {
         match self.socket.get_mut() {
             MaybeTlsStream::Plain(stream) => stream.set_read_deadline(deadline),
             MaybeTlsStream::Rustls(stream) => stream.get_mut().set_read_deadline(deadline),
+            _ => {}
+        }
+    }
+
+    fn set_write_deadline(&mut self, deadline: Instant) {
+        match self.socket.get_mut() {
+            MaybeTlsStream::Plain(stream) => stream.set_write_deadline(deadline),
+            MaybeTlsStream::Rustls(stream) => stream.get_mut().set_write_deadline(deadline),
             _ => {}
         }
     }
@@ -437,6 +445,41 @@ mod tests {
             .expect_err("lapsed write deadline fails");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(stream.operation_timeout(stream.read_deadline).is_ok());
+    }
+
+    #[test]
+    fn server_ping_uses_fresh_write_deadline_and_keeps_session_open() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let address = listener.local_addr().expect("loopback address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client connects");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("server read timeout");
+            let mut socket = tungstenite::accept(stream).expect("websocket handshake");
+            socket
+                .send(Message::Ping(vec![1, 2, 3].into()))
+                .expect("server sends ping");
+            assert_eq!(
+                socket.read().expect("client answers ping"),
+                Message::Pong(vec![1, 2, 3].into())
+            );
+            socket
+                .send(Message::Text("still connected".into()))
+                .expect("server sends data after pong");
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut socket, _) =
+            HyperliquidSocket::connect(&format!("ws://{address}/"), Duration::from_secs(3), &stop)
+                .expect("client connects");
+        socket.set_write_deadline(past());
+        assert_eq!(
+            socket
+                .read_event(Instant::now() + Duration::from_secs(3))
+                .expect("ping does not disconnect the client"),
+            SocketEvent::Text("still connected".to_string())
+        );
+        server.join().expect("server finishes");
     }
 
     #[test]
