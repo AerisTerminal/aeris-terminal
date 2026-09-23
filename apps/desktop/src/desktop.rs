@@ -1321,6 +1321,10 @@ const fn instrument_target_after_close(
     }
 }
 
+const fn symbol_menu_closes_after_selection(target: SymbolSelectionTarget) -> bool {
+    matches!(target, SymbolSelectionTarget::Chart)
+}
+
 fn clamped_side_panel_width(width: f32) -> f32 {
     width.clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
 }
@@ -2165,12 +2169,13 @@ fn subscribe_symbol_input(
             };
             match symbol_input_action(event) {
                 SymbolInputAction::Submit => {
-                    let selected = terminal.update(cx, WorkspaceSurface::submit_symbol_input);
-                    if selected {
-                        terminal.update(cx, |app, app_cx| {
+                    terminal.update(cx, |app, app_cx| {
+                        if app.submit_symbol_input(app_cx)
+                            && symbol_menu_closes_after_selection(app.symbol_selection_target)
+                        {
                             app.close_chrome_overlay(window, app_cx);
-                        });
-                    }
+                        }
+                    });
                 }
                 SymbolInputAction::Search => {
                     terminal.update(cx, |app, cx| {

@@ -1463,6 +1463,10 @@ impl WorkspaceSurface {
         target: SymbolSelectionTarget,
         cx: &mut Context<Self>,
     ) -> bool {
+        if target == SymbolSelectionTarget::Watchlist && self.market_state.symbol_selection_pending
+        {
+            return false;
+        }
         #[cfg(feature = "diagnostics")]
         let started = Instant::now();
         let selected = (|| match selection {
@@ -3340,18 +3344,19 @@ impl WorkspaceSurface {
                 // switch flow: the pending product replaces the chart only
                 // when its covering snapshot arrives.
                 if self.pending_symbol_selection_target == Some(SymbolSelectionTarget::Watchlist) {
-                    let Some(selection) = usize_generation(command_generation)
+                    let Some(_selection) = usize_generation(command_generation)
                         .and_then(|generation| self.symbol_browser.resolve_selection(generation))
                     else {
                         return;
                     };
-                    self.symbol_browser
-                        .consume_completed_search(selection.search_generation);
                     self.pending_watchlist_instrument = Some(instrument);
                     self.pending_symbol_selection_target = None;
-                    self.symbol_selection_target = SymbolSelectionTarget::Chart;
+                    if self.chrome_overlay != Some(ChromeOverlay::Instrument)
+                        || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
+                    {
+                        self.symbol_selection_target = SymbolSelectionTarget::Chart;
+                    }
                     self.market_state.symbol_selection_pending = false;
-                    self.chrome_overlay = None;
                     self.symbol_message = "Watchlist symbol resolved".to_string();
                     cx.notify();
                     return;
@@ -3441,6 +3446,11 @@ impl WorkspaceSurface {
         }
         if selection {
             self.pending_symbol_selection_target = None;
+            if self.chrome_overlay != Some(ChromeOverlay::Instrument)
+                || self.chrome_overlay_phase == ChromeOverlayPhase::Closing
+            {
+                self.symbol_selection_target = SymbolSelectionTarget::Chart;
+            }
         }
         self.market_state.symbol_selection_pending = false;
         let reason = rejection.reason;

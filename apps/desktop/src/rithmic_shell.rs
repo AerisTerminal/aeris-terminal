@@ -343,6 +343,19 @@ mod tests {
     }
 
     #[test]
+    fn completed_search_can_resolve_multiple_watchlist_symbols() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let search = browser.begin_search("E").expect("query validates");
+        assert!(browser.apply_results(search.request_id, vec![result("ESM7"), result("EPM7")]));
+
+        let first = browser.select(0).expect("first result");
+        assert_eq!(browser.resolve_selection(first.generation), Some(first));
+        let second = browser.select(1).expect("second result remains available");
+        assert_eq!(browser.resolve_selection(second.generation), Some(second));
+        assert_eq!(browser.results().len(), 2);
+    }
+
+    #[test]
     fn symbol_browser_bounds_queries_results_and_indexes() {
         let mut browser = RithmicSymbolBrowser::default();
         assert_eq!(browser.maximum_results(), MAXIMUM_RITHMIC_SYMBOL_RESULTS);

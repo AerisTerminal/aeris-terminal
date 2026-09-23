@@ -155,8 +155,11 @@ pub(super) fn instrument_dialog_row(
         state.menu.keyboard_selection,
         state.menu.keyboard_active,
     ))
+    .disabled(target == SymbolSelectionTarget::Watchlist && state.availability.selection_pending)
     .on_click(move |_, window, cx| {
-        if app.update(cx, |app, cx| app.select_instrument(selection, target, cx)) {
+        if app.update(cx, |app, cx| app.select_instrument(selection, target, cx))
+            && symbol_menu_closes_after_selection(target)
+        {
             app.update(cx, |app, app_cx| {
                 app.close_chrome_overlay(window, app_cx);
             });
@@ -170,16 +173,13 @@ pub(super) fn instrument_dialog_row(
     ));
     if state.target == SymbolSelectionTarget::Watchlist {
         row = row.trailing(button_activation(
-            compact_menu_add_button(("add_watchlist_symbol", index), theme),
-            true,
-            move |window, cx| {
-                if add_app.update(cx, |app, cx| {
-                    app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx)
-                }) {
-                    add_app.update(cx, |app, app_cx| {
-                        app.close_chrome_overlay(window, app_cx);
-                    });
-                }
+            compact_menu_add_button(("add_watchlist_symbol", index), theme)
+                .disabled(state.availability.selection_pending),
+            !state.availability.selection_pending,
+            move |_, cx| {
+                add_app.update(cx, |app, cx| {
+                    app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx);
+                });
             },
         ));
     } else if checked {

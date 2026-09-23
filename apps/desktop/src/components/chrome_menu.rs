@@ -45,6 +45,7 @@ pub(super) fn chrome_menu_surface(
         .h(px(CHROME_MENU_SEARCH_HEIGHT + extent.list_height))
         .max_h(px(CHROME_MENU_MAX_HEIGHT))
         .max_h_full()
+        .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
         .overflow_hidden()
         .bg(gpui_color(colors.surface))
         .font_family(asceify_design_system::platform_font_family())
@@ -247,6 +248,8 @@ pub(super) fn scrollable_menu_body(
         .w_full()
         .h(px(extent.list_height))
         .max_h(px(extent.list_height))
+        .rounded_bl(px(f32::from(RadiusToken::Medium.logical_pixels())))
+        .rounded_br(px(f32::from(RadiusToken::Medium.logical_pixels())))
         .overflow_hidden()
         .child(
             tracked_overflow_y_scrollbar(body, scroll)
