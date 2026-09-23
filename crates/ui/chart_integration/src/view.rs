@@ -2325,17 +2325,46 @@ impl NucleusChartView {
         self.user_state_revision = self.user_state_revision.saturating_add(1);
     }
 
-    /// Exports Nucleus-owned committed drawing semantics in z-order. Market data,
+    /// Exports Nucleus-owned committed drawing semantics in z-order. Each anchor
+    /// also carries its exchange time so a replacement bar series can restore
+    /// the same position after a timeframe switch. Market data,
     /// indicator definitions and renderer/runtime state are intentionally absent.
     ///
     /// # Errors
     ///
     /// Returns an error if Nucleus cannot serialize its bounded drawing state.
     pub fn export_semantic_state_json(&self) -> Result<String, String> {
-        Ok(self.engine.drawings_json())
+        let mut items =
+            serde_json::from_str::<Vec<serde_json::Value>>(&self.engine.drawings_json())
+                .map_err(|_| "chart drawing state is malformed".to_string())?;
+        for item in &mut items {
+            let Some(points) = item
+                .get_mut("points")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for point in points {
+                let Some(logical) = point.get("logical").and_then(serde_json::Value::as_f64) else {
+                    continue;
+                };
+                if let Some(time) = self.product_bars.time_at_logical(logical)
+                    && let Some(point) = point.as_object_mut()
+                {
+                    point.insert(
+                        "asceify_anchor_time".to_string(),
+                        serde_json::Value::from(time),
+                    );
+                }
+            }
+        }
+        serde_json::to_string(&items)
+            .map_err(|_| "chart drawing state could not be serialized".to_string())
     }
 
     /// Restores committed drawings after indicator panes have been recreated.
+    /// Older saved drawings without exchange-time anchors retain their original
+    /// logical coordinates until they can be exported against loaded history.
     /// Lock ids are remapped because Nucleus deliberately allocates fresh local
     /// drawing handles instead of accepting persisted runtime handles.
     ///
@@ -2376,13 +2405,25 @@ impl NucleusChartView {
                 .get("points")
                 .cloned()
                 .ok_or_else(|| "persisted drawing anchors are missing".to_string())?;
-            let points = serde_json::from_value::<Vec<nucleuscharts_engine::DrawingPoint>>(points)
-                .map_err(|_| "persisted drawing anchors are invalid".to_string())?;
+            let mut drawing_points =
+                serde_json::from_value::<Vec<nucleuscharts_engine::DrawingPoint>>(points.clone())
+                    .map_err(|_| "persisted drawing anchors are invalid".to_string())?;
+            if let Some(saved_points) = points.as_array() {
+                for (point, saved) in drawing_points.iter_mut().zip(saved_points) {
+                    if let Some(time) = saved
+                        .get("asceify_anchor_time")
+                        .and_then(serde_json::Value::as_f64)
+                        && let Some(logical) = self.product_bars.logical_at_time(time)
+                    {
+                        point.logical = logical;
+                    }
+                }
+            }
             let options = serde_json::to_string(&item)
                 .map_err(|_| "persisted drawing options are invalid".to_string())?;
             let new_id = self
                 .engine
-                .add_drawing(kind, pane_index, points, Some(&options))
+                .add_drawing(kind, pane_index, drawing_points, Some(&options))
                 .ok_or_else(|| "persisted drawing could not be restored".to_string())?;
             if locked_ids.contains(&old_id) {
                 self.locked_drawings.insert(new_id);

@@ -2435,6 +2435,54 @@ fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
 }
 
 #[test]
+fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut source = NucleusChartView::with_replay(&replay);
+    source
+        .engine
+        .add_drawing(
+            DrawingKind::TrendLine,
+            0,
+            vec![
+                nucleuscharts_engine::DrawingPoint {
+                    logical: 5.5,
+                    price: 100.0,
+                },
+                nucleuscharts_engine::DrawingPoint {
+                    logical: 12.0,
+                    price: 110.0,
+                },
+            ],
+            None,
+        )
+        .expect("drawing creates");
+    let mut state: serde_json::Value = serde_json::from_str(
+        &source
+            .export_semantic_state_json()
+            .expect("drawings export"),
+    )
+    .expect("export is JSON");
+    let saved_time = state[0]["points"][0]["asceify_anchor_time"]
+        .as_f64()
+        .expect("first anchor has exchange time");
+    assert_eq!(source.product_bars.logical_at_time(saved_time), Some(5.5));
+
+    let later_time = source
+        .product_bars
+        .time_at_logical(7.5)
+        .expect("later anchor time");
+    state[0]["points"][0]["asceify_anchor_time"] = serde_json::Value::from(later_time);
+    let mut restored = NucleusChartView::with_replay(&replay);
+    restored
+        .import_semantic_state_json(&state.to_string(), &[])
+        .expect("drawings restore");
+    assert!((restored.engine.drawings()[0].points[0].logical - 7.5).abs() < f64::EPSILON);
+    assert!((restored.engine.drawings()[0].points[1].logical - 12.0).abs() < f64::EPSILON);
+}
+
+#[test]
 fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
     let mut chart = interactive_chart();
     chart.set_drawing_tool(ChartDrawingTool::TrendLine);

@@ -19,6 +19,57 @@ pub(crate) struct ProductPriceBars {
 }
 
 impl ProductPriceBars {
+    /// Resolve a fractional bar index to exchange time, including points between bars.
+    /// The edge segment also places offscreen anchors without pinning them to the
+    /// first or last loaded candle.
+    pub(crate) fn time_at_logical(&self, logical: f64) -> Option<f64> {
+        if !logical.is_finite() {
+            return None;
+        }
+        if self.times.len() == 1 && logical == 0.0 {
+            return self.times.first().copied();
+        }
+        if self.times.len() < 2 {
+            return None;
+        }
+        let segment = logical
+            .floor()
+            .max(0.0)
+            .to_usize()
+            .unwrap_or(usize::MAX)
+            .min(self.times.len() - 2);
+        let start = self.times[segment];
+        let end = self.times[segment + 1];
+        let time = (end - start).mul_add(logical - segment.to_f64()?, start);
+        time.is_finite().then_some(time)
+    }
+
+    /// Project exchange time onto the current bar series, preserving fractional
+    /// placement rather than snapping to a candle on a timeframe change.
+    pub(crate) fn logical_at_time(&self, time: f64) -> Option<f64> {
+        if !time.is_finite() {
+            return None;
+        }
+        if self.times.len() == 1 && self.times[0].to_bits() == time.to_bits() {
+            return Some(0.0);
+        }
+        if self.times.len() < 2 {
+            return None;
+        }
+        let segment = self
+            .times
+            .partition_point(|&bar_time| bar_time <= time)
+            .saturating_sub(1)
+            .min(self.times.len() - 2);
+        let start = self.times[segment];
+        let span = self.times[segment + 1] - start;
+        if !span.is_finite() || span <= 0.0 {
+            return None;
+        }
+        let logical = (time - start) / span + segment.to_f64()?;
+        logical.is_finite().then_some(logical)
+    }
+
     fn is_empty(&self) -> bool {
         self.times.is_empty()
     }
@@ -334,7 +385,24 @@ fn fixed_value(value: i64, divisor: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{fixed_value, price_display_precision};
+    use super::{ProductPriceBars, fixed_value, price_display_precision};
+
+    #[test]
+    fn drawing_anchor_keeps_its_time_across_bar_intervals() {
+        let minute = ProductPriceBars {
+            times: vec![0.0, 60.0, 120.0, 180.0, 240.0, 300.0],
+            ..ProductPriceBars::default()
+        };
+        let five_minute = ProductPriceBars {
+            times: vec![0.0, 300.0, 600.0],
+            ..ProductPriceBars::default()
+        };
+        let time = minute.time_at_logical(2.5).expect("source anchor time");
+        assert!((time - 150.0).abs() < f64::EPSILON);
+        assert_eq!(five_minute.logical_at_time(time), Some(0.5));
+        assert_eq!(minute.logical_at_time(time), Some(2.5));
+        assert_eq!(five_minute.logical_at_time(900.0), Some(3.0));
+    }
 
     #[test]
     fn display_precision_removes_padding_without_hiding_significant_digits() {
