@@ -201,7 +201,11 @@ impl NucleusChartView {
         }
         if let Some(index) = self.separator_at(y) {
             self.engine.set_separator_hover(None);
-            self.drag = Some(ChartDrag::PaneSeparator { index, last_y: y });
+            let grab_offset_y = y - self.engine.panes[index + 1].top;
+            self.drag = Some(ChartDrag::PaneSeparator {
+                index,
+                grab_offset_y,
+            });
         } else if y > self.engine.pane_h {
             self.engine.time_axis_start_scale(pane_x);
             self.drag = Some(ChartDrag::TimeAxis);
@@ -252,10 +256,15 @@ impl NucleusChartView {
             Some(ChartDrag::PriceAxis { pane, target }) => {
                 self.engine.price_axis_scale_to(pane, target, y);
             }
-            Some(ChartDrag::PaneSeparator { index, last_y }) => {
-                self.engine.drag_pane_separator(index, y - last_y);
-                self.drag = Some(ChartDrag::PaneSeparator { index, last_y: y });
-                self.invalidate_series_frame();
+            Some(ChartDrag::PaneSeparator {
+                index,
+                grab_offset_y,
+            }) => {
+                if let Some(pane_below) = self.engine.panes.get(index + 1) {
+                    let delta = y - grab_offset_y - pane_below.top;
+                    self.engine.drag_pane_separator(index, delta);
+                    self.invalidate_series_layout();
+                }
             }
             None => {}
         }

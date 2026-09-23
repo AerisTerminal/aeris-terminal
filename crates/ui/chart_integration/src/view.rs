@@ -820,7 +820,7 @@ enum ChartDrag {
     },
     PaneSeparator {
         index: usize,
-        last_y: f64,
+        grab_offset_y: f64,
     },
 }
 

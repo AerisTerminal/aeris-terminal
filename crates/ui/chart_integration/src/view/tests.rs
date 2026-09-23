@@ -2956,6 +2956,7 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
     assert_eq!(chart.engine.panes.len(), 2);
     let separator_y = chart.engine.panes[1].top;
     let first_stretch = chart.engine.panes[0].stretch_factor;
+    let first_height = chart.engine.panes[0].height;
 
     chart.update_cursor(300.0, separator_y);
     assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
@@ -2967,8 +2968,18 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
         Some(ChartDrag::PaneSeparator { index: 0, .. })
     ));
     assert!(chart.engine.crosshair.is_none());
+    chart.layout_dirty = false;
     chart.drag_to(300.0, separator_y + 20.0);
+    assert!(chart.layout_dirty, "dragging must rebuild pane geometry");
     assert!(chart.engine.panes[0].stretch_factor > first_stretch);
+    // Mouse events may arrive faster than chart frames. The latest pointer
+    // position must win even before a layout pass updates pane heights.
+    chart.drag_to(300.0, separator_y + 40.0);
+    assert!((chart.engine.panes[0].stretch_factor - (first_height + 40.0)).abs() < 1e-6);
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    assert!((chart.engine.panes[1].top - (separator_y + 40.0)).abs() < 1.0);
 
     chart.move_pointer(
         300.0,
@@ -2977,7 +2988,7 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
         DrawingModifiers::default(),
     );
     assert!(chart.drag.is_none());
-    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+    assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
 }
 
 #[test]
