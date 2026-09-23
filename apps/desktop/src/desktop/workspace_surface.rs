@@ -1449,6 +1449,28 @@ impl WorkspaceSurface {
         }
     }
 
+    fn scroll_chrome_selection_into_view(&self, cx: &App) {
+        match self.chrome_overlay {
+            Some(ChromeOverlay::Instrument) if !self.symbol_browser.results().is_empty() => {
+                self.scrolls
+                    .instrument
+                    .scroll_to_item(self.chrome_selection);
+            }
+            Some(ChromeOverlay::Indicator)
+                if !chart_chrome::filter_indicator_specs(
+                    self.indicator_input.read(cx).value().as_ref(),
+                )
+                .is_empty() =>
+            {
+                // The group heading is the scroll body's first child.
+                self.scrolls
+                    .indicator
+                    .scroll_to_item(self.chrome_selection.saturating_add(1));
+            }
+            _ => {}
+        }
+    }
+
     fn sync_instrument_menu_keyboard(&mut self, cx: &App) {
         if self.menu_state.chrome_list_keyboard {
             return;
@@ -1573,6 +1595,7 @@ impl WorkspaceSurface {
         };
         match overlay {
             ChromeOverlay::Instrument => {
+                self.scrolls.instrument.set_offset(point(px(0.0), px(0.0)));
                 if let Some(input) = &self.symbol_input {
                     input.update(cx, |input, input_cx| input.focus(window, input_cx));
                 }
@@ -1580,6 +1603,7 @@ impl WorkspaceSurface {
                 self.sync_instrument_menu_keyboard(cx);
             }
             ChromeOverlay::Indicator => {
+                self.scrolls.indicator.set_offset(point(px(0.0), px(0.0)));
                 self.indicator_input
                     .update(cx, |input, input_cx| input.focus(window, input_cx));
             }
@@ -1699,6 +1723,7 @@ impl WorkspaceSurface {
                 }
                 self.activate_chrome_list_keyboard();
                 self.chrome_selection = self.chrome_selection.saturating_sub(1);
+                self.scroll_chrome_selection_into_view(cx);
                 cx.notify();
             }
             "down" => {
@@ -1723,6 +1748,7 @@ impl WorkspaceSurface {
                 };
                 self.activate_chrome_list_keyboard();
                 self.chrome_selection = (self.chrome_selection + 1).min(count.saturating_sub(1));
+                self.scroll_chrome_selection_into_view(cx);
                 cx.notify();
             }
             "left" if self.chrome_overlay == Some(ChromeOverlay::Timeframe) => {

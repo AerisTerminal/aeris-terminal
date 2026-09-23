@@ -407,8 +407,7 @@ fn workspace_tab_content(
         .child(exchange_mark(exchange, px(16.0), false, &theme.colors))
         .child(
             div()
-                .flex_initial()
-                .max_w(px(64.0))
+                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()

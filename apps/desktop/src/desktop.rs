@@ -2189,6 +2189,7 @@ fn subscribe_symbol_input(
                         } else {
                             current_instrument_menu_index(&app.instrument_entries(cx)).unwrap_or(0)
                         };
+                        app.scrolls.instrument.set_offset(point(px(0.0), px(0.0)));
                         app.search_symbol_input(cx);
                         cx.notify();
                     });
@@ -2234,9 +2235,10 @@ fn subscribe_indicator_input(
                             });
                         }
                     }
-                } else {
+                } else if matches!(event, InputEvent::Change) {
                     terminal.update(cx, |app, cx| {
                         app.chrome_selection = 0;
+                        app.scrolls.indicator.set_offset(point(px(0.0), px(0.0)));
                         cx.notify();
                     });
                 }
