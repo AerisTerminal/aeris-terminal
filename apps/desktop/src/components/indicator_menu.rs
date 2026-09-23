@@ -1,9 +1,9 @@
 use super::*;
 
 use super::chrome_menu::{
-    CHROME_MENU_INDICATOR_SEARCH_HEIGHT, ChromeMenuExtent, chrome_menu_empty, chrome_menu_footer,
-    chrome_menu_group_heading, chrome_menu_scroll_body, chrome_menu_search_header,
-    chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
+    CHROME_MENU_SEARCH_HEIGHT, ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading,
+    chrome_menu_scroll_body, chrome_menu_search_header, chrome_menu_surface,
+    compact_menu_add_button, scrollable_menu_body,
 };
 
 pub(super) fn indicator_selector(
@@ -128,7 +128,7 @@ pub(super) fn indicator_dialog_content(
             theme,
             app,
             hint,
-            CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
+            CHROME_MENU_SEARCH_HEIGHT,
         ))
         .child(scrollable_menu_body(
             list,
@@ -136,7 +136,6 @@ pub(super) fn indicator_dialog_content(
             colors.text_secondary,
             state.extent,
         ))
-        .child(chrome_menu_footer(&colors, "Add", "Publisher: Native"))
 }
 
 pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {

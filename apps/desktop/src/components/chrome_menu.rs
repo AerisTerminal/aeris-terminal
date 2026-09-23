@@ -3,9 +3,7 @@ use super::*;
 pub(super) const CHROME_MENU_WIDTH: f32 = 960.0;
 pub(super) const CHROME_MENU_MIN_WIDTH: f32 = 320.0;
 pub(super) const CHROME_MENU_SEARCH_HEIGHT: f32 = 44.0;
-pub(super) const CHROME_MENU_INDICATOR_SEARCH_HEIGHT: f32 = 40.0;
 pub(super) const CHROME_MENU_LIST_HEIGHT: f32 = 520.0;
-pub(super) const CHROME_MENU_FOOTER_HEIGHT: f32 = 40.0;
 pub(super) const CHROME_MENU_MAX_HEIGHT: f32 = 744.0;
 pub(super) const CHROME_MENU_ROW_ICON_WELL: f32 = 24.0;
 pub(super) const CHROME_MENU_SEARCH_ICON_SIZE: f32 = 16.0;
@@ -18,14 +16,11 @@ pub(super) struct ChromeMenuExtent {
 }
 
 /// Size the symbol and indicator menus to the surface they open over rather than to a fixed
-/// design width. Both keep the 896x704 ceiling on a roomy window and shrink from there, so a
-/// narrow or short viewport gets a smaller menu instead of a clipped one. Fixed chrome is passed
-/// explicitly so menus without a footer do not reserve dead space for one.
+/// design width. Both keep the 960x564 ceiling on a roomy window and shrink from there, so a
+/// narrow or short viewport gets a smaller menu instead of a clipped one.
 pub(super) fn chrome_menu_extent(
     viewport: gpui::Size<Pixels>,
     chrome_height: f32,
-    search_height: f32,
-    footer_height: f32,
 ) -> ChromeMenuExtent {
     let viewport_width = f32::from(viewport.width).max(0.0);
     let width = (viewport_width - OVERLAY_EDGE_MARGIN * 2.0)
@@ -33,7 +28,7 @@ pub(super) fn chrome_menu_extent(
         .min(viewport_width);
     let available =
         (f32::from(viewport.height) - chrome_height - OVERLAY_EDGE_MARGIN * 2.0).max(0.0);
-    let list_height = (available.min(CHROME_MENU_MAX_HEIGHT) - search_height - footer_height)
+    let list_height = (available.min(CHROME_MENU_MAX_HEIGHT) - CHROME_MENU_SEARCH_HEIGHT)
         .clamp(0.0, CHROME_MENU_LIST_HEIGHT);
     ChromeMenuExtent { width, list_height }
 }
@@ -47,6 +42,7 @@ pub(super) fn chrome_menu_surface(
         .flex()
         .flex_col()
         .w(px(extent.width))
+        .h(px(CHROME_MENU_SEARCH_HEIGHT + extent.list_height))
         .max_h(px(CHROME_MENU_MAX_HEIGHT))
         .max_h_full()
         .overflow_hidden()
@@ -239,31 +235,6 @@ pub(super) fn compact_menu_add_button(
         .tab_stop(false)
 }
 
-pub(super) fn chrome_menu_shortcut(
-    colors: &asceify_design_system::ThemeColors,
-    keys: &'static [&'static str],
-    caption: &'static str,
-) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .children(keys.iter().copied().map(|key| {
-            div()
-                .h(px(20.0))
-                .min_w(px(20.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border))
-                .child(key)
-        }))
-        .child(caption)
-}
-
 pub(super) fn scrollable_menu_body(
     body: Div,
     scroll: &ScrollHandle,
@@ -274,6 +245,7 @@ pub(super) fn scrollable_menu_body(
         .relative()
         .flex_none()
         .w_full()
+        .h(px(extent.list_height))
         .max_h(px(extent.list_height))
         .overflow_hidden()
         .child(
@@ -282,32 +254,4 @@ pub(super) fn scrollable_menu_body(
                 .max_h(px(extent.list_height)),
         )
         .child(ThinScrollbar::new(scroll, gpui_color(color)))
-}
-
-pub(super) fn chrome_menu_footer(
-    colors: &asceify_design_system::ThemeColors,
-    enter: &'static str,
-    trailing: impl Into<gpui::SharedString>,
-) -> Div {
-    div()
-        .h(px(CHROME_MENU_FOOTER_HEIGHT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_4()
-        .border_t_1()
-        .border_color(gpui_color(colors.border))
-        .text_xs()
-        .text_color(gpui_color(colors.text_muted))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_4()
-                .child(chrome_menu_shortcut(colors, &["↑", "↓"], "Navigate"))
-                .child(chrome_menu_shortcut(colors, &["Enter"], enter))
-                .child(chrome_menu_shortcut(colors, &["Esc"], "Close")),
-        )
-        .child(trailing.into())
 }

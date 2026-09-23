@@ -1155,7 +1155,7 @@ pub(super) struct ConnectionPresentation {
     pub(super) provider: &'static str,
     pub(super) status: &'static str,
     pub(super) latency: String,
-    color: ConnectionColor,
+    pub(super) color: ConnectionColor,
 }
 
 pub(super) fn connection_presentation(
@@ -1165,10 +1165,10 @@ pub(super) fn connection_presentation(
 ) -> ConnectionPresentation {
     let (status, color): (&'static str, ConnectionColor) = match state {
         FeedConnectionState::Disconnected => ("Offline", |theme| theme.colors.danger),
-        FeedConnectionState::Discovering => ("Connecting", |theme| theme.colors.primary),
-        FeedConnectionState::Authenticating => ("Authenticating", |theme| theme.colors.primary),
-        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.primary),
-        FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.danger),
+        FeedConnectionState::Discovering => ("Connecting", |theme| theme.colors.warning),
+        FeedConnectionState::Authenticating => ("Authenticating", |theme| theme.colors.warning),
+        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.success),
+        FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.warning),
         FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.danger),
     };
     ConnectionPresentation {

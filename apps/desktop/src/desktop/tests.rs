@@ -1,10 +1,10 @@
 #![cfg(test)]
 
 use super::{
-    CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_FOOTER_HEIGHT,
-    CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
-    CaptionPlatform, CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState,
-    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
+    CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_LIST_HEIGHT,
+    CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH, CaptionPlatform,
+    CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
+    ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
     RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SymbolInputAction,
@@ -1384,6 +1384,8 @@ fn worker_stop_preserves_a_concrete_startup_error() {
 
 #[test]
 fn connection_indicator_is_transport_only() {
+    let theme = super::AsceifyTheme::dark();
+    let colors = theme.colors;
     let live = connection_presentation(
         TerminalProvider::Rithmic,
         FeedConnectionState::Streaming,
@@ -1392,6 +1394,7 @@ fn connection_indicator_is_transport_only() {
     assert_eq!(live.provider, "Rithmic");
     assert_eq!(live.status, "Live");
     assert_eq!(live.latency, "Measuring…");
+    assert_eq!((live.color)(&theme), colors.success);
 
     let recovering = connection_presentation(
         TerminalProvider::Rithmic,
@@ -1400,6 +1403,7 @@ fn connection_indicator_is_transport_only() {
     );
     assert_eq!(recovering.status, "Reconnecting");
     assert_eq!(recovering.latency, "Measuring…");
+    assert_eq!((recovering.color)(&theme), colors.warning);
 
     let offline = connection_presentation(
         TerminalProvider::Rithmic,
@@ -1408,6 +1412,21 @@ fn connection_indicator_is_transport_only() {
     );
     assert_eq!(offline.status, "Offline");
     assert_eq!(offline.latency, "Measuring…");
+    assert_eq!((offline.color)(&theme), colors.danger);
+
+    for state in [
+        FeedConnectionState::Discovering,
+        FeedConnectionState::Authenticating,
+    ] {
+        let connecting = connection_presentation(TerminalProvider::Rithmic, state, None);
+        assert_eq!((connecting.color)(&theme), colors.warning);
+    }
+    let stopped = connection_presentation(
+        TerminalProvider::Rithmic,
+        FeedConnectionState::Stopped,
+        None,
+    );
+    assert_eq!((stopped.color)(&theme), colors.danger);
 }
 
 #[test]
@@ -1565,59 +1584,25 @@ fn copy_price_feedback_generation_fences_stale_close_timers() {
 #[test]
 fn chrome_menus_shrink_to_fit_a_small_viewport() {
     let chrome_height = 44.0;
-    let roomy = chrome_menu_extent(
-        size(px(1920.0), px(1200.0)),
-        chrome_height,
-        CHROME_MENU_SEARCH_HEIGHT,
-        CHROME_MENU_FOOTER_HEIGHT,
-    );
+    let roomy = chrome_menu_extent(size(px(1920.0), px(1200.0)), chrome_height);
     assert!((roomy.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
     assert!((roomy.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
 
-    let cramped = chrome_menu_extent(
-        size(px(800.0), px(600.0)),
-        chrome_height,
-        CHROME_MENU_SEARCH_HEIGHT,
-        CHROME_MENU_FOOTER_HEIGHT,
-    );
+    let cramped = chrome_menu_extent(size(px(800.0), px(600.0)), chrome_height);
     assert!(cramped.width < CHROME_MENU_WIDTH);
     assert!(cramped.width + OVERLAY_EDGE_MARGIN * 2.0 <= 800.0);
     assert!(cramped.list_height < CHROME_MENU_LIST_HEIGHT);
-    let drawn = CHROME_MENU_SEARCH_HEIGHT + cramped.list_height + CHROME_MENU_FOOTER_HEIGHT;
+    let drawn = CHROME_MENU_SEARCH_HEIGHT + cramped.list_height;
     assert!(drawn + chrome_height + OVERLAY_EDGE_MARGIN * 2.0 <= 600.0);
     assert!(drawn <= CHROME_MENU_MAX_HEIGHT);
 }
 
 #[test]
 fn chrome_menus_never_exceed_a_tiny_viewport() {
-    let tiny = chrome_menu_extent(
-        size(px(240.0), px(180.0)),
-        44.0,
-        CHROME_MENU_SEARCH_HEIGHT,
-        CHROME_MENU_FOOTER_HEIGHT,
-    );
+    let tiny = chrome_menu_extent(size(px(240.0), px(180.0)), 44.0);
     assert!(tiny.width <= 240.0);
     assert!(tiny.list_height >= 0.0);
-    assert!(
-        CHROME_MENU_SEARCH_HEIGHT + tiny.list_height + CHROME_MENU_FOOTER_HEIGHT <= 180.0 - 44.0
-    );
-}
-
-#[test]
-fn symbol_menu_does_not_reserve_removed_footer_space() {
-    let with_footer = chrome_menu_extent(
-        size(px(800.0), px(600.0)),
-        44.0,
-        CHROME_MENU_SEARCH_HEIGHT,
-        CHROME_MENU_FOOTER_HEIGHT,
-    );
-    let without_footer = chrome_menu_extent(
-        size(px(800.0), px(600.0)),
-        44.0,
-        CHROME_MENU_SEARCH_HEIGHT,
-        0.0,
-    );
-    assert!(without_footer.list_height > with_footer.list_height);
+    assert!(CHROME_MENU_SEARCH_HEIGHT + tiny.list_height <= 180.0 - 44.0);
 }
 
 #[test]

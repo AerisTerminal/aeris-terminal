@@ -52,6 +52,8 @@
   --primary-foreground: #fff;
   --danger: #fb3748;
   --danger-foreground: #ffffff;
+  --warning: #F5A623;
+  --success: #089981;
 
   /* Buttons */
   --button-fill: #333333;
@@ -100,6 +102,8 @@
   --primary-foreground: #fff;
   --danger: #fb3748;
   --danger-foreground: #ffffff;
+  --warning: #F5A623;
+  --success: #089981;
 
   /* Buttons */
   --button-fill: #EBEBEB;

@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn reconnect_status_is_plain_language_and_clears_after_streaming_resumes() {
+    let lifecycle = ProviderRuntimeLifecycle::default();
+    lifecycle.observe_generation(2, true);
+    assert_eq!(
+        lifecycle.detail().as_deref(),
+        Some("Market data connection interrupted; reconnecting automatically.")
+    );
+    lifecycle.observe_generation(2, false);
+    assert_eq!(lifecycle.detail(), None);
+}
+
+#[test]
 fn shipping_provider_capabilities_accept_the_declared_non_bar_study_streams() {
     let mut engine = configured_engine().expect("shipping market engine configures");
     let streams = StreamRequirements::BARS

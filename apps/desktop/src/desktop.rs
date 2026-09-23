@@ -116,12 +116,13 @@ use chart_toolbar_menus::{
     timeframe_flyout_offset, timeframe_flyout_row_is_active, timeframe_menu_row_label,
     timeframe_overlay_extent, timeframe_overlay_left,
 };
+#[cfg(test)]
 use chrome_menu::{
-    CHROME_MENU_FOOTER_HEIGHT, CHROME_MENU_INDICATOR_SEARCH_HEIGHT, CHROME_MENU_SEARCH_HEIGHT,
+    CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
+};
+use chrome_menu::{
     ChromeIconButtonTone, chrome_close_button, chrome_icon_button, chrome_menu_extent,
 };
-#[cfg(test)]
-use chrome_menu::{CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_WIDTH};
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,

@@ -514,10 +514,7 @@ impl ProviderRuntimeLifecycle {
             .clone()
             .or_else(|| {
                 self.reconnecting.load(Ordering::Acquire).then(|| {
-                    format!(
-                        "provider runtime generation {} is reconnecting",
-                        self.generation.load(Ordering::Acquire)
-                    )
+                    "Market data connection interrupted; reconnecting automatically.".to_string()
                 })
             })
     }

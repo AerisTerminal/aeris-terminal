@@ -186,7 +186,7 @@ pub(super) fn chrome_overlay_content(
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
-            chrome_menu_extent(viewport, chrome_height, CHROME_MENU_SEARCH_HEIGHT, 0.0),
+            chrome_menu_extent(viewport, chrome_height),
             &InstrumentSelectorState {
                 label: terminal_instrument_label(app_state),
                 instruments: app_state.instrument_entries(cx),
@@ -209,12 +209,7 @@ pub(super) fn chrome_overlay_content(
         ChromeOverlay::Indicator => indicator_dialog_content(
             app,
             IndicatorDialogState {
-                extent: chrome_menu_extent(
-                    viewport,
-                    chrome_height,
-                    CHROME_MENU_INDICATOR_SEARCH_HEIGHT,
-                    CHROME_MENU_FOOTER_HEIGHT,
-                ),
+                extent: chrome_menu_extent(viewport, chrome_height),
                 input: &app_state.indicator_input,
                 message: app_state.indicator_message.as_deref(),
                 keyboard_selection: app_state.chrome_selection,

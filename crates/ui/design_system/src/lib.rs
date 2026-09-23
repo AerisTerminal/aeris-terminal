@@ -308,6 +308,8 @@ pub struct ThemeColors {
     pub primary_foreground: ThemeColor,
     pub danger: ThemeColor,
     pub danger_foreground: ThemeColor,
+    pub warning: ThemeColor,
+    pub success: ThemeColor,
     pub button_fill: ThemeColor,
     pub ring: ThemeColor,
     /// Portable chart bullish token. Nucleus remains authoritative for chart rendering.
@@ -372,7 +374,7 @@ impl AsceifyTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 21] {
+    pub fn color_tokens(self) -> [ColorToken; 23] {
         let colors = self.colors;
         let sources = match self.mode {
             ThemeMode::Light => LIGHT_COLOR_SOURCES,
@@ -396,10 +398,12 @@ impl AsceifyTheme {
             ColorToken::new("primary-foreground", sources[14], colors.primary_foreground),
             ColorToken::new("danger", sources[15], colors.danger),
             ColorToken::new("danger-foreground", sources[16], colors.danger_foreground),
-            ColorToken::new("button-fill", sources[17], colors.button_fill),
-            ColorToken::new("ring", sources[18], colors.ring),
-            ColorToken::new("bullish", sources[19], colors.bullish),
-            ColorToken::new("bearish", sources[20], colors.bearish),
+            ColorToken::new("warning", sources[17], colors.warning),
+            ColorToken::new("success", sources[18], colors.success),
+            ColorToken::new("button-fill", sources[19], colors.button_fill),
+            ColorToken::new("ring", sources[20], colors.ring),
+            ColorToken::new("bullish", sources[21], colors.bullish),
+            ColorToken::new("bearish", sources[22], colors.bearish),
         ]
     }
 }
@@ -418,7 +422,7 @@ fn dark_colors() -> ThemeColors {
     generated_colors(DARK_COLORS)
 }
 
-fn generated_colors(values: [[u8; 4]; 21]) -> ThemeColors {
+fn generated_colors(values: [[u8; 4]; 23]) -> ThemeColors {
     let color = |index: usize| {
         let [red, green, blue, alpha] = values[index];
         ThemeColor::from_rgba8(red, green, blue, alpha)
@@ -441,11 +445,13 @@ fn generated_colors(values: [[u8; 4]; 21]) -> ThemeColors {
         primary_foreground: color(14),
         danger: color(15),
         danger_foreground: color(16),
-        button_fill: color(17),
-        ring: color(18),
-        bullish: color(19),
-        bearish: color(20),
-        market_up: ThemeColor::from_rgb8(8, 153, 129),
+        warning: color(17),
+        success: color(18),
+        button_fill: color(19),
+        ring: color(20),
+        bullish: color(21),
+        bearish: color(22),
+        market_up: color(18),
         market_down: ThemeColor::from_rgb8(247, 82, 95),
     }
 }
@@ -533,6 +539,10 @@ mod tests {
         assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(174, 174, 178));
         assert_eq!(light.primary, ThemeColor::from_rgb8(22, 142, 247));
         assert_eq!(dark.primary, light.primary);
+        assert_eq!(light.warning, ThemeColor::from_rgb8(245, 166, 35));
+        assert_eq!(dark.warning, light.warning);
+        assert_eq!(light.success, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(dark.success, light.success);
         assert_eq!(
             light.primary_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
@@ -580,6 +590,8 @@ mod tests {
             "var(--surface-secondary)"
         );
         assert_eq!(token_source(&dark_tokens, "danger"), "#fb3748");
+        assert_eq!(token_source(&dark_tokens, "warning"), "#F5A623");
+        assert_eq!(token_source(&dark_tokens, "success"), "#089981");
         assert_eq!(token_source(&dark_tokens, "primary"), "#168ef7");
         assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#EBEBEB");
@@ -685,7 +697,6 @@ mod tests {
             "--chart_",
             "--chart-1",
             "--positive",
-            "--warning",
             "--profit",
             "--loss",
             "--radius_",

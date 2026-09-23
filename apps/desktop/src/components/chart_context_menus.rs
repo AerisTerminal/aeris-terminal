@@ -782,7 +782,7 @@ fn chart_settings_panel(
         .w(panel_size.width)
         .h(panel_size.height)
         .flex()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface))

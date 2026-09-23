@@ -438,7 +438,7 @@ pub(super) fn study_settings_dialog_layer(
                 .max_h(px(640.0))
                 .flex()
                 .flex_col()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
                 .border_1()
                 .border_color(gpui_color(colors.border_secondary))
                 .bg(gpui_color(colors.surface))
