@@ -232,11 +232,10 @@ impl Render for WorkspaceSplitDrag {
 }
 
 #[derive(Clone, Copy)]
-struct WorkspaceTabRenderState<'a> {
+struct WorkspaceTabRenderState {
     index: usize,
     active: usize,
     workspace_count: usize,
-    market_summaries: &'a BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     drag_enabled: bool,
     drag_translation: Option<f32>,
     theme: AsceifyTheme,
@@ -374,7 +373,7 @@ fn workspace_tab_content(
     market_summaries: &BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
     theme: &AsceifyTheme,
     cx: &App,
-) -> (String, String, Div) {
+) -> (String, String, Div, Option<String>) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
     let label = terminal_instrument_label(surface);
     let summary = (!surface.showing_superseded_series())
@@ -414,7 +413,7 @@ fn workspace_tab_content(
                 .whitespace_nowrap()
                 .child(label.clone()),
         )
-        .children(change_label.map(|change| {
+        .children(change_label.clone().map(|change| {
             div()
                 .flex_none()
                 .text_xs()
@@ -423,7 +422,58 @@ fn workspace_tab_content(
                 .text_color(gpui_color(change_color))
                 .child(change)
         }));
-    (label, aria_label, content)
+    (label, aria_label, content, change_label)
+}
+
+fn workspace_tab_width(
+    label: &str,
+    change: Option<&str>,
+    show_close: bool,
+    window: &Window,
+) -> f32 {
+    let mut font = gpui::font(asceify_design_system::platform_font_family());
+    font.weight = platform_font_weight(TypographyRole::Normal);
+    let measure = |text: &str, size: f32, font: gpui::Font| {
+        f32::from(
+            window
+                .text_system()
+                .layout_line(
+                    text,
+                    px(size),
+                    &[gpui::TextRun {
+                        len: text.len(),
+                        font,
+                        ..Default::default()
+                    }],
+                    None,
+                )
+                .width,
+        )
+    };
+    let rem = f32::from(window.rem_size());
+    let gap = rem * 0.25;
+    let mut width = rem * 0.75 + 16.0 + gap + measure(label, rem * 0.875, font.clone()) + gap;
+    if let Some(change) = change {
+        font.features = platform_tabular_numerals();
+        width += gap + measure(change, rem * 0.75, font);
+    }
+    if show_close {
+        width += gap + WORKSPACE_TAB_ICON_HIT;
+    }
+    width.ceil().min(WORKSPACE_TAB_MAX_WIDTH)
+}
+
+fn workspace_tab_widths(
+    visuals: &[(String, String, Div, Option<String>)],
+    show_close: bool,
+    window: &Window,
+) -> Vec<f32> {
+    visuals
+        .iter()
+        .map(|(label, _, _, change)| {
+            workspace_tab_width(label, change.as_deref(), show_close, window)
+        })
+        .collect()
 }
 
 fn workspace_tab_change_label(values: MarketSummaryValues) -> Option<String> {
@@ -440,11 +490,11 @@ fn workspace_tab_aria_label(label: &str, change: Option<&str>) -> String {
 fn workspace_tab(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
-    state: &WorkspaceTabRenderState<'_>,
-    cx: &App,
+    state: &WorkspaceTabRenderState,
+    visual: (String, String, Div, Option<String>),
+    width: f32,
 ) -> AnyElement {
-    let (label, aria_label, content) =
-        workspace_tab_content(workspace, state.market_summaries, &state.theme, cx);
+    let (label, aria_label, content, _) = visual;
     let index = state.index;
     let drag_enabled = state.drag_enabled;
     let theme = state.theme;
@@ -459,7 +509,7 @@ fn workspace_tab(
     let mouse_focus = workspace.focus.clone();
     Tab::new(("workspace_tab", tab_id), &theme)
         .selected(selected)
-        .w(px(WORKSPACE_TAB_WIDTH))
+        .w(px(width))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .flex_none()
         .flex()
@@ -495,7 +545,12 @@ fn workspace_tab(
         .when(drag_enabled, |tab| {
             tab.on_drag(drag, move |drag, cursor_offset, _, cx| {
                 drag_terminal.update(cx, |terminal, cx| {
-                    terminal.begin_workspace_drag(drag.tab_id, f32::from(cursor_offset.x), cx);
+                    terminal.begin_workspace_drag(
+                        drag.tab_id,
+                        f32::from(cursor_offset.x),
+                        width,
+                        cx,
+                    );
                 });
                 cx.new(|_| drag.clone())
             })
@@ -511,6 +566,7 @@ fn workspace_tab(
 pub(super) fn workspace_tab_strip(
     terminal: &Entity<TerminalApp>,
     state: &WorkspaceTabBarState<'_>,
+    window: &Window,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let workspaces = state.workspaces;
@@ -518,24 +574,41 @@ pub(super) fn workspace_tab_strip(
     let theme = state.theme;
     let colors = theme.colors;
     let close_drag_enabled = workspace_tab_close_drag_enabled(workspaces.len());
-    let tabs = workspaces.iter().enumerate().map(|(index, workspace)| {
-        workspace_tab(
-            terminal,
-            workspace,
-            &WorkspaceTabRenderState {
-                index,
-                active: state.active,
-                workspace_count: workspaces.len(),
-                market_summaries: state.market_summaries,
-                drag_enabled: enabled && close_drag_enabled,
-                drag_translation: close_drag_enabled
-                    .then(|| workspace_drag_translation(state.workspace_drag, workspace.id, index))
-                    .flatten(),
-                theme,
-            },
-            cx,
-        )
-    });
+    let visuals: Vec<_> = workspaces
+        .iter()
+        .map(|workspace| workspace_tab_content(workspace, state.market_summaries, &theme, cx))
+        .collect();
+    let tab_widths = workspace_tab_widths(&visuals, close_drag_enabled, window);
+    let drag_widths = tab_widths.clone();
+    let tabs = workspaces
+        .iter()
+        .zip(visuals)
+        .enumerate()
+        .map(|(index, (workspace, visual))| {
+            workspace_tab(
+                terminal,
+                workspace,
+                &WorkspaceTabRenderState {
+                    index,
+                    active: state.active,
+                    workspace_count: workspaces.len(),
+                    drag_enabled: enabled && close_drag_enabled,
+                    drag_translation: close_drag_enabled
+                        .then(|| {
+                            workspace_drag_translation(
+                                state.workspace_drag,
+                                workspace.id,
+                                index,
+                                &tab_widths,
+                            )
+                        })
+                        .flatten(),
+                    theme,
+                },
+                visual,
+                tab_widths[index],
+            )
+        });
     let add_terminal = terminal.clone();
     let move_terminal = terminal.clone();
     let end_terminal = terminal.clone();
@@ -561,6 +634,7 @@ pub(super) fn workspace_tab_strip(
                     tab_id,
                     f32::from(event.event.position.x),
                     f32::from(event.bounds.left()),
+                    &drag_widths,
                     cx,
                 );
             });
@@ -792,8 +866,8 @@ pub(super) fn workspace_tabs_root(
 #[cfg(test)]
 mod tests {
     use super::{
-        MarketSummaryValues, WORKSPACE_TAB_WIDTH, workspace_tab_aria_label,
-        workspace_tab_change_label, workspace_tab_close_drag_enabled,
+        MarketSummaryValues, workspace_tab_aria_label, workspace_tab_change_label,
+        workspace_tab_close_drag_enabled,
     };
 
     #[test]
@@ -816,10 +890,5 @@ mod tests {
             workspace_tab_aria_label("BTC-USD", change.as_deref()),
             "BTC-USD, change +6.00%"
         );
-    }
-
-    #[test]
-    fn workspace_tabs_fit_symbol_percentage_and_close_without_legacy_price_space() {
-        assert!((WORKSPACE_TAB_WIDTH - 176.0).abs() < f32::EPSILON);
     }
 }

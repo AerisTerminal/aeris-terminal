@@ -1713,6 +1713,7 @@ impl TerminalApp {
         &mut self,
         tab_id: u64,
         cursor_offset_x: f32,
+        tab_width: f32,
         cx: &mut Context<Self>,
     ) {
         if self
@@ -1723,9 +1724,9 @@ impl TerminalApp {
             self.workspace_drag = Some(WorkspaceDragState {
                 tab_id,
                 cursor_offset_x: if cursor_offset_x.is_finite() {
-                    cursor_offset_x.clamp(0.0, WORKSPACE_TAB_WIDTH)
+                    cursor_offset_x.clamp(0.0, tab_width)
                 } else {
-                    WORKSPACE_TAB_WIDTH / 2.0
+                    tab_width / 2.0
                 },
                 pointer_x: None,
                 strip_left: 0.0,
@@ -1739,6 +1740,7 @@ impl TerminalApp {
         tab_id: u64,
         pointer_x: f32,
         strip_left: f32,
+        tab_widths: &[f32],
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self
@@ -1751,12 +1753,9 @@ impl TerminalApp {
         let cursor_offset_x = drag.cursor_offset_x;
         drag.pointer_x = Some(pointer_x);
         drag.strip_left = strip_left;
-        let Some(destination_index) = workspace_drag_destination(
-            pointer_x,
-            strip_left,
-            cursor_offset_x,
-            self.workspaces.len(),
-        ) else {
+        let Some(destination_index) =
+            workspace_drag_destination(pointer_x, strip_left, cursor_offset_x, tab_widths)
+        else {
             return;
         };
         if !self.reorder_workspace(tab_id, destination_index, cx) {

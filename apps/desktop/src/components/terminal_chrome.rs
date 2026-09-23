@@ -226,7 +226,7 @@ pub(super) fn workspace_title_bar(
     window: &Window,
     cx: &App,
 ) -> impl IntoElement + use<> {
-    let tabs = workspace_tab_strip(terminal, state, cx);
+    let tabs = workspace_tab_strip(terminal, state, window, cx);
     let theme = state.theme;
     let drag_region = workspace_window_drag_region(
         div()

@@ -393,7 +393,7 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
-const WORKSPACE_TAB_WIDTH: f32 = 176.0;
+const WORKSPACE_TAB_MAX_WIDTH: f32 = 248.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
@@ -2824,19 +2824,19 @@ fn workspace_drag_destination(
     pointer_x: f32,
     strip_left: f32,
     cursor_offset_x: f32,
-    workspace_count: usize,
+    tab_widths: &[f32],
 ) -> Option<usize> {
-    let last = workspace_count.checked_sub(1)?;
-    let stride = WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+    let last = tab_widths.len().checked_sub(1)?;
     let dragged_left = pointer_x - cursor_offset_x - strip_left - WORKSPACE_TAB_STRIP_PADDING_LEFT;
     if !dragged_left.is_finite() {
         return None;
     }
     let mut destination = 0;
-    let mut boundary = stride / 2.0;
+    let mut boundary = f32::midpoint(tab_widths[0], WORKSPACE_TAB_GAP);
     while destination < last && dragged_left >= boundary {
         destination += 1;
-        boundary += stride;
+        boundary +=
+            f32::midpoint(tab_widths[destination - 1], tab_widths[destination]) + WORKSPACE_TAB_GAP;
     }
     Some(destination)
 }
@@ -2845,12 +2845,14 @@ fn workspace_drag_translation(
     drag: Option<WorkspaceDragState>,
     tab_id: u64,
     index: usize,
+    tab_widths: &[f32],
 ) -> Option<f32> {
     let drag = drag.filter(|drag| drag.tab_id == tab_id)?;
     let pointer_x = drag.pointer_x?;
-    let index_offset = (0..index).fold(0.0, |offset, _| {
-        offset + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP
-    });
+    let index_offset = tab_widths
+        .get(..index)?
+        .iter()
+        .fold(0.0, |offset, width| offset + width + WORKSPACE_TAB_GAP);
     let slot_left = drag.strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + index_offset;
     Some(pointer_x - drag.cursor_offset_x - slot_left)
 }

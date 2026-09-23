@@ -10,10 +10,10 @@ use super::{
     RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SymbolInputAction,
     SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH,
     TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
-    WORKSPACE_TAB_STRIP_PADDING_LEFT, WORKSPACE_TAB_WIDTH, WatchlistDragState, WindowCommand,
-    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-    active_workspace_after_close, bounded_status_detail, caption_keyboard_activates,
-    caption_pointer_owner, catalog_rejection_message, chart_status_detail, chart_surface_notice,
+    WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
+    WindowMoveGestureTransition, WorkspaceDragState, active_workspace_after_close,
+    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    catalog_rejection_message, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
@@ -894,37 +894,38 @@ fn workspace_viewport_persistence_ignores_automatic_live_scrolling() {
 #[test]
 fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
     let strip_left = 100.0;
-    let cursor_offset = WORKSPACE_TAB_WIDTH / 2.0;
+    let widths = [120.0, 176.0, 96.0];
+    let cursor_offset = widths[0] / 2.0;
     let first_center = strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + cursor_offset;
-    let second_center = first_center + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
-    let third_center = second_center + WORKSPACE_TAB_WIDTH + WORKSPACE_TAB_GAP;
+    let second_center = first_center + widths[0] + WORKSPACE_TAB_GAP;
+    let third_center = second_center + widths[1] + WORKSPACE_TAB_GAP;
 
     assert_eq!(
-        workspace_drag_destination(first_center, strip_left, cursor_offset, 3),
+        workspace_drag_destination(first_center, strip_left, cursor_offset, &widths),
         Some(0)
     );
     assert_eq!(
-        workspace_drag_destination(second_center, strip_left, cursor_offset, 3),
+        workspace_drag_destination(second_center, strip_left, cursor_offset, &widths),
         Some(1)
     );
     assert_eq!(
-        workspace_drag_destination(third_center, strip_left, cursor_offset, 3),
+        workspace_drag_destination(third_center, strip_left, cursor_offset, &widths),
         Some(2)
     );
     assert_eq!(
-        workspace_drag_destination(strip_left - 500.0, strip_left, cursor_offset, 3),
+        workspace_drag_destination(strip_left - 500.0, strip_left, cursor_offset, &widths),
         Some(0)
     );
     assert_eq!(
-        workspace_drag_destination(third_center + 500.0, strip_left, cursor_offset, 3),
+        workspace_drag_destination(third_center + 500.0, strip_left, cursor_offset, &widths),
         Some(2)
     );
     assert_eq!(
-        workspace_drag_destination(first_center, strip_left, cursor_offset, 0),
+        workspace_drag_destination(first_center, strip_left, cursor_offset, &[]),
         None
     );
     assert_eq!(
-        workspace_drag_destination(f32::NAN, strip_left, cursor_offset, 3),
+        workspace_drag_destination(f32::NAN, strip_left, cursor_offset, &widths),
         None
     );
 
@@ -934,8 +935,11 @@ fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
         pointer_x: Some(second_center + 10.0),
         strip_left,
     };
-    assert_eq!(workspace_drag_translation(Some(drag), 7, 1), Some(10.0));
-    assert_eq!(workspace_drag_translation(Some(drag), 8, 1), None);
+    assert_eq!(
+        workspace_drag_translation(Some(drag), 7, 1, &widths),
+        Some(10.0)
+    );
+    assert_eq!(workspace_drag_translation(Some(drag), 8, 1, &widths), None);
 }
 
 #[test]
