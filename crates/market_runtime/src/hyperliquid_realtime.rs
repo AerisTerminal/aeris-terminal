@@ -531,10 +531,8 @@ pub(crate) fn run(
         ) {
             return;
         }
-        if let Ok((mut socket, _shutdown)) =
-            HyperliquidSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
-        {
-            match run_session(
+        match HyperliquidSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
+            Ok((mut socket, _shutdown)) => match run_session(
                 &mut socket,
                 generation,
                 &mut demand,
@@ -544,20 +542,27 @@ pub(crate) fn run(
                 wake,
             ) {
                 SessionExit::Closed => return,
-                SessionExit::Parked => stopped = true,
-                SessionExit::Reconnect => {}
-            }
-        } else {
-            if stop.load(Ordering::Acquire) {
-                return;
-            }
-            if emit(
-                events,
-                HyperliquidRealtimeEvent::Recovering(generation),
-                stop,
-                wake,
-            ) {
-                return;
+                SessionExit::Parked => {
+                    eprintln!("Asceify Hyperliquid realtime parked by demand owner");
+                    stopped = true;
+                }
+                SessionExit::Reconnect(reason) => {
+                    eprintln!("Asceify Hyperliquid realtime reconnecting: {reason}");
+                }
+            },
+            Err(error) => {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                eprintln!("Asceify Hyperliquid connection failed: {error}");
+                if emit(
+                    events,
+                    HyperliquidRealtimeEvent::Recovering(generation),
+                    stop,
+                    wake,
+                ) {
+                    return;
+                }
             }
         }
         if stop.load(Ordering::Acquire) {
@@ -580,7 +585,7 @@ pub(crate) fn run(
 
 #[derive(PartialEq, Eq)]
 enum SessionExit {
-    Reconnect,
+    Reconnect(String),
     Parked,
     Closed,
 }
@@ -681,7 +686,7 @@ fn run_session(
         pending_ping: None,
     };
     if reconcile_subscriptions(socket, demand, &mut state).is_err() {
-        return SessionExit::Reconnect;
+        return SessionExit::Reconnect("subscription write failed".to_string());
     }
     if sink.send(HyperliquidRealtimeEvent::Connected(generation)) {
         return SessionExit::Closed;
@@ -698,11 +703,11 @@ fn run_session(
             return SessionExit::Parked;
         }
         if changed && reconcile_subscriptions(socket, demand, &mut state).is_err() {
-            return SessionExit::Reconnect;
+            return SessionExit::Reconnect("subscription update write failed".to_string());
         }
         let now = Instant::now();
-        if heartbeat(socket, &mut state, now) {
-            return SessionExit::Reconnect;
+        if let Some(reason) = heartbeat(socket, &mut state, now) {
+            return SessionExit::Reconnect(reason.to_string());
         }
         match socket.read_event(now + READ_TIMEOUT) {
             Ok(SocketEvent::Text(text)) => {
@@ -728,7 +733,11 @@ fn run_session(
                         }
                     }
                     Err(FrameOutcome::Closed) => return SessionExit::Closed,
-                    Err(FrameOutcome::Reconnect) => return SessionExit::Reconnect,
+                    Err(FrameOutcome::Reconnect) => {
+                        return SessionExit::Reconnect(
+                            "frame validation or sequence failed".to_string(),
+                        );
+                    }
                 }
             }
             Ok(SocketEvent::Pong) => {
@@ -738,7 +747,7 @@ fn run_session(
                 }
             }
             Err(error) if is_read_timeout(&error) => {}
-            Err(_) => return SessionExit::Reconnect,
+            Err(error) => return SessionExit::Reconnect(error),
         }
     }
 }
@@ -770,21 +779,25 @@ enum FrameOutcome {
 
 /// Sends a heartbeat ping when the feed has been quiet, and reports a dead
 /// socket after sustained silence. Returns true when the session must end.
-fn heartbeat(socket: &mut HyperliquidSocket, state: &mut SessionState, now: Instant) -> bool {
+fn heartbeat(
+    socket: &mut HyperliquidSocket,
+    state: &mut SessionState,
+    now: Instant,
+) -> Option<&'static str> {
     if now.saturating_duration_since(state.last_inbound) >= MESSAGE_SILENCE_TIMEOUT {
-        return true;
+        return Some("inbound silence exceeded 45 seconds");
     }
     if application_ping_due(state, now) {
         if socket
             .send_text(&asceify_hyperliquid_market_adapter::build_ping())
             .is_err()
         {
-            return true;
+            return Some("heartbeat write failed");
         }
         state.last_ping = now;
         state.pending_ping = Some(now);
     }
-    false
+    None
 }
 
 fn application_ping_due(state: &SessionState, now: Instant) -> bool {
@@ -925,8 +938,9 @@ fn handle_frame(
     book_sequences: &mut BTreeMap<String, u64>,
     sink: &RealtimeEventSink<'_>,
 ) -> Result<bool, FrameOutcome> {
-    let Ok(event) = parse_ws_frame(text) else {
-        return record_frame_failure(decode_failures).map(|()| false);
+    let event = match parse_ws_frame(text) {
+        Ok(event) => event,
+        Err(reason) => return record_frame_failure(decode_failures, &reason).map(|()| false),
     };
     if matches!(&event, WsClientEvent::Pong) {
         return Ok(true);
@@ -962,14 +976,21 @@ fn handle_frame(
         // traffic neither counts nor forgives; only a new connection resets.
         Ok(()) => Ok(false),
         Err(FrameError::Abort(outcome)) => Err(outcome),
-        Err(FrameError::Malformed) => record_frame_failure(decode_failures).map(|()| false),
+        Err(FrameError::Malformed(reason)) => {
+            record_frame_failure(decode_failures, &reason).map(|()| false)
+        }
     }
 }
 
 /// Counts one malformed frame; too many in a row means the connection itself
 /// is suspect, so the session reconnects instead of spamming the log.
-fn record_frame_failure(decode_failures: &mut u32) -> Result<(), FrameOutcome> {
-    note_decode_failure(decode_failures);
+fn record_frame_failure(decode_failures: &mut u32, reason: &str) -> Result<(), FrameOutcome> {
+    let reason = if reason.starts_with("hyperliquid channel is unsupported:") {
+        "hyperliquid channel is unsupported"
+    } else {
+        reason
+    };
+    note_decode_failure(decode_failures, reason);
     if *decode_failures >= MAXIMUM_DECODE_FAILURES_PER_CONNECTION {
         return Err(FrameOutcome::Reconnect);
     }
@@ -990,17 +1011,19 @@ struct FrameDecoder<'a> {
 /// terminal conditions (`Closed`, sequence-overflow `Reconnect`) pass through
 /// without counting, since the connection itself is not suspect.
 enum FrameError {
-    Malformed,
+    Malformed(String),
     Abort(FrameOutcome),
 }
 
 impl FrameDecoder<'_> {
     fn bbo(&mut self, coin: &str, bbo: &serde_json::value::RawValue) -> Result<(), FrameError> {
         let Some(mapping) = self.instruments.get(coin) else {
-            return Err(FrameError::Malformed);
+            return Err(FrameError::Malformed(
+                "bbo coin is not demanded".to_string(),
+            ));
         };
         let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
-        let Ok(quote) = asceify_hyperliquid_market_adapter::decode_bbo_quote(
+        let quote = asceify_hyperliquid_market_adapter::decode_bbo_quote(
             bbo,
             coin,
             &mapping.instrument_id,
@@ -1008,9 +1031,8 @@ impl FrameDecoder<'_> {
             self.generation,
             sequence,
             unix_nanos_now(),
-        ) else {
-            return Err(FrameError::Malformed);
-        };
+        )
+        .map_err(|reason| FrameError::Malformed(format!("bbo: {reason}")))?;
         let next = sequence
             .checked_add(1)
             .ok_or(FrameError::Abort(FrameOutcome::Reconnect))?;
@@ -1032,13 +1054,12 @@ impl FrameDecoder<'_> {
     ) -> Result<(), FrameError> {
         // The live channel emits one `Candle` object per frame; the decoder
         // rejects anything else without touching the socket.
-        let Ok(candle) = decode_live_candle(
+        let candle = decode_live_candle(
             candles,
             price_scale_for(coin, self.instruments),
             quantity_scale_for(coin, self.instruments),
-        ) else {
-            return Err(FrameError::Malformed);
-        };
+        )
+        .map_err(|reason| FrameError::Malformed(format!("candle: {reason}")))?;
         if self.sink.send(HyperliquidRealtimeEvent::Candle(
             self.generation,
             coin.to_string(),
@@ -1058,10 +1079,12 @@ impl FrameDecoder<'_> {
         let Some(mapping) = self.instruments.get(coin) else {
             // Data for an unsubscribed coin is dropped and counted: it must
             // never enter another instrument's continuity.
-            return Err(FrameError::Malformed);
+            return Err(FrameError::Malformed(
+                "trade coin is not demanded".to_string(),
+            ));
         };
         let first = *self.next_trade_sequence;
-        let Ok(batch) = decode_trades_batch(
+        let batch = decode_trades_batch(
             trades,
             coin,
             &mapping.instrument_id,
@@ -1069,9 +1092,8 @@ impl FrameDecoder<'_> {
             self.generation,
             unix_nanos_now(),
             first,
-        ) else {
-            return Err(FrameError::Malformed);
-        };
+        )
+        .map_err(|reason| FrameError::Malformed(format!("trades: {reason}")))?;
         let advance = u64::try_from(batch.trades.len()).unwrap_or(u64::MAX);
         match first.checked_add(advance) {
             Some(next) => *self.next_trade_sequence = next.max(1),
@@ -1090,10 +1112,12 @@ impl FrameDecoder<'_> {
 
     fn book(&mut self, coin: &str, book: &serde_json::value::RawValue) -> Result<(), FrameError> {
         let Some(mapping) = self.instruments.get(coin) else {
-            return Err(FrameError::Malformed);
+            return Err(FrameError::Malformed(
+                "book coin is not demanded".to_string(),
+            ));
         };
         let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
-        let Ok(decoded) = decode_book_snapshot(
+        let decoded = decode_book_snapshot(
             book,
             coin,
             &mapping.instrument_id,
@@ -1101,9 +1125,8 @@ impl FrameDecoder<'_> {
             self.generation,
             sequence,
             unix_nanos_now(),
-        ) else {
-            return Err(FrameError::Malformed);
-        };
+        )
+        .map_err(|reason| FrameError::Malformed(format!("book: {reason}")))?;
         let next = sequence
             .checked_add(1)
             .ok_or(FrameError::Abort(FrameOutcome::Reconnect))?;
@@ -1133,12 +1156,12 @@ fn quantity_scale_for(
         .map_or(8, |mapping| u32::from(mapping.quantity_scale))
 }
 
-fn note_decode_failure(decode_failures: &mut u32) {
+fn note_decode_failure(decode_failures: &mut u32, reason: &str) {
     *decode_failures = decode_failures.saturating_add(1);
     if *decode_failures == 1 || (*decode_failures).is_multiple_of(10) {
         eprintln!(
-            "Asceify engine Hyperliquid feed dropped malformed data ({} this connection)",
-            *decode_failures
+            "Asceify engine Hyperliquid feed dropped malformed data: {reason} ({} this connection)",
+            *decode_failures,
         );
     }
 }

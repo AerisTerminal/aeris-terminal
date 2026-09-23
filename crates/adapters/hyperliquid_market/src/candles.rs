@@ -291,7 +291,7 @@ pub fn decode_live_candle(
         high: high.to_fixed(price_scale)?,
         low: low.to_fixed(price_scale)?,
         close: close.to_fixed(price_scale)?,
-        volume: volume.to_fixed(quantity_scale)?,
+        volume: volume.to_fixed_aggregate(quantity_scale)?,
     };
     if candle.volume < 0 {
         return Err("hyperliquid candle volume is invalid".to_string());
@@ -550,6 +550,19 @@ mod tests {
         let page =
             serde_json::value::RawValue::from_string("[]".to_string()).expect("wire encodes");
         assert!(decode_live_candle(&page, 6, 6).is_err());
+    }
+
+    #[test]
+    fn live_aggregate_volume_uses_the_same_precision_as_history() {
+        let wire = serde_json::value::RawValue::from_string(
+            r#"{"t":60000,"T":120000,"s":"BTC","i":"1m","o":"10.0","h":"11.0","l":"9.0","c":"10.5","v":"939217.2893600001","n":3}"#.to_string(),
+        )
+        .expect("wire encodes");
+        let live = decode_live_candle(&wire, 8, 8).expect("aggregate volume decodes");
+        let history = decode_candle_page(&wire, BarPeriod::time(60).unwrap(), 8, 8, 90_000)
+            .expect("same candle decodes as history");
+        assert_eq!(live.volume, 93_921_728_936_000);
+        assert_eq!(history.forming.expect("forming candle").volume, live.volume);
     }
 
     #[test]
