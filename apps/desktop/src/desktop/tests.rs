@@ -338,6 +338,184 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
     assert!(!ChartInterval::Minute1.matches_typeahead("1M"));
 }
 
+mod timeframe_input {
+    use super::super::*;
+    use asceify_desktop::market_worker::{
+        EngineWorkerStartup, MarketWorkerCommand, MarketWorkerSender, market_worker_channel,
+    };
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::num::NonZeroUsize;
+    use std::sync::{atomic::AtomicU64, mpsc};
+
+    struct TimeframeHarness(Entity<WorkspaceSurface>);
+
+    impl Render for TimeframeHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let surface = self.0.read(cx);
+            let input = surface.timeframe_input.clone();
+            let quick = surface.chrome_overlay == Some(ChromeOverlay::QuickTimeframe);
+            div()
+                .size_full()
+                .track_focus(&surface.chrome_focus)
+                .on_key_down(cx.listener(|this, event, window, cx| {
+                    if this.0.update(cx, |surface, cx| {
+                        surface.on_terminal_key_down(event, window, cx)
+                    }) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }))
+                .when(quick, |root| root.child(Input::new(&input)))
+        }
+    }
+
+    fn harness(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceSurface>,
+        mpsc::Receiver<MarketWorkerCommand>,
+        MarketWorkerSender,
+        &mut VisualTestContext,
+    ) {
+        let (commands, requests) = mpsc::sync_channel(8);
+        let (publications, messages) = market_worker_channel(NonZeroUsize::MIN);
+        let (_, shutdown) = mpsc::sync_channel(1);
+        let worker = MarketDataWorker::from_channels(
+            commands,
+            messages,
+            shutdown,
+            None,
+            Some(Arc::new(AtomicU64::new(1))),
+        );
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            gpui_base::init(cx);
+            let product = local_state::default_workspace().watchlist_entries[0]
+                .instrument
+                .clone()
+                .expect("default instrument");
+            let surface = workspace_surface_entity(
+                MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
+                    product,
+                    interval: ChartInterval::Minute1,
+                    restored_viewport: None,
+                    subscription_id: "timeframe_test".into(),
+                    worker_label: "timeframe_test".into(),
+                })),
+                worker,
+                &DesktopLifecycle::new(),
+                chart_chrome::ChartChromePreferences::default(),
+                WorkspaceSurfaceRestore::default(),
+                window,
+                cx,
+            );
+            surface.read(cx).chrome_focus.clone().focus(window, cx);
+            cx.observe(&surface, |_, _, cx| cx.notify()).detach();
+            TimeframeHarness(surface)
+        });
+        let surface = cx.read(|cx| view.read(cx).0.clone());
+        (surface, requests, publications, cx)
+    }
+
+    #[gpui::test]
+    fn quick_daily_enter_submits_exactly_one_selection(cx: &mut TestAppContext) {
+        let (surface, requests, _publications, cx) = harness(cx);
+        cx.simulate_keystrokes("1 shift-d");
+        cx.read(|cx| assert_eq!(surface.read(cx).timeframe_input.read(cx).value(), "1D"));
+        cx.simulate_keystrokes("enter");
+        let selections = requests
+            .try_iter()
+            .filter_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.interval),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selections, [ChartInterval::Day1]);
+        cx.read(|cx| {
+            assert_eq!(
+                surface.read(cx).rithmic_pending_interval,
+                Some(ChartInterval::Day1)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_quick_switches_keep_the_entered_units(cx: &mut TestAppContext) {
+        let (surface, requests, publications, cx) = harness(cx);
+        for (keys, interval) in [
+            ("1 d", ChartInterval::Day1),
+            ("4 h", ChartInterval::Hour4),
+            ("1 shift-m", ChartInterval::Month1),
+            ("1 m", ChartInterval::Minute1),
+            ("5", ChartInterval::Minute5),
+        ] {
+            cx.simulate_keystrokes(keys);
+            cx.simulate_keystrokes("enter enter");
+            let selections = requests
+                .try_iter()
+                .filter_map(|command| match command {
+                    MarketWorkerCommand::EngineSelect(request) => Some(request),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(selections.len(), 1, "one request for {keys}");
+            assert_eq!(selections[0].interval, interval);
+            publications
+                .send(MarketWorkerMessage::EngineSwitchMarker {
+                    sequence: selections[0].sequence,
+                })
+                .expect("switch marker");
+            cx.update(|_, cx| {
+                surface.update(cx, |surface, cx| {
+                    surface.poll_market_worker(cx);
+                });
+            });
+            cx.executor().advance_clock(CHROME_OVERLAY_EXIT_DURATION);
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn closing_quick_menu_ignores_delayed_submit_and_change(cx: &mut TestAppContext) {
+        let (surface, requests, _publications, cx) = harness(cx);
+        cx.simulate_keystrokes("1 d escape");
+        cx.update(|_, cx| {
+            let input = surface.read(cx).timeframe_input.clone();
+            input.update(cx, |_, cx| {
+                cx.emit(InputEvent::Change);
+                cx.emit(InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            requests.try_recv().is_err(),
+            "dismissal cannot select an interval"
+        );
+    }
+
+    #[gpui::test]
+    fn normal_timeframe_menu_keeps_keyboard_submission(cx: &mut TestAppContext) {
+        let (surface, requests, _publications, cx) = harness(cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_chrome_overlay(ChromeOverlay::Timeframe, window, cx);
+            });
+        });
+        // Minutes -> Hours -> Days, then open the flyout and choose one day.
+        cx.simulate_keystrokes("down down right enter");
+        let selections = requests
+            .try_iter()
+            .filter_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.interval),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selections, [ChartInterval::Day1]);
+    }
+}
+
 #[test]
 fn workspace_split_ratio_tracks_the_active_axis_and_clamps_safe_bounds() {
     assert_eq!(

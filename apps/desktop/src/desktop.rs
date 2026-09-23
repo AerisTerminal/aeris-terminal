@@ -2254,7 +2254,9 @@ fn subscribe_timeframe_input(
             move |_, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe) {
+                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe)
+                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
+                        {
                             return;
                         }
                         let intervals = app.quick_timeframe_matches(app_cx);
@@ -2263,7 +2265,9 @@ fn subscribe_timeframe_input(
                 }
                 InputEvent::Change => {
                     terminal.update(cx, |app, app_cx| {
-                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe) {
+                        if app.chrome_overlay != Some(ChromeOverlay::QuickTimeframe)
+                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
+                        {
                             return;
                         }
                         let query = input.read(app_cx).value();

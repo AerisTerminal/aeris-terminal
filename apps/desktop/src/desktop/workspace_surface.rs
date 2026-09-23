@@ -1760,8 +1760,10 @@ impl WorkspaceSurface {
             }
             Some(ChromeOverlay::ChartType) => self.apply_highlighted_chart_type(window, cx),
             Some(ChromeOverlay::QuickTimeframe) => {
-                let intervals = self.quick_timeframe_matches(cx);
-                self.apply_highlighted_interval(&intervals, window, cx);
+                // InputState emits PressEnter before propagating the raw key.
+                // Its subscription owns submission: handling both would submit
+                // again after closing clears the query, selecting another interval.
+                return false;
             }
             Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator) | None => return false,
         }
