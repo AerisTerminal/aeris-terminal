@@ -369,6 +369,33 @@ impl Coordinator<'_> {
         }
     }
 
+    pub(super) fn reject_overflowed_catalog(&mut self, provider: &str) {
+        for selection in [false, true] {
+            let pending = if selection {
+                &self.catalog_selections
+            } else {
+                &self.catalog_searches
+            };
+            let rejected = pending
+                .iter()
+                .filter(|((_, candidate), _)| candidate == provider)
+                .map(|((consumer, _), generation)| (consumer.0.get(), *generation))
+                .collect::<Vec<_>>();
+            for (consumer_id, command_generation) in rejected {
+                self.handle_catalog_rejection(
+                    ProviderCatalogRejected {
+                        consumer_id,
+                        provider: provider.to_string(),
+                        provider_generation: None,
+                        command_generation,
+                        reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+                    },
+                    selection,
+                );
+            }
+        }
+    }
+
     pub(super) fn handle_catalog_rejection(
         &mut self,
         rejection: ProviderCatalogRejected,

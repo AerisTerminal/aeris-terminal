@@ -5,7 +5,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread,
@@ -118,6 +118,8 @@ pub struct MarketService {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketServiceStatus {
     pub connected_desktop_clients: usize,
+    /// Calculation lane was isolated after an execution deadline or worker failure.
+    pub study_execution_failed: bool,
     pub providers: Vec<ProviderState>,
     pub retained_series: usize,
     pub retained_bars: usize,
@@ -136,7 +138,23 @@ impl Drop for MarketRuntime {
     }
 }
 
+// 0 queued, 1 started, 2 cancelled. The start/cancel race has one winner.
+struct RequestState(AtomicU8);
+impl RequestState {
+    fn start(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+    fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
 enum Command {
+    Request(Box<Command>, Arc<RequestState>),
     /// Provider workers use this zero-payload control only to interrupt the
     /// coordinator's bounded idle wait after publishing an event. The actual
     /// provider event remains in its dedicated bounded lane and is drained at
@@ -207,11 +225,24 @@ enum Command {
 #[derive(Clone)]
 pub(crate) struct ProviderCoordinatorWake {
     commands: SyncSender<Command>,
+    // Two fixed provider slots: overflow is observable even when every queue is full.
+    overflow: Arc<[AtomicU64; 2]>,
+    pending: Arc<AtomicBool>,
+    catalog_overflow: Arc<[AtomicBool; 2]>,
+    drain_cursor: Arc<std::sync::atomic::AtomicUsize>,
+    pending_overflow: Arc<[AtomicU64; 2]>,
 }
 
 impl ProviderCoordinatorWake {
     fn new(commands: SyncSender<Command>) -> Self {
-        Self { commands }
+        Self {
+            commands,
+            pending: Arc::new(AtomicBool::new(false)),
+            catalog_overflow: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
+            drain_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            overflow: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            pending_overflow: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+        }
     }
 
     #[cfg(test)]
@@ -220,9 +251,57 @@ impl ProviderCoordinatorWake {
         Self::new(commands)
     }
 
+    pub(crate) fn report_overflow(&self, provider: usize, generation: u64) {
+        self.overflow[provider].fetch_max(generation, Ordering::AcqRel);
+        self.pending_overflow[provider].fetch_max(generation, Ordering::AcqRel);
+        self.notify();
+    }
+
+    pub(crate) fn overflowed(&self, provider: usize, generation: u64) -> bool {
+        generation != 0 && self.overflow[provider].load(Ordering::Acquire) >= generation
+    }
+
     pub(crate) fn notify(&self) {
-        match self.commands.try_send(Command::ProviderWake) {
-            Ok(()) | Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {}
+        if self.pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.commands.try_send(Command::ProviderWake).is_err() {
+            self.pending.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Catalog responses must never block the session owner. Saturation rejects
+/// outstanding catalog requests through a fixed out-of-band flag.
+pub(crate) struct CatalogPublisher<T> {
+    events: SyncSender<T>,
+    provider: usize,
+    wake: ProviderCoordinatorWake,
+}
+impl<T> CatalogPublisher<T> {
+    pub(crate) fn new(
+        events: SyncSender<T>,
+        provider: usize,
+        wake: ProviderCoordinatorWake,
+    ) -> Self {
+        Self {
+            events,
+            provider,
+            wake,
+        }
+    }
+    pub(crate) fn send(&self, event: T) -> Result<(), mpsc::SendError<T>> {
+        match self.events.try_send(event) {
+            Ok(()) => {
+                self.wake.notify();
+                Ok(())
+            }
+            Err(TrySendError::Full(event)) => {
+                self.wake.catalog_overflow[self.provider].store(true, Ordering::Release);
+                self.wake.notify();
+                Err(mpsc::SendError(event))
+            }
+            Err(TrySendError::Disconnected(event)) => Err(mpsc::SendError(event)),
         }
     }
 }
@@ -439,7 +518,8 @@ trait HistorySource: Send + 'static {
 
 struct LiveRithmicHistory;
 
-struct LiveHyperliquidHistory;
+#[derive(Default)]
+struct LiveHyperliquidHistory(asceify_hyperliquid_market_adapter::HyperliquidHttpClient);
 
 struct ProviderRuntimeSpec {
     provider_id: &'static str,
@@ -583,6 +663,7 @@ impl StartedProviderRuntime {
 /// `MarketEngine` remains the capability and generation authority. This registry owns only the
 /// concrete adapter workers and their bounded dispatch/lifecycle state.
 struct ProviderRuntimeRegistry {
+    wake: ProviderCoordinatorWake,
     records: BTreeMap<&'static str, ProviderRuntimeRecord>,
 }
 
@@ -611,6 +692,7 @@ impl Drop for ActiveWorkerGuard {
 }
 
 struct ProviderDispatch<'a> {
+    wake: Option<&'a ProviderCoordinatorWake>,
     records: BTreeMap<&'static str, ProviderDispatchRecord<'a>>,
 }
 

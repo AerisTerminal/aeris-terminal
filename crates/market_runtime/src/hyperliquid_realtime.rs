@@ -33,7 +33,7 @@ use asceify_hyperliquid_market_adapter::{
 };
 use asceify_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 
-use crate::market_service::ProviderCoordinatorWake;
+use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
 /// Public account and entitlement identity for credential-free market data.
 pub(crate) const HYPERLIQUID_PUBLIC_ACCOUNT_ID: &str = "hyperliquid-public";
@@ -144,10 +144,9 @@ enum SubscriptionKey {
 /// Runs the catalog worker: retained-catalog search/select over HTTP.
 pub(crate) fn run_catalog(
     controls: &Receiver<HyperliquidCatalogControl>,
-    events: &SyncSender<HyperliquidCatalogEvent>,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
-    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) {
     let mut catalog = CatalogState::default();
@@ -165,7 +164,6 @@ pub(crate) fn run_catalog(
                     events,
                     ws_generation,
                     stop,
-                    wake,
                     http_config,
                 ) {
                     return;
@@ -187,11 +185,10 @@ pub(crate) fn run_catalog(
                 }
                 Err(error) => {
                     next_refresh = Instant::now() + CATALOG_REFRESH_INTERVAL;
-                    if send_cancellable(
+                    if publish_catalog(
                         events,
                         HyperliquidCatalogEvent::RefreshFailed { detail: error },
                         stop,
-                        Some(wake),
                     ) {
                         return;
                     }
@@ -235,31 +232,18 @@ impl CatalogState {
 fn handle_catalog_control(
     control: HyperliquidCatalogControl,
     catalog: &mut CatalogState,
-    events: &SyncSender<HyperliquidCatalogEvent>,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
-    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
     match control {
-        HyperliquidCatalogControl::Search(search) => handle_catalog_search(
-            search,
-            catalog,
-            events,
-            ws_generation,
-            stop,
-            wake,
-            http_config,
-        ),
-        HyperliquidCatalogControl::Select(selection) => handle_catalog_select(
-            selection,
-            catalog,
-            events,
-            ws_generation,
-            stop,
-            wake,
-            http_config,
-        ),
+        HyperliquidCatalogControl::Search(search) => {
+            handle_catalog_search(search, catalog, events, ws_generation, stop, http_config)
+        }
+        HyperliquidCatalogControl::Select(selection) => {
+            handle_catalog_select(selection, catalog, events, ws_generation, stop, http_config)
+        }
     }
 }
 
@@ -276,15 +260,14 @@ fn ensure_catalog(catalog: &mut CatalogState, http_config: HyperliquidHttpConfig
 }
 
 fn reject_catalog_command(
-    events: &SyncSender<HyperliquidCatalogEvent>,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     consumer_id: u64,
     command_generation: u64,
     selection: bool,
     stop: &AtomicBool,
-    wake: &ProviderCoordinatorWake,
 ) {
-    let _ = send_cancellable(
+    let _ = publish_catalog(
         events,
         HyperliquidCatalogEvent::Rejected {
             rejection: ProviderCatalogRejected {
@@ -297,17 +280,15 @@ fn reject_catalog_command(
             selection,
         },
         stop,
-        Some(wake),
     );
 }
 
 fn handle_catalog_search(
     search: SearchProviderInstruments,
     catalog: &mut CatalogState,
-    events: &SyncSender<HyperliquidCatalogEvent>,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
-    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
     // No catalog yet: fetch on demand so a cold start with no background
@@ -320,7 +301,6 @@ fn handle_catalog_search(
                 events,
                 ws_generation,
                 stop,
-                wake,
                 http_config,
             );
         }
@@ -334,7 +314,6 @@ fn handle_catalog_search(
             search.search_generation,
             false,
             stop,
-            wake,
         );
         return false;
     }
@@ -367,7 +346,7 @@ fn handle_catalog_search(
             expiration_date: None,
         })
         .collect();
-    let _ = send_cancellable(
+    let _ = publish_catalog(
         events,
         HyperliquidCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
             consumer_id: search.consumer_id,
@@ -377,7 +356,6 @@ fn handle_catalog_search(
             instruments,
         }),
         stop,
-        Some(wake),
     );
     false
 }
@@ -385,10 +363,9 @@ fn handle_catalog_search(
 fn handle_catalog_select(
     selection: SelectProviderInstrument,
     catalog: &mut CatalogState,
-    events: &SyncSender<HyperliquidCatalogEvent>,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
     ws_generation: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
-    wake: &ProviderCoordinatorWake,
     http_config: HyperliquidHttpConfig,
 ) -> bool {
     let command_generation = selection.selection_generation;
@@ -402,7 +379,6 @@ fn handle_catalog_select(
                 events,
                 ws_generation,
                 stop,
-                wake,
                 http_config,
             );
         }
@@ -416,7 +392,6 @@ fn handle_catalog_select(
             selection.selection_generation,
             true,
             stop,
-            wake,
         );
         return false;
     }
@@ -432,7 +407,7 @@ fn handle_catalog_select(
             .cloned()
     });
     let Some(resolved) = resolved else {
-        let _ = send_cancellable(
+        let _ = publish_catalog(
             events,
             HyperliquidCatalogEvent::Rejected {
                 rejection: ProviderCatalogRejected {
@@ -445,12 +420,11 @@ fn handle_catalog_select(
                 selection: true,
             },
             stop,
-            Some(wake),
         );
         return false;
     };
     catalog.selection_generation = catalog.selection_generation.saturating_add(1).max(1);
-    let _ = send_cancellable(
+    let _ = publish_catalog(
         events,
         HyperliquidCatalogEvent::SelectionResolved {
             consumer_id: selection.consumer_id,
@@ -470,7 +444,6 @@ fn handle_catalog_select(
             },
         },
         stop,
-        Some(wake),
     );
     false
 }
@@ -531,6 +504,11 @@ pub(crate) fn run(
         ) {
             return;
         }
+        if wake.overflowed(1, generation) {
+            generation = generation.saturating_add(1);
+            thread_sleep(reconnect_delay, stop);
+            continue;
+        }
         match HyperliquidSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
             Ok((mut socket, _shutdown)) => match run_session(
                 &mut socket,
@@ -541,7 +519,8 @@ pub(crate) fn run(
                 stop,
                 wake,
             ) {
-                SessionExit::Closed => return,
+                SessionExit::Closed if !wake.overflowed(1, generation) => return,
+                SessionExit::Closed => {}
                 SessionExit::Parked => {
                     eprintln!("Asceify Hyperliquid realtime parked by demand owner");
                     stopped = true;
@@ -602,31 +581,15 @@ fn thread_sleep(delay: Duration, stop: &Arc<AtomicBool>) {
     }
 }
 
-/// Preserves bounded backpressure while allowing shutdown to cancel a full queue.
-fn send_cancellable<T>(
-    events: &SyncSender<T>,
-    mut event: T,
-    stop: &AtomicBool,
-    wake: Option<&ProviderCoordinatorWake>,
-) -> bool {
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return true;
-        }
-        match events.try_send(event) {
-            Ok(()) => {
-                if let Some(wake) = wake {
-                    wake.notify();
-                }
-                return false;
-            }
-            Err(TrySendError::Disconnected(_)) => return true,
-            Err(TrySendError::Full(returned)) => {
-                event = returned;
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
+/// Publishes without blocking; overflow rejects the pending catalog requests.
+fn publish_catalog<T>(events: &CatalogPublisher<T>, event: T, stop: &AtomicBool) -> bool {
+    if stop.load(Ordering::Acquire) {
+        return true;
     }
+    // Overflow is reported by the publisher; the coordinator rejects pending
+    // requests. The worker continues serving instead of becoming terminal.
+    let _ = events.send(event);
+    false
 }
 
 /// Sends one realtime event; returns true when cancelled or the coordinator is gone.
@@ -636,7 +599,37 @@ fn emit(
     stop: &AtomicBool,
     wake: &ProviderCoordinatorWake,
 ) -> bool {
-    send_cancellable(events, event, stop, Some(wake))
+    if stop.load(Ordering::Acquire) {
+        return true;
+    }
+    let generation = event.generation();
+    match events.try_send(event) {
+        Ok(()) => {
+            wake.notify();
+            false
+        }
+        Err(TrySendError::Full(_)) => {
+            wake.report_overflow(1, generation);
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => true,
+    }
+}
+
+impl HyperliquidRealtimeEvent {
+    pub(crate) fn generation(&self) -> u64 {
+        match self {
+            HyperliquidRealtimeEvent::Connecting(g)
+            | HyperliquidRealtimeEvent::Connected(g)
+            | HyperliquidRealtimeEvent::Recovering(g)
+            | HyperliquidRealtimeEvent::Disconnected(g)
+            | HyperliquidRealtimeEvent::Heartbeat(g, _)
+            | HyperliquidRealtimeEvent::Candle(g, ..)
+            | HyperliquidRealtimeEvent::Trades(g, _)
+            | HyperliquidRealtimeEvent::Quote(g, _)
+            | HyperliquidRealtimeEvent::Depth(g, _) => *g,
+        }
+    }
 }
 
 struct RealtimeEventSink<'a> {
@@ -647,11 +640,30 @@ struct RealtimeEventSink<'a> {
 
 impl RealtimeEventSink<'_> {
     fn send(&self, event: HyperliquidRealtimeEvent) -> bool {
-        emit(self.events, event, self.stop, self.wake)
+        if self.stop.load(Ordering::Acquire) {
+            return true;
+        }
+        let generation = event.generation();
+        if self.wake.overflowed(1, generation) {
+            return true;
+        }
+        match self.events.try_send(event) {
+            Ok(()) => {
+                self.wake.notify();
+                false
+            }
+            Err(TrySendError::Full(_)) => {
+                self.wake.report_overflow(1, generation);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => true,
+        }
     }
 }
 
 struct SessionState {
+    pending_subscriptions: BTreeMap<SubscriptionKey, Instant>,
+    connected: bool,
     active: BTreeMap<SubscriptionKey, String>,
     instruments: BTreeMap<String, HyperliquidInstrumentDemand>,
     next_trade_sequence: u64,
@@ -674,6 +686,8 @@ fn run_session(
     let sink = RealtimeEventSink { events, stop, wake };
     let started = Instant::now();
     let mut state = SessionState {
+        pending_subscriptions: BTreeMap::new(),
+        connected: false,
         active: BTreeMap::new(),
         instruments: BTreeMap::new(),
         next_trade_sequence: 1,
@@ -687,9 +701,6 @@ fn run_session(
     };
     if reconcile_subscriptions(socket, demand, &mut state).is_err() {
         return SessionExit::Reconnect("subscription write failed".to_string());
-    }
-    if sink.send(HyperliquidRealtimeEvent::Connected(generation)) {
-        return SessionExit::Closed;
     }
     loop {
         if stop.load(Ordering::Acquire) {
@@ -722,17 +733,31 @@ fn run_session(
                     &mut state.book_sequences,
                     &sink,
                 ) {
-                    Ok(application_pong) => {
-                        if application_pong
-                            && sink.send(HyperliquidRealtimeEvent::Heartbeat(
-                                generation,
-                                application_ping_rtt_nanos(&mut state, received_at),
-                            ))
-                        {
+                    Ok(progress) => {
+                        if let FrameProgress::Subscribed(key) = &progress {
+                            state.pending_subscriptions.remove(key);
+                            if !state.connected && state.pending_subscriptions.is_empty() {
+                                if sink.send(HyperliquidRealtimeEvent::Connected(generation)) {
+                                    return SessionExit::Closed;
+                                }
+                                state.connected = true;
+                            }
+                        }
+                        if matches!(progress, FrameProgress::Pong) && {
+                            let rtt = application_ping_rtt_nanos(&mut state, received_at);
+                            state.connected
+                                && sink.send(HyperliquidRealtimeEvent::Heartbeat(generation, rtt))
+                        } {
                             return SessionExit::Closed;
                         }
                     }
-                    Err(FrameOutcome::Closed) => return SessionExit::Closed,
+                    Err(FrameOutcome::Closed) => {
+                        return if wake.overflowed(1, generation) {
+                            SessionExit::Reconnect("local event queue overflow".into())
+                        } else {
+                            SessionExit::Closed
+                        };
+                    }
                     Err(FrameOutcome::Reconnect) => {
                         return SessionExit::Reconnect(
                             "frame validation or sequence failed".to_string(),
@@ -742,7 +767,9 @@ fn run_session(
             }
             Ok(SocketEvent::Pong) => {
                 state.last_inbound = Instant::now();
-                if sink.send(HyperliquidRealtimeEvent::Heartbeat(generation, None)) {
+                if state.connected
+                    && sink.send(HyperliquidRealtimeEvent::Heartbeat(generation, None))
+                {
                     return SessionExit::Closed;
                 }
             }
@@ -784,6 +811,9 @@ fn heartbeat(
     state: &mut SessionState,
     now: Instant,
 ) -> Option<&'static str> {
+    if let Some(reason) = session_deadline(state, now) {
+        return Some(reason);
+    }
     if now.saturating_duration_since(state.last_inbound) >= MESSAGE_SILENCE_TIMEOUT {
         return Some("inbound silence exceeded 45 seconds");
     }
@@ -796,6 +826,23 @@ fn heartbeat(
         }
         state.last_ping = now;
         state.pending_ping = Some(now);
+    }
+    None
+}
+
+fn session_deadline(state: &SessionState, now: Instant) -> Option<&'static str> {
+    if state
+        .pending_ping
+        .is_some_and(|sent| now.saturating_duration_since(sent) >= PING_INTERVAL)
+    {
+        return Some("application heartbeat response timed out");
+    }
+    if state
+        .pending_subscriptions
+        .values()
+        .any(|sent| now.saturating_duration_since(*sent) >= CONNECT_TIMEOUT)
+    {
+        return Some("subscription acknowledgement timed out");
     }
     None
 }
@@ -904,6 +951,7 @@ fn reconcile_subscriptions(
         .cloned()
         .collect::<Vec<_>>();
     for key in removed {
+        state.pending_subscriptions.remove(&key);
         if let Some(frame) = state.active.remove(&key)
             && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&frame)
             && let Some(subscription) = raw.get("subscription")
@@ -923,10 +971,54 @@ fn reconcile_subscriptions(
         if !state.active.contains_key(key) {
             socket.send_text(frame)?;
             state.active.insert(key.clone(), frame.clone());
+            state
+                .pending_subscriptions
+                .insert(key.clone(), Instant::now());
         }
     }
     state.instruments = instruments;
     Ok(())
+}
+
+enum FrameProgress {
+    Pong,
+    Subscribed(SubscriptionKey),
+    Other,
+}
+
+fn acknowledged_subscription(raw: &str) -> Result<Option<SubscriptionKey>, String> {
+    let data: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| "invalid subscription response".to_string())?;
+    match data.get("method").and_then(serde_json::Value::as_str) {
+        Some("unsubscribe") => return Ok(None),
+        Some("subscribe") => {}
+        _ => return Err("subscription response omitted method".into()),
+    }
+    let subscription = data
+        .get("subscription")
+        .ok_or("subscription response omitted identity")?;
+    let coin = subscription
+        .get("coin")
+        .and_then(serde_json::Value::as_str)
+        .filter(|coin| !coin.is_empty())
+        .ok_or("subscription response omitted coin")?
+        .to_string();
+    let key = match subscription.get("type").and_then(serde_json::Value::as_str) {
+        Some("candle") => SubscriptionKey::Candle {
+            coin,
+            interval: subscription
+                .get("interval")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or("subscription response omitted interval")?
+                .to_string(),
+        },
+        Some("trades") => SubscriptionKey::Trades { coin },
+        Some("bbo") => SubscriptionKey::Bbo { coin },
+        Some("l2Book") => SubscriptionKey::Book { coin },
+        _ => return Err("unexpected subscription response type".into()),
+    };
+    Ok(Some(key))
 }
 
 fn handle_frame(
@@ -937,13 +1029,24 @@ fn handle_frame(
     next_trade_sequence: &mut u64,
     book_sequences: &mut BTreeMap<String, u64>,
     sink: &RealtimeEventSink<'_>,
-) -> Result<bool, FrameOutcome> {
+) -> Result<FrameProgress, FrameOutcome> {
     let event = match parse_ws_frame(text) {
         Ok(event) => event,
-        Err(reason) => return record_frame_failure(decode_failures, &reason).map(|()| false),
+        Err(reason) => {
+            return record_frame_failure(decode_failures, &reason).map(|()| FrameProgress::Other);
+        }
     };
     if matches!(&event, WsClientEvent::Pong) {
-        return Ok(true);
+        return Ok(FrameProgress::Pong);
+    }
+    if let WsClientEvent::Subscribed { channel } = &event {
+        return match acknowledged_subscription(channel) {
+            Ok(Some(key)) => Ok(FrameProgress::Subscribed(key)),
+            Ok(None) => Ok(FrameProgress::Other),
+            Err(reason) => {
+                record_frame_failure(decode_failures, &reason).map(|()| FrameProgress::Other)
+            }
+        };
     }
     let mut frame = FrameDecoder {
         generation,
@@ -974,10 +1077,10 @@ fn handle_frame(
         // or a partially wedged feed (one corrupt channel beside healthy
         // ones) would never trip the reconnect threshold. Benign control
         // traffic neither counts nor forgives; only a new connection resets.
-        Ok(()) => Ok(false),
+        Ok(()) => Ok(FrameProgress::Other),
         Err(FrameError::Abort(outcome)) => Err(outcome),
         Err(FrameError::Malformed(reason)) => {
-            record_frame_failure(decode_failures, &reason).map(|()| false)
+            record_frame_failure(decode_failures, &reason).map(|()| FrameProgress::Other)
         }
     }
 }
@@ -1219,7 +1322,7 @@ mod tests {
     /// Benign control traffic: healthy for the connection, but evidence of
     /// nothing about payload decoders.
     fn subscribed_ack() -> String {
-        r#"{"channel":"subscriptionResponse","data":{"method":"subscribe"}}"#.to_string()
+        r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"candle","coin":"BTC","interval":"1m"}}}"#.to_string()
     }
 
     fn handle(
@@ -1253,6 +1356,72 @@ mod tests {
         format!(
             r#"{{"channel":"trades","data":[{{"coin":"{coin}","px":"10","sz":"1","side":"B","time":{time},"tid":{tid}}}]}}"#
         )
+    }
+
+    #[test]
+    fn full_live_queue_reports_local_overflow_without_waiting() {
+        let (events, _received) = std::sync::mpsc::sync_channel(1);
+        events.send(HyperliquidRealtimeEvent::Connected(1)).unwrap();
+        let stop = AtomicBool::new(false);
+        let wake = ProviderCoordinatorWake::for_tests();
+        let sink = RealtimeEventSink {
+            events: &events,
+            stop: &stop,
+            wake: &wake,
+        };
+        assert!(sink.send(HyperliquidRealtimeEvent::Heartbeat(1, None)));
+        assert!(wake.overflowed(1, 1));
+        assert!(!wake.overflowed(1, 2), "new generation can recover");
+    }
+
+    #[test]
+    fn subscription_acknowledgement_matches_exact_stream_identity() {
+        assert!(
+            matches!(acknowledged_subscription(r#"{"method":"subscribe","subscription":{"type":"candle","coin":"BTC","interval":"1m"}}"#),
+            Ok(Some(SubscriptionKey::Candle { coin, interval })) if coin == "BTC" && interval == "1m")
+        );
+        assert!(acknowledged_subscription(r#"{"method":"subscribe"}"#).is_err());
+        assert!(
+            acknowledged_subscription(r#"{"method":"unsubscribe"}"#)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn healthy_other_traffic_does_not_hide_pending_pong_or_subscription_deadlines() {
+        let now = Instant::now();
+        let mut state = SessionState {
+            active: BTreeMap::new(),
+            pending_subscriptions: BTreeMap::new(),
+            connected: true,
+            instruments: BTreeMap::new(),
+            next_trade_sequence: 1,
+            book_sequences: BTreeMap::new(),
+            decode_failures: 0,
+            last_inbound: now,
+            last_ping: now,
+            pending_ping: Some(now.checked_sub(PING_INTERVAL).unwrap()),
+        };
+        assert_eq!(
+            session_deadline(&state, now),
+            Some("application heartbeat response timed out")
+        );
+        state.pending_ping = None;
+        state.pending_subscriptions.insert(
+            SubscriptionKey::Trades { coin: "BTC".into() },
+            now.checked_sub(CONNECT_TIMEOUT).unwrap(),
+        );
+        assert_eq!(
+            session_deadline(&state, now),
+            Some("subscription acknowledgement timed out")
+        );
+        state.pending_subscriptions.clear();
+        assert_eq!(
+            session_deadline(&state, now),
+            None,
+            "acknowledged quiet market is not a broken subscription"
+        );
     }
 
     #[test]
@@ -1380,6 +1549,8 @@ mod tests {
     fn application_ping_rtt_is_monotonic_one_shot_and_not_feed_age() {
         let started = Instant::now();
         let mut state = SessionState {
+            pending_subscriptions: BTreeMap::new(),
+            connected: false,
             active: BTreeMap::new(),
             instruments: BTreeMap::new(),
             next_trade_sequence: 1,
@@ -1404,6 +1575,8 @@ mod tests {
     fn first_application_ping_is_due_immediately_for_live_rtt() {
         let started = Instant::now();
         let state = SessionState {
+            pending_subscriptions: BTreeMap::new(),
+            connected: false,
             active: BTreeMap::new(),
             instruments: BTreeMap::new(),
             next_trade_sequence: 1,
@@ -1504,8 +1677,9 @@ mod tests {
     fn full_event_queue_observes_cancellation() {
         let (events, _received) = std::sync::mpsc::sync_channel(1);
         events.send(1).expect("fill queue");
+        let events = CatalogPublisher::new(events, 1, ProviderCoordinatorWake::for_tests());
         let stop = AtomicBool::new(true);
-        assert!(send_cancellable(&events, 2, &stop, None));
+        assert!(publish_catalog(&events, 2, &stop));
     }
 
     #[test]

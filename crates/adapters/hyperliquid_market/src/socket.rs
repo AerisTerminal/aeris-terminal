@@ -8,7 +8,7 @@
 
 use std::{
     io::{Read, Write},
-    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
+    net::{Shutdown, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -67,9 +67,8 @@ pub enum SocketEvent {
 impl HyperliquidSocket {
     /// Opens the feed socket with a bounded TCP/TLS handshake.
     ///
-    /// DNS resolution runs on the calling (provider-owned) thread, matching
-    /// the blocking HTTP history path; every TCP attempt carries its own
-    /// timeout and the overall `timeout` bounds the handshake.
+    /// DNS uses the shared bounded platform resolver; the overall deadline
+    /// covers resolution, TCP attempts, and the TLS/WebSocket handshake.
     ///
     /// # Errors
     ///
@@ -282,11 +281,9 @@ fn connect_tcp(
     if stop.load(Ordering::Acquire) {
         return Err("hyperliquid socket cancelled".to_string());
     }
-    let addresses: Vec<SocketAddr> = (host, port)
-        .to_socket_addrs()
-        .map_err(|_| "hyperliquid socket resolution failed".to_string())?
-        .take(16)
-        .collect();
+    let addresses =
+        asceify_platform_runtime::resolve_addresses(host, port, deadline, Some(stop))
+            .map_err(|error| format!("hyperliquid socket resolution failed: {:?}", error.kind()))?;
     if addresses.is_empty() {
         return Err("hyperliquid socket resolution failed".to_string());
     }

@@ -65,6 +65,7 @@ impl HistorySource for LiveHyperliquidHistory {
             .as_ref()
             .ok_or_else(|| "Hyperliquid instrument is not installed".to_string())?;
         let snapshot = crate::hyperliquid_history::fetch(
+            &mut self.0,
             &request.series,
             request.provider_generation.0.get(),
             installed,
@@ -90,6 +91,7 @@ impl ProviderRuntimeRegistry {
     ) -> Result<Self, String> {
         let wake = ProviderCoordinatorWake::new(completions.clone());
         let mut registry = Self {
+            wake: wake.clone(),
             records: BTreeMap::new(),
         };
         for spec in specs {
@@ -184,6 +186,7 @@ impl ProviderRuntimeRegistry {
             None
         };
         let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let catalog_events_tx = super::CatalogPublisher::new(catalog_events_tx, 0, wake.clone());
         let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_controls, realtime_controls_rx) =
@@ -264,6 +267,7 @@ impl ProviderRuntimeRegistry {
             None
         };
         let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let catalog_events_tx = super::CatalogPublisher::new(catalog_events_tx, 1, wake.clone());
         let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_controls, realtime_controls_rx) =
@@ -286,7 +290,6 @@ impl ProviderRuntimeRegistry {
                 catalog_controls_rx,
                 catalog_events_tx,
                 Arc::clone(&ws_generation),
-                wake.clone(),
             ) {
                 started.cancel_and_join();
                 return Err(error);
@@ -343,9 +346,8 @@ impl ProviderRuntimeRegistry {
         started: &mut StartedProviderRuntime,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
         controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidCatalogControl>,
-        events: mpsc::SyncSender<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
+        events: super::CatalogPublisher<crate::hyperliquid_realtime::HyperliquidCatalogEvent>,
         ws_generation: Arc<AtomicU64>,
-        wake: ProviderCoordinatorWake,
     ) -> Result<(), String> {
         let cancellation = Arc::clone(&started.cancellation);
         let lifecycle = Arc::clone(&started.lifecycle);
@@ -360,7 +362,6 @@ impl ProviderRuntimeRegistry {
                     &events,
                     &ws_generation,
                     &cancellation,
-                    &wake,
                     asceify_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
                 );
                 if !cancellation.load(Ordering::Acquire) {
@@ -484,7 +485,10 @@ impl ProviderRuntimeRegistry {
                 )
             })
             .collect();
-        ProviderDispatch { records }
+        ProviderDispatch {
+            records,
+            wake: Some(&self.wake),
+        }
     }
 
     pub(super) fn cancel_and_join(&mut self) -> Vec<String> {
@@ -629,10 +633,29 @@ impl ProviderDispatch<'_> {
             },
             _ => None,
         }?;
-        match &event {
+        self.observe_event(&event);
+        Some(event)
+    }
+
+    fn observe_event(&self, event: &ProviderRuntimeEvent) {
+        // Do not let retired queued events overwrite out-of-band health.
+        let retired = match event {
+            ProviderRuntimeEvent::RithmicRealtime(event) => self
+                .wake
+                .is_some_and(|wake| wake.overflowed(0, event.generation())),
+            ProviderRuntimeEvent::HyperliquidRealtime(event) => self
+                .wake
+                .is_some_and(|wake| wake.overflowed(1, event.generation())),
+            _ => false,
+        };
+        if retired {
+            return;
+        }
+        match event {
             ProviderRuntimeEvent::RithmicRealtime(event) => {
                 let (generation, reconnecting, transport_rtt_nanos) = match event {
-                    RithmicRealtimeEvent::Connecting(generation)
+                    RithmicRealtimeEvent::Failed(generation, _)
+                    | RithmicRealtimeEvent::Connecting(generation)
                     | RithmicRealtimeEvent::Recovering(generation, _)
                     | RithmicRealtimeEvent::Disconnected(generation, _) => {
                         (*generation, true, None)
@@ -675,7 +698,6 @@ impl ProviderDispatch<'_> {
             | ProviderRuntimeEvent::HyperliquidCatalog(_)
             | ProviderRuntimeEvent::HyperliquidDisplayDepth(_) => {}
         }
-        Some(event)
     }
 
     pub(super) fn dispatch_catalog(
@@ -840,7 +862,7 @@ impl MarketService {
     pub fn start() -> Result<Self, String> {
         Self::start_composed(vec![
             ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
-            ProviderRuntimeSpec::hyperliquid(Box::new(LiveHyperliquidHistory), true),
+            ProviderRuntimeSpec::hyperliquid(Box::<LiveHyperliquidHistory>::default(), true),
         ])
     }
 
@@ -1317,14 +1339,50 @@ impl MarketService {
         &self,
         build: impl FnOnce(Reply<T>) -> Result<Command, String>,
     ) -> Result<T, String> {
+        self.request_with_timeout(build, Duration::from_secs(5))
+    }
+
+    fn request_with_timeout<T>(
+        &self,
+        build: impl FnOnce(Reply<T>) -> Result<Command, String>,
+        timeout: Duration,
+    ) -> Result<T, String> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        let command = build(reply_tx)?;
-        self.commands
-            .send(command)
-            .map_err(|_| "market engine coordinator is unavailable".to_string())?;
-        reply_rx
-            .recv()
-            .map_err(|_| "market engine coordinator stopped before replying".to_string())?
+        let state = Arc::new(super::RequestState(std::sync::atomic::AtomicU8::new(0)));
+        let command = Command::Request(Box::new(build(reply_tx)?), Arc::clone(&state));
+        let deadline = Instant::now() + timeout;
+        let mut command = command;
+        loop {
+            match self.commands.try_send(command) {
+                Ok(()) => break,
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err("market engine coordinator is unavailable".to_string());
+                }
+                Err(TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "market coordinator is busy; request was not submitted".to_string()
+                        );
+                    }
+                    command = returned;
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        match reply_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("market engine coordinator stopped before replying".to_string())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if state.cancel() {
+                    Err("market coordinator deadline expired; request was cancelled before execution".to_string())
+                } else {
+                    // Never automatically retry a mutation whose execution has started.
+                    Err("market coordinator deadline expired after execution started; outcome is unknown".to_string())
+                }
+            }
+        }
     }
 }
 
@@ -1447,6 +1505,26 @@ mod tests {
                 state_factory: None,
             },
         }
+    }
+
+    #[test]
+    fn queued_request_deadline_cancels_execution_without_waiting_for_coordinator() {
+        let (commands, receiver) = mpsc::sync_channel(1);
+        let service = MarketService {
+            commands,
+            runtime: Arc::new(MarketRuntime {
+                shutdown: Arc::new(AtomicBool::new(false)),
+                active_provider_workers: Arc::new(Mutex::new(BTreeSet::new())),
+                workers: Mutex::new(None),
+            }),
+        };
+        let result =
+            service.request_with_timeout(|reply| Ok(Command::Status(reply)), Duration::ZERO);
+        assert!(result.unwrap_err().contains("cancelled before execution"));
+        let Command::Request(_, state) = receiver.try_recv().unwrap() else {
+            panic!("request envelope");
+        };
+        assert!(!state.start());
     }
 
     #[test]

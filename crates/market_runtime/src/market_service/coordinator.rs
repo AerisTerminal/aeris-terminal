@@ -1,7 +1,7 @@
 use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
     ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
-    DemandWaiter, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
+    DemandWaiter, Duration, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
     InstallProviderInstrument, Instant, LiveHistoryState, MAXIMUM_STUDIES,
     MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT,
     MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE, MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS,
@@ -108,7 +108,8 @@ fn run_coordinator(
             coordinator.begin_shutdown();
             return;
         }
-        let _ = drain_coordinator_events(&mut coordinator);
+        coordinator.studies.begin_turn();
+        let drained = drain_coordinator_events(&mut coordinator);
         coordinator.publish_rithmic_live();
         coordinator.publish_hyperliquid_live();
         coordinator.recover_overflowed_series_queues();
@@ -116,7 +117,11 @@ fn run_coordinator(
         coordinator.flush_hyperliquid_demand();
         coordinator.stop_realtime_if_idle();
         coordinator.retry_history();
-        match commands.recv_timeout(COORDINATOR_TICK) {
+        match commands.recv_timeout(if drained >= REALTIME_DRAIN_BUDGET {
+            Duration::ZERO
+        } else {
+            COORDINATOR_TICK
+        }) {
             Ok(command) if !shutdown.load(Ordering::Acquire) => {
                 coordinator.handle_command(command);
             }
@@ -132,21 +137,55 @@ fn run_coordinator(
 }
 
 fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
+    if let Some(wake) = coordinator.providers.wake {
+        for (index, provider) in [(0, "rithmic"), (1, "hyperliquid")] {
+            if wake.catalog_overflow[index].swap(false, Ordering::AcqRel) {
+                coordinator.reject_overflowed_catalog(provider);
+            }
+        }
+    }
     let mut drained = 0;
-    for lane in 0..5 {
-        for _ in 0..REALTIME_DRAIN_BUDGET {
+    let started = Instant::now();
+    let first_lane = coordinator
+        .providers
+        .wake
+        .map_or(0, |wake| wake.drain_cursor.load(Ordering::Relaxed));
+    'drain: for _ in 0..REALTIME_DRAIN_BUDGET {
+        for offset in 0..5 {
+            let lane = (first_lane + offset) % 5;
+            if let Some(wake) = coordinator.providers.wake {
+                wake.drain_cursor.store((lane + 1) % 5, Ordering::Relaxed);
+                if started.elapsed() >= Duration::from_millis(4) {
+                    wake.notify();
+                    break 'drain;
+                }
+            }
             let Some(event) = coordinator.providers.take_event(lane) else {
-                break;
+                continue;
             };
             drained += 1;
             match event {
                 ProviderRuntimeEvent::RithmicRealtime(event) => {
+                    if coordinator
+                        .providers
+                        .wake
+                        .is_some_and(|wake| wake.overflowed(0, event.generation()))
+                    {
+                        continue;
+                    }
                     coordinator.handle_rithmic_realtime(event);
                 }
                 ProviderRuntimeEvent::RithmicCatalog(event) => {
                     coordinator.handle_rithmic_catalog(event);
                 }
                 ProviderRuntimeEvent::HyperliquidRealtime(event) => {
+                    if coordinator
+                        .providers
+                        .wake
+                        .is_some_and(|wake| wake.overflowed(1, event.generation()))
+                    {
+                        continue;
+                    }
                     coordinator.handle_hyperliquid_realtime(event);
                 }
                 ProviderRuntimeEvent::HyperliquidDisplayDepth(event) => {
@@ -156,6 +195,22 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                     coordinator.handle_hyperliquid_catalog(event);
                 }
             }
+        }
+    }
+    if let Some(wake) = coordinator.providers.wake {
+        let rithmic = wake.pending_overflow[0].swap(0, Ordering::AcqRel);
+        let hyperliquid = wake.pending_overflow[1].swap(0, Ordering::AcqRel);
+        if rithmic != 0 {
+            coordinator.rithmic_recovering(
+                rithmic,
+                "Local market event queue overflow; repairing continuity",
+            );
+        }
+        if hyperliquid != 0 {
+            coordinator.hyperliquid_recovering(
+                hyperliquid,
+                "Local market event queue overflow; repairing continuity",
+            );
         }
     }
     drained
@@ -322,7 +377,16 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_command(&mut self, command: Command) {
         match command {
-            Command::ProviderWake => (),
+            Command::Request(command, state) => {
+                if state.start() {
+                    self.handle_command(*command);
+                }
+            }
+            Command::ProviderWake => {
+                if let Some(wake) = self.providers.wake {
+                    wake.pending.store(false, Ordering::Release);
+                }
+            }
             Command::HistoryCompleted(series, generation, range, result) => {
                 self.history_completed(&series, generation, range, result);
             }
@@ -432,7 +496,8 @@ impl Coordinator<'_> {
             Command::Poll(client_id, consumer_id, reply) => {
                 self.handle_poll(client_id, consumer_id, &reply);
             }
-            Command::HistoryCompleted(..)
+            Command::Request(..)
+            | Command::HistoryCompleted(..)
             | Command::ProviderWake
             | Command::Status(..)
             | Command::Attach(..)
@@ -974,6 +1039,7 @@ impl Coordinator<'_> {
         let metrics = self.engine.metrics();
         MarketServiceStatus {
             connected_desktop_clients: self.attached.len(),
+            study_execution_failed: self.studies.execution_failed(),
             providers: ["rithmic", "hyperliquid"]
                 .into_iter()
                 .filter_map(|provider| self.provider_state(provider))
@@ -1308,6 +1374,7 @@ mod tests {
                     .expect("total study state bound"),
             }),
             providers: ProviderDispatch {
+                wake: None,
                 records: BTreeMap::new(),
             },
             attached: BTreeSet::new(),
@@ -1352,6 +1419,41 @@ mod tests {
                 true,
             )
             .expect("consumer registers");
+    }
+
+    #[test]
+    fn exhausted_current_history_keeps_one_cooldown_recovery_ticket() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        for _ in 0..super::super::MAXIMUM_HISTORY_RETRIES {
+            assert!(coordinator.schedule_history_retry(&selected, generation, None, "transient"));
+        }
+        assert!(!coordinator.schedule_history_retry(&selected, generation, None, "transient"));
+        let ticket = coordinator
+            .history_retries
+            .get(&(selected, generation))
+            .unwrap();
+        assert_eq!(ticket.1, 0);
+        assert!(ticket.2.is_none());
+        assert!(ticket.0 > Instant::now());
+        assert_eq!(coordinator.history_retries.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_request_cannot_mutate_the_coordinator() {
+        let mut coordinator = coordinator();
+        let state = Arc::new(super::super::RequestState(
+            std::sync::atomic::AtomicU8::new(0),
+        ));
+        assert!(state.cancel());
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_command(Command::Request(
+            Box::new(Command::Attach(client(99), reply)),
+            state,
+        ));
+        assert!(!coordinator.attached.contains(&client(99)));
+        assert!(received.try_recv().is_err());
     }
 
     #[test]

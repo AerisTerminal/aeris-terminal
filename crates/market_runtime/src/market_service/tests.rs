@@ -173,3 +173,35 @@ fn initial_history_is_small_and_viewport_fetches_are_bounded() {
         MAXIMUM_HISTORY_BARS_PER_REQUEST
     );
 }
+
+#[test]
+fn catalog_overflow_remains_observable_when_command_queue_is_full() {
+    let (commands, _command_receiver) = mpsc::sync_channel(1);
+    commands
+        .try_send(Command::ProviderWake)
+        .expect("fill command queue");
+    let wake = ProviderCoordinatorWake::new(commands);
+    let (events, receiver) = mpsc::sync_channel(1);
+    let publisher = CatalogPublisher::new(events, 1, wake.clone());
+    publisher.send(1).expect("first catalog event");
+    assert!(publisher.send(2).is_err());
+    assert!(wake.catalog_overflow[1].swap(false, Ordering::AcqRel));
+    assert!(!wake.catalog_overflow[0].load(Ordering::Acquire));
+    assert_eq!(receiver.try_recv().expect("retained event"), 1);
+}
+
+#[test]
+fn realtime_overflow_fences_retired_generations_even_when_wake_queue_is_full() {
+    let (commands, _command_receiver) = mpsc::sync_channel(1);
+    commands
+        .try_send(Command::ProviderWake)
+        .expect("fill command queue");
+    let wake = ProviderCoordinatorWake::new(commands);
+    wake.report_overflow(1, 4);
+    wake.report_overflow(1, 2);
+    assert_eq!(wake.pending_overflow[1].load(Ordering::Acquire), 4);
+    assert!(wake.overflowed(1, 3));
+    assert!(wake.overflowed(1, 4));
+    assert!(!wake.overflowed(1, 5));
+    assert!(!wake.overflowed(0, 4));
+}

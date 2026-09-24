@@ -67,6 +67,9 @@ enum SessionExit {
 }
 
 struct SessionState {
+    pending: BTreeMap<String, HyperliquidDisplayBookSnapshot>,
+    last_published: Option<String>,
+    pending_ping: Option<Instant>,
     active: BTreeMap<String, String>,
     instruments: BTreeMap<String, HyperliquidDisplayBookDemand>,
     sequences: BTreeMap<String, u64>,
@@ -155,6 +158,9 @@ fn run_session(
 ) -> SessionExit {
     let started = Instant::now();
     let mut state = SessionState {
+        pending: BTreeMap::new(),
+        last_published: None,
+        pending_ping: None,
         active: BTreeMap::new(),
         instruments: BTreeMap::new(),
         sequences: BTreeMap::new(),
@@ -178,8 +184,15 @@ fn run_session(
         if changed && reconcile_subscriptions(socket, demand, &mut state).is_err() {
             return SessionExit::Reconnect;
         }
+        if flush_pending(&mut state.pending, &mut state.last_published, events, wake).is_err() {
+            return SessionExit::Closed;
+        }
         let now = Instant::now();
-        if now.saturating_duration_since(state.last_inbound) >= MESSAGE_SILENCE_TIMEOUT {
+        if now.saturating_duration_since(state.last_inbound) >= MESSAGE_SILENCE_TIMEOUT
+            || state
+                .pending_ping
+                .is_some_and(|sent| now.saturating_duration_since(sent) >= PING_INTERVAL)
+        {
             return SessionExit::Reconnect;
         }
         if now.saturating_duration_since(state.last_ping) >= PING_INTERVAL {
@@ -187,12 +200,12 @@ fn run_session(
                 return SessionExit::Reconnect;
             }
             state.last_ping = now;
+            state.pending_ping = Some(now);
         }
         match socket.read_event(now + READ_TIMEOUT) {
             Ok(SocketEvent::Text(text)) => {
                 state.last_inbound = Instant::now();
-                if handle_frame(&text, display_generation, &mut state, events, stop, wake).is_err()
-                {
+                if handle_frame(&text, display_generation, &mut state).is_err() {
                     state.decode_failures = state.decode_failures.saturating_add(1);
                     if state.decode_failures >= MAXIMUM_DECODE_FAILURES_PER_CONNECTION {
                         return SessionExit::Reconnect;
@@ -265,18 +278,14 @@ fn reconcile_subscriptions(
             state.active.insert(coin.clone(), frame.clone());
         }
     }
+    state
+        .pending
+        .retain(|coin, _| instruments.contains_key(coin));
     state.instruments = instruments;
     Ok(())
 }
 
-fn handle_frame(
-    text: &str,
-    display_generation: u64,
-    state: &mut SessionState,
-    events: &SyncSender<HyperliquidDisplayDepthEvent>,
-    stop: &AtomicBool,
-    wake: &ProviderCoordinatorWake,
-) -> Result<(), ()> {
+fn handle_frame(text: &str, display_generation: u64, state: &mut SessionState) -> Result<(), ()> {
     match parse_ws_frame(text).map_err(|_| ())? {
         WsClientEvent::Book { coin, book } => {
             let mapping = state.instruments.get(&coin).ok_or(())?;
@@ -293,46 +302,67 @@ fn handle_frame(
             .map_err(|_| ())?;
             state
                 .sequences
-                .insert(coin, sequence.checked_add(1).ok_or(())?);
-            if emit(
-                events,
-                HyperliquidDisplayDepthEvent::Snapshot(HyperliquidDisplayBookSnapshot {
+                .insert(coin.clone(), sequence.checked_add(1).ok_or(())?);
+            state.pending.insert(
+                coin,
+                HyperliquidDisplayBookSnapshot {
                     provider_generation: mapping.provider_generation,
                     display_generation,
                     snapshot: decoded.snapshot,
-                }),
-                stop,
-                wake,
-            ) {
-                return Err(());
-            }
+                },
+            );
+            Ok(())
+        }
+        WsClientEvent::Pong => {
+            state.pending_ping = None;
             Ok(())
         }
         _ => Ok(()),
     }
 }
 
-fn emit<T>(
-    events: &SyncSender<T>,
-    mut event: T,
+fn flush_pending(
+    pending: &mut BTreeMap<String, HyperliquidDisplayBookSnapshot>,
+    last_published: &mut Option<String>,
+    events: &SyncSender<HyperliquidDisplayDepthEvent>,
+    wake: &ProviderCoordinatorWake,
+) -> Result<(), ()> {
+    while let Some(coin) = next_pending_coin(pending, last_published.as_deref()) {
+        let Some(snapshot) = pending.remove(&coin) else {
+            break;
+        };
+        match events.try_send(HyperliquidDisplayDepthEvent::Snapshot(snapshot)) {
+            Ok(()) => {
+                *last_published = Some(coin);
+                wake.notify();
+            }
+            Err(TrySendError::Full(HyperliquidDisplayDepthEvent::Snapshot(snapshot))) => {
+                pending.insert(coin, snapshot);
+                break;
+            }
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(())
+}
+
+fn emit(
+    events: &SyncSender<HyperliquidDisplayDepthEvent>,
+    event: HyperliquidDisplayDepthEvent,
     stop: &AtomicBool,
     wake: &ProviderCoordinatorWake,
 ) -> bool {
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return true;
+    if stop.load(Ordering::Acquire) {
+        return true;
+    }
+    match events.try_send(event) {
+        Ok(()) => {
+            wake.notify();
+            false
         }
-        match events.try_send(event) {
-            Ok(()) => {
-                wake.notify();
-                return false;
-            }
-            Err(TrySendError::Disconnected(_)) => return true,
-            Err(TrySendError::Full(returned)) => {
-                event = returned;
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
+        Err(TrySendError::Disconnected(_)) => true,
+        // A snapshot carries the reset generation when this control is coalesced.
+        Err(TrySendError::Full(_)) => false,
     }
 }
 
@@ -355,4 +385,31 @@ fn unix_nanos_now() -> i64 {
         .ok()
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
         .unwrap_or(i64::MAX)
+}
+
+// Resume after the last successful publication so a busy alphabetically first
+// instrument cannot starve another instrument when the queue has one free slot.
+fn next_pending_coin<T>(pending: &BTreeMap<String, T>, last: Option<&str>) -> Option<String> {
+    last.and_then(|last| pending.keys().find(|coin| coin.as_str() > last))
+        .or_else(|| pending.keys().next())
+        .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_books_rotate_past_continuously_updated_first_instrument() {
+        let pending = BTreeMap::from([("BTC".into(), 1u8), ("ETH".into(), 2u8)]);
+        assert_eq!(next_pending_coin(&pending, None).as_deref(), Some("BTC"));
+        assert_eq!(
+            next_pending_coin(&pending, Some("BTC")).as_deref(),
+            Some("ETH")
+        );
+        assert_eq!(
+            next_pending_coin(&pending, Some("ETH")).as_deref(),
+            Some("BTC")
+        );
+    }
 }

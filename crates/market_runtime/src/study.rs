@@ -24,6 +24,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+mod execution;
+
 /// Maximum UTF-8 bytes accepted in one stable study identifier.
 pub const MAXIMUM_STUDY_IDENTIFIER_BYTES: usize = 128;
 /// Maximum typed settings declared by one study.
@@ -264,8 +266,8 @@ impl<'a> StudyQuoteView<'a> {
 
 /// Borrowed canonical depth image for one instrument.
 ///
-/// Level iteration reads the existing `OrderBook` maps directly. No depth
-/// vector is cloned merely to execute a study.
+/// Level iteration reads an immutable book image. Worker execution owns a
+/// bounded snapshot so calculations never borrow mutable canonical state.
 #[derive(Clone, Copy)]
 pub struct StudyDepthView<'a> {
     book: &'a OrderBook,
@@ -2288,6 +2290,7 @@ struct StudyMarketLease {
 /// Registration order is dependency order: a study may reference only outputs that already exist.
 /// That rule makes cycles impossible without maintaining a second graph authority.
 pub struct StudyRuntime {
+    executor: OnceLock<Result<execution::Executor, String>>,
     config: StudyRuntimeConfig,
     studies: BTreeMap<StudyInstanceId, StudyNode>,
     market_dependents: BTreeMap<BarSeriesKey, BTreeSet<StudyInstanceId>>,
@@ -2362,6 +2365,7 @@ impl StudyRuntime {
     #[must_use]
     pub fn new(config: StudyRuntimeConfig) -> Self {
         Self {
+            executor: OnceLock::new(),
             config,
             studies: BTreeMap::new(),
             market_dependents: BTreeMap::new(),
@@ -2375,6 +2379,32 @@ impl StudyRuntime {
             #[cfg(test)]
             last_output_preparation_work_rows: 0,
         }
+    }
+
+    pub(crate) fn begin_turn(&self) {
+        if let Ok(executor) = self.executor.get_or_init(execution::Executor::start) {
+            executor.begin_turn();
+        }
+    }
+
+    pub(crate) fn execution_failed(&self) -> bool {
+        self.executor.get().is_some_and(|executor| match executor {
+            Ok(executor) => executor.is_failed(),
+            Err(_) => true,
+        })
+    }
+
+    fn ensure_execution_available(
+        &self,
+        study_id: StudyInstanceId,
+    ) -> Result<(), StudyRuntimeError> {
+        if self.execution_failed() {
+            return Err(StudyRuntimeError::ExecutionRejected {
+                study_id,
+                detail: "study execution disabled after worker deadline; restart required".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Returns the number of registered study instances.
@@ -2877,6 +2907,7 @@ impl StudyRuntime {
     where
         F: FnMut(&StudyMarketInput) -> Option<StudyLiveMarketData<'a>>,
     {
+        self.ensure_execution_available(study_id)?;
         let (definition, settings, program, previous_state_bytes) = {
             let node = self
                 .studies
@@ -3139,32 +3170,22 @@ impl StudyRuntime {
             .into_iter()
             .map(|(output, _)| output)
             .collect::<Vec<_>>();
-        let mut context = StudyExecutionContext {
-            settings: calculation.settings,
-            inputs: calculation.inputs,
-            live_inputs: calculation.live_inputs,
-            timeline: calculation.timeline,
-            dirty: calculation.dirty,
-            outputs: &mut outputs,
-            state: state.as_mut(),
-        };
-        match catch_unwind(AssertUnwindSafe(|| {
-            (calculation.program.calculate)(&mut context)
-        })) {
-            Ok(Ok(())) => {}
-            Ok(Err(detail)) => {
-                return Err(StudyRuntimeError::ExecutionRejected {
-                    study_id: calculation.study_id,
-                    detail: bounded_execution_detail(detail),
-                });
-            }
-            Err(_) => {
-                return Err(StudyRuntimeError::ExecutionRejected {
-                    study_id: calculation.study_id,
-                    detail: "native study panicked".to_string(),
-                });
-            }
-        }
+        let executor = self
+            .executor
+            .get_or_init(execution::Executor::start)
+            .as_ref()
+            .map_err(|detail| StudyRuntimeError::ExecutionRejected {
+                study_id: calculation.study_id,
+                detail: detail.clone(),
+            })?;
+        let result = executor
+            .calculate(calculation, outputs, state.take())
+            .map_err(|detail| StudyRuntimeError::ExecutionRejected {
+                study_id: calculation.study_id,
+                detail,
+            })?;
+        outputs = result.0;
+        *state = result.1;
         Ok(CalculatedStudyOutputs {
             outputs,
             #[cfg(test)]
@@ -6389,6 +6410,41 @@ mod tests {
                 Some(22_000.0),
             ]
         );
+    }
+
+    #[test]
+    fn slow_native_calculation_cannot_commit_late_or_start_replacement_workers() {
+        fn delayed(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            calculate_scaled_close(context)
+        }
+        let mut fixture = native_chain(2);
+        fixture
+            .runtime
+            .execute_ready(&fixture.engine, fixture.producer)
+            .unwrap();
+        let output = StudyOutputId {
+            study_id: fixture.producer,
+            output_index: 0,
+        };
+        let committed = fixture.runtime.output_series(output).unwrap().clone();
+        fixture
+            .runtime
+            .studies
+            .get_mut(&fixture.producer)
+            .unwrap()
+            .program = Some(NativeStudyProgram::stateless(delayed));
+        assert!(
+            matches!(fixture.runtime.execute_ready(&fixture.engine, fixture.producer),
+            Err(StudyRuntimeError::ExecutionRejected { detail, .. }) if detail.contains("deadline"))
+        );
+        // A subsequent call rejects admission while the original worker is busy.
+        assert!(
+            matches!(fixture.runtime.execute_ready(&fixture.engine, fixture.producer),
+            Err(StudyRuntimeError::ExecutionRejected { detail, .. }) if detail.contains("disabled"))
+        );
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        assert_eq!(fixture.runtime.output_series(output), Some(&committed));
     }
 
     #[test]

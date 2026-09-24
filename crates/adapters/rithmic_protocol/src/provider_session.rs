@@ -1564,16 +1564,37 @@ impl RithmicRetryScheduler {
     /// # Errors
     ///
     /// Returns a shared runtime state, vault, or driver error.
-    pub fn retry_due<V: CredentialVault>(
+    pub fn retry_due<V: CredentialVault, D: ProviderSessionDriver>(
         &mut self,
-        worker: &mut RithmicProviderRuntime<V, RithmicProviderDriver>,
+        worker: &mut RithmicProviderRuntime<V, D>,
         now: Instant,
     ) -> Result<Option<SessionGeneration>, RithmicProviderRuntimeError> {
         let state = worker.state()?;
         if !self.take_due(state, now) {
             return Ok(None);
         }
-        worker.connect(ConnectTrigger::Retry).map(Some)
+        match worker.connect(ConnectTrigger::Retry) {
+            Ok(generation) => Ok(Some(generation)),
+            Err(error) => {
+                self.record_start_failure(worker.state()?, now);
+                Err(error)
+            }
+        }
+    }
+
+    fn record_start_failure(&mut self, state: RithmicProviderRuntimeState, now: Instant) {
+        if let RithmicProviderRuntimeState::RecoveryRequired {
+            generation: Some(generation),
+            reason: RecoveryReason::ProviderFailure,
+        } = state
+        {
+            self.record_invalid(
+                generation,
+                ProviderInvalidationReason::Transport,
+                RetryDisposition::Transient,
+                now,
+            );
+        }
     }
 
     fn take_due(&mut self, state: RithmicProviderRuntimeState, now: Instant) -> bool {
@@ -1587,7 +1608,7 @@ impl RithmicRetryScheduler {
             state,
             RithmicProviderRuntimeState::RecoveryRequired {
                 generation: Some(generation),
-                reason: RecoveryReason::TransportInvalid | RecoveryReason::SemanticQueueOverflow,
+                reason: RecoveryReason::TransportInvalid | RecoveryReason::SemanticQueueOverflow | RecoveryReason::ProviderFailure,
             } if generation == ticket.failed_generation
         );
         self.ticket = None;
@@ -3560,6 +3581,35 @@ mod tests {
         generation_driver
             .stop_session(generation(7))
             .expect("finished session is joined");
+    }
+
+    #[test]
+    fn synchronous_retry_start_failure_rearms_exact_new_generation() {
+        let mut retries = RithmicRetryScheduler::default();
+        let now = Instant::now();
+        let failed = RithmicProviderRuntimeState::RecoveryRequired {
+            generation: Some(generation(11)),
+            reason: RecoveryReason::ProviderFailure,
+        };
+        retries.record_start_failure(failed, now);
+        let ticket = retries
+            .ticket()
+            .expect("failed startup retains retry intent");
+        assert_eq!(ticket.failed_generation, generation(11));
+        assert!(!retries.take_due(failed, now));
+        assert!(retries.take_due(failed, ticket.due_at));
+        assert!(retries.ticket().is_none());
+        retries.record_start_failure(
+            RithmicProviderRuntimeState::RecoveryRequired {
+                generation: None,
+                reason: RecoveryReason::CredentialUnavailable,
+            },
+            now,
+        );
+        assert!(
+            retries.ticket().is_none(),
+            "credentials require user action"
+        );
     }
 
     #[test]

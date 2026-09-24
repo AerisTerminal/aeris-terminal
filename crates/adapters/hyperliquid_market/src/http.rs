@@ -49,14 +49,17 @@ pub fn post_info(
     if raw.len() > 64 * 1024 {
         return Err("hyperliquid info request is too large".to_string());
     }
-    // Catalog and history workers share a bounded keep-alive pool.
-    let agent = AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .max_idle_connections(2)
-            .max_idle_connections_per_host(2)
-            .build()
-            .into()
-    });
+    // Catalog requests use the same bounded DNS/transport implementation.
+    // This shared agent has no mutable request token; history owns its own client.
+    let agent = AGENT.get_or_init(|| crate::HyperliquidHttpClient::default().agent);
+    post_with_agent(agent, raw, config)
+}
+
+fn post_with_agent(
+    agent: &ureq::Agent,
+    raw: String,
+    config: HyperliquidHttpConfig,
+) -> Result<Vec<u8>, String> {
     let mut response = agent
         .post(HYPERLIQUID_INFO_URL)
         .config()
@@ -277,38 +280,59 @@ pub struct CandleSnapshotRequest<'a> {
 pub fn fetch_candle_snapshot(
     request: &CandleSnapshotRequest<'_>,
 ) -> Result<HyperliquidCandlePage, String> {
-    if request.wire_coin.trim().is_empty()
-        || request.start_millis < 0
-        || request.end_millis <= request.start_millis
-    {
-        return Err("hyperliquid candle request is invalid".to_string());
-    }
-    let interval = hyperliquid_interval_for_period(request.period)?;
-    let bytes = post_info(
-        &serde_json::json!({
-            "type": "candleSnapshot",
-            "req": {
-                "coin": request.wire_coin,
-                "interval": interval,
-                "startTime": request.start_millis,
-                "endTime": request.end_millis,
-            },
-        }),
-        request.config,
-    )?;
-    // Decode from the raw response text: candle decimals never pass
-    // through `f64` on this path either.
-    let text = String::from_utf8(bytes)
-        .map_err(|_| "hyperliquid info response is malformed".to_string())?;
-    let payload = serde_json::value::RawValue::from_string(text)
-        .map_err(|_| "hyperliquid info response is malformed".to_string())?;
-    decode_candle_page(
-        &payload,
-        request.period,
-        request.price_scale,
-        request.quantity_scale,
-        request.now_millis,
+    crate::HyperliquidHttpClient::default().fetch_candle_snapshot(
+        request,
+        &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
+}
+
+impl crate::HyperliquidHttpClient {
+    /// Fetches a bounded candle page with cancellation through DNS, TLS and HTTP I/O.
+    ///
+    /// # Errors
+    /// Returns transport, cancellation, or validated provider payload errors.
+    pub fn fetch_candle_snapshot(
+        &mut self,
+        request: &CandleSnapshotRequest<'_>,
+        stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<HyperliquidCandlePage, String> {
+        self.set_cancellation(stop);
+        if request.wire_coin.trim().is_empty()
+            || request.wire_coin.len() > 96
+            || request.start_millis < 0
+            || request.end_millis <= request.start_millis
+        {
+            return Err("hyperliquid candle request is invalid".to_string());
+        }
+        let interval = hyperliquid_interval_for_period(request.period)?;
+        let bytes = post_with_agent(
+            &self.agent,
+            serde_json::json!({
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": request.wire_coin,
+                    "interval": interval,
+                    "startTime": request.start_millis,
+                    "endTime": request.end_millis,
+                },
+            })
+            .to_string(),
+            request.config,
+        )?;
+        // Decode from the raw response text: candle decimals never pass
+        // through `f64` on this path either.
+        let text = String::from_utf8(bytes)
+            .map_err(|_| "hyperliquid info response is malformed".to_string())?;
+        let payload = serde_json::value::RawValue::from_string(text)
+            .map_err(|_| "hyperliquid info response is malformed".to_string())?;
+        decode_candle_page(
+            &payload,
+            request.period,
+            request.price_scale,
+            request.quantity_scale,
+            request.now_millis,
+        )
+    }
 }
 
 #[cfg(test)]

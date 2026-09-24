@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     thread,
     time::{Duration, Instant},
 };
@@ -25,12 +25,13 @@ use asceify_rithmic_protocol_adapter::{
     RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
     RithmicInstrumentSelection, RithmicProviderCommandError, RithmicProviderConfig,
     RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
-    RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeState,
-    RithmicReadOnlySubscription, RithmicRetryScheduler, RithmicSessionLimits, RithmicSymbolSearch,
-    SearchPattern, SessionGeneration, apply_rithmic_environment_event, try_recv_rithmic_event,
+    RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeError,
+    RithmicProviderRuntimeState, RithmicReadOnlySubscription, RithmicRetryScheduler,
+    RithmicSessionLimits, RithmicSymbolSearch, SearchPattern, SessionGeneration,
+    apply_rithmic_environment_event, try_recv_rithmic_event,
 };
 
-use crate::market_service::ProviderCoordinatorWake;
+use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
 const CALLBACK_CAPACITY: usize = 256;
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
@@ -94,6 +95,7 @@ pub(crate) enum RithmicCatalogEvent {
 
 pub(crate) enum RithmicRealtimeEvent {
     Connecting(u64),
+    Failed(u64, RithmicProviderRuntimeError),
     Connected(u64),
     Trade(u64, MarketTrade),
     Quote(u64, TopOfBookQuote),
@@ -103,12 +105,28 @@ pub(crate) enum RithmicRealtimeEvent {
     Disconnected(u64, Option<ProviderInvalidationReason>),
 }
 
+impl RithmicRealtimeEvent {
+    pub(crate) fn generation(&self) -> u64 {
+        match self {
+            RithmicRealtimeEvent::Failed(g, _)
+            | RithmicRealtimeEvent::Connecting(g)
+            | RithmicRealtimeEvent::Connected(g)
+            | RithmicRealtimeEvent::Recovering(g, _)
+            | RithmicRealtimeEvent::Disconnected(g, _)
+            | RithmicRealtimeEvent::Heartbeat(g, _)
+            | RithmicRealtimeEvent::Trade(g, _)
+            | RithmicRealtimeEvent::Quote(g, _)
+            | RithmicRealtimeEvent::Depth(g, _) => *g,
+        }
+    }
+}
+
 type Runtime = RithmicProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
 
 #[derive(Clone, Copy)]
 struct ProviderChannels<'a> {
     catalog_controls: &'a Receiver<RithmicCatalogControl>,
-    catalog_publications: &'a SyncSender<RithmicCatalogEvent>,
+    catalog_publications: &'a CatalogPublisher<RithmicCatalogEvent>,
     realtime_controls: &'a Receiver<RithmicRealtimeControl>,
     realtime_publications: &'a SyncSender<RithmicRealtimeEvent>,
     coordinator_wake: &'a ProviderCoordinatorWake,
@@ -117,8 +135,14 @@ struct ProviderChannels<'a> {
 
 impl ProviderChannels<'_> {
     fn publish_realtime(&self, event: RithmicRealtimeEvent) {
-        if self.realtime_publications.send(event).is_ok() {
-            self.coordinator_wake.notify();
+        let generation = event.generation();
+        if self.coordinator_wake.overflowed(0, generation) {
+            return;
+        }
+        match self.realtime_publications.try_send(event) {
+            Ok(()) => self.coordinator_wake.notify(),
+            Err(TrySendError::Full(_)) => self.coordinator_wake.report_overflow(0, generation),
+            Err(TrySendError::Disconnected(_)) => {}
         }
     }
 
@@ -350,10 +374,23 @@ fn run_catalog_session(
             );
             return retry_catalog_session(&mut runtime, generation);
         }
-        if retries
-            .retry_due(&mut runtime, Instant::now())
-            .is_ok_and(|started| started.is_some())
-        {
+        let restarted = match retries.retry_due(&mut runtime, Instant::now()) {
+            Ok(started) => started.is_some(),
+            Err(error) => {
+                eprintln!("Asceify Rithmic reconnect start failed: {error}");
+                if retries.ticket().is_none() {
+                    reject_pending_catalog(
+                        channels.catalog_publications,
+                        generation,
+                        &mut searches,
+                        &mut selections,
+                    );
+                    return retry_catalog_session(&mut runtime, generation);
+                }
+                false
+            }
+        };
+        if restarted {
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
@@ -406,7 +443,7 @@ fn catalog_selection_subscription(realtime: bool) -> Option<RithmicReadOnlySubsc
 fn dispatch_catalog_control(
     runtime: &Runtime,
     events: &RithmicProviderEvents,
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
     searches: &mut BTreeMap<usize, u64>,
     selections: &mut BTreeMap<usize, u64>,
@@ -502,7 +539,7 @@ fn dispatch_catalog_control(
 }
 
 fn publish_catalog_callback(
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
     event: AdapterCatalogEvent,
     searches: &mut BTreeMap<usize, u64>,
@@ -611,7 +648,7 @@ fn protocol_instrument(
 }
 
 fn reject_catalog_control(
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     control: RithmicCatalogControl,
     provider_generation: Option<u64>,
 ) {
@@ -633,7 +670,7 @@ fn reject_catalog_control(
 }
 
 fn reject_catalog_generation(
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     consumer_id: u64,
     provider_generation: Option<u64>,
     command_generation: u64,
@@ -655,7 +692,7 @@ fn reject_catalog_generation(
 /// rejection when their generation is retired. Callers restart the session
 /// afterwards so re-demand lands on a generation that can actually connect.
 fn reject_pending_catalog(
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     provider_generation: u64,
     searches: &mut BTreeMap<usize, u64>,
     selections: &mut BTreeMap<usize, u64>,
@@ -686,7 +723,7 @@ fn reject_pending_catalog(
 /// longer receive a callback from it. Consumers can then re-demand on the
 /// fresh generation instead of waiting for their outer deadline.
 fn retire_pending_catalog_generation(
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     generation: u64,
     searches: &mut BTreeMap<usize, u64>,
     selections: &mut BTreeMap<usize, u64>,
@@ -738,7 +775,7 @@ fn usize_generation(generation: u64) -> Option<NonZeroUsize> {
 
 pub(crate) fn run(
     catalog_controls: &Receiver<RithmicCatalogControl>,
-    catalog_publications: &SyncSender<RithmicCatalogEvent>,
+    catalog_publications: &CatalogPublisher<RithmicCatalogEvent>,
     realtime_controls: &Receiver<RithmicRealtimeControl>,
     realtime_publications: &SyncSender<RithmicRealtimeEvent>,
     coordinator_wake: &ProviderCoordinatorWake,
@@ -937,7 +974,7 @@ fn handle_idle_catalog(
 
 const fn provider_channels<'a>(
     catalog_controls: &'a Receiver<RithmicCatalogControl>,
-    catalog_publications: &'a SyncSender<RithmicCatalogEvent>,
+    catalog_publications: &'a CatalogPublisher<RithmicCatalogEvent>,
     realtime_controls: &'a Receiver<RithmicRealtimeControl>,
     realtime_publications: &'a SyncSender<RithmicRealtimeEvent>,
     coordinator_wake: &'a ProviderCoordinatorWake,
@@ -995,7 +1032,7 @@ const fn reconnect_backoff_delay(transport_recovery: bool, configured: Duration)
 }
 
 fn publish_live_catalog_selection(
-    publications: &SyncSender<RithmicCatalogEvent>,
+    publications: &CatalogPublisher<RithmicCatalogEvent>,
     coordinator_wake: Option<&ProviderCoordinatorWake>,
     selection: RithmicCatalogEvent,
 ) {
@@ -1137,6 +1174,14 @@ fn run_demand(
         channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, None));
     }
     loop {
+        if channels.coordinator_wake.overflowed(0, generation) {
+            let _ = runtime.stop();
+            return SelectionExit::Replace {
+                demand,
+                generation,
+                transport_recovery: true,
+            };
+        }
         match poll_environment(
             environment,
             environment_state,
@@ -1221,10 +1266,25 @@ fn run_demand(
                 }
             }
         }
-        if retries
-            .retry_due(&mut runtime, Instant::now())
-            .is_ok_and(|started| started.is_some())
-        {
+        let restarted = match retries.retry_due(&mut runtime, Instant::now()) {
+            Ok(started) => started.is_some(),
+            Err(error) => {
+                eprintln!("Asceify Rithmic reconnect start failed: {error}");
+                if retries.ticket().is_none() {
+                    channels.publish_realtime(RithmicRealtimeEvent::Failed(generation, error));
+                    let _ = runtime.stop();
+                    return wait_for_replacement(
+                        channels.realtime_controls,
+                        environment,
+                        environment_state,
+                        generation,
+                        false,
+                    );
+                }
+                false
+            }
+        };
+        if restarted {
             generation = retire_pending_catalog_generation(
                 channels.catalog_publications,
                 generation,
@@ -1250,7 +1310,9 @@ fn drain_live_events(
 ) -> Option<SelectionExit> {
     let (environment, environment_state) = environment;
     let mut pending_depth = None;
-    while events.has_ready() {
+    for _ in (0..CALLBACK_CAPACITY)
+        .take_while(|_| events.has_ready() && !channels.coordinator_wake.overflowed(0, generation))
+    {
         match try_recv_rithmic_event(runtime, events, retries, Instant::now()) {
             Ok(Some(AppliedRithmicEvent::Semantic(event))) => match event {
                 ProviderSessionEvent::InstrumentsDiscovered {
@@ -1729,6 +1791,11 @@ mod tests {
     #[test]
     fn resolved_selection_is_deferred_to_the_session_owner() {
         let (publications, published) = mpsc::sync_channel(1);
+        let publications = super::CatalogPublisher::new(
+            publications,
+            0,
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
         let mut searches = BTreeMap::new();
         let mut selections = BTreeMap::from([(1, 41)]);
         let callback = AdapterCatalogEvent::selection_installed(
@@ -1777,6 +1844,11 @@ mod tests {
     #[test]
     fn unconfirmed_catalog_close_rejects_the_deferred_selection() {
         let (publications, published) = mpsc::sync_channel(1);
+        let publications = super::CatalogPublisher::new(
+            publications,
+            0,
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
 
         reject_catalog_generation(&publications, 41, Some(7), 3, true);
 
@@ -1794,6 +1866,11 @@ mod tests {
     #[test]
     fn retired_generation_rejects_pending_searches_and_selections() {
         let (publications, published) = mpsc::sync_channel(4);
+        let publications = super::CatalogPublisher::new(
+            publications,
+            0,
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
         let mut searches = BTreeMap::from([(2, 41)]);
         let mut selections = BTreeMap::from([(3, 42)]);
 
@@ -1833,6 +1910,11 @@ mod tests {
     #[test]
     fn retry_advances_generation_and_rejects_every_pending_catalog_command() {
         let (publications, published) = mpsc::sync_channel(2);
+        let publications = super::CatalogPublisher::new(
+            publications,
+            0,
+            crate::market_service::ProviderCoordinatorWake::for_tests(),
+        );
         let mut searches = BTreeMap::from([(2, 41)]);
         let mut selections = BTreeMap::from([(3, 42)]);
 

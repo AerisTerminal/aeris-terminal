@@ -16,7 +16,7 @@ use std::{
 use asceify_contracts::InstallProviderInstrument;
 use asceify_hyperliquid_market_adapter::{
     CandleSnapshotRequest, HyperliquidHttpConfig, NORMALIZED_PRICE_SCALE,
-    NORMALIZED_QUANTITY_SCALE, fetch_candle_snapshot, hyperliquid_interval_for_period,
+    NORMALIZED_QUANTITY_SCALE, hyperliquid_interval_for_period,
 };
 use asceify_market_data::{BarPeriod, BarSeriesKey};
 use asceify_provider_history::HistoryRange;
@@ -47,6 +47,7 @@ pub(super) struct Snapshot {
 /// Returns an error for inconsistent identity, unsupported intervals,
 /// transport or decode failure, empty pages, or cancellation.
 pub(super) fn fetch(
+    client: &mut asceify_hyperliquid_market_adapter::HyperliquidHttpClient,
     series: &BarSeriesKey,
     _provider_generation: u64,
     installed: &InstallProviderInstrument,
@@ -84,16 +85,19 @@ pub(super) fn fetch(
         Some(range) => history_window_for_range(series.period, maximum_bars, range, now_millis)?,
         None => history_window(series.period, maximum_bars, now_millis)?,
     };
-    let page = fetch_candle_snapshot(&CandleSnapshotRequest {
-        wire_coin: &installed.provider_symbol,
-        period: series.period,
-        start_millis,
-        end_millis,
-        now_millis,
-        price_scale: NORMALIZED_PRICE_SCALE,
-        quantity_scale: NORMALIZED_QUANTITY_SCALE,
-        config: HyperliquidHttpConfig::default(),
-    })?;
+    let page = client.fetch_candle_snapshot(
+        &CandleSnapshotRequest {
+            wire_coin: &installed.provider_symbol,
+            period: series.period,
+            start_millis,
+            end_millis,
+            now_millis,
+            price_scale: NORMALIZED_PRICE_SCALE,
+            quantity_scale: NORMALIZED_QUANTITY_SCALE,
+            config: HyperliquidHttpConfig::default(),
+        },
+        stop,
+    )?;
     if stop.load(Ordering::Acquire) {
         return Err("Hyperliquid history request was cancelled".to_string());
     }

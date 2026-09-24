@@ -115,6 +115,7 @@ pub enum OrderBookApplyOutcome {
 }
 
 /// Bounded candidate book that fails closed on any ordering or spread violation.
+#[derive(Clone)]
 pub struct OrderBook {
     maximum_levels: NonZeroUsize,
     bids: BTreeMap<i64, DepthLevel>,

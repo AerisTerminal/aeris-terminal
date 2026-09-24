@@ -906,7 +906,7 @@ impl Coordinator<'_> {
                 self.clear_hyperliquid_display_depth();
             }
             HyperliquidDisplayDepthEvent::Snapshot(display) => {
-                if display.display_generation != self.hyperliquid_display_generation {
+                if display.display_generation < self.hyperliquid_display_generation {
                     return;
                 }
                 let Some(provider_generation) = self
@@ -932,6 +932,12 @@ impl Coordinator<'_> {
                 if order_book.instrument.entitlement_id != display.snapshot.metadata.entitlement_id
                 {
                     return;
+                }
+                // A full display queue may coalesce its reset. A validated
+                // snapshot carries the same generation boundary itself.
+                if display.display_generation > self.hyperliquid_display_generation {
+                    self.hyperliquid_display_generation = display.display_generation;
+                    self.clear_hyperliquid_display_depth();
                 }
                 let source_sequence = display.snapshot.metadata.source_sequence;
                 if self
@@ -1153,7 +1159,8 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_rithmic_realtime(&mut self, event: RithmicRealtimeEvent) {
         let event_generation = match &event {
-            RithmicRealtimeEvent::Connecting(generation)
+            RithmicRealtimeEvent::Failed(generation, _)
+            | RithmicRealtimeEvent::Connecting(generation)
             | RithmicRealtimeEvent::Connected(generation)
             | RithmicRealtimeEvent::Trade(generation, _)
             | RithmicRealtimeEvent::Quote(generation, _)
@@ -1170,6 +1177,13 @@ impl Coordinator<'_> {
             return;
         }
         match event {
+            RithmicRealtimeEvent::Failed(generation, error) => {
+                eprintln!("Asceify Rithmic reconnect requires intervention: {error}");
+                self.rithmic_failed(
+                    generation,
+                    "Rithmic reconnect could not start; check provider configuration",
+                );
+            }
             RithmicRealtimeEvent::Connecting(generation) => self.rithmic_connecting(generation),
             RithmicRealtimeEvent::Connected(generation)
             | RithmicRealtimeEvent::Heartbeat(generation, _) => self.rithmic_online(generation),

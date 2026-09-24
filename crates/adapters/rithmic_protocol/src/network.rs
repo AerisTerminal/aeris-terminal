@@ -4,11 +4,10 @@ use rustls::{ClientConfig, RootCertStore};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::{self, Read, Write},
-    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
+    net::{Shutdown, SocketAddr, TcpStream},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -17,18 +16,6 @@ use tungstenite::{Connector, WebSocket, protocol::WebSocketConfig, stream::Maybe
 
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TCP_CONNECT_ATTEMPT_LIMIT: Duration = Duration::from_secs(1);
-const MAXIMUM_RESOLVED_ADDRESSES: usize = 16;
-
-type ResolutionResult = io::Result<Vec<SocketAddr>>;
-
-struct ResolutionRequest {
-    host: String,
-    port: u16,
-    response: mpsc::SyncSender<ResolutionResult>,
-}
-
-static RESOLVER: OnceLock<Result<mpsc::SyncSender<ResolutionRequest>, ()>> = OnceLock::new();
-
 pub(crate) type RithmicWebSocket = WebSocket<MaybeTlsStream<DeadlineTcpStream>>;
 
 #[derive(Debug, Default)]
@@ -292,67 +279,13 @@ fn resolve_addresses(
     deadline: Instant,
     stop: Option<&AtomicBool>,
 ) -> Result<Vec<SocketAddr>, RithmicSessionError> {
-    let resolver = RESOLVER.get_or_init(start_resolver);
-    let resolver = resolver
-        .as_ref()
-        .map_err(|()| RithmicSessionError::Resolve)?;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let mut request = ResolutionRequest {
-        host: host.to_string(),
-        port,
-        response: sender,
-    };
-    loop {
-        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
-            return Err(RithmicSessionError::Cancelled);
+    asceify_platform_runtime::resolve_addresses(host, port, deadline, stop).map_err(|error| {
+        match error.kind() {
+            io::ErrorKind::Interrupted => RithmicSessionError::Cancelled,
+            io::ErrorKind::TimedOut => RithmicSessionError::Deadline,
+            _ => RithmicSessionError::Resolve,
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(RithmicSessionError::Deadline);
-        }
-        match resolver.try_send(request) {
-            Ok(()) => break,
-            Err(mpsc::TrySendError::Full(returned)) => {
-                request = returned;
-                thread::sleep(remaining.min(NETWORK_POLL_INTERVAL));
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                return Err(RithmicSessionError::Resolve);
-            }
-        }
-    }
-    loop {
-        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
-            return Err(RithmicSessionError::Cancelled);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(RithmicSessionError::Deadline);
-        }
-        match receiver.recv_timeout(remaining.min(NETWORK_POLL_INTERVAL)) {
-            Ok(result) => return result.map_err(|_| RithmicSessionError::Resolve),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(RithmicSessionError::Resolve);
-            }
-        }
-    }
-}
-
-fn start_resolver() -> Result<mpsc::SyncSender<ResolutionRequest>, ()> {
-    let (sender, receiver) = mpsc::sync_channel::<ResolutionRequest>(1);
-    thread::Builder::new()
-        .name("rithmic-dns".to_string())
-        .spawn(move || {
-            while let Ok(request) = receiver.recv() {
-                let result = (request.host.as_str(), request.port)
-                    .to_socket_addrs()
-                    .map(|addresses| addresses.take(MAXIMUM_RESOLVED_ADDRESSES).collect());
-                let _ = request.response.send(result);
-            }
-        })
-        .map_err(|_| ())?;
-    Ok(sender)
+    })
 }
 
 #[cfg(test)]

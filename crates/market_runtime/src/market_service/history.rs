@@ -371,25 +371,64 @@ pub(super) fn run_history_worker(
     completions: &SyncSender<Command>,
     shutdown: &AtomicBool,
 ) {
-    while let Ok(request) = requests.recv() {
-        if shutdown.load(Ordering::Acquire) {
-            request.stop.store(true, Ordering::Release);
-            return;
-        }
-        let result = source.fetch(&request);
+    let mut queued = Vec::<HistoryRequest>::new();
+    let mut current_burst = 0usize;
+    loop {
         if shutdown.load(Ordering::Acquire) {
             return;
         }
-        if completions
-            .send(Command::HistoryCompleted(
-                request.series,
-                request.provider_generation,
-                request.range,
-                result,
-            ))
-            .is_err()
-        {
-            return;
+        if queued.is_empty() {
+            match requests.recv_timeout(super::COORDINATOR_TICK) {
+                Ok(request) => queued.push(request),
+                Err(super::RecvTimeoutError::Timeout) => continue,
+                Err(super::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        while queued.len() < super::HISTORY_CAPACITY {
+            let Ok(request) = requests.try_recv() else {
+                break;
+            };
+            queued.push(request);
+        }
+        // Current repair/initial load precede optional backfill, but every
+        // fourth slot serves the oldest waiting request to prevent starvation.
+        let index = if current_burst < 3 {
+            queued
+                .iter()
+                .position(|request| request.range.is_none())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let request = queued.remove(index);
+        current_burst = if request.range.is_some() || current_burst == 3 {
+            0
+        } else {
+            current_burst + 1
+        };
+        let result = if request.stop.load(Ordering::Acquire) {
+            Err("history request cancelled before fetch".to_string())
+        } else {
+            source.fetch(&request)
+        };
+        let mut completion = Command::HistoryCompleted(
+            request.series,
+            request.provider_generation,
+            request.range,
+            result,
+        );
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            match completions.try_send(completion) {
+                Ok(()) => break,
+                Err(super::TrySendError::Disconnected(_)) => return,
+                Err(super::TrySendError::Full(returned)) => {
+                    completion = returned;
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
         }
     }
 }
@@ -507,7 +546,12 @@ impl Coordinator<'_> {
                     ),
                 );
             } else {
-                self.history_retries.remove(&key);
+                // Keep current-continuity recovery alive, with one bounded ticket
+                // per demanded series. Optional backfill keeps its existing policy.
+                self.history_retries.insert(
+                    key,
+                    (Instant::now() + HISTORY_FAILED_RETRY_COOLDOWN, 0, None),
+                );
             }
             return false;
         }
@@ -826,7 +870,7 @@ impl Coordinator<'_> {
             self.broadcast_series_resolution_for(
                 series,
                 SeriesLoadState::Partial,
-                Some("Older provider history is temporarily unavailable"),
+                Some("Current provider history is unavailable; recovery will retry"),
             );
         } else if let Some(waiters) = self.pending.remove(series) {
             fail_waiters(
@@ -864,16 +908,16 @@ impl Coordinator<'_> {
             self.history_retries.remove(&key);
             return None;
         }
+        if cancelled {
+            if self.engine.has_subscription(series) {
+                let _ = self.enqueue_history(series, generation);
+            }
+            return None;
+        }
         match result {
-            Ok(snapshot) if !cancelled => {
+            Ok(snapshot) => {
                 self.history_retries.remove(&key);
                 Some(snapshot)
-            }
-            Ok(_) => {
-                if self.engine.has_subscription(series) {
-                    let _ = self.enqueue_history(series, generation);
-                }
-                None
             }
             Err(error) => {
                 if !self.schedule_history_retry(series, generation, range, &error) {
@@ -1677,6 +1721,33 @@ mod tests {
                 handoff_boundary_unix_nanos: None,
             })
         }
+    }
+
+    #[test]
+    fn history_worker_prioritizes_current_work_and_skips_cancelled_fetches() {
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let (requests, receiver) = mpsc::sync_channel(3);
+        let (completions, _results) = mpsc::sync_channel(3);
+        let mut backfill = test_history_request("backfill");
+        backfill.range = Some(HistoryRange {
+            start_unix_nanos: 1,
+            end_unix_nanos: 2,
+        });
+        requests.send(backfill).unwrap();
+        let cancelled = test_history_request("cancelled");
+        cancelled.stop.store(true, Ordering::Release);
+        requests.send(cancelled).unwrap();
+        requests.send(test_history_request("current")).unwrap();
+        drop(requests);
+        run_history_worker(
+            Box::new(RecordingHistorySource {
+                calls: StdArc::clone(&calls),
+            }),
+            &receiver,
+            &completions,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(*calls.lock().unwrap(), ["current", "backfill"]);
     }
 
     #[test]

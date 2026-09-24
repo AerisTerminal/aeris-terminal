@@ -55,3 +55,6 @@ pub use ws::{
     build_candle_subscription, build_l2_subscription, build_ping, build_trades_subscription,
     build_unsubscribe, parse_ws_frame,
 };
+
+mod http_transport;
+pub use http_transport::HyperliquidHttpClient;
