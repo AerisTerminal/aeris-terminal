@@ -10,7 +10,7 @@ documentation = "https://docs.rs/gpui-base"
 license-file = "LICENSE-APACHE"
 publish = false
 
-[package.metadata.asceify]
+[package.metadata.aeris]
 upstream-revision = "c0946e6acdc9e2f984f317ef7f998ee2c79f1a87"
 
 [lib]

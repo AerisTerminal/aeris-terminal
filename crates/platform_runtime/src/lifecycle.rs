@@ -192,7 +192,7 @@ pub struct VaultEntry {
     pub key: String,
 }
 
-/// Versioned inventory of every local artifact owned by `Asceify`.
+/// Versioned inventory of every local artifact owned by `Aeris`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallationInventory {
@@ -224,7 +224,7 @@ pub trait LifecycleHooks {
     /// # Errors
     /// Returns a redacted platform error if a registration remains enabled.
     fn disable_registrations(&self, registrations: &[String]) -> Result<(), String>;
-    /// Stops all verified `Asceify` process identities before uninstall.
+    /// Stops all verified `Aeris` process identities before uninstall.
     ///
     /// # Errors
     /// Returns a redacted error if an owned process remains active.
@@ -284,7 +284,7 @@ impl fmt::Display for LifecycleError {
             Self::InvalidSignature => "release signature verification failed",
             Self::IncompatibleRelease => "release does not match this platform",
             Self::DowngradeRejected => "release downgrade policy rejected activation",
-            Self::InvalidInventory => "Asceify ownership inventory is invalid",
+            Self::InvalidInventory => "Aeris ownership inventory is invalid",
             Self::UpdateLocked => "another lifecycle transaction is active",
             Self::StagingFailed => "release staging did not complete",
             Self::VerificationFailed => "staged release inventory verification failed",
@@ -293,7 +293,7 @@ impl fmt::Display for LifecycleError {
             Self::RollbackFailed => "candidate rollback requires remediation",
             Self::UpdatePendingCleanup => "update is pending superseded-file cleanup",
             Self::UninstallPendingCleanup => "uninstall is pending local-artifact cleanup",
-            Self::ExternalArtifactRemaining => "an external Asceify artifact remains",
+            Self::ExternalArtifactRemaining => "an external Aeris artifact remains",
             Self::JournalCorrupt => "lifecycle recovery journal is invalid",
             Self::StateMigrationFailed => "legacy local state migration did not complete",
         })
@@ -1486,7 +1486,7 @@ fn inventory_roots(inventory: &InstallationInventory) -> Vec<PathBuf> {
     roots
 }
 
-/// Resolves the one native `Asceify` data root used by the desktop runtime.
+/// Resolves the one native `Aeris` data root used by the desktop runtime.
 ///
 /// # Errors
 /// Returns an error when the current user's native data directory is unavailable.
@@ -1495,14 +1495,14 @@ pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
     {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .map(|root| root.join("Asceify"))
+            .map(|root| root.join("Aeris"))
             .ok_or(LifecycleError::InvalidInventory)
     }
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|root| root.join("Library/Application Support/Asceify"))
+            .map(|root| root.join("Library/Application Support/Aeris"))
             .ok_or(LifecycleError::InvalidInventory)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1512,7 +1512,7 @@ pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
             .or_else(|| {
                 std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
             })
-            .map(|root| root.join("asceify"))
+            .map(|root| root.join("aeris"))
             .ok_or(LifecycleError::InvalidInventory)
     }
 }
@@ -1544,9 +1544,9 @@ fn native_legacy_data_root(product: &str) -> Result<PathBuf, LifecycleError> {
     }
 }
 
-/// Moves legacy Axiusflow local state into the `Asceify` data root before
-/// runtime services open persisted files. Existing `Asceify` files win; only
-/// missing paths are migrated, so a previous `Asceify` run is never replaced
+/// Moves legacy Axiusflow local state into the `Aeris` data root before
+/// runtime services open persisted files. Existing `Aeris` files win; only
+/// missing paths are migrated, so a previous `Aeris` run is never replaced
 /// by older local state.
 ///
 /// # Errors
@@ -1621,7 +1621,7 @@ fn merge_legacy_owned_directory(source: &Path, destination: &Path) -> Result<(),
     Ok(())
 }
 
-/// Resolves the stable per-user `Asceify` installation root used by the
+/// Resolves the stable per-user `Aeris` installation root used by the
 /// website bootstrap and the persisted launcher. It intentionally requires no
 /// administrator-owned system directory.
 ///
@@ -1632,14 +1632,14 @@ pub fn native_install_root() -> Result<PathBuf, LifecycleError> {
     {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .map(|root| root.join("Programs/Asceify"))
+            .map(|root| root.join("Programs/Aeris"))
             .ok_or(LifecycleError::InvalidInventory)
     }
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|root| root.join("Applications/Asceify"))
+            .map(|root| root.join("Applications/Aeris"))
             .ok_or(LifecycleError::InvalidInventory)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1649,7 +1649,7 @@ pub fn native_install_root() -> Result<PathBuf, LifecycleError> {
             .or_else(|| {
                 std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
             })
-            .map(|root| root.join("asceify/app"))
+            .map(|root| root.join("aeris/app"))
             .ok_or(LifecycleError::InvalidInventory)
     }
 }
@@ -1721,14 +1721,14 @@ pub fn native_installation_inventory(
         {
             std::env::var_os("LOCALAPPDATA")
                 .map(PathBuf::from)
-                .map(|root| root.join("Asceify/cache"))
+                .map(|root| root.join("Aeris/cache"))
                 .ok_or(LifecycleError::InvalidInventory)?
         }
         #[cfg(target_os = "macos")]
         {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .map(|root| root.join("Library/Caches/Asceify"))
+                .map(|root| root.join("Library/Caches/Aeris"))
                 .ok_or(LifecycleError::InvalidInventory)?
         }
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -1736,7 +1736,7 @@ pub fn native_installation_inventory(
             std::env::var_os("XDG_CACHE_HOME")
                 .map(PathBuf::from)
                 .or_else(|| std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".cache")))
-                .map(|root| root.join("asceify"))
+                .map(|root| root.join("aeris"))
                 .ok_or(LifecycleError::InvalidInventory)?
         }
     };
@@ -1755,7 +1755,7 @@ pub fn native_installation_inventory(
         legacy_install_parent.join(".Axiusflow-lifecycle.lock"),
         legacy_install_parent.join("Axiusflow-Uninstall"),
     ];
-    let registrations = vec!["start-menu:Asceify".to_string()];
+    let registrations = vec!["start-menu:Aeris".to_string()];
     Ok(InstallationInventory {
         schema_version: INVENTORY_SCHEMA_VERSION,
         install_root,
@@ -1765,27 +1765,27 @@ pub fn native_installation_inventory(
         legacy_cleanup_roots,
         vault_entries: vec![
             VaultEntry {
-                service: "com.asceify.terminal".to_string(),
+                service: "com.aeris.terminal".to_string(),
                 key: "provider-rithmic-test-default-v1".to_string(),
             },
             VaultEntry {
-                service: "com.asceify.account".to_string(),
+                service: "com.aeris.account".to_string(),
                 key: "account-refresh-default-v1".to_string(),
             },
             VaultEntry {
-                service: "com.asceify.account".to_string(),
+                service: "com.aeris.account".to_string(),
                 key: "account-entitlement-lease-v1".to_string(),
             },
             VaultEntry {
-                service: "com.asceify.account".to_string(),
+                service: "com.aeris.account".to_string(),
                 key: "account-entitlement-directory-v1".to_string(),
             },
             VaultEntry {
-                service: "com.asceify.account".to_string(),
+                service: "com.aeris.account".to_string(),
                 key: "account-device-key-v1".to_string(),
             },
             VaultEntry {
-                service: "com.asceify.account".to_string(),
+                service: "com.aeris.account".to_string(),
                 key: "account-profile-v1".to_string(),
             },
         ],
@@ -1987,7 +1987,7 @@ where
 
 #[cfg(target_os = "windows")]
 fn embedded_authenticode_thumbprint() -> Result<Option<&'static str>, LifecycleError> {
-    let Some(thumbprint) = option_env!("ASCEIFY_AUTHENTICODE_CERT_SHA1") else {
+    let Some(thumbprint) = option_env!("AERIS_AUTHENTICODE_CERT_SHA1") else {
         return Ok(None);
     };
     if !valid_authenticode_thumbprint(thumbprint) {
@@ -2060,7 +2060,7 @@ fn run_windows_authenticode_check(
     path: &Path,
     expected_thumbprint: &str,
 ) -> Result<(), LifecycleError> {
-    const SCRIPT: &str = "$ErrorActionPreference='Stop'; Import-Module -Name $env:ASCEIFY_AUTHENTICODE_SECURITY_MODULE -Force -ErrorAction Stop; $s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:ASCEIFY_AUTHENTICODE_PATH -ErrorAction Stop; if ($s.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ine $env:ASCEIFY_AUTHENTICODE_CERT_SHA1 -or $null -eq $s.TimeStamperCertificate) { exit 1 }; exit 0";
+    const SCRIPT: &str = "$ErrorActionPreference='Stop'; Import-Module -Name $env:AERIS_AUTHENTICODE_SECURITY_MODULE -Force -ErrorAction Stop; $s=Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:AERIS_AUTHENTICODE_PATH -ErrorAction Stop; if ($s.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Thumbprint -ine $env:AERIS_AUTHENTICODE_CERT_SHA1 -or $null -eq $s.TimeStamperCertificate) { exit 1 }; exit 0";
     let mut child = Command::new(powershell)
         .args([
             "-NoLogo",
@@ -2069,9 +2069,9 @@ fn run_windows_authenticode_check(
             "-Command",
             SCRIPT,
         ])
-        .env("ASCEIFY_AUTHENTICODE_SECURITY_MODULE", security_module)
-        .env("ASCEIFY_AUTHENTICODE_PATH", path)
-        .env("ASCEIFY_AUTHENTICODE_CERT_SHA1", expected_thumbprint)
+        .env("AERIS_AUTHENTICODE_SECURITY_MODULE", security_module)
+        .env("AERIS_AUTHENTICODE_PATH", path)
+        .env("AERIS_AUTHENTICODE_CERT_SHA1", expected_thumbprint)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2352,7 +2352,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier, Mutex};
 
-    const LIFECYCLE_LOCK_CHILD_PATH_ENV: &str = "ASCEIFY_TEST_LIFECYCLE_LOCK_PATH";
+    const LIFECYCLE_LOCK_CHILD_PATH_ENV: &str = "AERIS_TEST_LIFECYCLE_LOCK_PATH";
 
     #[derive(Default)]
     struct Hooks {
@@ -2407,7 +2407,7 @@ mod tests {
 
     fn temporary_root(name: &str) -> PathBuf {
         let root = fixture_base_dir().join(format!(
-            "asceify-lifecycle-{name}-{}-{}",
+            "aeris-lifecycle-{name}-{}-{}",
             std::process::id(),
             rand_suffix()
         ));
@@ -2553,15 +2553,15 @@ mod tests {
         fs::create_dir_all(&bundle).expect("bundle");
         let desktop = format!("desktop-{generation}").into_bytes();
         let launcher = format!("launcher-{generation}").into_bytes();
-        fs::write(bundle.join("asceify_desktop"), &desktop).expect("desktop");
-        fs::write(bundle.join("asceify_launcher"), &launcher).expect("launcher");
+        fs::write(bundle.join("aeris_desktop"), &desktop).expect("desktop");
+        fs::write(bundle.join("aeris_launcher"), &launcher).expect("launcher");
         if let Some(bytes) = &rollback_compatibility {
             fs::write(bundle.join(ROLLBACK_COMPATIBILITY_FILENAME), bytes)
                 .expect("rollback compatibility");
         }
         let mut files = vec![
-            (ReleaseFileRole::Desktop, "asceify_desktop", desktop),
-            (ReleaseFileRole::RuntimeAsset, "asceify_launcher", launcher),
+            (ReleaseFileRole::Desktop, "aeris_desktop", desktop),
+            (ReleaseFileRole::RuntimeAsset, "aeris_launcher", launcher),
         ];
         if let Some(bytes) = rollback_compatibility {
             files.push((
@@ -2575,7 +2575,7 @@ mod tests {
             .map(|(role, path, bytes)| ReleaseFile {
                 role,
                 path: path.to_string(),
-                url: format!("https://releases.asceify.test/{generation}/{path}"),
+                url: format!("https://releases.aeris.test/{generation}/{path}"),
                 size: bytes.len() as u64,
                 sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
                 executable: true,
@@ -2583,7 +2583,7 @@ mod tests {
             .collect::<Vec<_>>();
         // Manifest validation requires path-sorted inventories. Under the old
         // product name the desktop/launcher entries happened to sort before
-        // rollback-compatibility.json; the Asceify prefix does not.
+        // rollback-compatibility.json; the Aeris prefix does not.
         files.sort_by(|left, right| left.path.cmp(&right.path));
         let manifest = ReleaseManifest {
             schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
@@ -2643,7 +2643,7 @@ mod tests {
         let expected = ReleaseFile {
             role: ReleaseFileRole::Desktop,
             path: "fixture.exe".to_string(),
-            url: "https://releases.asceify.test/fixture.exe".to_string(),
+            url: "https://releases.aeris.test/fixture.exe".to_string(),
             size: bytes.len() as u64,
             sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
             executable: true,
@@ -2700,7 +2700,7 @@ mod tests {
             Err(LifecycleError::InvalidSignature)
         );
         let (signed, key, bundle) = release(&root, 2);
-        fs::write(bundle.join("asceify_desktop"), b"tampered").expect("tamper bundle");
+        fs::write(bundle.join("aeris_desktop"), b"tampered").expect("tamper bundle");
         let install_root = root.join("install");
         let installer =
             ReleaseInstaller::new(&install_root, key.verifying_key(), ReleasePolicy::native(0))
@@ -2722,8 +2722,8 @@ mod tests {
             1,
             ReleaseFile {
                 role: ReleaseFileRole::Engine,
-                path: "asceify_engine".to_string(),
-                url: "https://releases.asceify.test/1/asceify_engine".to_string(),
+                path: "aeris_engine".to_string(),
+                url: "https://releases.aeris.test/1/aeris_engine".to_string(),
                 size: 6,
                 sha256: URL_SAFE_NO_PAD.encode(Sha256::digest(b"engine")),
                 executable: true,
@@ -2754,7 +2754,7 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        fs::remove_file(bundle.join("asceify_launcher")).expect("drop one bundle file");
+        fs::remove_file(bundle.join("aeris_launcher")).expect("drop one bundle file");
         assert_eq!(
             installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::StagingFailed)
@@ -2771,7 +2771,7 @@ mod tests {
             ReleasePolicy::native(0),
         )
         .expect("installer");
-        fs::write(bundle.join("asceify_desktop"), b"truncated").expect("truncate bundle file");
+        fs::write(bundle.join("aeris_desktop"), b"truncated").expect("truncate bundle file");
         assert_eq!(
             installer.install(&signed, &bundle, &Hooks::default()),
             Err(LifecycleError::VerificationFailed)
@@ -2960,7 +2960,7 @@ mod tests {
             installer
                 .release_directory(&retained)
                 .expect("retained directory")
-                .join("asceify_desktop"),
+                .join("aeris_desktop"),
             b"tampered retained desktop",
         )
         .expect("mutate retained desktop");
@@ -2992,7 +2992,7 @@ mod tests {
         let desktop = installer
             .release_directory(&active)
             .expect("release directory")
-            .join("asceify_desktop");
+            .join("aeris_desktop");
         fs::write(desktop, b"post-install mutation").expect("mutate active desktop");
         assert_eq!(
             installer.audit_active_release(),
@@ -3198,7 +3198,7 @@ mod tests {
             .expect("write activated journal");
 
         fs::write(
-            candidate_root.join("asceify_desktop"),
+            candidate_root.join("aeris_desktop"),
             b"post-activation mutation",
         )
         .expect("mutate candidate desktop");
@@ -3909,7 +3909,7 @@ mod tests {
         let old_desktop = installer
             .release_directory(&first_active)
             .expect("old release directory")
-            .join("asceify_desktop");
+            .join("aeris_desktop");
         // FILE_SHARE_READ lets the pre-install audit read the old release
         // while still blocking its deletion, mirroring a locked executable.
         let lock = OpenOptions::new()
@@ -4047,7 +4047,7 @@ mod tests {
                 inventory
                     .vault_entries
                     .iter()
-                    .any(|entry| entry.service == "com.asceify.account" && entry.key == key),
+                    .any(|entry| entry.service == "com.aeris.account" && entry.key == key),
                 "native inventory lost account vault key {key}"
             );
         }
@@ -4077,7 +4077,7 @@ mod tests {
     fn legacy_state_merge_preserves_current_files_and_moves_missing_state() {
         let root = temporary_root("legacy-state-merge");
         let legacy = root.join("Axiusflow");
-        let current = root.join("Asceify");
+        let current = root.join("Aeris");
         fs::create_dir_all(legacy.join("desktop")).expect("legacy desktop directory");
         fs::create_dir_all(&current).expect("current state directory");
         fs::write(legacy.join("workspace-state.pb"), b"legacy-workspace")
@@ -4105,10 +4105,10 @@ mod tests {
     }
 
     #[test]
-    fn tradingplot_state_merges_without_replacing_newer_asceify_state() {
+    fn tradingplot_state_merges_without_replacing_newer_aeris_state() {
         let root = temporary_root("tradingplot-migration");
         let previous = root.join("TradingPlot");
-        let current = root.join("Asceify");
+        let current = root.join("Aeris");
         fs::create_dir_all(&previous).expect("previous state directory");
         fs::create_dir_all(&current).expect("current state directory");
         fs::write(previous.join("workspace-state.pb"), b"previous").expect("previous workspace");
@@ -4170,15 +4170,15 @@ mod tests {
             legacy_cleanup_roots: Vec::new(),
             vault_entries: vec![
                 VaultEntry {
-                    service: "com.asceify.account".to_string(),
+                    service: "com.aeris.account".to_string(),
                     key: "account-refresh-default-v1".to_string(),
                 },
                 VaultEntry {
-                    service: "com.asceify.terminal".to_string(),
+                    service: "com.aeris.terminal".to_string(),
                     key: "provider-rithmic-test-default-v1".to_string(),
                 },
             ],
-            registrations: vec!["start-menu:Asceify".to_string()],
+            registrations: vec!["start-menu:Aeris".to_string()],
         };
         let hooks = Hooks::default();
         let outcome = installer.uninstall(&inventory, &hooks).expect("uninstall");

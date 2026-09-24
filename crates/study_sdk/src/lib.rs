@@ -1,11 +1,11 @@
-//! `Asceify` native Study SDK.
+//! `Aeris` native Study SDK.
 //!
 //! This crate is the stable Axius-owned surface above the in-process Study
 //! Runtime. Technical-analysis math delegates to the exact pinned Nucleus pure
 //! indicator crate so built-ins and SDK studies do not fork formula behavior.
 
-pub use asceify_market_data::{AggressorSide, BarPeriod, BarSeriesKey, DepthLevel, OrderBookState};
-pub use asceify_market_runtime::{
+pub use aeris_market_data::{AggressorSide, BarPeriod, BarSeriesKey, DepthLevel, OrderBookState};
+pub use aeris_market_runtime::{
     MarketStream, StreamRequirements,
     study::{
         MAXIMUM_STUDY_IDENTIFIER_BYTES, NativeStudyCalculate, NativeStudyProgram,
@@ -30,7 +30,7 @@ use std::{
 };
 
 /// Converts one fixed-point market value into the floating-point representation used by study
-/// formulas without requiring authors to depend on `Asceify`'s internal conversion crate.
+/// formulas without requiring authors to depend on `Aeris`'s internal conversion crate.
 ///
 /// The conversion is intentionally explicit because canonical market storage remains fixed-point.
 /// `None` is reserved for a conversion failure; ordinary `i64` market values and the runtime's
@@ -253,7 +253,7 @@ pub type TrustedStudyRestore = fn(
 
 /// Build-time descriptor for one reviewed trusted-native study package.
 ///
-/// `Asceify` does not load arbitrary native libraries at runtime. Product builds statically link
+/// `Aeris` does not load arbitrary native libraries at runtime. Product builds statically link
 /// approved study crates and list their descriptors at the desktop packaging boundary. The signed
 /// application therefore defines the trust set.
 #[derive(Clone, Copy)]
@@ -2501,7 +2501,7 @@ pub mod builtins {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_market_data::BarPeriod;
+    use aeris_market_data::BarPeriod;
 
     fn test_series() -> BarSeriesKey {
         BarSeriesKey {

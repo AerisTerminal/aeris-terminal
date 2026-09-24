@@ -1,8 +1,8 @@
 # AGENTS.md
 
-Instructions for coding agents working in the Asceify native repository.
+Instructions for coding agents working in the Aeris native repository.
 
-Asceify is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
+Aeris is a local-first Rust/GPUI trading terminal. The desktop is the single application process.
 In-process `market_runtime` and `account_runtime` own provider sessions, canonical market/account state,
 and bounded background work; GPUI owns presentation scheduling only. A secondary local market process must not return.
 
@@ -101,7 +101,7 @@ only the `nucleuscharts_*` revisions required by that update; do not update GPUI
 
 ## Authentication and website coordination
 
-Authentication is disabled for the current development build because no Asceify account backend is deployed. Desktop startup must reach the workspace without opening a browser or creating an account session. Do not restore sign-in, sign-up, profile, billing, or lease traffic until an Asceify backend is provisioned and the full browser to callback to account runtime to vault to desktop path is verified.
+Authentication is disabled for the current development build because no Aeris account backend is deployed. Desktop startup must reach the workspace without opening a browser or creating an account session. Do not restore sign-in, sign-up, profile, billing, or lease traffic until an Aeris backend is provisioned and the full browser to callback to account runtime to vault to desktop path is verified.
 
 The sibling website is at `C:\Users\devraj\Downloads\Axiusflow-Org\axiusflow-website`. Inspect both repositories for future auth/profile/subscription changes, and preserve unrelated edits there. Keep tokens and credentials out of UI and logs.
 
@@ -141,7 +141,7 @@ independent baseline failures precisely.
 
 ## Release workflow
 
-Production release publication is disabled while the Asceify domain and AWS backend are unconfigured. Do not publish, install, or point clients at the former Axiusflow endpoint. The retired publication workflow must not be restored. Design and verify a new AWS release path when the maintainer requests deployment.
+Production release publication is disabled while the Aeris domain and AWS backend are unconfigured. Do not publish, install, or point clients at the former Axiusflow endpoint. The retired publication workflow must not be restored. Design and verify a new AWS release path when the maintainer requests deployment.
 
 The local launcher and signed lifecycle code remain for future integration; development builds run the desktop directly and automatic update checks are disabled. Do not claim installed-app or update behavior was verified unless exercised on that path.
 

@@ -1,7 +1,7 @@
 use std::{rc::Rc, sync::Arc};
 
-use asceify_design_system::{
-    AsceifyTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+use aeris_design_system::{
+    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement,
@@ -67,7 +67,7 @@ fn with_pointer_states(
 fn with_control_surface(
     control: BaseButton,
     surface: Option<ButtonAppearance>,
-    theme: Option<&AsceifyTheme>,
+    theme: Option<&AerisTheme>,
 ) -> BaseButton {
     control.when_some(surface, |control, surface| {
         control
@@ -121,7 +121,7 @@ impl ControlPolicy {
     }
 }
 
-/// A narrow `Asceify`-owned push/toggle control built directly on GPUI's
+/// A narrow `Aeris`-owned push/toggle control built directly on GPUI's
 /// styling primitives and `gpui-base`'s press, focus, and accessibility model.
 ///
 /// Base owns press/release pairing and keyboard click synthesis. This control
@@ -138,7 +138,7 @@ pub(crate) struct Control {
     caret: Option<Icon>,
     loading_icon: Option<Icon>,
     children: Vec<AnyElement>,
-    theme: Option<AsceifyTheme>,
+    theme: Option<AerisTheme>,
     surface: Option<ButtonAppearance>,
     resting_fill: Option<ThemeColor>,
     tooltip: Option<TooltipSpec>,
@@ -179,12 +179,12 @@ impl Control {
         }
     }
 
-    pub(crate) fn theme(mut self, theme: &AsceifyTheme) -> Self {
+    pub(crate) fn theme(mut self, theme: &AerisTheme) -> Self {
         self.theme = Some(*theme);
         self
     }
 
-    pub(crate) fn variant(mut self, theme: &AsceifyTheme, variant: ButtonVariant) -> Self {
+    pub(crate) fn variant(mut self, theme: &AerisTheme, variant: ButtonVariant) -> Self {
         self.theme = Some(*theme);
         let appearance = button_appearance(theme, variant);
         self.resting_fill = Some(appearance.fill);
@@ -458,7 +458,7 @@ impl RenderOnce for Control {
 
 #[cfg(test)]
 mod tests {
-    use asceify_design_system::AsceifyTheme;
+    use aeris_design_system::AerisTheme;
     use gpui::{FontWeight, InteractiveElement, Styled, px};
 
     use super::super::theme::{ButtonVariant, button_appearance};
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn dialog_actions_use_canonical_primary_and_secondary_fills() {
-        let theme = AsceifyTheme::dark();
+        let theme = AerisTheme::dark();
         let primary = Control::new("primary").variant(&theme, ButtonVariant::Filled);
         let secondary = Control::new("secondary").variant(&theme, ButtonVariant::Secondary);
 

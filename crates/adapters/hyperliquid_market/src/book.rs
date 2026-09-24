@@ -6,7 +6,7 @@
 //! are legal (one-sided markets) and surface as an empty level list with a
 //! valid sequence.
 
-use asceify_market_data::{
+use aeris_market_data::{
     DepthLevel, DepthSnapshot, EventMetadata, QualifiedTimestamp, TopOfBookQuote,
 };
 use serde::Deserialize;

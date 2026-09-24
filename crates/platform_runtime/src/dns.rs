@@ -36,7 +36,7 @@ pub fn resolve_addresses(
         .get_or_init(|| {
             let (sender, receiver) = mpsc::sync_channel::<Request>(1);
             thread::Builder::new()
-                .name("asceify-dns".into())
+                .name("aeris-dns".into())
                 .spawn(move || {
                     while let Ok(request) = receiver.recv() {
                         if Instant::now() >= request.deadline {

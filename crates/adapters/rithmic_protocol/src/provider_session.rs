@@ -18,11 +18,11 @@ use crate::{
     RithmicProviderRuntime, RithmicProviderRuntimeError, RithmicProviderRuntimeState,
     SessionGeneration,
 };
-use asceify_market_data::{
+use aeris_market_data::{
     AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
     QualifiedTimestamp, TopOfBookQuote,
 };
-use asceify_platform_runtime::{CredentialVault, PowerEvent};
+use aeris_platform_runtime::{CredentialVault, PowerEvent};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -41,8 +41,8 @@ use std::{
 const PROVIDER_ID: &str = "rithmic";
 const SYSTEM_ID: &str = "RITHMIC_TEST";
 const ENVIRONMENT: &str = "Test";
-/// Native credential-vault service for the `Asceify` terminal.
-pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.asceify.terminal";
+/// Native credential-vault service for the `Aeris` terminal.
+pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.aeris.terminal";
 /// Non-secret vault key for the default Rithmic Test account.
 pub const RITHMIC_TEST_VAULT_KEY: &str = "provider-rithmic-test-default-v1";
 const MAXIMUM_INSTRUMENTS: usize = 128;
@@ -2184,7 +2184,7 @@ mod tests {
         MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, OrderBookSides, OrderBookUpdate,
         OrderBookUpdateKind, QuoteUpdate, TradeUpdate,
     };
-    use asceify_market_data::{BookSide, DepthDelta};
+    use aeris_market_data::{BookSide, DepthDelta};
     use std::{
         io::Read,
         net::{TcpListener, TcpStream},

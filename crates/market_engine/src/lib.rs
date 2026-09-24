@@ -1,4 +1,4 @@
-//! Headless single-owner market state for the `Asceify` desktop runtime.
+//! Headless single-owner market state for the `Aeris` desktop runtime.
 //!
 //! This crate contains no GPUI, transport serialization, provider sockets,
 //! storage, threads, or global mutable state. The desktop runtime owns one `MarketEngine`
@@ -21,7 +21,7 @@ pub use publication::{ConsumerPublication, ConsumerSeriesUpdate};
 pub use series_store::{SeriesSnapshot, SeriesTailOperation};
 pub use subscription_registry::SubscriptionStatus;
 
-use asceify_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
+use aeris_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
 use data_lease::DataLeaseRegistry;
 use demand::DemandRegistry;
 use provider_manager::ProviderManager;
@@ -1105,7 +1105,7 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_market_data::BarPeriod;
+    use aeris_market_data::BarPeriod;
 
     fn nonzero(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).expect("test identity is non-zero")

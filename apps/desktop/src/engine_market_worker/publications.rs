@@ -187,22 +187,22 @@ fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
         observed
     );
     let notification =
-        asceify_platform_runtime::NativeUserNotification::try_new("Asceify price alert", body);
-    match notification.and_then(asceify_platform_runtime::try_send_user_notification) {
+        aeris_platform_runtime::NativeUserNotification::try_new("Aeris price alert", body);
+    match notification.and_then(aeris_platform_runtime::try_send_user_notification) {
         Ok(()) => {}
-        Err(error) => eprintln!("Asceify price alert notification was not delivered: {error}"),
+        Err(error) => eprintln!("Aeris price alert notification was not delivered: {error}"),
     }
 }
 
 const fn price_alert_condition_phrase(
-    condition: asceify_contracts::PriceAlertCondition,
+    condition: aeris_contracts::PriceAlertCondition,
 ) -> &'static str {
     match condition {
-        asceify_contracts::PriceAlertCondition::Crossing => "crossed",
-        asceify_contracts::PriceAlertCondition::CrossingUp => "crossed up through",
-        asceify_contracts::PriceAlertCondition::CrossingDown => "crossed down through",
-        asceify_contracts::PriceAlertCondition::GreaterThan => "moved above",
-        asceify_contracts::PriceAlertCondition::LessThan => "moved below",
+        aeris_contracts::PriceAlertCondition::Crossing => "crossed",
+        aeris_contracts::PriceAlertCondition::CrossingUp => "crossed up through",
+        aeris_contracts::PriceAlertCondition::CrossingDown => "crossed down through",
+        aeris_contracts::PriceAlertCondition::GreaterThan => "moved above",
+        aeris_contracts::PriceAlertCondition::LessThan => "moved below",
     }
 }
 

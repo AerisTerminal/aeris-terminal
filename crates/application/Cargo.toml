@@ -1,5 +1,5 @@
 [package]
-name = "asceify_application"
+name = "aeris_application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-asceify_instruments = { path = "../domain/instruments" }
-asceify_market_data = { path = "../domain/market_data" }
+aeris_instruments = { path = "../domain/instruments" }
+aeris_market_data = { path = "../domain/market_data" }
 sha2.workspace = true
 
 [lints]

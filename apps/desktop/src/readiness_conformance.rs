@@ -9,26 +9,26 @@
 
 use crate::desktop::frame_poll_gate::FramePollGate;
 
-use asceify_application::{
+use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason,
 };
-use asceify_desktop::market_worker::{
+use aeris_desktop::market_worker::{
     FixtureMarketWorker, MarketPublicationGeneration, MarketWorkerMessage, MarketWorkerPublication,
     MarketWorkerReceiver, MarketWorkerSendError, MarketWorkerSender, market_worker_channel,
 };
-use asceify_instruments::InstrumentPrecision;
-use asceify_market_data::{
+use aeris_instruments::InstrumentPrecision;
+use aeris_market_data::{
     BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, OrderBook,
     OrderBookApplyOutcome, OrderBookRecoveryReason, OrderBookState, QualifiedTimestamp,
 };
-use asceify_platform_runtime::{
+use aeris_platform_runtime::{
     LIVE_MARKET_GATE_EVIDENCE_SCOPE, LIVE_MARKET_GATE_MAXIMUM_BINARY_BYTES,
     LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,
     LIVE_MARKET_GATE_SCHEMA_VERSION, LiveMarketGateCompletion, LiveMarketGateEvidence,
     LiveMarketGateOutcome,
 };
-use asceify_terminal_ui::{OrderBookSelection, project_order_book};
+use aeris_terminal_ui::{OrderBookSelection, project_order_book};
 use serde::Serialize;
 use sha2::Digest as _;
 use std::{
@@ -1147,7 +1147,7 @@ mod tests {
     impl LiveGateFixture {
         fn new() -> Self {
             let directory = std::env::temp_dir().join(format!(
-                "asceify-live-gate-evidence-{}-{}",
+                "aeris-live-gate-evidence-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1462,7 +1462,7 @@ mod tests {
     #[test]
     fn interrupted_endurance_retains_an_atomic_incomplete_checkpoint() {
         let directory = std::env::temp_dir().join(format!(
-            "asceify-endurance-checkpoint-{}-{}",
+            "aeris-endurance-checkpoint-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -1,5 +1,5 @@
 [package]
-name = "asceify_platform_runtime"
+name = "aeris_platform_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

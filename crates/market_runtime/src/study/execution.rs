@@ -87,7 +87,7 @@ impl Executor {
     pub(super) fn start() -> Result<Self, String> {
         let (jobs, receiver) = mpsc::sync_channel::<Job>(1);
         thread::Builder::new()
-            .name("asceify-study-calculation".into())
+            .name("aeris-study-calculation".into())
             .spawn(move || {
                 while let Ok(mut job) = receiver.recv() {
                     let live = job

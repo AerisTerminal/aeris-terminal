@@ -164,7 +164,7 @@ pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) enabled: bool,
     pub(super) error: Option<&'a str>,
     pub(super) workspace_drag: Option<WorkspaceDragState>,
-    pub(super) theme: AsceifyTheme,
+    pub(super) theme: AerisTheme,
 }
 
 pub(super) fn workspace_window_drag_region(
@@ -236,10 +236,10 @@ pub(super) fn workspace_title_bar(
             .flex_1(),
         terminal,
     );
-    let account = asceify_desktop::account::DesktopAccount::shared().map_or_else(
-        asceify_desktop::account::unavailable_menu_state,
-        |account| account.menu_state(),
-    );
+    let account = aeris_desktop::account::DesktopAccount::shared()
+        .map_or_else(aeris_desktop::account::unavailable_menu_state, |account| {
+            account.menu_state()
+        });
     let profile_region = div()
         .id("workspace_profile_region")
         .h_full()
@@ -288,7 +288,7 @@ fn workspace_caption_control(
     terminal: Option<&Entity<TerminalApp>>,
     spec: CaptionControlSpec,
     pointer_owner: CaptionPointerOwner,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Stateful<Div> {
     let CaptionControlSpec {
         id,
@@ -354,7 +354,7 @@ fn workspace_caption_control(
 pub(super) fn workspace_window_controls(
     terminal: &Entity<TerminalApp>,
     window: &Window,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Div {
     let pointer_owner = caption_pointer_owner(current_caption_platform());
     if pointer_owner == CaptionPointerOwner::System {
@@ -525,7 +525,7 @@ pub(super) fn header_controls(
 
 fn header_global_controls(
     terminal: &Entity<TerminalApp>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     div()
         .w(px(HEADER_GLOBAL_CONTROLS_WIDTH))
@@ -541,7 +541,7 @@ fn header_global_controls(
 
 pub(super) fn side_panel_toggle(
     app: Entity<WorkspaceSurface>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     panel: SidePanel,
     enabled: bool,
     selected: bool,
@@ -578,7 +578,7 @@ pub(super) fn side_panel_toggle(
 
 pub(super) fn connection_status_indicator(
     presentation: ConnectionPresentation,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let color = (presentation.color)(theme);
     let provider = SharedString::from(presentation.provider);
@@ -612,7 +612,7 @@ struct ConnectionStatusTooltip {
     provider: SharedString,
     status: SharedString,
     latency: SharedString,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
 }
 
 impl Render for ConnectionStatusTooltip {
@@ -627,7 +627,7 @@ impl Render for ConnectionStatusTooltip {
                 .border_1()
                 .border_color(gpui_color(colors.border))
                 .bg(gpui_color(colors.surface))
-                .font_family(asceify_design_system::platform_font_family())
+                .font_family(aeris_design_system::platform_font_family())
                 .font_weight(platform_font_weight(TypographyRole::Normal))
                 .flex()
                 .flex_col()
@@ -658,7 +658,7 @@ fn connection_tooltip_row(
     label: &'static str,
     value: SharedString,
     numeric: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     div()
         .flex()
@@ -673,7 +673,7 @@ fn connection_tooltip_row(
         )
         .child(if numeric {
             div()
-                .font_family(asceify_design_system::platform_font_family())
+                .font_family(aeris_design_system::platform_font_family())
                 .font_features(platform_tabular_numerals())
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_primary))
@@ -699,7 +699,7 @@ struct PanelToggleState {
 
 fn panel_toggle(
     state: PanelToggleState,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     app: Entity<WorkspaceSurface>,
 ) -> impl IntoElement {
     let button = Button::new(state.id)
@@ -769,7 +769,7 @@ fn drawing_history_control(
     app: Entity<WorkspaceSurface>,
     control: DrawingHistoryControl,
     history: DrawingHistoryState,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let enabled = control.enabled(history);
     let button = Button::new(control.id())
@@ -790,12 +790,12 @@ fn drawing_history_control(
 
 pub(super) fn theme_toggle(
     terminal: Entity<TerminalApp>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let next = theme.mode.toggled();
     let icon = match next {
-        asceify_design_system::ThemeMode::Light => HugeIcon::Sun,
-        asceify_design_system::ThemeMode::Dark => HugeIcon::Moon,
+        aeris_design_system::ThemeMode::Light => HugeIcon::Sun,
+        aeris_design_system::ThemeMode::Dark => HugeIcon::Moon,
     };
     let tooltip = format!("Switch to {} theme", next.label());
     let button = Button::new("theme_toggle")
@@ -874,7 +874,7 @@ pub(super) fn rasterize_colored_svg(
         return Ok(Arc::clone(image));
     }
 
-    let bytes = assets::AsceifyAssets
+    let bytes = assets::AerisAssets
         .load(path.as_ref())
         .map_err(|error| gpui::ImageCacheError::Other(Arc::new(error)))?
         .ok_or_else(|| {
@@ -940,7 +940,7 @@ pub(super) fn exchange_mark(
     logo: assets::ExchangeLogo,
     size: Pixels,
     bordered: bool,
-    colors: &asceify_design_system::ThemeColors,
+    colors: &aeris_design_system::ThemeColors,
 ) -> Div {
     let glyph_size = if bordered { size - px(4.0) } else { size };
     div()
@@ -971,7 +971,7 @@ pub(super) fn chrome_tooltip(
     id: &'static str,
     label: impl Into<gpui::SharedString>,
     trigger: impl IntoElement + 'static,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> AnyElement {
     with_tooltip(
         (id, usize::MAX),
@@ -986,7 +986,7 @@ pub(super) fn series_selector(
     label: String,
     _message: String,
     pending: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     enabled: bool,
 ) -> impl IntoElement {
     let button = Button::new("series_selector")
@@ -1042,7 +1042,7 @@ pub(super) fn chart_type_selector(
     chart_type: ChartType,
     label: String,
     enabled: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement {
     let button = Button::new("chart_type_selector")
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
@@ -1090,7 +1090,7 @@ pub(super) fn chart_type_selector(
 
 pub(super) fn chrome_button_style(
     button: Button,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     selected: bool,
     enabled: bool,
 ) -> Button {
@@ -1110,7 +1110,7 @@ pub(super) fn chrome_button_style(
 }
 
 pub(super) fn chrome_control_foreground(
-    colors: &asceify_design_system::ThemeColors,
+    colors: &aeris_design_system::ThemeColors,
     selected: bool,
     enabled: bool,
 ) -> ThemeColor {
@@ -1149,7 +1149,7 @@ pub(super) fn button_activation_at(
     })
 }
 
-type ConnectionColor = fn(&AsceifyTheme) -> ThemeColor;
+type ConnectionColor = fn(&AerisTheme) -> ThemeColor;
 
 pub(super) struct ConnectionPresentation {
     pub(super) provider: &'static str,

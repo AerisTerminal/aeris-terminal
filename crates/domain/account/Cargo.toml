@@ -1,5 +1,5 @@
 [package]
-name = "asceify_account"
+name = "aeris_account"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

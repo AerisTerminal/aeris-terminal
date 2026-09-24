@@ -1,5 +1,5 @@
 [package]
-name = "asceify_instruments"
+name = "aeris_instruments"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

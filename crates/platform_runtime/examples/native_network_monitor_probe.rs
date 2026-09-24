@@ -1,4 +1,4 @@
-use asceify_platform_runtime::NativeNetworkMonitor;
+use aeris_platform_runtime::NativeNetworkMonitor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitor = NativeNetworkMonitor::connect()?;

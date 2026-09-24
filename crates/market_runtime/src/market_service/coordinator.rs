@@ -32,7 +32,7 @@ pub(super) fn spawn_coordinator(
     shutdown: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>, String> {
     thread::Builder::new()
-        .name("asceify-market-engine".to_string())
+        .name("aeris-market-engine".to_string())
         .spawn(move || {
             {
                 let providers = channels.providers.dispatch();
@@ -357,7 +357,7 @@ impl Coordinator<'_> {
             self.remove_waiter(consumer_id);
         }
         if removed_study && let Err(error) = self.reconcile_study_market_data() {
-            eprintln!("Asceify study cleanup failed during client detach: {error}");
+            eprintln!("Aeris study cleanup failed during client detach: {error}");
         }
         if removed_consumer {
             let _ = self.send_rithmic_demand();
@@ -758,7 +758,7 @@ impl Coordinator<'_> {
             Err(error) => {
                 self.studies.restore_subtree_checkpoint(checkpoint);
                 if let Err(rollback_error) = self.reconcile_study_market_data() {
-                    eprintln!("Asceify study reinitialization rollback failed: {rollback_error}");
+                    eprintln!("Aeris study reinitialization rollback failed: {rollback_error}");
                 }
                 Err(error)
             }
@@ -1082,7 +1082,7 @@ impl Coordinator<'_> {
     ) -> Result<
         (
             ProviderGeneration,
-            Option<asceify_market_engine::ConsumerPublication>,
+            Option<aeris_market_engine::ConsumerPublication>,
         ),
         String,
     > {
@@ -1190,12 +1190,12 @@ mod tests {
     use crate::{
         hyperliquid_realtime::HyperliquidRealtimeEvent, rithmic_realtime::RithmicRealtimeEvent,
     };
-    use asceify_contracts::ProviderInstrumentSearchResult;
-    use asceify_market_data::{
+    use aeris_contracts::ProviderInstrumentSearchResult;
+    use aeris_market_data::{
         AggressorSide, BarPeriod, DepthLevel, DepthSnapshot, EventMetadata, MarketBar, MarketTrade,
         OrderBookState, QualifiedTimestamp, TopOfBookQuote,
     };
-    use asceify_market_engine::{ConsumerResourceClass, GenerationId, Viewport, WorkspaceId};
+    use aeris_market_engine::{ConsumerResourceClass, GenerationId, Viewport, WorkspaceId};
     use std::num::NonZeroU64;
 
     const _: () = {
@@ -1807,7 +1807,7 @@ mod tests {
         consumer_id: ConsumerId,
         boundary: i64,
         live_timestamp: i64,
-        detached_snapshot: Arc<asceify_market_engine::SeriesSnapshot>,
+        detached_snapshot: Arc<aeris_market_engine::SeriesSnapshot>,
     }
 
     fn detached_rithmic_fixture() -> DetachedRithmicFixture {
@@ -2934,18 +2934,18 @@ mod tests {
             .expect("demand installs");
         assert_eq!(current_provider_generation.0.get(), 2);
 
-        let retained = asceify_market_engine::ConsumerPublication {
+        let retained = aeris_market_engine::ConsumerPublication {
             consumer_id: consumer,
             generation: generation(7),
             publication_generation: 1,
-            snapshot: Arc::new(asceify_market_engine::SeriesSnapshot {
+            snapshot: Arc::new(aeris_market_engine::SeriesSnapshot {
                 series: selected_series.clone(),
                 provider_generation: ProviderGeneration(nonzero(1)),
                 publication_generation: 1,
                 price_scale: 2,
                 quantity_scale: 0,
                 forming: false,
-                bars: Arc::from([asceify_market_data::MarketBar {
+                bars: Arc::from([aeris_market_data::MarketBar {
                     source_sequence: 1,
                     exchange_timestamp_seconds: 60,
                     exchange_timestamp_unix_nanos: 60_000_000_000,
@@ -3342,8 +3342,8 @@ mod tests {
                     && snapshot.publication.session_generation == selected.session_generation
                     && matches!(
                         snapshot.publication.state,
-                        asceify_market_data::OrderBookState::Recovering(
-                            asceify_market_data::OrderBookRecoveryReason::AwaitingSnapshot
+                        aeris_market_data::OrderBookState::Recovering(
+                            aeris_market_data::OrderBookRecoveryReason::AwaitingSnapshot
                         )
                     )
         ));

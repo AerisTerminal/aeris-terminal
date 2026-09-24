@@ -5,25 +5,25 @@
 //! application replay model used by engine publications without inventing a
 //! second desktop wire protocol.
 
-use asceify_application::ReplayRecoveryCommand;
-use asceify_application::{
+use aeris_application::ReplayRecoveryCommand;
+use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
-use asceify_contracts::{
+use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
 };
-use asceify_market_data::ChartInterval;
-use asceify_market_data::OrderBookFrame;
-use asceify_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
-use asceify_market_runtime::{
+use aeris_market_data::ChartInterval;
+use aeris_market_data::OrderBookFrame;
+use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
+use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
     MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
     MarketStudyOutputsInvalidated, MarketStudyRemoved,
 };
-use asceify_observability::FeedConnectionState;
-use asceify_observability::FeedDiagnosticsSnapshot;
+use aeris_observability::FeedConnectionState;
+use aeris_observability::FeedDiagnosticsSnapshot;
 use std::{
     collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
@@ -1588,20 +1588,20 @@ mod tests {
         MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
-    use asceify_application::{
+    use aeris_application::{
         Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
     };
-    use asceify_contracts::{
+    use aeris_contracts::{
         InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
         SearchProviderInstruments, SelectProviderInstrument,
     };
-    use asceify_market_data::OrderBookFrame;
-    use asceify_market_data::{
+    use aeris_market_data::OrderBookFrame;
+    use aeris_market_data::{
         BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
     };
-    use asceify_market_runtime::study::StudyInstanceId;
-    use asceify_observability::{FeedDiagnostics, FeedIdentity};
-    use asceify_study_sdk::builtins;
+    use aeris_market_runtime::study::StudyInstanceId;
+    use aeris_observability::{FeedDiagnostics, FeedIdentity};
+    use aeris_study_sdk::builtins;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{

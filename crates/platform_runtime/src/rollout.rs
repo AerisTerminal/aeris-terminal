@@ -10,8 +10,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::lifecycle::RolloutMetadata;
 
-const INSTALLATION_DOMAIN: &[u8] = b"asceify-rollout-installation-v1\0";
-const COHORT_DOMAIN: &[u8] = b"asceify-rollout-cohort-v1\0";
+const INSTALLATION_DOMAIN: &[u8] = b"aeris-rollout-installation-v1\0";
+const COHORT_DOMAIN: &[u8] = b"aeris-rollout-cohort-v1\0";
 
 /// Returns whether this installation is eligible for one signed rollout.
 ///
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn zero_percent_is_a_hold_and_full_rollout_needs_no_bucket_exception() {
-        let root = Path::new("/users/example/asceify");
+        let root = Path::new("/users/example/aeris");
         assert!(!rollout_eligible(&rollout("stable", 0), root));
         assert!(rollout_eligible(&rollout("stable", 100), root));
         assert!(!rollout_eligible(&rollout("stable", 101), root));
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn bucket_is_deterministic_and_namespaced_by_signed_cohort() {
-        let root = Path::new("/users/example/asceify");
+        let root = Path::new("/users/example/aeris");
         let stable = rollout("stable", 50);
         let canary = rollout("canary", 50);
 
@@ -80,13 +80,13 @@ mod tests {
         assert_ne!(rollout_sample(&stable, root), rollout_sample(&canary, root));
         assert_ne!(
             rollout_sample(&stable, root),
-            rollout_sample(&stable, Path::new("/users/other/asceify"))
+            rollout_sample(&stable, Path::new("/users/other/aeris"))
         );
     }
 
     #[test]
     fn increasing_percentage_for_one_ring_is_monotonic() {
-        let root = Path::new("/users/example/asceify");
+        let root = Path::new("/users/example/aeris");
         let mut seen_eligible = false;
         for percentage in 0..=100 {
             let eligible = rollout_eligible(&rollout("stable", percentage), root);
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn deterministic_vector_fences_bucket_algorithm_changes() {
-        let sample = rollout_sample(&rollout("canary", 25), Path::new("/users/example/asceify"));
+        let sample = rollout_sample(&rollout("canary", 25), Path::new("/users/example/aeris"));
         assert_eq!(sample, 16_128_428_820_566_202_637);
     }
 }

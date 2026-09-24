@@ -360,10 +360,10 @@ fn process_engine_select(
     market: &MarketService,
     client_id: u64,
     product: &mut InstallProviderInstrument,
-    interval: &mut asceify_market_data::ChartInterval,
+    interval: &mut aeris_market_data::ChartInterval,
     endpoint: &mut WorkerEndpoint,
     startup_resolution: &mut Option<StartupResolution>,
-    request: &asceify_desktop::market_worker::EngineSelectionRequest,
+    request: &aeris_desktop::market_worker::EngineSelectionRequest,
 ) -> Result<(), String> {
     *startup_resolution = None;
     let series = match series_key(&request.product, request.interval) {
@@ -429,7 +429,7 @@ fn reinitialize_study(
     market: &MarketService,
     client_id: u64,
     endpoint: &WorkerEndpoint,
-    request: asceify_desktop::market_worker::StudyReinitializationRequest,
+    request: aeris_desktop::market_worker::StudyReinitializationRequest,
 ) -> Result<(), String> {
     match market.reinitialize_study(client_id, request.study_id, request.registration) {
         Ok(_) => endpoint
@@ -452,7 +452,7 @@ fn register_study(
     market: &MarketService,
     client_id: u64,
     endpoint: &WorkerEndpoint,
-    request: asceify_desktop::market_worker::StudyRegistrationRequest,
+    request: aeris_desktop::market_worker::StudyRegistrationRequest,
 ) -> Result<(), String> {
     match market.register_study(client_id, endpoint.consumer_id, request.registration) {
         Ok(study_id) => endpoint
@@ -476,7 +476,7 @@ fn remove_study(
     market: &MarketService,
     client_id: u64,
     endpoint: &WorkerEndpoint,
-    study_id: asceify_market_runtime::study::StudyInstanceId,
+    study_id: aeris_market_runtime::study::StudyInstanceId,
 ) -> Result<(), String> {
     match market.remove_study(client_id, study_id) {
         Ok(_) => Ok(()),

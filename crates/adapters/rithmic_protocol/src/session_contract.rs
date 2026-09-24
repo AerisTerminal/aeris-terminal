@@ -1,5 +1,5 @@
 use crate::provider_runtime::{ConnectTrigger, RecoveryReason, SessionGeneration};
-use asceify_market_data::{BarSeriesKey, MarketEvent};
+use aeris_market_data::{BarSeriesKey, MarketEvent};
 use core::fmt;
 use std::{collections::BTreeSet, error::Error, num::NonZeroUsize};
 
@@ -416,7 +416,7 @@ impl fmt::Debug for ProviderSessionCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_market_data::{
+    use aeris_market_data::{
         AggressorSide, BarPeriod, BarSeriesKey, EventMetadata, MarketTrade, QualifiedTimestamp,
     };
     use std::{cell::Cell, num::NonZeroU64};

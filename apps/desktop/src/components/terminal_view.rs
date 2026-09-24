@@ -2,7 +2,7 @@ use super::*;
 
 fn active_header_state(
     workspace: &WorkspaceSurface,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     chart_has_market_data: bool,
     cx: &App,
 ) -> HeaderState {
@@ -175,7 +175,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::close_window))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
-            .font_family(asceify_design_system::platform_font_family())
+            .font_family(aeris_design_system::platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .children(title_bar)
             .child(header)
@@ -238,7 +238,7 @@ struct WorkspaceTabRenderState {
     workspace_count: usize,
     drag_enabled: bool,
     drag_translation: Option<f32>,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
 }
 
 const fn workspace_tab_close_drag_enabled(workspace_count: usize) -> bool {
@@ -249,7 +249,7 @@ fn workspace_tab_close_button(
     terminal: Entity<TerminalApp>,
     tab_id: u64,
     label: &str,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let key_terminal = terminal.clone();
@@ -323,7 +323,7 @@ fn handle_workspace_tab_key(
 fn workspace_add_button(
     terminal: Entity<TerminalApp>,
     enabled: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let key_terminal = terminal.clone();
@@ -371,7 +371,7 @@ fn workspace_add_button(
 fn workspace_tab_content(
     workspace: &WorkspaceTab,
     market_summaries: &BTreeMap<MarketSummaryKey, MarketSummaryEntry>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     cx: &App,
 ) -> (String, String, Div, Option<String>) {
     let surface = workspace.panes[workspace.active_pane].surface.read(cx);
@@ -431,7 +431,7 @@ fn workspace_tab_width(
     show_close: bool,
     window: &Window,
 ) -> f32 {
-    let mut font = gpui::font(asceify_design_system::platform_font_family());
+    let mut font = gpui::font(aeris_design_system::platform_font_family());
     font.weight = platform_font_weight(TypographyRole::Normal);
     let measure = |text: &str, size: f32, font: gpui::Font| {
         f32::from(

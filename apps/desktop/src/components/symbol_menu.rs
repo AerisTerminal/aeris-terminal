@@ -16,7 +16,7 @@ fn provider_exchange_logo(provider: TerminalProvider) -> assets::ExchangeLogo {
 pub(super) fn instrument_selector(
     app: Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
         .leading(exchange_mark(
@@ -98,7 +98,7 @@ pub(super) fn instrument_dialog_content(
     app: &Entity<WorkspaceSurface>,
     extent: ChromeMenuExtent,
     state: &InstrumentSelectorState,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let mut list = chrome_menu_scroll_body();
@@ -137,7 +137,7 @@ pub(super) fn instrument_dialog_row(
     instrument: &InstrumentMenuEntry,
     index: usize,
     state: &InstrumentSelectorState,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let checked = instrument.checked;
     let app = app.clone();
@@ -190,7 +190,7 @@ pub(super) fn instrument_dialog_row(
 
 pub(super) fn instrument_search_header(
     input: &Entity<InputState>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
 ) -> Div {

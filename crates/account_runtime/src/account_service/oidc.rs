@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use asceify_account::{AccountId, PlanId};
+use aeris_account::{AccountId, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::Deserialize;
@@ -32,7 +32,7 @@ pub struct AuthorizationRequest<'a> {
     pub code_challenge: &'a str,
 }
 
-/// OIDC endpoints resolved from discovery plus the `Asceify` link route.
+/// OIDC endpoints resolved from discovery plus the `Aeris` link route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OidcEndpoints {
     /// Verified issuer identity.
@@ -105,8 +105,8 @@ fn parse_discovery(issuer: &str, metadata: &DiscoveryMetadata) -> Result<OidcEnd
         token_endpoint: metadata.token_endpoint.clone(),
         jwks_uri: metadata.jwks_uri.clone(),
         revocation_endpoint: metadata.revocation_endpoint.clone(),
-        link_endpoint: format!("{origin}/api/asceify/link"),
-        lease_endpoint: format!("{origin}/api/asceify/lease"),
+        link_endpoint: format!("{origin}/api/aeris/link"),
+        lease_endpoint: format!("{origin}/api/aeris/lease"),
     })
 }
 
@@ -141,8 +141,8 @@ pub fn revoke_refresh(endpoints: &OidcEndpoints, refresh_token: &str) -> Result<
 
 /// Derives the control-plane origin from the OIDC issuer.
 ///
-/// The `Asceify` issuer is the Better Auth mount (`{origin}/api/auth`); the
-/// `Asceify`-owned link route lives on the origin beside it.
+/// The `Aeris` issuer is the Better Auth mount (`{origin}/api/auth`); the
+/// `Aeris`-owned link route lives on the origin beside it.
 ///
 /// # Errors
 ///
@@ -388,7 +388,7 @@ pub struct AccountProfile {
     pub photo_url: String,
 }
 
-/// Links one verified OIDC subject to the canonical `Asceify` account.
+/// Links one verified OIDC subject to the canonical `Aeris` account.
 ///
 /// The ID token travels as the proof: the control plane verifies it
 /// server-side and never trusts the client-claimed subject. The verified
@@ -430,12 +430,12 @@ pub fn link_subject(
         AccountProfile {
             display_name: clip_profile(
                 &link.display_name,
-                asceify_account::MAXIMUM_PROFILE_NAME_BYTES,
+                aeris_account::MAXIMUM_PROFILE_NAME_BYTES,
             ),
-            email: clip_profile(&link.email, asceify_account::MAXIMUM_PROFILE_EMAIL_BYTES),
+            email: clip_profile(&link.email, aeris_account::MAXIMUM_PROFILE_EMAIL_BYTES),
             photo_url: clip_profile(
                 &link.photo_url,
-                asceify_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
+                aeris_account::MAXIMUM_PROFILE_PHOTO_URL_BYTES,
             ),
         },
     ))
@@ -655,8 +655,8 @@ mod tests {
             token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
             jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
             revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
-            link_endpoint: "https://auth.example.test/api/asceify/link".to_string(),
-            lease_endpoint: "https://auth.example.test/api/asceify/lease".to_string(),
+            link_endpoint: "https://auth.example.test/api/aeris/link".to_string(),
+            lease_endpoint: "https://auth.example.test/api/aeris/lease".to_string(),
         }
     }
 
@@ -783,7 +783,7 @@ mod tests {
         let endpoints = endpoints();
         let request = AuthorizationRequest {
             endpoints: &endpoints,
-            client_id: "asceify-desktop",
+            client_id: "aeris-desktop",
             redirect_uri: "http://127.0.0.1:43129/callback",
             state: "state-value",
             nonce: "nonce-value",
@@ -846,11 +846,11 @@ mod tests {
 
     #[test]
     fn audience_matching_covers_string_and_array() {
-        let single = serde_json::Value::String("asceify-desktop".to_string());
-        assert!(audience_matches(&single, "asceify-desktop"));
+        let single = serde_json::Value::String("aeris-desktop".to_string());
+        assert!(audience_matches(&single, "aeris-desktop"));
         assert!(!audience_matches(&single, "other"));
         let many = serde_json::Value::Array(vec![serde_json::Value::String("other".to_string())]);
-        assert!(!audience_matches(&many, "asceify-desktop"));
+        assert!(!audience_matches(&many, "aeris-desktop"));
     }
 
     #[test]

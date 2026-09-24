@@ -235,7 +235,7 @@ mod tests {
                 .unwrap_or_default();
             for dependency in forbidden {
                 // Whole dependency names only: a substring match would ban
-                // asceify_hyperliquid_market_adapter through "hyper" while
+                // aeris_hyperliquid_market_adapter through "hyper" while
                 // the gate targets public server frameworks.
                 assert!(
                     name != *dependency
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn cargo_dependency_direction_excludes_ui_from_backend_layers() {
-        let ui = ["gpui", "asceify_chart_integration", "asceify_terminal_ui"];
+        let ui = ["gpui", "aeris_chart_integration", "aeris_terminal_ui"];
         for relative in [
             "crates/market_engine/Cargo.toml",
             "crates/market_runtime/Cargo.toml",
@@ -293,8 +293,8 @@ mod tests {
         assert_excludes(
             "crates/ui/chart_integration/Cargo.toml",
             &[
-                "asceify_rithmic_protocol_adapter",
-                "asceify_hyperliquid_market_adapter",
+                "aeris_rithmic_protocol_adapter",
+                "aeris_hyperliquid_market_adapter",
             ],
         );
     }
@@ -356,7 +356,7 @@ mod tests {
         );
         assert!(
             application_sources.is_empty(),
-            "provider_kit must not gain Asceify Rust/application source: {:?}",
+            "provider_kit must not gain Aeris Rust/application source: {:?}",
             application_sources
                 .iter()
                 .map(|path| relative_string(path))
@@ -393,7 +393,7 @@ mod tests {
             if contents.contains("nucleuscharts_indicators.workspace") {
                 assert_eq!(
                     relative, "crates/study_sdk/Cargo.toml",
-                    "pure Nucleus TA must enter Asceify only through the Study SDK facade"
+                    "pure Nucleus TA must enter Aeris only through the Study SDK facade"
                 );
             }
             if contents.contains("nucleuscharts_engine.workspace")
@@ -410,11 +410,11 @@ mod tests {
         assert_excludes(
             "crates/study_sdk/Cargo.toml",
             &[
-                "asceify_market_engine",
-                "asceify_account_runtime",
-                "asceify_chart_integration",
-                "asceify_rithmic_protocol_adapter",
-                "asceify_hyperliquid_market_adapter",
+                "aeris_market_engine",
+                "aeris_account_runtime",
+                "aeris_chart_integration",
+                "aeris_rithmic_protocol_adapter",
+                "aeris_hyperliquid_market_adapter",
                 "nucleuscharts_engine",
                 "nucleuscharts_render",
                 "nucleuscharts_render_gpui",
@@ -441,12 +441,12 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "asceify_rithmic_protocol_adapter",
-                    "asceify_hyperliquid_market_adapter",
-                    "asceify_local_history",
-                    "asceify_local_storage",
-                    "asceify_market_engine",
-                    "asceify_provider_history",
+                    "aeris_rithmic_protocol_adapter",
+                    "aeris_hyperliquid_market_adapter",
+                    "aeris_local_history",
+                    "aeris_local_storage",
+                    "aeris_market_engine",
+                    "aeris_provider_history",
                     "rusqlite",
                 ],
             );
@@ -550,20 +550,20 @@ mod tests {
         assert_excludes(
             "apps/desktop/Cargo.toml",
             &[
-                "asceify_desktop_market_runtime",
-                "asceify_desktop_provider_runtime",
-                "asceify_rithmic_protocol_adapter",
-                "asceify_hyperliquid_market_adapter",
-                "asceify_provider_history",
-                "asceify_local_storage",
-                "asceify_local_history",
-                "asceify_market_engine",
+                "aeris_desktop_market_runtime",
+                "aeris_desktop_provider_runtime",
+                "aeris_rithmic_protocol_adapter",
+                "aeris_hyperliquid_market_adapter",
+                "aeris_provider_history",
+                "aeris_local_storage",
+                "aeris_local_history",
+                "aeris_market_engine",
             ],
         );
     }
 
     #[test]
-    fn workspace_uses_only_asceify_owned_gpui_controls() {
+    fn workspace_uses_only_aeris_owned_gpui_controls() {
         const RETIRED_COMPONENT_IDENTITIES: &[&str] = &[
             concat!("gpui", "-component"),
             concat!("gpui", "_component"),
@@ -686,9 +686,9 @@ mod tests {
     fn market_core_manifests_exclude_process_and_runtime_dependencies() {
         assert_dependencies_are(
             "crates/application/Cargo.toml",
-            &["asceify_instruments", "asceify_market_data", "sha2"],
+            &["aeris_instruments", "aeris_market_data", "sha2"],
         );
-        assert_dependencies_are("crates/market_engine/Cargo.toml", &["asceify_market_data"]);
+        assert_dependencies_are("crates/market_engine/Cargo.toml", &["aeris_market_data"]);
         assert_dependencies_are("crates/domain/instruments/Cargo.toml", &[]);
         assert_dependencies_are("crates/domain/market_data/Cargo.toml", &[]);
     }
@@ -699,10 +699,10 @@ mod tests {
             assert_excludes(
                 relative,
                 &[
-                    "asceify_desktop_market_runtime",
-                    "asceify_desktop_provider_runtime",
-                    "asceify_local_engine_client",
-                    "asceify_local_history",
+                    "aeris_desktop_market_runtime",
+                    "aeris_desktop_provider_runtime",
+                    "aeris_local_engine_client",
+                    "aeris_local_history",
                 ],
             );
         }
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(
             applications,
             ["desktop".to_string()].into(),
-            "Asceify must have exactly one application process"
+            "Aeris must have exactly one application process"
         );
     }
     #[test]
@@ -1000,10 +1000,10 @@ mod tests {
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
-                "asceify_local_storage",
-                "asceify_local_history",
-                "asceify_chart_integration",
-                "asceify_terminal_ui",
+                "aeris_local_storage",
+                "aeris_local_history",
+                "aeris_chart_integration",
+                "aeris_terminal_ui",
                 "gpui",
             ] {
                 assert!(
@@ -1018,11 +1018,11 @@ mod tests {
     fn engine_manifest_owns_backend_composition_without_ui() {
         let market = manifest("crates/market_runtime/Cargo.toml");
         for dependency in [
-            "asceify_rithmic_protocol_adapter",
-            "asceify_hyperliquid_market_adapter",
-            "asceify_market_engine",
-            "asceify_provider_history",
-            "asceify_platform_runtime",
+            "aeris_rithmic_protocol_adapter",
+            "aeris_hyperliquid_market_adapter",
+            "aeris_market_engine",
+            "aeris_provider_history",
+            "aeris_platform_runtime",
         ] {
             assert!(
                 market.contains(dependency),
@@ -1030,7 +1030,7 @@ mod tests {
             );
         }
         let account = manifest("crates/account_runtime/Cargo.toml");
-        for dependency in ["asceify_account", "asceify_platform_runtime"] {
+        for dependency in ["aeris_account", "aeris_platform_runtime"] {
             assert!(
                 account.contains(dependency),
                 "account_runtime must compose {dependency}"
@@ -1042,7 +1042,7 @@ mod tests {
         ] {
             assert_excludes(
                 relative,
-                &["gpui", "asceify_chart_integration", "asceify_terminal_ui"],
+                &["gpui", "aeris_chart_integration", "aeris_terminal_ui"],
             );
         }
     }
@@ -1056,11 +1056,11 @@ mod tests {
         }
         let market = manifest("crates/market_runtime/Cargo.toml");
         assert!(
-            market.contains("asceify_provider_history"),
+            market.contains("aeris_provider_history"),
             "market runtime lost provider-history adapter boundary"
         );
         assert!(
-            !market.contains("asceify_local_storage"),
+            !market.contains("aeris_local_storage"),
             "market runtime must not persist market history"
         );
         let module = manifest("crates/market_runtime/src/market_service/mod.rs");
@@ -1261,7 +1261,7 @@ mod tests {
         let cleanup = &update[cleanup_start..cleanup_end];
         assert!(
             workspace_tabs.contains("drop(cleanup);")
-                && cleanup.contains("asceify-update-restart-cleanup")
+                && cleanup.contains("aeris-update-restart-cleanup")
                 && cleanup.contains(".spawn(move || {")
                 && cleanup.contains("child.kill()")
                 && cleanup.contains("child.wait()"),
@@ -1335,7 +1335,7 @@ mod tests {
             .expect("update restart preparation boundary");
         let prepare = &workspace_tabs[prepare_start..prepare_end];
         assert!(
-            prepare.contains("asceify_desktop::account::begin_refresh_quiesce()")
+            prepare.contains("aeris_desktop::account::begin_refresh_quiesce()")
                 && prepare.contains("account_refresh.wait()?")
                 && prepare.contains("drop(account_refresh)"),
             "update restart must quiesce account refresh and release its claim on cancellation"
@@ -1357,7 +1357,7 @@ mod tests {
 
         let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
         assert!(
-            lifecycle.contains("asceify_desktop::account::begin_refresh_quiesce()")
+            lifecycle.contains("aeris_desktop::account::begin_refresh_quiesce()")
                 && lifecycle.contains("quiesce.wait()")
                 && lifecycle.contains("quiesce.retain_until_process_exit()")
                 && lifecycle.contains("blocks_exit: true")
@@ -1427,7 +1427,7 @@ mod tests {
                 "platform lifecycle lost {contract}"
             );
         }
-        let launcher = manifest("crates/platform_runtime/src/bin/asceify_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/aeris_launcher.rs");
         for contract in [
             "--check-update",
             "--prepare-update",
@@ -1482,7 +1482,7 @@ mod tests {
         for path in [
             "tools/publish_release.ps1",
             ".github/workflows/release.yml",
-            "crates/platform_runtime/src/bin/asceify_release_publisher.rs",
+            "crates/platform_runtime/src/bin/aeris_release_publisher.rs",
         ] {
             assert!(
                 !repository_root().join(path).exists(),
@@ -1509,7 +1509,7 @@ mod tests {
 
     #[test]
     fn launcher_rollout_and_lkg_startup_failover_remain_bounded() {
-        let launcher = manifest("crates/platform_runtime/src/bin/asceify_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/aeris_launcher.rs");
         for contract in [
             "rollout_eligible",
             "current_update_check_report",
@@ -1548,27 +1548,27 @@ mod tests {
     fn windows_install_shell_keeps_native_identity_and_signed_lifecycle_boundary() {
         for path in [
             "apps/desktop/src/main.rs",
-            "crates/platform_runtime/src/bin/asceify_launcher.rs",
+            "crates/platform_runtime/src/bin/aeris_launcher.rs",
         ] {
             assert!(
                 manifest(path).contains("windows_subsystem = \"windows\""),
                 "Windows GUI binary {path} lost subsystem marker"
             );
         }
-        let setup = manifest("tools/windows/asceify_setup.iss");
+        let setup = manifest("tools/windows/aeris_setup.iss");
         for contract in [
             "PrivilegesRequired=lowest",
-            "DefaultDirName={localappdata}\\Programs\\Asceify",
-            "UninstallDisplayIcon={app}\\asceify_launcher.exe",
-            "AppUserModelID: \"com.asceify.desktop\"",
-            "DestName: \"asceify_launcher.exe\"",
+            "DefaultDirName={localappdata}\\Programs\\Aeris",
+            "UninstallDisplayIcon={app}\\aeris_launcher.exe",
+            "AppUserModelID: \"com.aeris.desktop\"",
+            "DestName: \"aeris_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
-            "ValueName: \"Asceify Engine\"; Flags: deletevalue",
+            "ValueName: \"Aeris Engine\"; Flags: deletevalue",
             "RollbackCompatibilityPath",
             "DestName: \"rollback-compatibility.json\"",
             "function PrepareToInstall(var NeedsRestart: Boolean): String;",
-            "{localappdata}\\Programs\\.Asceify-lifecycle\\uninstall.json",
-            "Finishing the previous Asceify uninstall...",
+            "{localappdata}\\Programs\\.Aeris-lifecycle\\uninstall.json",
+            "Finishing the previous Aeris Terminal uninstall...",
         ] {
             assert!(
                 setup.contains(contract),
@@ -1618,7 +1618,7 @@ mod tests {
             for forbidden in [
                 "/proc/",
                 "\"/tmp",
-                "/opt/asceify",
+                "/opt/aeris",
                 "/Applications/",
                 "C:\\Program",
                 "C:/Program",
@@ -1711,9 +1711,9 @@ mod tests {
         );
         for production_release_contract in [
             "release-pair",
-            "ASCEIFY_RELEASE_IDENTITY",
-            "ASCEIFY_INSTALL_GENERATION",
-            "ASCEIFY_RELEASE_VERIFYING_KEY",
+            "AERIS_RELEASE_IDENTITY",
+            "AERIS_INSTALL_GENERATION",
+            "AERIS_RELEASE_VERIFYING_KEY",
         ] {
             assert!(
                 !workflow.contains(production_release_contract),
@@ -1837,7 +1837,7 @@ mod tests {
     }
     #[test]
     fn launcher_uninstall_relocates_outside_install_root() {
-        let launcher = manifest("crates/platform_runtime/src/bin/asceify_launcher.rs");
+        let launcher = manifest("crates/platform_runtime/src/bin/aeris_launcher.rs");
         // The launcher runs from inside the tree uninstall deletes, and
         // Windows refuses to delete a running executable: uninstall must
         // rename the image to a sibling staging dir first so the original
@@ -1913,7 +1913,7 @@ mod tests {
         }
         assert!(
             workflow.contains("AXIUSFLOW_RITHMIC_KIT_ROOT")
-                && workflow.contains("ASCEIFY_RITHMIC_KIT_ROOT")
+                && workflow.contains("AERIS_RITHMIC_KIT_ROOT")
                 && workflow.contains("C:\\axiusflow-deps\\provider-kit"),
             "live-market gates must keep the provisioned Rithmic kit location and accept both env names"
         );
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn rithmic_application_name_has_one_canonical_source() {
         let adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
-        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Asceify\";"));
+        assert!(adapter.contains("pub const RITHMIC_APPLICATION_NAME: &str = \"Aeris\";"));
         for relative in [
             "crates/adapters/rithmic_protocol/src/provider_session.rs",
             "crates/adapters/rithmic_protocol/src/protocol.rs",
@@ -1939,7 +1939,7 @@ mod tests {
         ] {
             let source = manifest(relative);
             assert!(
-                !source.contains("\"Asceify\""),
+                !source.contains("\"Aeris\""),
                 "{relative} reintroduced non-canonical identity"
             );
             assert!(
@@ -2013,8 +2013,8 @@ mod tests {
                 "market coordinator must not own account state {identifier}"
             );
         }
-        assert!(manifest("apps/desktop/Cargo.toml").contains("asceify_account_runtime"));
-        assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("asceify_account"));
+        assert!(manifest("apps/desktop/Cargo.toml").contains("aeris_account_runtime"));
+        assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("aeris_account"));
     }
     #[test]
     fn account_contracts_remain_plain_bounded_values() {

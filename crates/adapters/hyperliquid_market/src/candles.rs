@@ -5,7 +5,7 @@
 //! interval, and candle-open timestamp with exactly one forming candle.
 //! Trade volume is never added into provider candles.
 
-use asceify_market_data::{BarPeriod, MarketBar};
+use aeris_market_data::{BarPeriod, MarketBar};
 use serde::Deserialize;
 
 use crate::decimal::RawDecimal;

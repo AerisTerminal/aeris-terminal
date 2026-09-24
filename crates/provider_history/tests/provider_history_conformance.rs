@@ -1,4 +1,4 @@
-use asceify_provider_history::{
+use aeris_provider_history::{
     CancelOutcome, Continuation, CoverageClass, CoverageSnapshot, DataClass, DatasetCapability,
     FetchFailureOutcome, HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest,
     HistoryRange, HistoryScheduler, PaginationStyle, ProviderHistoryError, RateLimit,

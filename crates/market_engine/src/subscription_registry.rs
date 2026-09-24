@@ -1,5 +1,5 @@
 use crate::{ConsumerId, MarketDataLeaseId, StreamRequirements};
-use asceify_market_data::BarSeriesKey;
+use aeris_market_data::BarSeriesKey;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

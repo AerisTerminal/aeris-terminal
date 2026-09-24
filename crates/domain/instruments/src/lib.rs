@@ -5,7 +5,7 @@ use std::error::Error;
 
 const MAX_DECIMAL_SCALE: u8 = 18;
 
-/// A stable `Asceify` instrument identity.
+/// A stable `Aeris` instrument identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InstrumentId(String);
 

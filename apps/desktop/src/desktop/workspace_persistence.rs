@@ -109,7 +109,7 @@ impl WorkspaceLayoutPersistence {
         let worker_result = Arc::clone(&result);
         let worker_durability = Arc::clone(&durability);
         std::thread::Builder::new()
-            .name("asceify-workspace-layout-client".to_string())
+            .name("aeris-workspace-layout-client".to_string())
             .spawn(move || {
                 run_workspace_layout_persistence(
                     &worker_latest,

@@ -49,8 +49,8 @@ mod update;
 mod workspace_layout;
 
 use about_dialog::about_dialog_layer;
-use asceify_application::ReplayStreamUpdate;
-use asceify_chart_integration::{
+use aeris_application::ReplayStreamUpdate;
+use aeris_chart_integration::{
     ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
     ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
@@ -59,7 +59,7 @@ use asceify_chart_integration::{
     ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, ChartWorkspaceLayout,
     NucleusChartTheme, NucleusChartView, NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
 };
-use asceify_contracts::{
+use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
@@ -71,27 +71,27 @@ use asceify_contracts::{
     WorkspaceStudySettingState, WorkspaceTabState, WorkspaceWatchlistEntryState,
     workspace_study_setting_state,
 };
-use asceify_design_system::{
-    AsceifyTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
+use aeris_design_system::{
+    AerisTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
 };
-use asceify_desktop::market_worker::{
+use aeris_desktop::market_worker::{
     ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
     MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
     PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
 };
-use asceify_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
-use asceify_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
-use asceify_market_runtime::study::{
+use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
+use aeris_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
+use aeris_market_runtime::study::{
     NativeStudyRegistration, StudyDecimal, StudyDependency, StudyInstanceId, StudyMarketInput,
     StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettingCondition,
     StudySettingControl, StudySettingSpec, StudySettingValue, StudyThresholdRegion,
 };
-use asceify_market_runtime::{
+use aeris_market_runtime::{
     MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger, MarketStream,
     StreamRequirements,
 };
-use asceify_observability::FeedConnectionState;
-use asceify_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
+use aeris_observability::FeedConnectionState;
+use aeris_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
 use assets::UiIcon as HugeIcon;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
@@ -199,21 +199,21 @@ use workspace_layout::workspace_split_ratio;
 use std::time::Instant;
 
 fn install_platform_http_client(cx: &mut App) {
-    match ReqwestClient::user_agent(concat!("Asceify/", env!("CARGO_PKG_VERSION"))) {
+    match ReqwestClient::user_agent(concat!("Aeris/", env!("CARGO_PKG_VERSION"))) {
         Ok(client) => cx.set_http_client(Arc::new(client)),
-        Err(error) => eprintln!("Asceify image networking degraded: {error}"),
+        Err(error) => eprintln!("Aeris image networking degraded: {error}"),
     }
 }
 
 fn retain_account_refresh_quiesce_for_exit(
-    account_refresh: Result<asceify_account_runtime::AccountRefreshQuiesce, String>,
+    account_refresh: Result<aeris_account_runtime::AccountRefreshQuiesce, String>,
     context: &str,
 ) {
     let quiesce = match account_refresh {
         Ok(quiesce) => quiesce,
         Err(error) => {
             eprintln!(
-                "Asceify refused {context} because account refresh could not be quiesced: {error}"
+                "Aeris refused {context} because account refresh could not be quiesced: {error}"
             );
             loop {
                 std::thread::park();
@@ -228,7 +228,7 @@ fn retain_account_refresh_quiesce_for_exit(
         }
         Err(error) => error,
     };
-    eprintln!("Asceify account shutdown retrying after: {first_error}");
+    eprintln!("Aeris account shutdown retrying after: {first_error}");
     let second_error = match quiesce.wait() {
         Ok(()) => {
             quiesce.retain_until_process_exit();
@@ -237,7 +237,7 @@ fn retain_account_refresh_quiesce_for_exit(
         Err(error) => error,
     };
     eprintln!(
-        "Asceify refused {context} because durable account refresh did not settle: {second_error}"
+        "Aeris refused {context} because durable account refresh did not settle: {second_error}"
     );
     // This startup/background path has no GPUI lifecycle to return to. Keep the
     // existing quiesce claim alive after the bounded retries so a forced exit
@@ -249,7 +249,7 @@ fn retain_account_refresh_quiesce_for_exit(
 
 fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
     retain_account_refresh_quiesce_for_exit(
-        asceify_desktop::account::begin_refresh_quiesce(),
+        aeris_desktop::account::begin_refresh_quiesce(),
         "process exit",
     );
     std::process::exit(exit_code);
@@ -257,25 +257,25 @@ fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
 
 #[cfg(target_os = "windows")]
 fn native_account_session_shutdown_guard(
-    begin_quiesce: impl Fn() -> Result<asceify_account_runtime::AccountRefreshQuiesce, String>
+    begin_quiesce: impl Fn() -> Result<aeris_account_runtime::AccountRefreshQuiesce, String>
     + Send
     + Sync
     + 'static,
-) -> Result<asceify_platform_runtime::NativeSessionShutdownGuard, String> {
-    asceify_platform_runtime::NativeSessionShutdownGuard::connect(move || {
+) -> Result<aeris_platform_runtime::NativeSessionShutdownGuard, String> {
+    aeris_platform_runtime::NativeSessionShutdownGuard::connect(move || {
         let quiesce = match begin_quiesce() {
             Ok(quiesce) => quiesce,
             Err(error) => {
-                eprintln!("Asceify session shutdown was blocked: {error}");
+                eprintln!("Aeris session shutdown was blocked: {error}");
                 return None;
             }
         };
         match quiesce.wait() {
-            Ok(()) => Some(asceify_platform_runtime::NativeSessionShutdownPermit::new(
+            Ok(()) => Some(aeris_platform_runtime::NativeSessionShutdownPermit::new(
                 quiesce,
             )),
             Err(error) => {
-                eprintln!("Asceify session shutdown was blocked: {error}");
+                eprintln!("Aeris session shutdown was blocked: {error}");
                 None
             }
         }
@@ -409,7 +409,7 @@ mod workspace_persistence;
 use workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceLayoutShutdownWait};
 
 actions!(
-    asceify,
+    aeris,
     [
         MinimizeWindow,
         ZoomWindow,
@@ -630,7 +630,7 @@ struct WorkspaceSurface {
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     replay_label: String,
     worker_label: String,
     subscription_id: String,
@@ -1231,7 +1231,7 @@ fn should_autoload_rithmic_catalog(
 }
 
 struct HeaderState {
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
@@ -1894,16 +1894,16 @@ const ACCOUNT_RESTORE_READINESS_POLL_INTERVAL: std::time::Duration =
 
 fn wait_for_account_restore_readiness(
     timeout: std::time::Duration,
-    mut readiness: impl FnMut() -> asceify_account_runtime::AccountRestoreReadiness,
+    mut readiness: impl FnMut() -> aeris_account_runtime::AccountRestoreReadiness,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match readiness() {
-            asceify_account_runtime::AccountRestoreReadiness::Ready => return Ok(()),
-            asceify_account_runtime::AccountRestoreReadiness::Failed => {
+            aeris_account_runtime::AccountRestoreReadiness::Ready => return Ok(()),
+            aeris_account_runtime::AccountRestoreReadiness::Failed => {
                 return Err("candidate account restore failed local readiness".to_string());
             }
-            asceify_account_runtime::AccountRestoreReadiness::Pending => {}
+            aeris_account_runtime::AccountRestoreReadiness::Pending => {}
         }
         if std::time::Instant::now() >= deadline {
             return Err("candidate account restore local readiness timed out".to_string());
@@ -1921,7 +1921,7 @@ fn validate_workspace_boot_for_readiness(workspace: &WorkspaceState) -> Result<(
 #[cfg(test)]
 mod desktop_readiness_account_tests {
     use super::wait_for_account_restore_readiness;
-    use asceify_account_runtime::AccountRestoreReadiness;
+    use aeris_account_runtime::AccountRestoreReadiness;
     use std::{cell::Cell, time::Duration};
 
     #[test]
@@ -1972,7 +1972,7 @@ mod desktop_readiness_account_tests {
 #[cfg(test)]
 mod desktop_readiness_workspace_tests {
     use super::validate_workspace_boot_for_readiness;
-    use asceify_contracts::WorkspacePaneKind;
+    use aeris_contracts::WorkspacePaneKind;
 
     #[test]
     fn readiness_reuses_the_production_workspace_boot_planner() {
@@ -1995,7 +1995,7 @@ mod desktop_readiness_workspace_tests {
 fn run_desktop_readiness_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
-    let usage = "usage: asceify_desktop --desktop-readiness <report-path>";
+    let usage = "usage: aeris_desktop --desktop-readiness <report-path>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     if arguments.next().is_some() {
         return Err(usage.to_string());
@@ -2003,8 +2003,8 @@ fn run_desktop_readiness_command(
     let workspace = local_state::load_workspace_for_readiness()
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
     validate_workspace_boot_for_readiness(&workspace)?;
-    let account_service = asceify_account_runtime::AccountService::new(
-        asceify_account_runtime::AccountServiceConfig::from_environment(),
+    let account_service = aeris_account_runtime::AccountService::new(
+        aeris_account_runtime::AccountServiceConfig::from_environment(),
     );
     #[cfg(target_os = "windows")]
     let _session_shutdown_guard = {
@@ -2026,12 +2026,12 @@ fn run_desktop_readiness_command(
         wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
             account_service.restore_readiness()
         })?;
-        let market = asceify_market_runtime::MarketService::start()?;
+        let market = aeris_market_runtime::MarketService::start()?;
         let status = market.status()?;
         if status.providers.is_empty() {
             return Err("candidate market service did not reach readiness".to_string());
         }
-        let release = asceify_platform_runtime::current_release_identity();
+        let release = aeris_platform_runtime::current_release_identity();
         let report = LifecycleReadinessReport {
             schema_version: 2,
             release_identity: release.release_identity,
@@ -2076,7 +2076,7 @@ struct LifecycleReadinessReport {
 fn run_desktop_conformance_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
-    let usage = "usage: asceify_desktop --desktop-conformance <report-path>";
+    let usage = "usage: aeris_desktop --desktop-conformance <report-path>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     if arguments.next().is_some() {
         return Err(usage.to_string());
@@ -2089,7 +2089,7 @@ fn run_desktop_conformance_command(
 fn run_desktop_endurance_command(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), String> {
-    let usage = "usage: asceify_desktop --desktop-endurance <report-path> <duration-seconds>";
+    let usage = "usage: aeris_desktop --desktop-endurance <report-path> <duration-seconds>";
     let report_path = arguments.next().ok_or_else(|| usage.to_string())?;
     let duration_seconds = arguments
         .next()
@@ -2138,7 +2138,7 @@ fn desktop_window_options(window_index: usize, cx: &mut App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("Asceify".into()),
+            title: Some("Aeris Terminal".into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(9.0), px(9.0))),
         }),
@@ -2578,7 +2578,7 @@ enum WorkspaceShellKind {
 struct TerminalApp {
     workspaces: Vec<WorkspaceTab>,
     active: usize,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     drawing_toolbar: DrawingToolbarVisibility,
     window_active: bool,
     frame_poll_gate: frame_poll_gate::FramePollGate,
@@ -2950,7 +2950,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
-                eprintln!("usage: asceify_desktop --rithmic-test");
+                eprintln!("usage: aeris_desktop --rithmic-test");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -2961,7 +2961,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             )
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
-                eprintln!("usage: asceify_desktop --multi-chart");
+                eprintln!("usage: aeris_desktop --multi-chart");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -2972,7 +2972,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             )
         } else if argument == "--workspace-tabs" {
             if arguments.next().is_some() {
-                eprintln!("usage: asceify_desktop --workspace-tabs");
+                eprintln!("usage: aeris_desktop --workspace-tabs");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -3009,24 +3009,24 @@ pub(super) fn run() {
     let mut lifecycle_arguments = std::env::args_os().skip(1);
     if lifecycle_arguments.next().as_deref() == Some(std::ffi::OsStr::new("--desktop-readiness")) {
         if let Err(error) = run_desktop_readiness_command(lifecycle_arguments) {
-            eprintln!("Asceify desktop readiness failed: {error}");
+            eprintln!("Aeris desktop readiness failed: {error}");
             std::process::exit(1);
         }
         return;
     }
-    if let Err(error) = asceify_platform_runtime::migrate_legacy_native_data_root() {
-        eprintln!("Asceify legacy local state migration deferred: {error}");
+    if let Err(error) = aeris_platform_runtime::migrate_legacy_native_data_root() {
+        eprintln!("Aeris legacy local state migration deferred: {error}");
     }
     if std::env::args_os().len() == 1
         && let Err(error) = schedule_versioned_launcher_promotion()
     {
-        eprintln!("Asceify launcher promotion deferred: {error}");
+        eprintln!("Aeris launcher promotion deferred: {error}");
     }
     let configured = match configured_market_workers() {
         Ok(Some(configured)) => configured,
         Ok(None) => exit_after_account_refresh_quiesce(0),
         Err(error) => {
-            eprintln!("Asceify market worker could not start: {error}");
+            eprintln!("Aeris market worker could not start: {error}");
             exit_after_account_refresh_quiesce(1);
         }
     };
@@ -3040,7 +3040,7 @@ fn schedule_versioned_launcher_promotion() -> Result<(), String> {
     let release_root = executable
         .parent()
         .ok_or_else(|| "desktop release directory is unavailable".to_string())?;
-    let launcher = release_root.join(format!("asceify_launcher{}", std::env::consts::EXE_SUFFIX));
+    let launcher = release_root.join(format!("aeris_launcher{}", std::env::consts::EXE_SUFFIX));
     let metadata = match std::fs::symlink_metadata(&launcher) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -3061,13 +3061,13 @@ fn schedule_versioned_launcher_promotion() -> Result<(), String> {
 
 fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
     application()
-        .with_assets(assets::AsceifyAssets)
+        .with_assets(assets::AerisAssets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_base::init(cx);
-            cx.set_global(base_theme(&AsceifyTheme::dark()));
+            cx.set_global(base_theme(&AerisTheme::dark()));
             install_platform_http_client(cx);
-            cx.set_app_identity("com.asceify.desktop", "Asceify");
+            cx.set_app_identity("com.aeris.desktop", "Aeris Terminal");
             cx.text_system()
                 .add_fonts(
                     PLATFORM_FONT_BYTES
@@ -3117,7 +3117,7 @@ fn mount_desktop(
             if let Some(quit) = quit
                 && let Err(error) = quit.await
             {
-                eprintln!("Asceify desktop shutdown failed: {error}");
+                eprintln!("Aeris desktop shutdown failed: {error}");
             }
         }
     })
@@ -3152,7 +3152,7 @@ fn mount_desktop(
                 } else {
                     let options = desktop_window_options(window_index, cx);
                     cx.open_window(options, build)
-                        .expect("the Asceify terminal window opens");
+                        .expect("the Aeris terminal window opens");
                 }
             }
         }
@@ -3175,7 +3175,7 @@ fn mount_desktop(
             } else {
                 let options = desktop_window_options(0, cx);
                 cx.open_window(options, build)
-                    .expect("the Asceify workspace window opens");
+                    .expect("the Aeris workspace window opens");
             }
         }
     }
@@ -3229,12 +3229,12 @@ mod http_wiring_tests {
                 request.starts_with("GET /avatar.gif "),
                 "GPUI image loader must issue a GET for the avatar resource: {request}"
             );
-            let expected_user_agent = format!("user-agent: Asceify/{}", env!("CARGO_PKG_VERSION"));
+            let expected_user_agent = format!("user-agent: Aeris/{}", env!("CARGO_PKG_VERSION"));
             assert!(
                 request
                     .lines()
                     .any(|line| line.eq_ignore_ascii_case(&expected_user_agent)),
-                "installed ReqwestClient must carry the Asceify user agent: {request}"
+                "installed ReqwestClient must carry the Aeris user agent: {request}"
             );
 
             write!(

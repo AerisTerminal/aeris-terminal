@@ -99,7 +99,7 @@ fn valid_perp_quote_asset(quote_asset: &str) -> bool {
         && !quote_asset.contains('-')
 }
 
-/// Migrates display labels written by `Asceify`'s legacy Hyperliquid formatter
+/// Migrates display labels written by `Aeris`'s legacy Hyperliquid formatter
 /// when the historical quote asset is unambiguous.
 ///
 /// This is deliberately narrower than live catalog formatting. HIP-3 permits

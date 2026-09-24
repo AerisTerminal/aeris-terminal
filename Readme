@@ -1,6 +1,6 @@
-# Asceify
+# Aeris Terminal
 
-Asceify is a local-first desktop trading terminal built with Rust and GPUI. It brings charts, order books, market data, and multi-pane workspaces into one native application process.
+Aeris Terminal is a local-first desktop trading terminal built with Rust and GPUI. It brings charts, order books, market data, and multi-pane workspaces into one native application process.
 
 ## Development
 
@@ -9,7 +9,7 @@ The desktop is currently in development mode. Sign-in and automatic updates are 
 Requirements: the Rust toolchain in `rust-toolchain.toml` and the platform dependencies for GPUI. On Linux, run `tools/setup_linux_desktop.sh`.
 
 ```text
-cargo run --release -p asceify_desktop -- --workspace-tabs
+cargo run --release -p aeris_desktop -- --workspace-tabs
 ```
 
 ## Project layout

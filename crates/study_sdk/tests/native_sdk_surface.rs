@@ -1,4 +1,4 @@
-use asceify_study_sdk::{
+use aeris_study_sdk::{
     BarPeriod, BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, NativeStudyState,
     StreamRequirements, StudyDefinition, StudyDependency, StudyExecutionContext, StudyInstanceId,
     StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,
@@ -137,9 +137,9 @@ fn indicator_on_indicator_dependency_is_expressible_through_the_sdk_facade_only(
 #[test]
 fn quote_trade_and_depth_inputs_are_expressible_through_the_sdk_facade_only() {
     let streams = StreamRequirements::BARS
-        .with(asceify_study_sdk::MarketStream::Trades)
-        .with(asceify_study_sdk::MarketStream::Quotes)
-        .with(asceify_study_sdk::MarketStream::Depth);
+        .with(aeris_study_sdk::MarketStream::Trades)
+        .with(aeris_study_sdk::MarketStream::Quotes)
+        .with(aeris_study_sdk::MarketStream::Depth);
     let definition = StudyDefinition {
         identifier: "example.microstructure".to_string(),
         dependencies: vec![StudyDependency::Market(StudyMarketInput {

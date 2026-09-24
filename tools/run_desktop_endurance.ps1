@@ -72,7 +72,7 @@ $sourceRevision = Get-SourceRevision $repoRoot
 $sourceCargoLockPath = (Resolve-Path -LiteralPath (Join-Path $repoRoot "Cargo.lock")).Path
 $cargoLockHash = (Get-FileHash -LiteralPath $sourceCargoLockPath -Algorithm SHA256).Hash
 
-cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --locked --release --package asceify_desktop --all-features
+cargo build --manifest-path (Join-Path $repoRoot "Cargo.toml") --locked --release --package aeris_desktop --all-features
 if ($LASTEXITCODE -ne 0) {
     throw "Desktop-endurance release build failed."
 }
@@ -83,9 +83,9 @@ if ((Get-FileHash -LiteralPath $sourceCargoLockPath -Algorithm SHA256).Hash -ne 
     throw "Cargo.lock changed during the desktop-endurance build."
 }
 
-$builtExecutable = (Resolve-Path -LiteralPath (Join-Path $repoRoot "target\release\asceify_desktop.exe")).Path
+$builtExecutable = (Resolve-Path -LiteralPath (Join-Path $repoRoot "target\release\aeris_desktop.exe")).Path
 $null = New-Item -ItemType Directory -Path $resolvedEvidenceDirectory
-$executablePath = Join-Path $resolvedEvidenceDirectory "asceify_desktop.exe"
+$executablePath = Join-Path $resolvedEvidenceDirectory "aeris_desktop.exe"
 $cargoLockPath = Join-Path $resolvedEvidenceDirectory "Cargo.lock"
 $reportPath = Join-Path $resolvedEvidenceDirectory "desktop-endurance-schema2-8h.json"
 $manifestPath = Join-Path $resolvedEvidenceDirectory "run-manifest.json"

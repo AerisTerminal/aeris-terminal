@@ -6,10 +6,10 @@
 //! `market_service`. The runtime produces deterministic recalculation plans and shared upstream
 //! stream requirements without creating provider work itself.
 
-use asceify_market_data::{
+use aeris_market_data::{
     AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, TopOfBookQuote,
 };
-use asceify_market_engine::{
+use aeris_market_engine::{
     ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesSnapshot,
     StreamRequirements,
 };
@@ -4203,8 +4203,8 @@ fn bounded_execution_detail(mut detail: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_market_data::{BarPeriod, DepthSnapshot, EventMetadata, QualifiedTimestamp};
-    use asceify_market_engine::{
+    use aeris_market_data::{BarPeriod, DepthSnapshot, EventMetadata, QualifiedTimestamp};
+    use aeris_market_engine::{
         MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
     };
     use std::{sync::Mutex, time::Duration};

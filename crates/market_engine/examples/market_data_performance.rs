@@ -1,6 +1,6 @@
 //! Deterministic engine workload. Timing is evidence, correctness is a hard gate.
-use asceify_market_data::{BarPeriod, BarSeriesKey, MarketBar};
-use asceify_market_engine::{
+use aeris_market_data::{BarPeriod, BarSeriesKey, MarketBar};
+use aeris_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, EngineError, GenerationId, MarketEngine,
     MarketEngineConfig, ProviderCapabilities, ProviderConfig, ProviderGeneration,
     StreamRequirements, Viewport, WorkspaceId,

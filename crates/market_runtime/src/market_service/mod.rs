@@ -20,27 +20,27 @@ use crate::{
         StudyRuntime, StudyRuntimeConfig, StudyTradeSample,
     },
 };
-use asceify_contracts::{
+use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
     SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
 };
-use asceify_hyperliquid_market_adapter::{
+use aeris_hyperliquid_market_adapter::{
     HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
 };
-use asceify_market_data::{
+use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
     TopOfBookQuote,
 };
-use asceify_market_engine::{
+use aeris_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
     MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig,
     ProviderGeneration, ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation,
     StreamRequirements, Viewport, WorkspaceId,
 };
-use asceify_provider_history::HistoryRange;
-use asceify_rithmic_protocol_adapter::{
+use aeris_provider_history::HistoryRange;
+use aeris_rithmic_protocol_adapter::{
     RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
 };
 
@@ -519,7 +519,7 @@ trait HistorySource: Send + 'static {
 struct LiveRithmicHistory;
 
 #[derive(Default)]
-struct LiveHyperliquidHistory(asceify_hyperliquid_market_adapter::HyperliquidHttpClient);
+struct LiveHyperliquidHistory(aeris_hyperliquid_market_adapter::HyperliquidHttpClient);
 
 struct ProviderRuntimeSpec {
     provider_id: &'static str,

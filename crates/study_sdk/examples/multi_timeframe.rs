@@ -1,4 +1,4 @@
-use asceify_study_sdk::{
+use aeris_study_sdk::{
     BarPeriod, BarSeriesKey, NativeStudyProgram, NativeStudyRegistration, StreamRequirements,
     StudyBarField, StudyDefinition, StudyDependency, StudyExecutionContext, StudyInputSeries,
     StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec, StudyPaneTarget, StudyPlotKind,

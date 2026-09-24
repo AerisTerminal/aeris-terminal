@@ -1,4 +1,4 @@
-use asceify_design_system::{AsceifyTheme, RadiusToken, TypographyRole, platform_font_family};
+use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
     RenderOnce, StyleRefinement, Styled, Window, prelude::*, px,
@@ -14,21 +14,21 @@ fn tab_radius() -> gpui::Pixels {
     px(f32::from(RadiusToken::Full.logical_pixels()))
 }
 
-/// Shared `Asceify` tab surface. Tabs own their semantic role, selected-state
+/// Shared `Aeris` tab surface. Tabs own their semantic role, selected-state
 /// treatment, focus treatment, and the canonical pill radius while callers own
 /// layout, content, and activation behavior.
 #[derive(IntoElement)]
 pub(crate) struct Tab {
     base: BaseButton,
     style: StyleRefinement,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     selected: bool,
     segmented: bool,
     children: Vec<AnyElement>,
 }
 
 impl Tab {
-    pub(crate) fn new(id: impl Into<ElementId>, theme: &AsceifyTheme) -> Self {
+    pub(crate) fn new(id: impl Into<ElementId>, theme: &AerisTheme) -> Self {
         Self {
             base: BaseButton::new(id),
             style: StyleRefinement::default(),

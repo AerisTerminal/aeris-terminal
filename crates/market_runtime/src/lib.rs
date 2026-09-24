@@ -1,6 +1,6 @@
 //! In-process market runtime.
 //!
-//! `Asceify` owns provider connections, canonical market state, on-demand
+//! `Aeris` owns provider connections, canonical market state, on-demand
 //! history, and realtime fanout inside the desktop process. There is no secondary local process, serialized runtime transport, or restart-replay layer here.
 
 mod hyperliquid_display_depth;
@@ -22,10 +22,10 @@ pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
 /// symbol rules.
 #[must_use]
 pub fn migrate_retained_provider_display_symbol(
-    instrument: &asceify_contracts::InstallProviderInstrument,
+    instrument: &aeris_contracts::InstallProviderInstrument,
 ) -> Option<String> {
     match instrument.provider.as_str() {
-        "hyperliquid" => asceify_hyperliquid_market_adapter::legacy_display_label(
+        "hyperliquid" => aeris_hyperliquid_market_adapter::legacy_display_label(
             &instrument.instrument_id,
             &instrument.provider_symbol,
             &instrument.display_symbol,
@@ -38,23 +38,23 @@ pub fn migrate_retained_provider_display_symbol(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketPriceAlert {
     pub id: String,
-    pub instrument: asceify_contracts::InstallProviderInstrument,
+    pub instrument: aeris_contracts::InstallProviderInstrument,
     pub price: i64,
-    pub condition: asceify_contracts::PriceAlertCondition,
-    pub frequency: asceify_contracts::PriceAlertFrequency,
+    pub condition: aeris_contracts::PriceAlertCondition,
+    pub frequency: aeris_contracts::PriceAlertFrequency,
     pub active: bool,
 }
 
 /// Exact trade observation that satisfied one runtime-owned price alert.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketPriceAlertTrigger {
-    pub consumer_id: asceify_market_engine::ConsumerId,
+    pub consumer_id: aeris_market_engine::ConsumerId,
     pub alert_id: String,
-    pub instrument: asceify_contracts::InstallProviderInstrument,
+    pub instrument: aeris_contracts::InstallProviderInstrument,
     pub threshold_price: i64,
     pub observed_price: i64,
-    pub condition: asceify_contracts::PriceAlertCondition,
-    pub frequency: asceify_contracts::PriceAlertFrequency,
+    pub condition: aeris_contracts::PriceAlertCondition,
+    pub frequency: aeris_contracts::PriceAlertFrequency,
     pub observed_unix_nanos: i64,
     pub remains_active: bool,
 }
@@ -69,8 +69,8 @@ pub struct MarketDisplayDepth {
     pub provider_generation: u64,
     pub display_generation: u64,
     pub source_sequence: u64,
-    pub bids: Vec<asceify_market_data::DepthLevel>,
-    pub asks: Vec<asceify_market_data::DepthLevel>,
+    pub bids: Vec<aeris_market_data::DepthLevel>,
+    pub asks: Vec<aeris_market_data::DepthLevel>,
 }
 
 /// Direct in-process order-book image for one consumer generation.
@@ -80,39 +80,39 @@ pub struct MarketDisplayDepth {
 /// DOM while retaining canonical raw depth for correctness and fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketOrderBookSnapshot {
-    pub consumer_id: asceify_market_engine::ConsumerId,
-    pub generation: asceify_market_engine::GenerationId,
-    pub publication: asceify_market_data::OrderBookPublication,
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: aeris_market_engine::GenerationId,
+    pub publication: aeris_market_data::OrderBookPublication,
     pub display_depth: Option<MarketDisplayDepth>,
 }
 
 /// Direct completed provider selection for one runtime consumer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketProviderInstrumentSelection {
-    pub consumer_id: asceify_market_engine::ConsumerId,
-    pub instrument: asceify_contracts::InstallProviderInstrument,
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub instrument: aeris_contracts::InstallProviderInstrument,
     pub command_generation: u64,
 }
 
 /// Direct generation-fenced readiness state for one canonical series.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketSeriesState {
-    pub consumer_id: asceify_market_engine::ConsumerId,
-    pub generation: asceify_market_engine::GenerationId,
-    pub series: Option<asceify_market_data::BarSeriesKey>,
-    pub state: asceify_contracts::SeriesLoadState,
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: aeris_market_engine::GenerationId,
+    pub series: Option<aeris_market_data::BarSeriesKey>,
+    pub state: aeris_contracts::SeriesLoadState,
     pub detail: Option<String>,
 }
 
 /// Direct structured failure for one canonical series demand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketDemandError {
-    pub consumer_id: asceify_market_engine::ConsumerId,
-    pub generation: asceify_market_engine::GenerationId,
-    pub code: asceify_contracts::EngineFaultCode,
-    pub stage: asceify_contracts::FailureStage,
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: aeris_market_engine::GenerationId,
+    pub code: aeris_contracts::EngineFaultCode,
+    pub stage: aeris_contracts::FailureStage,
     pub detail: String,
-    pub series: Option<asceify_market_data::BarSeriesKey>,
+    pub series: Option<aeris_market_data::BarSeriesKey>,
     pub cause: String,
     pub elapsed_millis: Option<u64>,
 }
@@ -126,7 +126,7 @@ pub struct MarketDemandError {
 /// supersedes an older queued one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketStudyOutputSnapshot {
-    pub consumer_id: asceify_market_engine::ConsumerId,
+    pub consumer_id: aeris_market_engine::ConsumerId,
     pub study_id: study::StudyInstanceId,
     pub output_id: study::StudyOutputId,
     pub study_identifier: String,
@@ -141,7 +141,7 @@ pub struct MarketStudyOutputSnapshot {
 /// reconstructing runtime dependency state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketStudyRemoved {
-    pub consumer_id: asceify_market_engine::ConsumerId,
+    pub consumer_id: aeris_market_engine::ConsumerId,
     pub study_ids: Vec<study::StudyInstanceId>,
 }
 
@@ -150,7 +150,7 @@ pub struct MarketStudyRemoved {
 /// output series until replacement snapshots arrive.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketStudyOutputsInvalidated {
-    pub consumer_id: asceify_market_engine::ConsumerId,
+    pub consumer_id: aeris_market_engine::ConsumerId,
     pub study_ids: Vec<study::StudyInstanceId>,
 }
 
@@ -161,9 +161,9 @@ pub struct MarketStudyOutputsInvalidated {
 /// or process-reconnect replay exists on this boundary.
 #[derive(Clone, Debug)]
 pub enum MarketRuntimeEvent {
-    ProviderState(asceify_contracts::ProviderState),
-    SeriesSnapshot(asceify_market_engine::ConsumerPublication),
-    SeriesUpdate(asceify_market_engine::ConsumerSeriesUpdate),
+    ProviderState(aeris_contracts::ProviderState),
+    SeriesSnapshot(aeris_market_engine::ConsumerPublication),
+    SeriesUpdate(aeris_market_engine::ConsumerSeriesUpdate),
     SeriesState(MarketSeriesState),
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
@@ -171,13 +171,13 @@ pub enum MarketRuntimeEvent {
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),
     PriceAlertTriggered(MarketPriceAlertTrigger),
-    ProviderInstrumentSearchResult(asceify_contracts::ProviderInstrumentSearchResult),
+    ProviderInstrumentSearchResult(aeris_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
-    ProviderCatalogRejected(asceify_contracts::ProviderCatalogRejected),
-    Fault(asceify_contracts::Fault),
+    ProviderCatalogRejected(aeris_contracts::ProviderCatalogRejected),
+    Fault(aeris_contracts::Fault),
 }
 
-pub use asceify_market_engine::{
+pub use aeris_market_engine::{
     ConsumerId as MarketConsumerId, ConsumerPublication as MarketSeriesSnapshot,
     ConsumerResourceClass as MarketConsumerResourceClass,
     ConsumerSeriesUpdate as MarketSeriesUpdate, GenerationId as MarketGenerationId, MarketStream,

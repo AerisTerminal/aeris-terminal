@@ -4,8 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-cargo test --locked --package asceify_platform_runtime network_notifications::tests::
-cargo test --locked --package asceify_platform_runtime power_notifications::tests::
+cargo test --locked --package aeris_platform_runtime network_notifications::tests::
+cargo test --locked --package aeris_platform_runtime power_notifications::tests::
 
 live_probe="not_available"
 platform="$(uname -s)"
@@ -35,7 +35,7 @@ if [[ "$platform" == "Linux" ]] && command -v busctl >/dev/null 2>&1 \
         State >/dev/null 2>&1; then
     probe_output="$(
         cargo run --quiet --locked \
-            --package asceify_platform_runtime \
+            --package aeris_platform_runtime \
             --example native_network_monitor_probe
     )"
     live_probe="passed:${probe_output#native_network_monitor_current=}"
@@ -43,7 +43,7 @@ fi
 if [[ "$platform" == "Darwin" || "$platform" == MINGW* || "$platform" == MSYS* || "$platform" == CYGWIN* ]]; then
     probe_output="$(
         cargo run --quiet --locked \
-            --package asceify_platform_runtime \
+            --package aeris_platform_runtime \
             --example native_network_monitor_probe
     )"
     live_probe="passed:${probe_output#native_network_monitor_current=}"

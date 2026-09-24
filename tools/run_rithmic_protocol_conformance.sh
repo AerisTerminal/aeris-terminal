@@ -9,7 +9,7 @@ if [[ -d "$kit_proto_dir" ]]; then
     cargo test \
         --manifest-path "$manifest_path" \
         --locked \
-        --package asceify_rithmic_protocol_adapter \
+        --package aeris_rithmic_protocol_adapter \
         --all-targets \
         --all-features
     kit_evidence="passed"
@@ -17,10 +17,10 @@ else
     kit_evidence="unavailable"
 fi
 
-ASCEIFY_RITHMIC_KIT_DISABLED=1 cargo test \
+AERIS_RITHMIC_KIT_DISABLED=1 cargo test \
     --manifest-path "$manifest_path" \
     --locked \
-    --package asceify_rithmic_protocol_adapter \
+    --package aeris_rithmic_protocol_adapter \
     --all-targets \
     --all-features
 

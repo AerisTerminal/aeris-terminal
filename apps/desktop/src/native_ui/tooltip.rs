@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use asceify_design_system::{AsceifyTheme, RadiusToken, TypographyRole, platform_font_family};
+use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     AnyView, App, Context, ElementId, IntoElement, Render, SharedString, Window, div, prelude::*,
     px,
@@ -16,12 +16,12 @@ use super::{
 #[derive(Clone)]
 pub(crate) struct TooltipSpec {
     label: SharedString,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     show_delay: Duration,
 }
 
 impl TooltipSpec {
-    pub(crate) fn new(label: impl Into<SharedString>, theme: &AsceifyTheme) -> Self {
+    pub(crate) fn new(label: impl Into<SharedString>, theme: &AerisTheme) -> Self {
         Self {
             label: label.into(),
             theme: *theme,
@@ -53,7 +53,7 @@ impl TooltipSpec {
 
 struct TooltipView {
     label: SharedString,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
 }
 
 impl Render for TooltipView {
@@ -97,14 +97,14 @@ pub(crate) fn with_tooltip(
 mod tests {
     use std::time::Duration;
 
-    use asceify_design_system::AsceifyTheme;
+    use aeris_design_system::AerisTheme;
 
     use super::TooltipSpec;
 
     #[test]
     fn tooltip_delay_is_explicit_and_bounded_by_the_owner() {
         let tooltip =
-            TooltipSpec::new("Close", &AsceifyTheme::dark()).show_delay(Duration::from_millis(275));
+            TooltipSpec::new("Close", &AerisTheme::dark()).show_delay(Duration::from_millis(275));
         assert_eq!(tooltip.delay(), Duration::from_millis(275));
     }
 }

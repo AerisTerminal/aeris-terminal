@@ -1,5 +1,5 @@
 [package]
-name = "asceify_hyperliquid_market_adapter"
+name = "aeris_hyperliquid_market_adapter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-asceify_platform_runtime = { path = "../../platform_runtime" }
-asceify_market_data = { path = "../../domain/market_data" }
+aeris_platform_runtime = { path = "../../platform_runtime" }
+aeris_market_data = { path = "../../domain/market_data" }
 serde.workspace = true
 # `raw_value` only exposes the `RawValue` API; it changes no existing
 # `serde_json` behavior. The adapter needs it to decode provider decimals

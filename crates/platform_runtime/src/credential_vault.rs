@@ -268,7 +268,7 @@ fn validate_identifier(identifier: &str) -> Result<(), ()> {
 }
 
 fn backend_identifier(kind: &str, identifier: &str) -> String {
-    previous_backend_identifier("asceify", kind, identifier)
+    previous_backend_identifier("aeris", kind, identifier)
 }
 
 fn previous_backend_identifier(namespace: &str, kind: &str, identifier: &str) -> String {
@@ -285,11 +285,11 @@ fn legacy_backend_identifier(kind: &str, identifier: &str) -> String {
 
 fn legacy_services(service: &str) -> &'static [(&'static str, &'static str)] {
     match service {
-        "com.asceify.account" => &[
+        "com.aeris.account" => &[
             ("tradingplot", "com.tradingplot.account"),
             ("axiusflow", "com.axiusflow.account"),
         ],
-        "com.asceify.terminal" => &[
+        "com.aeris.terminal" => &[
             ("tradingplot", "com.tradingplot.terminal"),
             ("axiusflow", "com.axiusflow.terminal"),
         ],
@@ -351,10 +351,10 @@ mod tests {
             Err(NativeCredentialVaultError::InvalidService)
         ));
         assert!(matches!(
-            NativeCredentialVault::new("asceify\nterminal"),
+            NativeCredentialVault::new("aeris\nterminal"),
             Err(NativeCredentialVaultError::InvalidService)
         ));
-        assert!(NativeCredentialVault::new("com.asceify.terminal").is_ok());
+        assert!(NativeCredentialVault::new("com.aeris.terminal").is_ok());
         assert!(validate_identifier("").is_err());
         assert!(validate_identifier("session\0token").is_err());
         assert!(validate_identifier("session-token").is_ok());
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn native_vault_round_trips_binary_secrets_and_treats_deletion_as_idempotent() {
         let vault = NativeCredentialVault::with_backend(
-            "com.asceify.terminal",
+            "com.aeris.terminal",
             MemoryCredentialBackend::default(),
         )
         .expect("valid service creates a native vault");
@@ -407,17 +407,17 @@ mod tests {
 
     #[test]
     fn native_vault_debug_never_contains_secret_material() {
-        let vault = NativeCredentialVault::new("com.asceify.terminal")
+        let vault = NativeCredentialVault::new("com.aeris.terminal")
             .expect("valid service creates a native vault");
         let debug = format!("{vault:?}");
-        assert!(debug.contains("com.asceify.terminal"));
+        assert!(debug.contains("com.aeris.terminal"));
         assert!(!debug.contains("secret"));
     }
 
     #[test]
     fn native_vault_migrates_legacy_service_and_backend_namespace_on_load() {
         let backend = MemoryCredentialBackend::default();
-        let vault = NativeCredentialVault::with_backend("com.asceify.account", backend.clone())
+        let vault = NativeCredentialVault::with_backend("com.aeris.account", backend.clone())
             .expect("canonical account service creates a vault");
         let legacy_service = legacy_backend_identifier("service", "com.axiusflow.account");
         let legacy_key = legacy_backend_identifier("key", "session");
@@ -429,7 +429,7 @@ mod tests {
             vault.load("session").expect("legacy credential migrates"),
             Some(b"legacy-secret".to_vec())
         );
-        let canonical_service = backend_identifier("service", "com.asceify.account");
+        let canonical_service = backend_identifier("service", "com.aeris.account");
         let canonical_key = backend_identifier("key", "session");
         assert_eq!(
             backend
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn native_vault_migrates_tradingplot_provider_credential() {
         let backend = MemoryCredentialBackend::default();
-        let vault = NativeCredentialVault::with_backend("com.asceify.terminal", backend.clone())
+        let vault = NativeCredentialVault::with_backend("com.aeris.terminal", backend.clone())
             .expect("canonical terminal service creates a vault");
         let legacy_service = super::previous_backend_identifier(
             "tradingplot",
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn native_vault_delete_removes_legacy_credential_when_canonical_is_missing() {
         let backend = MemoryCredentialBackend::default();
-        let vault = NativeCredentialVault::with_backend("com.asceify.terminal", backend.clone())
+        let vault = NativeCredentialVault::with_backend("com.aeris.terminal", backend.clone())
             .expect("canonical terminal service creates a vault");
         let legacy_service = legacy_backend_identifier("service", "com.axiusflow.terminal");
         let legacy_key = legacy_backend_identifier("key", "provider");
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn native_vault_store_retires_legacy_credential() {
         let backend = MemoryCredentialBackend::default();
-        let vault = NativeCredentialVault::with_backend("com.asceify.account", backend.clone())
+        let vault = NativeCredentialVault::with_backend("com.aeris.account", backend.clone())
             .expect("canonical account service creates a vault");
         let legacy_service = legacy_backend_identifier("service", "com.axiusflow.account");
         let legacy_key = legacy_backend_identifier("key", "session");

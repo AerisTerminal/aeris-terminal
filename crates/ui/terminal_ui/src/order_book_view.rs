@@ -2,10 +2,10 @@
 use crate::OrderBookRow;
 use crate::order_book::{compact_quantity_text, grouped_fixed_point_text};
 use crate::{OrderBookColumnLevel, OrderBookFrame};
-use asceify_design_system::{
-    AsceifyTheme, ThemeColor, TypographyRole, platform_font_family, platform_typography,
+use aeris_design_system::{
+    AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_typography,
 };
-use asceify_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
+use aeris_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
 use gpui::{
     AnyElement, Context, Div, Hsla, IntoElement, Render, ScrollStrategy, UniformListScrollHandle,
     Window, div, prelude::*, px, relative, uniform_list,
@@ -175,14 +175,14 @@ pub struct ReadOnlyOrderBookView {
     frame: Option<Arc<OrderBookFrame>>,
     unavailable: bool,
     connection_state: OrderBookConnectionState,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     ladder_scroll: UniformListScrollHandle,
     columns: OrderBookColumnVisibility,
 }
 
 impl ReadOnlyOrderBookView {
     #[must_use]
-    pub fn new(theme: AsceifyTheme) -> Self {
+    pub fn new(theme: AerisTheme) -> Self {
         Self {
             frame: None,
             unavailable: false,
@@ -264,7 +264,7 @@ impl ReadOnlyOrderBookView {
         }
     }
 
-    pub fn set_theme(&mut self, theme: AsceifyTheme, cx: &mut Context<Self>) {
+    pub fn set_theme(&mut self, theme: AerisTheme, cx: &mut Context<Self>) {
         if self.theme != theme {
             self.theme = theme;
             cx.notify();
@@ -372,7 +372,7 @@ fn connection_status_banner(
     state: OrderBookConnectionState,
     has_frame: bool,
     unavailable: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
     let (label, color): (&str, StatusColor) = match state {
         OrderBookConnectionState::Online => return None,
@@ -409,7 +409,7 @@ fn connection_status_banner(
 
 fn render_header(
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     div()
         .h(px(HEADER_HEIGHT))
@@ -452,7 +452,7 @@ fn render_ladder(
     frame: Option<Arc<OrderBookFrame>>,
     empty_copy: &'static str,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     ladder_scroll: &UniformListScrollHandle,
 ) -> impl IntoElement + use<> {
     let body = div()
@@ -507,7 +507,7 @@ fn render_ladder(
 fn render_virtualized_ladder_list(
     frame: &Arc<OrderBookFrame>,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     ladder_scroll: &UniformListScrollHandle,
 ) -> AnyElement {
     let list_frame = Arc::clone(frame);
@@ -949,7 +949,7 @@ fn render_price_grid_item(
     layout: PriceGridLayout,
     index: usize,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     maximum_quantity: i64,
     maximum_trade_quantity: i64,
 ) -> Option<AnyElement> {
@@ -1133,7 +1133,7 @@ fn render_ladder_item(
     layout: LadderLayout,
     index: usize,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     maximum_quantity: i64,
     maximum_trade_quantity: i64,
 ) -> Option<AnyElement> {
@@ -1217,7 +1217,7 @@ enum CellAlignment {
 struct LevelCellContext<'a> {
     columns: OrderBookColumnVisibility,
     price_color: ThemeColor,
-    theme: &'a AsceifyTheme,
+    theme: &'a AerisTheme,
     maximum_quantity: i64,
     maximum_trade_quantity: i64,
     trade_volumes: AggressorTradeVolumes,
@@ -1258,7 +1258,7 @@ fn render_level_row(
     level: &OrderBookColumnLevel,
     side: BookColumnSide,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     stats: RowRenderStats,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -1314,7 +1314,7 @@ fn render_empty_price_tick(
     price_scale: u8,
     side: BookColumnSide,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     stats: RowRenderStats,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -1375,7 +1375,7 @@ fn render_empty_price_tick(
         )
 }
 
-fn price_grid_center_row(frame: &OrderBookFrame, theme: &AsceifyTheme) -> AnyElement {
+fn price_grid_center_row(frame: &OrderBookFrame, theme: &AerisTheme) -> AnyElement {
     if let Some(row) = spread_row(display_best_bid(frame), display_best_ask(frame), theme) {
         return row.into_any_element();
     }
@@ -1571,7 +1571,7 @@ fn visible_quantity_width(quantity: i64, maximum_quantity: i64) -> f32 {
 
 fn column_rails(
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl Iterator<Item = gpui::AnyElement> + use<> {
     let border = gpui_color(theme.colors.border);
     let mut edge = 0.0;
@@ -1599,7 +1599,7 @@ fn column_rails(
 fn spread_row(
     best_bid: Option<&OrderBookColumnLevel>,
     best_ask: Option<&OrderBookColumnLevel>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
     let bid = best_bid?;
     let ask = best_ask?;
@@ -1626,7 +1626,7 @@ fn spread_row(
 fn status_banner(
     state: OrderBookState,
     watermark: u64,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
     let (label, color) = status_presentation(state, watermark)?;
     Some(
@@ -1645,7 +1645,7 @@ fn status_banner(
     )
 }
 
-type StatusColor = fn(&AsceifyTheme) -> ThemeColor;
+type StatusColor = fn(&AerisTheme) -> ThemeColor;
 
 fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String, StatusColor)> {
     match state {
@@ -1724,7 +1724,7 @@ mod tests {
 
     #[test]
     fn retiring_a_book_discards_the_displayed_frame() {
-        let mut view = ReadOnlyOrderBookView::new(AsceifyTheme::dark());
+        let mut view = ReadOnlyOrderBookView::new(AerisTheme::dark());
         view.frame = Some(Arc::new(frame(1, 8, 40, OrderBookState::Ready, true)));
         assert!(view.discard_frames());
         assert!(view.frame.is_none());
@@ -1783,7 +1783,7 @@ mod tests {
 
     #[test]
     fn provider_connectivity_has_stable_actionable_book_feedback() {
-        let theme = AsceifyTheme::default();
+        let theme = AerisTheme::default();
         assert!(
             connection_status_banner(OrderBookConnectionState::Online, false, false, &theme)
                 .is_none()
@@ -1804,7 +1804,7 @@ mod tests {
 
     #[test]
     fn first_snapshot_recovery_is_presented_as_loading_not_reconnecting() {
-        let theme = AsceifyTheme::default();
+        let theme = AerisTheme::default();
         assert!(
             connection_status_banner(OrderBookConnectionState::Recovering, false, false, &theme)
                 .is_none()
@@ -1834,7 +1834,7 @@ mod tests {
         }
         // Awaiting the first snapshot is loading, not failure: it must not
         // share the failure color used by stale and broken books.
-        let theme = AsceifyTheme::default();
+        let theme = AerisTheme::default();
         let awaiting = status_presentation(
             OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot),
             0,

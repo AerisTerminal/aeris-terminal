@@ -18,7 +18,7 @@ use crate::hyperliquid_display_depth::{
 use crate::study::{
     StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyQuoteView, StudyTradeWindow,
 };
-use asceify_rithmic_protocol_adapter::ProviderInvalidationReason;
+use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
@@ -857,13 +857,13 @@ impl Coordinator<'_> {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
-                    eprintln!("Asceify live non-bar study execution failed: {error}");
+                    eprintln!("Aeris live non-bar study execution failed: {error}");
                 }
             }
             Err(error) => {
                 // Native study failure must not change acceptance/recovery of
                 // authoritative provider state.
-                eprintln!("Asceify live non-bar study execution failed: {error}");
+                eprintln!("Aeris live non-bar study execution failed: {error}");
             }
         }
     }
@@ -997,14 +997,14 @@ impl Coordinator<'_> {
                 Ok(batch) => {
                     self.publish_study_outputs(&batch.executed);
                     for error in batch.errors {
-                        eprintln!("Asceify live study execution failed: {error}");
+                        eprintln!("Aeris live study execution failed: {error}");
                     }
                 }
                 Err(error) => {
                     // Study failure is isolated from canonical market publication.
                     // A user calculation must never force provider recovery or make
                     // an accepted market tail look discontinuous.
-                    eprintln!("Asceify live study execution failed: {error}");
+                    eprintln!("Aeris live study execution failed: {error}");
                 }
             }
         }
@@ -1178,7 +1178,7 @@ impl Coordinator<'_> {
         }
         match event {
             RithmicRealtimeEvent::Failed(generation, error) => {
-                eprintln!("Asceify Rithmic reconnect requires intervention: {error}");
+                eprintln!("Aeris Rithmic reconnect requires intervention: {error}");
                 self.rithmic_failed(
                     generation,
                     "Rithmic reconnect could not start; check provider configuration",
@@ -2018,7 +2018,7 @@ impl Coordinator<'_> {
                 }
             };
             if let Err(error) = published {
-                eprintln!("Asceify engine Rithmic live publication failed: {error}");
+                eprintln!("Aeris engine Rithmic live publication failed: {error}");
                 self.rithmic_series_recovering(
                     &series,
                     generation,
@@ -2258,7 +2258,7 @@ impl Coordinator<'_> {
                 }
             };
             if let Err(error) = published {
-                eprintln!("Asceify engine Hyperliquid live publication failed: {error}");
+                eprintln!("Aeris engine Hyperliquid live publication failed: {error}");
                 self.hyperliquid_series_recovering(
                     &series,
                     generation,
@@ -2390,10 +2390,8 @@ impl Coordinator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_market_data::{
-        AggressorTradeVolumes, DepthLevel, EventMetadata, QualifiedTimestamp,
-    };
-    use asceify_market_engine::StreamRequirements;
+    use aeris_market_data::{AggressorTradeVolumes, DepthLevel, EventMetadata, QualifiedTimestamp};
+    use aeris_market_engine::StreamRequirements;
     use std::num::NonZeroU64;
 
     fn generation() -> ProviderGeneration {
@@ -2425,13 +2423,13 @@ mod tests {
 
     fn rithmic_trade(sequence: u64, timestamp: i64, price: i64) -> MarketTrade {
         MarketTrade {
-            metadata: asceify_market_data::EventMetadata {
+            metadata: aeris_market_data::EventMetadata {
                 provider_id: "rithmic".to_string(),
                 instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
                 entitlement_id: "rithmic-test:CME:MNQ".to_string(),
                 source_sequence: sequence,
                 session_generation: 1,
-                timestamps: asceify_market_data::QualifiedTimestamp {
+                timestamps: aeris_market_data::QualifiedTimestamp {
                     exchange_unix_nanos: Some(timestamp),
                     provider_unix_nanos: None,
                     received_unix_nanos: timestamp,
@@ -2440,7 +2438,7 @@ mod tests {
             trade_id: format!("trade-{sequence}"),
             price,
             quantity: 1,
-            aggressor: asceify_market_data::AggressorSide::Unknown,
+            aggressor: aeris_market_data::AggressorSide::Unknown,
         }
     }
 
@@ -2469,13 +2467,13 @@ mod tests {
         aggressor: AggressorSide,
     ) -> MarketTrade {
         MarketTrade {
-            metadata: asceify_market_data::EventMetadata {
+            metadata: aeris_market_data::EventMetadata {
                 provider_id: "rithmic".to_string(),
                 instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
                 entitlement_id: "rithmic-test:CME:MNQ".to_string(),
                 source_sequence: sequence,
                 session_generation,
-                timestamps: asceify_market_data::QualifiedTimestamp {
+                timestamps: aeris_market_data::QualifiedTimestamp {
                     exchange_unix_nanos: Some(received_unix_nanos),
                     provider_unix_nanos: None,
                     received_unix_nanos,

@@ -1,5 +1,5 @@
-use asceify_chart_integration::ChartType;
-use asceify_design_system::RadiusToken;
+use aeris_chart_integration::ChartType;
+use aeris_design_system::RadiusToken;
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
@@ -361,7 +361,7 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
 
 #[must_use]
 pub fn chart_chrome_state_path() -> Option<PathBuf> {
-    asceify_platform_runtime::native_data_root()
+    aeris_platform_runtime::native_data_root()
         .ok()
         .map(|root| root.join("desktop").join("chart-chrome"))
 }
@@ -588,13 +588,13 @@ mod tests {
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
     };
-    use asceify_chart_integration::ChartType;
+    use aeris_chart_integration::ChartType;
     use std::sync::Mutex;
     use std::time::Duration;
 
     fn temporary_chart_chrome_path(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "asceify-chart-chrome-{label}-{}-{}",
+            "aeris-chart-chrome-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

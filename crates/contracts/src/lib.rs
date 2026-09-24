@@ -1,4 +1,4 @@
-//! Shared in-process and persisted `Asceify` contracts.
+//! Shared in-process and persisted `Aeris` contracts.
 //!
 //! These prost DTOs carry bounded market/account metadata between ownership
 //! boundaries in the single desktop process and encode the local workspace file.

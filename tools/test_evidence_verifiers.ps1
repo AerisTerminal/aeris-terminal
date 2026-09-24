@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $enduranceVerifier = Join-Path $PSScriptRoot "verify_desktop_endurance.ps1"
 $pacingVerifier = Join-Path $PSScriptRoot "verify_physical_pacing_matrix.ps1"
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("asceify-evidence-verifier-" + [Guid]::NewGuid().ToString("N"))
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ("aeris-evidence-verifier-" + [Guid]::NewGuid().ToString("N"))
 $null = New-Item -ItemType Directory -Path $testRoot
 
 function Write-Json {

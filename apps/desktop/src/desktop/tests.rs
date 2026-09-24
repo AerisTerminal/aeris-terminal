@@ -35,14 +35,14 @@ use super::{
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-use asceify_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
-use asceify_contracts::{
+use aeris_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
+use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
     SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
-use asceify_design_system::{AsceifyTheme, ThemeColor, ThemeMode};
-use asceify_market_data::{ChartInterval, MarketBar};
-use asceify_observability::FeedConnectionState;
+use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode};
+use aeris_market_data::{ChartInterval, MarketBar};
+use aeris_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -340,7 +340,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
 
 mod timeframe_input {
     use super::super::*;
-    use asceify_desktop::market_worker::{
+    use aeris_desktop::market_worker::{
         EngineWorkerStartup, MarketWorkerCommand, MarketWorkerSender, market_worker_channel,
     };
     use gpui::{TestAppContext, VisualTestContext};
@@ -804,7 +804,7 @@ fn saved_workspace_boot_fixture() -> WorkspaceState {
 #[test]
 fn fresh_boot_consumes_saved_symbol_timeframe_layout_and_active_pane() {
     let unique = format!(
-        "asceify-workspace-boot-consumption-{}-{}",
+        "aeris-workspace-boot-consumption-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -992,7 +992,7 @@ fn watchlist_drag_reflows_continuously_at_row_midpoints() {
 
 #[test]
 fn chrome_controls_use_icon_and_disabled_hierarchy() {
-    let colors = AsceifyTheme::light().colors;
+    let colors = AerisTheme::light().colors;
     assert_eq!(chrome_control_foreground(&colors, false, true), colors.icon);
     assert_eq!(
         chrome_control_foreground(&colors, true, true),
@@ -1388,7 +1388,7 @@ fn worker_stop_preserves_a_concrete_startup_error() {
 
 #[test]
 fn connection_indicator_is_transport_only() {
-    let theme = super::AsceifyTheme::dark();
+    let theme = super::AerisTheme::dark();
     let colors = theme.colors;
     let live = connection_presentation(
         TerminalProvider::Rithmic,

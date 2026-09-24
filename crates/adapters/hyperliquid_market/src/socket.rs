@@ -281,9 +281,8 @@ fn connect_tcp(
     if stop.load(Ordering::Acquire) {
         return Err("hyperliquid socket cancelled".to_string());
     }
-    let addresses =
-        asceify_platform_runtime::resolve_addresses(host, port, deadline, Some(stop))
-            .map_err(|error| format!("hyperliquid socket resolution failed: {:?}", error.kind()))?;
+    let addresses = aeris_platform_runtime::resolve_addresses(host, port, deadline, Some(stop))
+        .map_err(|error| format!("hyperliquid socket resolution failed: {:?}", error.kind()))?;
     if addresses.is_empty() {
         return Err("hyperliquid socket resolution failed".to_string());
     }

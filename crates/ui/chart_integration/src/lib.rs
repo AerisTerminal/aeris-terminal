@@ -1,4 +1,4 @@
-//! `Asceify` host integration for Nucleus Charts' existing GPUI backend.
+//! `Aeris` host integration for Nucleus Charts' existing GPUI backend.
 //!
 //! Nucleus owns chart state, layout, scales, interactions, frames, and rendering.
 //! This crate only negotiates GPUI window geometry and submits the resulting
@@ -10,7 +10,7 @@ mod provenance;
 mod view;
 mod workspace;
 
-pub use asceify_application::ReplayRecoveryCommand;
+pub use aeris_application::ReplayRecoveryCommand;
 pub use bridge::ChartBridgeMetrics;
 pub use nucleuscharts_engine::ChartTheme as NucleusChartTheme;
 pub use nucleuscharts_engine::{

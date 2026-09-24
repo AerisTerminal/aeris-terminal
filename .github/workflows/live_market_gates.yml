@@ -26,7 +26,7 @@ jobs:
         # Job-scoped credential rewrite (see ci.yml): per-job temp file via
         # GITHUB_ENV, never the runner owner's persistent global git config.
         run: |
-          config="$RUNNER_TEMP/asceify-job-gitconfig"
+          config="$RUNNER_TEMP/aeris-job-gitconfig"
           git config --file "$config" url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf "https://github.com/"
           printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - name: Validate private chart credential
@@ -45,7 +45,7 @@ jobs:
         run: rustup show
       - name: Exercise the live Hyperliquid runtime and cancellation path
         run: >-
-          cargo test -p asceify_market_runtime --locked --
+          cargo test -p aeris_market_runtime --locked --
           --ignored --nocapture live_worker_cancellation_is_prompt
       - name: Upload the recorded gate
         if: always()
@@ -56,7 +56,7 @@ jobs:
           retention-days: 30
       - name: Remove job-scoped git credential
         if: always()
-        run: rm -f "$RUNNER_TEMP/asceify-job-gitconfig"
+        run: rm -f "$RUNNER_TEMP/aeris-job-gitconfig"
 
   rithmic:
     # Rithmic needs credentials in the runner's native vault, so this job only
@@ -78,8 +78,8 @@ jobs:
         # back to kitless Rithmic and no live path can work.
         shell: pwsh
         run: |
-          $kitRoot = if ($env:ASCEIFY_RITHMIC_KIT_ROOT) {
-            $env:ASCEIFY_RITHMIC_KIT_ROOT
+          $kitRoot = if ($env:AERIS_RITHMIC_KIT_ROOT) {
+            $env:AERIS_RITHMIC_KIT_ROOT
           } elseif ($env:AXIUSFLOW_RITHMIC_KIT_ROOT) {
             $env:AXIUSFLOW_RITHMIC_KIT_ROOT
           } else {
@@ -99,7 +99,7 @@ jobs:
         # This job assumes a Windows runner, matching its pwsh preflight.
         shell: pwsh
         run: |
-          $config = Join-Path $env:RUNNER_TEMP 'asceify-job-gitconfig'
+          $config = Join-Path $env:RUNNER_TEMP 'aeris-job-gitconfig'
           git config --file $config url."https://x-access-token:${{ secrets.NUCLEUS_CHARTS_TOKEN }}@github.com/".insteadOf 'https://github.com/'
           Add-Content -Path $env:GITHUB_ENV -Value "GIT_CONFIG_GLOBAL=$config"
       - name: Validate private chart credential
@@ -121,7 +121,7 @@ jobs:
           if ($schemas.Count -eq 0) { throw 'Rithmic provider kit is unavailable on this runner' }
       - name: Exercise the live Rithmic provider smoke path
         run: >-
-          cargo run -p asceify_rithmic_protocol_adapter --bin rithmic_test_smoke --locked --release
+          cargo run -p aeris_rithmic_protocol_adapter --bin rithmic_test_smoke --locked --release
       - name: Upload the recorded gate
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -132,4 +132,4 @@ jobs:
       - name: Remove job-scoped git credential
         if: always()
         shell: pwsh
-        run: Remove-Item -Force (Join-Path $env:RUNNER_TEMP 'asceify-job-gitconfig') -ErrorAction SilentlyContinue
+        run: Remove-Item -Force (Join-Path $env:RUNNER_TEMP 'aeris-job-gitconfig') -ErrorAction SilentlyContinue

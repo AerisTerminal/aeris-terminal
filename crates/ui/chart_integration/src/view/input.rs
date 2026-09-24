@@ -421,7 +421,7 @@ impl NucleusChartView {
             self.live_evidence_mouse_downs = self.live_evidence_mouse_downs.saturating_add(1);
             let x: f32 = event.position.x.into();
             let y: f32 = event.position.y.into();
-            eprintln!("ASCEIFY_CHART_MOUSE_DOWN {{\"x\":{x},\"y\":{y}}}");
+            eprintln!("AERIS_CHART_MOUSE_DOWN {{\"x\":{x},\"y\":{y}}}");
         }
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);

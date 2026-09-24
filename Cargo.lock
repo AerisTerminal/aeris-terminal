@@ -237,16 +237,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_account"
+name = "aeris_account"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_account_runtime"
+name = "aeris_account_runtime"
 version = "0.2.3"
 dependencies = [
- "asceify_account",
- "asceify_contracts",
- "asceify_platform_runtime",
+ "aeris_account",
+ "aeris_contracts",
+ "aeris_platform_runtime",
  "base64 0.23.1",
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -258,21 +258,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_application"
+name = "aeris_application"
 version = "0.2.3"
 dependencies = [
- "asceify_instruments",
- "asceify_market_data",
+ "aeris_instruments",
+ "aeris_market_data",
  "sha2 0.11.0",
 ]
 
 [[package]]
-name = "asceify_chart_integration"
+name = "aeris_chart_integration"
 version = "0.2.3"
 dependencies = [
- "asceify_application",
- "asceify_design_system",
- "asceify_terminal_ui",
+ "aeris_application",
+ "aeris_design_system",
+ "aeris_terminal_ui",
  "gpui",
  "nucleuscharts_engine",
  "nucleuscharts_render",
@@ -282,32 +282,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_contracts"
+name = "aeris_contracts"
 version = "0.2.3"
 dependencies = [
  "prost",
 ]
 
 [[package]]
-name = "asceify_design_system"
+name = "aeris_design_system"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_desktop"
+name = "aeris_desktop"
 version = "0.2.3"
 dependencies = [
- "asceify_account_runtime",
- "asceify_application",
- "asceify_chart_integration",
- "asceify_contracts",
- "asceify_design_system",
- "asceify_instruments",
- "asceify_market_data",
- "asceify_market_runtime",
- "asceify_observability",
- "asceify_platform_runtime",
- "asceify_study_sdk",
- "asceify_terminal_ui",
+ "aeris_account_runtime",
+ "aeris_application",
+ "aeris_chart_integration",
+ "aeris_contracts",
+ "aeris_design_system",
+ "aeris_instruments",
+ "aeris_market_data",
+ "aeris_market_runtime",
+ "aeris_observability",
+ "aeris_platform_runtime",
+ "aeris_study_sdk",
+ "aeris_terminal_ui",
  "embed-resource",
  "getrandom 0.4.3",
  "gpui",
@@ -324,11 +324,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_hyperliquid_market_adapter"
+name = "aeris_hyperliquid_market_adapter"
 version = "0.2.3"
 dependencies = [
- "asceify_market_data",
- "asceify_platform_runtime",
+ "aeris_market_data",
+ "aeris_platform_runtime",
  "rustls",
  "serde",
  "serde_json",
@@ -338,47 +338,47 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_instruments"
+name = "aeris_instruments"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_market_data"
+name = "aeris_market_data"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_market_engine"
+name = "aeris_market_engine"
 version = "0.2.3"
 dependencies = [
- "asceify_market_data",
+ "aeris_market_data",
  "serde_json",
  "sha2 0.11.0",
 ]
 
 [[package]]
-name = "asceify_market_runtime"
+name = "aeris_market_runtime"
 version = "0.2.3"
 dependencies = [
- "asceify_contracts",
- "asceify_hyperliquid_market_adapter",
- "asceify_market_data",
- "asceify_market_engine",
- "asceify_platform_runtime",
- "asceify_provider_history",
- "asceify_rithmic_protocol_adapter",
+ "aeris_contracts",
+ "aeris_hyperliquid_market_adapter",
+ "aeris_market_data",
+ "aeris_market_engine",
+ "aeris_platform_runtime",
+ "aeris_provider_history",
+ "aeris_rithmic_protocol_adapter",
  "serde_json",
  "zeroize",
 ]
 
 [[package]]
-name = "asceify_naming_check"
+name = "aeris_naming_check"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_observability"
+name = "aeris_observability"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_platform_runtime"
+name = "aeris_platform_runtime"
 version = "0.2.3"
 dependencies = [
  "base64 0.23.1",
@@ -402,17 +402,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_provider_history"
+name = "aeris_provider_history"
 version = "0.2.3"
 
 [[package]]
-name = "asceify_rithmic_protocol_adapter"
+name = "aeris_rithmic_protocol_adapter"
 version = "0.2.3"
 dependencies = [
- "asceify_market_data",
- "asceify_observability",
- "asceify_platform_runtime",
- "asceify_provider_history",
+ "aeris_market_data",
+ "aeris_observability",
+ "aeris_platform_runtime",
+ "aeris_provider_history",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
@@ -429,22 +429,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "asceify_study_sdk"
+name = "aeris_study_sdk"
 version = "0.2.3"
 dependencies = [
- "asceify_market_data",
- "asceify_market_runtime",
+ "aeris_market_data",
+ "aeris_market_runtime",
  "nucleuscharts_indicators",
  "num-traits",
 ]
 
 [[package]]
-name = "asceify_terminal_ui"
+name = "aeris_terminal_ui"
 version = "0.2.3"
 dependencies = [
- "asceify_design_system",
- "asceify_instruments",
- "asceify_market_data",
+ "aeris_design_system",
+ "aeris_instruments",
+ "aeris_market_data",
  "gpui",
 ]
 

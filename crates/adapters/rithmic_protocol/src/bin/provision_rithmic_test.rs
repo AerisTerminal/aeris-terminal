@@ -1,5 +1,5 @@
-use asceify_platform_runtime::{CredentialVault, NativeCredentialVault};
-use asceify_rithmic_protocol_adapter::{
+use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
+use aeris_rithmic_protocol_adapter::{
     RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCredentialBytes,
 };
 use rpassword::prompt_password;

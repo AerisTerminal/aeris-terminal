@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use asceify_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
+use aeris_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
 use nucleuscharts_engine::AxisTextMidpoint;
 
 fn interactive_chart() -> NucleusChartView {
@@ -58,11 +58,11 @@ fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
     );
     assert_eq!(
         options.layout.font_family,
-        asceify_design_system::platform_font_stack()
+        aeris_design_system::platform_font_stack()
     );
     assert_eq!(
         options.watermark.font_family,
-        asceify_design_system::platform_font_stack()
+        aeris_design_system::platform_font_stack()
     );
     assert_eq!(
         options.grid.vert_lines.color,
@@ -532,8 +532,8 @@ fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
 #[test]
 fn chart_legend_text_colors_project_platform_chrome_and_nucleus_market_colors() {
     for (theme, platform) in [
-        (ChartTheme::Light, AsceifyTheme::light()),
-        (ChartTheme::Dark, AsceifyTheme::dark()),
+        (ChartTheme::Light, AerisTheme::light()),
+        (ChartTheme::Dark, AerisTheme::dark()),
     ] {
         let palette = legend_palette(theme, "#089981", "#f7525f");
         let colors = platform.colors;
@@ -2464,7 +2464,7 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
             .expect("drawings export"),
     )
     .expect("export is JSON");
-    let saved_time = state[0]["points"][0]["asceify_anchor_time"]
+    let saved_time = state[0]["points"][0]["aeris_anchor_time"]
         .as_f64()
         .expect("first anchor has exchange time");
     assert_eq!(source.product_bars.logical_at_time(saved_time), Some(5.5));
@@ -2473,7 +2473,7 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
         .product_bars
         .time_at_logical(7.5)
         .expect("later anchor time");
-    state[0]["points"][0]["asceify_anchor_time"] = serde_json::Value::from(later_time);
+    state[0]["points"][0]["aeris_anchor_time"] = serde_json::Value::from(later_time);
     let mut restored = NucleusChartView::with_replay(&replay);
     restored
         .import_semantic_state_json(&state.to_string(), &[])

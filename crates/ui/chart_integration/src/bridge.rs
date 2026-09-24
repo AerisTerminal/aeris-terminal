@@ -1,10 +1,10 @@
 //! Bounded replay-to-Nucleus data bridge with correlated recovery commands.
 
-use asceify_application::{
+use aeris_application::{
     ProvenancedMarketBar, ReplayRecoveryCommand, ReplaySession, ReplaySnapshot, ReplayStreamUpdate,
     ReplayValidationError, ResnapshotReason, SequenceDecision,
 };
-use asceify_terminal_ui::BoundedUiQueue;
+use aeris_terminal_ui::BoundedUiQueue;
 use std::{num::NonZeroUsize, time::Instant};
 
 pub(crate) const MAX_RECOVERY_DISPATCH_ATTEMPTS: usize = 3;
@@ -558,7 +558,7 @@ fn snapshot_may_replace(
 }
 
 fn delta_matches_snapshot(
-    delta: &asceify_application::StreamDelta<ProvenancedMarketBar>,
+    delta: &aeris_application::StreamDelta<ProvenancedMarketBar>,
     snapshot: &ReplaySnapshot,
 ) -> bool {
     let provenance = delta.item().provenance();
@@ -570,7 +570,7 @@ fn delta_matches_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
+    use aeris_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
 
     fn snapshot() -> ReplaySnapshot {
         EmbeddedReplaySource

@@ -1,5 +1,5 @@
 [package]
-name = "asceify_chart_integration"
+name = "aeris_chart_integration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,9 @@ publish.workspace = true
 diagnostics = []
 
 [dependencies]
-asceify_application = { path = "../../application" }
-asceify_design_system = { path = "../design_system" }
-asceify_terminal_ui = { path = "../terminal_ui", default-features = false }
+aeris_application = { path = "../../application" }
+aeris_design_system = { path = "../design_system" }
+aeris_terminal_ui = { path = "../terminal_ui", default-features = false }
 gpui.workspace = true
 num-traits = "=0.2.19"
 nucleuscharts_engine.workspace = true

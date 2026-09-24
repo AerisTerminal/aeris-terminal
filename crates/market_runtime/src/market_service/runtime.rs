@@ -127,9 +127,9 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::new(ProviderRuntimeLifecycle::default());
         let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
         let history_name: &'static str = if spec.provider_id == "hyperliquid" {
-            "asceify-hyperliquid-history"
+            "aeris-hyperliquid-history"
         } else {
-            "asceify-rithmic-history"
+            "aeris-rithmic-history"
         };
         let history_worker = spawn_history_worker(
             history_name,
@@ -200,10 +200,10 @@ impl ProviderRuntimeRegistry {
             };
             let worker_activity = Arc::clone(active_workers);
             let provider = thread::Builder::new()
-                .name("asceify-rithmic-provider".to_string())
+                .name("aeris-rithmic-provider".to_string())
                 .spawn(move || {
                     let _activity =
-                        ActiveWorkerGuard::register("asceify-rithmic-provider", worker_activity);
+                        ActiveWorkerGuard::register("aeris-rithmic-provider", worker_activity);
                     crate::rithmic_realtime::run(
                         &catalog_controls_rx,
                         &catalog_events_tx,
@@ -353,16 +353,15 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::clone(&started.lifecycle);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("asceify-hyperliquid-catalog".to_string())
+            .name("aeris-hyperliquid-catalog".to_string())
             .spawn(move || {
-                let _activity =
-                    ActiveWorkerGuard::register("asceify-hyperliquid-catalog", activity);
+                let _activity = ActiveWorkerGuard::register("aeris-hyperliquid-catalog", activity);
                 crate::hyperliquid_realtime::run_catalog(
                     &controls,
                     &events,
                     &ws_generation,
                     &cancellation,
-                    asceify_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
+                    aeris_hyperliquid_market_adapter::HyperliquidHttpConfig::default(),
                 );
                 if !cancellation.load(Ordering::Acquire) {
                     lifecycle
@@ -387,10 +386,9 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::clone(&started.lifecycle);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("asceify-hyperliquid-provider".to_string())
+            .name("aeris-hyperliquid-provider".to_string())
             .spawn(move || {
-                let _activity =
-                    ActiveWorkerGuard::register("asceify-hyperliquid-provider", activity);
+                let _activity = ActiveWorkerGuard::register("aeris-hyperliquid-provider", activity);
                 crate::hyperliquid_realtime::run(
                     &controls,
                     &events,
@@ -420,10 +418,10 @@ impl ProviderRuntimeRegistry {
         let cancellation = Arc::clone(&started.cancellation);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("asceify-hyperliquid-display-depth".to_string())
+            .name("aeris-hyperliquid-display-depth".to_string())
             .spawn(move || {
                 let _activity =
-                    ActiveWorkerGuard::register("asceify-hyperliquid-display-depth", activity);
+                    ActiveWorkerGuard::register("aeris-hyperliquid-display-depth", activity);
                 crate::hyperliquid_display_depth::run(
                     &controls,
                     &events,
@@ -1394,7 +1392,7 @@ mod tests {
         StudyExecutionContext, StudyInvalidationPolicy, StudyMarketInput, StudyOutputSpec,
         StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettings,
     };
-    use asceify_market_data::{BarPeriod, MarketBar};
+    use aeris_market_data::{BarPeriod, MarketBar};
 
     struct RecordingStudyHistory {
         calls: Arc<Mutex<Vec<String>>>,

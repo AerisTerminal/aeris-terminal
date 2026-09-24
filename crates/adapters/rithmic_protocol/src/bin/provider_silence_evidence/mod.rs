@@ -524,10 +524,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("test clock is valid")
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "asceify-{name}-{}-{nonce}.json",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("aeris-{name}-{}-{nonce}.json", std::process::id()))
     }
 
     #[test]

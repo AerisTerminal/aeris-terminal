@@ -1,5 +1,5 @@
-use asceify_design_system::{
-    AsceifyTheme, RadiusToken, ThemeColor, ThemeMode, TypographyRole, platform_font_family,
+use aeris_design_system::{
+    AerisTheme, RadiusToken, ThemeColor, ThemeMode, TypographyRole, platform_font_family,
     platform_typography,
 };
 use gpui::{FontWeight, Hsla, Pixels, px};
@@ -22,7 +22,7 @@ pub(crate) struct ButtonAppearance {
     pub(crate) active: ThemeColor,
 }
 
-pub(crate) fn button_appearance(theme: &AsceifyTheme, variant: ButtonVariant) -> ButtonAppearance {
+pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> ButtonAppearance {
     let colors = theme.colors;
     let (fill, foreground, border) = match variant {
         ButtonVariant::Filled => (colors.button_fill, colors.surface, None),
@@ -43,7 +43,7 @@ pub(crate) fn button_appearance(theme: &AsceifyTheme, variant: ButtonVariant) ->
     }
 }
 
-pub(crate) fn input_appearance(theme: &AsceifyTheme) -> (ThemeColor, ThemeColor, ThemeColor) {
+pub(crate) fn input_appearance(theme: &AerisTheme) -> (ThemeColor, ThemeColor, ThemeColor) {
     (
         theme.colors.input_fill,
         theme.colors.input_border,
@@ -56,14 +56,14 @@ pub(crate) fn gpui_color(color: ThemeColor) -> Hsla {
     Hsla { h, s, l, a }
 }
 
-pub(crate) fn platform_border_width(theme: &AsceifyTheme) -> Pixels {
+pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
     px(theme.dimensions.border_width)
 }
 
-/// Projects `Asceify`'s semantic design contract into the unstyled Base
+/// Projects `Aeris`'s semantic design contract into the unstyled Base
 /// foundation. Base behavior modules can then resolve unset semantics without
 /// introducing a second palette or typography source.
-pub(crate) fn base_theme(theme: &AsceifyTheme) -> Theme {
+pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
     let colors = theme.colors;
     let mut base = Theme {
         appearance: match theme.mode {
@@ -120,13 +120,13 @@ pub(crate) fn base_theme(theme: &AsceifyTheme) -> Theme {
 
 #[cfg(test)]
 mod tests {
-    use asceify_design_system::AsceifyTheme;
+    use aeris_design_system::AerisTheme;
 
     use super::{ButtonVariant, base_theme, button_appearance, gpui_color, input_appearance};
 
     #[test]
     fn semantic_appearances_follow_platform_aliases_in_both_modes() {
-        for theme in [AsceifyTheme::light(), AsceifyTheme::dark()] {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let filled = button_appearance(&theme, ButtonVariant::Filled);
             assert_eq!(filled.fill, theme.colors.button_fill);
             assert_eq!(filled.foreground, theme.colors.surface);
@@ -147,8 +147,8 @@ mod tests {
     }
 
     #[test]
-    fn base_semantics_are_projected_from_asceify_tokens() {
-        for theme in [AsceifyTheme::light(), AsceifyTheme::dark()] {
+    fn base_semantics_are_projected_from_aeris_tokens() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let base = base_theme(&theme);
             assert_eq!(
                 base.tokens.colors.foreground,
@@ -159,12 +159,12 @@ mod tests {
             assert_eq!(
                 base.tokens.radius.md,
                 gpui::px(f32::from(
-                    asceify_design_system::RadiusToken::Default.logical_pixels()
+                    aeris_design_system::RadiusToken::Default.logical_pixels()
                 ))
             );
             assert_eq!(
                 base.tokens.typography.sans.as_ref(),
-                asceify_design_system::platform_font_family()
+                aeris_design_system::platform_font_family()
             );
         }
     }

@@ -22,36 +22,36 @@
 
 [Setup]
 AppId={{08131BC4-8BBC-48B4-A67A-A032EE62FBD4}
-AppName=Asceify
+AppName=Aeris Terminal
 AppVersion={#AppVersion}
-AppPublisher=Asceify
-DefaultDirName={localappdata}\Programs\Asceify
-DefaultGroupName=Asceify
+AppPublisher=Aeris Terminal
+DefaultDirName={localappdata}\Programs\Aeris
+DefaultGroupName=Aeris Terminal
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 SetupIconFile={#IconPath}
-UninstallDisplayIcon={app}\asceify_launcher.exe
-UninstallDisplayName=Asceify
-UninstallFilesDir={localappdata}\Programs\Asceify-Uninstall
+UninstallDisplayIcon={app}\aeris_launcher.exe
+UninstallDisplayName=Aeris Terminal
+UninstallFilesDir={localappdata}\Programs\Aeris-Uninstall
 OutputDir={#OutputDir}
-OutputBaseFilename=Asceify-Setup
+OutputBaseFilename=Aeris-Setup
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=yes
 RestartApplications=no
 UsePreviousAppDir=no
-VersionInfoCompany=Asceify
-VersionInfoDescription=Asceify Installer
-VersionInfoProductName=Asceify
+VersionInfoCompany=Aeris Terminal
+VersionInfoDescription=Aeris Terminal Installer
+VersionInfoProductName=Aeris Terminal
 VersionInfoProductVersion={#AppVersion}
 
 
 [InstallDelete]
-Type: files; Name: "{app}\asceify_desktop.exe"
-Type: files; Name: "{app}\asceify_engine.exe"
+Type: files; Name: "{app}\aeris_desktop.exe"
+Type: files; Name: "{app}\aeris_engine.exe"
 Type: filesandordirs; Name: "{app}\.release-downloads"
 Type: filesandordirs; Name: "{localappdata}\Programs\Axiusflow"
 Type: filesandordirs; Name: "{localappdata}\Programs\Axiusflow-Uninstall"
@@ -60,21 +60,21 @@ Type: files; Name: "{localappdata}\Programs\.Axiusflow-lifecycle.lock"
 Type: filesandordirs; Name: "{autoprograms}\Axiusflow"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Asceify Engine"; Flags: deletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Aeris Engine"; Flags: deletevalue
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Axiusflow Engine"; Flags: deletevalue
 
 [Files]
-Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "asceify_launcher.exe"; Flags: ignoreversion
-Source: "{#ManifestPath}"; DestDir: "{tmp}\AsceifyRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
-Source: "{#LauncherPath}"; DestDir: "{tmp}\AsceifyRelease\bundle"; DestName: "asceify_launcher.exe"; Flags: deleteafterinstall
-Source: "{#DesktopPath}"; DestDir: "{tmp}\AsceifyRelease\bundle"; DestName: "asceify_desktop.exe"; Flags: deleteafterinstall
-Source: "{#RollbackCompatibilityPath}"; DestDir: "{tmp}\AsceifyRelease\bundle"; DestName: "rollback-compatibility.json"; Flags: deleteafterinstall
+Source: "{#LauncherPath}"; DestDir: "{app}"; DestName: "aeris_launcher.exe"; Flags: ignoreversion
+Source: "{#ManifestPath}"; DestDir: "{tmp}\AerisRelease"; DestName: "manifest.json"; Flags: deleteafterinstall
+Source: "{#LauncherPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "aeris_launcher.exe"; Flags: deleteafterinstall
+Source: "{#DesktopPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "aeris_desktop.exe"; Flags: deleteafterinstall
+Source: "{#RollbackCompatibilityPath}"; DestDir: "{tmp}\AerisRelease\bundle"; DestName: "rollback-compatibility.json"; Flags: deleteafterinstall
 
 [Icons]
-Name: "{autoprograms}\Asceify\Asceify"; Filename: "{app}\asceify_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\asceify_launcher.exe"; AppUserModelID: "com.asceify.desktop"; Comment: "Asceify trading terminal"
+Name: "{autoprograms}\Aeris\Aeris"; Filename: "{app}\aeris_launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\aeris_launcher.exe"; AppUserModelID: "com.aeris.desktop"; Comment: "Aeris Terminal trading terminal"
 
 [Run]
-Filename: "{app}\asceify_launcher.exe"; Description: "Launch Asceify"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\aeris_launcher.exe"; Description: "Launch Aeris Terminal"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure RegisterCloseResource(const Filename: String);
@@ -103,7 +103,7 @@ begin
         if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
            (FindRec.Name <> '.') and (FindRec.Name <> '..') then
         begin
-          DesktopPath := VersionsRoot + '\' + FindRec.Name + '\asceify_desktop.exe';
+          DesktopPath := VersionsRoot + '\' + FindRec.Name + '\aeris_desktop.exe';
           if FileExists(DesktopPath) then
             RegisterCloseResource(DesktopPath);
         end;
@@ -181,11 +181,11 @@ begin
   { A pending uninstall is an explicit request to remove local state. Complete
     it before [InstallDelete] can replace either recovery launcher. }
   Result := FinishPendingUninstall(
-    ExpandConstant('{localappdata}\Programs\.Asceify-lifecycle\uninstall.json'),
-    ExpandConstant('{localappdata}\Programs\Asceify\asceify_launcher.exe'),
-    ExpandConstant('{localappdata}\Programs\Asceify'),
-    'Finishing the previous Asceify uninstall...',
-    'Asceify could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.');
+    ExpandConstant('{localappdata}\Programs\.Aeris-lifecycle\uninstall.json'),
+    ExpandConstant('{localappdata}\Programs\Aeris\aeris_launcher.exe'),
+    ExpandConstant('{localappdata}\Programs\Aeris'),
+    'Finishing the previous Aeris Terminal uninstall...',
+    'Aeris Terminal could not finish the pending uninstall cleanup. Setup has not replaced the recovery launcher; retry or cancel Setup.');
   if Result <> '' then
     exit;
 
@@ -205,7 +205,7 @@ begin
   if CurUninstallStep <> usUninstall then
     exit;
 
-  Launcher := ExpandConstant('{app}\asceify_launcher.exe');
+  Launcher := ExpandConstant('{app}\aeris_launcher.exe');
   if (not FileExists(Launcher)) or
      (not Exec(
        Launcher,
@@ -217,7 +217,7 @@ begin
      (ResultCode <> 0) then
   begin
     MsgBox(
-      'Asceify could not remove all local application data. Uninstall has stopped so cleanup can be retried safely.',
+      'Aeris Terminal could not remove all local application data. Uninstall has stopped so cleanup can be retried safely.',
       mbError,
       MB_OK);
     Abort;
@@ -233,17 +233,17 @@ begin
   if CurStep <> ssPostInstall then
     exit;
 
-  Manifest := ExpandConstant('{tmp}\AsceifyRelease\manifest.json');
-  Bundle := ExpandConstant('{tmp}\AsceifyRelease\bundle');
-  WizardForm.StatusLabel.Caption := 'Verifying and installing the signed Asceify release...';
+  Manifest := ExpandConstant('{tmp}\AerisRelease\manifest.json');
+  Bundle := ExpandConstant('{tmp}\AerisRelease\bundle');
+  WizardForm.StatusLabel.Caption := 'Verifying and installing the signed Aeris Terminal release...';
   if (not Exec(
-      ExpandConstant('{app}\asceify_launcher.exe'),
+      ExpandConstant('{app}\aeris_launcher.exe'),
       '--install "' + Manifest + '" "' + Bundle + '"',
       ExpandConstant('{app}'),
       SW_HIDE,
       ewWaitUntilTerminated,
       ResultCode)) or (ResultCode <> 0) then
   begin
-    RaiseException('Asceify could not verify and install the bundled release. Setup has stopped without activating an unverified application.');
+    RaiseException('Aeris Terminal could not verify and install the bundled release. Setup has stopped without activating an unverified application.');
   end;
 end;

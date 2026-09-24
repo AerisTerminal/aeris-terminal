@@ -11,7 +11,7 @@ pub(crate) mod tooltip;
 
 use std::sync::Arc;
 
-use asceify_design_system::{TypographyRole, platform_typography};
+use aeris_design_system::{TypographyRole, platform_typography};
 use gpui::{FontFeatures, FontWeight};
 
 /// GPUI adapter for the semantic weights owned by `platform.css`.

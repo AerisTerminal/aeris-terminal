@@ -54,7 +54,7 @@ impl DesktopLifecycle {
         if self.shutdown_started.replace(true) {
             return None;
         }
-        let account_refresh = asceify_desktop::account::begin_refresh_quiesce();
+        let account_refresh = aeris_desktop::account::begin_refresh_quiesce();
         let terminals = self.terminals.borrow_mut().drain(..).collect::<Vec<_>>();
         for terminal in terminals {
             terminal
@@ -133,7 +133,7 @@ impl DesktopLifecycle {
         cx.spawn(async move |cx| {
             if let Err(error) = shutdown.await {
                 let blocks_exit = error.blocks_exit;
-                eprintln!("Asceify desktop shutdown failed: {error}");
+                eprintln!("Aeris desktop shutdown failed: {error}");
                 if blocks_exit {
                     lifecycle.shutdown_started.set(false);
                     if retry_account_failure {

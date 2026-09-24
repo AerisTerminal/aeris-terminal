@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Exercises Asceify's real Win32 non-client hit-test and caption-action path.
+Exercises Aeris Terminal's real Win32 non-client hit-test and caption-action path.
 
 .DESCRIPTION
 Build the release diagnostics binary first. Run this script once for each launch mode and DPI
@@ -9,7 +9,7 @@ transitions and 50 fresh-process launches.
 #>
 [CmdletBinding()]
 param(
-    [string]$BinaryPath = "target/release/asceify_desktop.exe",
+    [string]$BinaryPath = "target/release/aeris_desktop.exe",
     [ValidateSet("normal", "workspace-tabs", "multi-chart")]
     [string]$Mode = "normal",
     [ValidateRange(1, 1000)]
@@ -30,7 +30,7 @@ Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public static class AsceifyWindowControlsNative {
+public static class AerisWindowControlsNative {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, UIntPtr w, IntPtr l);
@@ -94,7 +94,7 @@ public static class AsceifyWindowControlsNative {
 "@
 
 # Keep P/Invoke screen/client coordinates in the same physical-pixel space as the GPUI process.
-[void][AsceifyWindowControlsNative]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
+[void][AerisWindowControlsNative]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
 
 $WM_MOUSEMOVE = 0x0200
 $WM_NCHITTEST = 0x0084
@@ -147,25 +147,25 @@ function Start-TestWindow([string]$Lane) {
 }
 
 function Get-ControlPoints([IntPtr]$Handle) {
-    $rect = New-Object AsceifyWindowControlsNative+RECT
+    $rect = New-Object AerisWindowControlsNative+RECT
     $deadline = [DateTime]::UtcNow.AddSeconds(2)
     do {
-        if (([AsceifyWindowControlsNative]::GetClientRect($Handle, [ref]$rect)) -and ($rect.Right -gt $rect.Left) -and ($rect.Bottom -gt $rect.Top)) {
+        if (([AerisWindowControlsNative]::GetClientRect($Handle, [ref]$rect)) -and ($rect.Right -gt $rect.Left) -and ($rect.Bottom -gt $rect.Top)) {
             break
         }
         Start-Sleep -Milliseconds 25
     } while ([DateTime]::UtcNow -lt $deadline)
     Assert-True (($rect.Right -gt $rect.Left) -and ($rect.Bottom -gt $rect.Top)) "GetClientRect did not expose a valid native client area after the window transition."
-    $dpi = [int][AsceifyWindowControlsNative]::GetDpiForWindow($Handle)
+    $dpi = [int][AerisWindowControlsNative]::GetDpiForWindow($Handle)
     $scale = $dpi / 96.0
     $width = $rect.Right - $rect.Left
     $titleBarY = [Math]::Round(21.0 * $scale)
     $headerY = [Math]::Round(65.0 * $scale)
     function Make-Point([int]$ClientX, [int]$ClientY) {
-        $screen = New-Object AsceifyWindowControlsNative+POINT
+        $screen = New-Object AerisWindowControlsNative+POINT
         $screen.X = $ClientX
         $screen.Y = $ClientY
-        Assert-True ([AsceifyWindowControlsNative]::ClientToScreen($Handle, [ref]$screen)) "ClientToScreen failed."
+        Assert-True ([AerisWindowControlsNative]::ClientToScreen($Handle, [ref]$screen)) "ClientToScreen failed."
         return @{ ClientX = $ClientX; ClientY = $ClientY; ScreenX = $screen.X; ScreenY = $screen.Y }
     }
     return @{
@@ -181,24 +181,24 @@ function Get-ControlPoints([IntPtr]$Handle) {
 function Get-HitTest([IntPtr]$Handle, $Point) {
     # Move the real cursor so Windows emits the same client/non-client transition sequence as a
     # user. Synthetic WM_MOUSEMOVE alone does not maintain Win32's NC tracking state.
-    [void][AsceifyWindowControlsNative]::ActivateWindow($Handle)
-    [void][AsceifyWindowControlsNative]::BringWindowToTop($Handle)
-    [void][AsceifyWindowControlsNative]::SetActiveWindow($Handle)
-    [void][AsceifyWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
-    [void][AsceifyWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
+    [void][AerisWindowControlsNative]::ActivateWindow($Handle)
+    [void][AerisWindowControlsNative]::BringWindowToTop($Handle)
+    [void][AerisWindowControlsNative]::SetActiveWindow($Handle)
+    [void][AerisWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
+    [void][AerisWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
     Start-Sleep -Milliseconds 25
-    $actualCursor = New-Object AsceifyWindowControlsNative+POINT
-    [void][AsceifyWindowControlsNative]::GetCursorPos([ref]$actualCursor)
+    $actualCursor = New-Object AerisWindowControlsNative+POINT
+    [void][AerisWindowControlsNative]::GetCursorPos([ref]$actualCursor)
     $cursorMoved = $actualCursor.X -eq $Point.ScreenX -and $actualCursor.Y -eq $Point.ScreenY
     if ($null -eq $script:CursorInjectionAvailable) { $script:CursorInjectionAvailable = $cursorMoved }
     if (-not $cursorMoved) {
         # Headless/remote Windows sessions may reject cursor injection. Exercise the same pinned
         # GPUI input callback directly in that case, using client coordinates.
-        [void][AsceifyWindowControlsNative]::SendMessage(
+        [void][AerisWindowControlsNative]::SendMessage(
             $Handle, $WM_MOUSEMOVE, [UIntPtr]::Zero, (New-LParam $Point.ClientX $Point.ClientY))
         Start-Sleep -Milliseconds 25
     }
-    $result = [AsceifyWindowControlsNative]::SendMessage(
+    $result = [AerisWindowControlsNative]::SendMessage(
         $Handle, $WM_NCHITTEST, [UIntPtr]::Zero, (New-LParam $Point.ScreenX $Point.ScreenY))
     return $result.ToInt32()
 }
@@ -220,8 +220,8 @@ function Assert-StableHitTest([IntPtr]$Handle, $Point, [int]$Expected, [string]$
 }
 
 function Save-DiagnosticCapture([IntPtr]$Handle) {
-    $rect = New-Object AsceifyWindowControlsNative+RECT
-    if (-not [AsceifyWindowControlsNative]::GetWindowRect($Handle, [ref]$rect)) { return }
+    $rect = New-Object AerisWindowControlsNative+RECT
+    if (-not [AerisWindowControlsNative]::GetWindowRect($Handle, [ref]$rect)) { return }
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
     if ($width -le 0 -or $height -le 0) { return }
@@ -285,55 +285,55 @@ function Assert-GlyphPixels([IntPtr]$Handle, $Points) {
 function Invoke-NativeClick([IntPtr]$Handle, [int]$HitCode, $Point) {
     Assert-StableHitTest $Handle $Point $HitCode "Native click target"
     if ($script:CursorInjectionAvailable) {
-        [void][AsceifyWindowControlsNative]::ActivateWindow($Handle)
-        [void][AsceifyWindowControlsNative]::SetActiveWindow($Handle)
-        [void][AsceifyWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
-        [void][AsceifyWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
-        Assert-True ([AsceifyWindowControlsNative]::SendMove()) "SendInput cursor move failed."
+        [void][AerisWindowControlsNative]::ActivateWindow($Handle)
+        [void][AerisWindowControlsNative]::SetActiveWindow($Handle)
+        [void][AerisWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
+        [void][AerisWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
+        Assert-True ([AerisWindowControlsNative]::SendMove()) "SendInput cursor move failed."
         Start-Sleep -Milliseconds 25
-        Assert-True ([AsceifyWindowControlsNative]::SendLeftButton($true)) "SendInput left-button down failed."
+        Assert-True ([AerisWindowControlsNative]::SendLeftButton($true)) "SendInput left-button down failed."
         Start-Sleep -Milliseconds 25
-        Assert-True ([AsceifyWindowControlsNative]::SendLeftButton($false)) "SendInput left-button up failed."
+        Assert-True ([AerisWindowControlsNative]::SendLeftButton($false)) "SendInput left-button up failed."
     } else {
         $screen = New-LParam $Point.ScreenX $Point.ScreenY
         $hit = [UIntPtr]::new([uint32]$HitCode)
-        [void][AsceifyWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONDOWN, $hit, $screen)
-        [void][AsceifyWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONUP, $hit, $screen)
+        [void][AerisWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONDOWN, $hit, $screen)
+        [void][AerisWindowControlsNative]::SendMessage($Handle, $WM_NCLBUTTONUP, $hit, $screen)
     }
 }
 
 function Invoke-RealClientClick([IntPtr]$Handle, $Point) {
     Assert-StableHitTest $Handle $Point $HTCLIENT "Client click target"
     Assert-True ([bool]$script:CursorInjectionAvailable) "The required live lane cannot use synthetic client input."
-    [void][AsceifyWindowControlsNative]::ActivateWindow($Handle)
-    [void][AsceifyWindowControlsNative]::SetActiveWindow($Handle)
-    [void][AsceifyWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
-    [void][AsceifyWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
-    Assert-True ([AsceifyWindowControlsNative]::SendMove()) "SendInput header move failed."
+    [void][AerisWindowControlsNative]::ActivateWindow($Handle)
+    [void][AerisWindowControlsNative]::SetActiveWindow($Handle)
+    [void][AerisWindowControlsNative]::SetCursorPos($Point.ScreenX, $Point.ScreenY)
+    [void][AerisWindowControlsNative]::SetPhysicalCursorPos($Point.ScreenX, $Point.ScreenY)
+    Assert-True ([AerisWindowControlsNative]::SendMove()) "SendInput header move failed."
     Start-Sleep -Milliseconds 25
-    Assert-True ([AsceifyWindowControlsNative]::SendLeftButton($true)) "SendInput header down failed."
+    Assert-True ([AerisWindowControlsNative]::SendLeftButton($true)) "SendInput header down failed."
     Start-Sleep -Milliseconds 25
-    Assert-True ([AsceifyWindowControlsNative]::SendLeftButton($false)) "SendInput header up failed."
+    Assert-True ([AerisWindowControlsNative]::SendLeftButton($false)) "SendInput header up failed."
 }
 
 function Invoke-CrossRelease([IntPtr]$Handle, [int]$DownHitCode, $DownPoint, [int]$UpHitCode, $UpPoint) {
     Assert-StableHitTest $Handle $DownPoint $DownHitCode "Cross-release press target"
     if ($script:CursorInjectionAvailable) {
-        [void][AsceifyWindowControlsNative]::ActivateWindow($Handle)
-        [void][AsceifyWindowControlsNative]::SetActiveWindow($Handle)
-        [void][AsceifyWindowControlsNative]::SetCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
-        [void][AsceifyWindowControlsNative]::SetPhysicalCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
-        Assert-True ([AsceifyWindowControlsNative]::SendMove()) "SendInput cross-release move failed."
+        [void][AerisWindowControlsNative]::ActivateWindow($Handle)
+        [void][AerisWindowControlsNative]::SetActiveWindow($Handle)
+        [void][AerisWindowControlsNative]::SetCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
+        [void][AerisWindowControlsNative]::SetPhysicalCursorPos($DownPoint.ScreenX, $DownPoint.ScreenY)
+        Assert-True ([AerisWindowControlsNative]::SendMove()) "SendInput cross-release move failed."
         Start-Sleep -Milliseconds 25
-        Assert-True ([AsceifyWindowControlsNative]::SendLeftButton($true)) "SendInput cross-release down failed."
-        [void][AsceifyWindowControlsNative]::SetPhysicalCursorPos($UpPoint.ScreenX, $UpPoint.ScreenY)
+        Assert-True ([AerisWindowControlsNative]::SendLeftButton($true)) "SendInput cross-release down failed."
+        [void][AerisWindowControlsNative]::SetPhysicalCursorPos($UpPoint.ScreenX, $UpPoint.ScreenY)
         Start-Sleep -Milliseconds 25
-        Assert-True ([AsceifyWindowControlsNative]::SendLeftButton($false)) "SendInput cross-release up failed."
+        Assert-True ([AerisWindowControlsNative]::SendLeftButton($false)) "SendInput cross-release up failed."
     } else {
-        [void][AsceifyWindowControlsNative]::SendMessage(
+        [void][AerisWindowControlsNative]::SendMessage(
             $Handle, $WM_NCLBUTTONDOWN, [UIntPtr]::new([uint32]$DownHitCode),
             (New-LParam $DownPoint.ScreenX $DownPoint.ScreenY))
-        [void][AsceifyWindowControlsNative]::SendMessage(
+        [void][AerisWindowControlsNative]::SendMessage(
             $Handle, $WM_NCLBUTTONUP, [UIntPtr]::new([uint32]$UpHitCode),
             (New-LParam $UpPoint.ScreenX $UpPoint.ScreenY))
     }
@@ -349,10 +349,10 @@ function Wait-State([scriptblock]$Predicate, [string]$Failure) {
 }
 
 function Close-TestProcess($TestProcess, [IntPtr]$InitialHandle, [string]$Failure) {
-    [void][AsceifyWindowControlsNative]::PostMessage($InitialHandle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
+    [void][AerisWindowControlsNative]::PostMessage($InitialHandle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 250
-    foreach ($handle in [AsceifyWindowControlsNative]::WindowsForProcess([uint32]$TestProcess.Id)) {
-        [void][AsceifyWindowControlsNative]::PostMessage($handle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
+    foreach ($handle in [AerisWindowControlsNative]::WindowsForProcess([uint32]$TestProcess.Id)) {
+        [void][AerisWindowControlsNative]::PostMessage($handle, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero)
     }
     Assert-True ($TestProcess.WaitForExit(10000)) $Failure
 }
@@ -375,12 +375,12 @@ function Read-LiveDiagnostics([string]$Path) {
             $text = $reader.ReadToEnd()
             foreach ($line in ($text -split "`r?`n")) {
                 try {
-                    if ($line -match '^ASCEIFY_LIVE_SNAPSHOT (\{.*\})$') {
+                    if ($line -match '^AERIS_LIVE_SNAPSHOT (\{.*\})$') {
                         $snapshot = $Matches[1] | ConvertFrom-Json
-                    } elseif ($line -match '^ASCEIFY_LIVE_UPDATE (\{.*\})$') {
+                    } elseif ($line -match '^AERIS_LIVE_UPDATE (\{.*\})$') {
                         $update = $Matches[1] | ConvertFrom-Json
                         if ($update.kind -eq "tail") { $tailUpdates++ }
-                    } elseif ($line -match '^ASCEIFY_CHART_REBUILD (\{.*\})$') {
+                    } elseif ($line -match '^AERIS_CHART_REBUILD (\{.*\})$') {
                         $rebuild = $Matches[1] | ConvertFrom-Json
                         $lastRebuild = $rebuild
                         if ($rebuild.data -eq "tail_replace") {
@@ -392,7 +392,7 @@ function Read-LiveDiagnostics([string]$Path) {
                                 $tailReplaceFrameRebuilds++
                             }
                         }
-                    } elseif ($line -match '^ASCEIFY_CHART_MOUSE_DOWN ') {
+                    } elseif ($line -match '^AERIS_CHART_MOUSE_DOWN ') {
                         $chartMouseDowns++
                     }
                 } catch {
@@ -448,10 +448,10 @@ $liveDiagnosticsReportPath = $null
 $observedDpi = 0
 $script:CursorInjectionAvailable = $null
 $script:LaunchIndex = 0
-$originalLiveEvidence = $env:ASCEIFY_LIVE_EVIDENCE
-$env:ASCEIFY_LIVE_EVIDENCE = "1"
-$originalCursor = New-Object AsceifyWindowControlsNative+POINT
-[void][AsceifyWindowControlsNative]::GetPhysicalCursorPos([ref]$originalCursor)
+$originalLiveEvidence = $env:AERIS_LIVE_EVIDENCE
+$env:AERIS_LIVE_EVIDENCE = "1"
+$originalCursor = New-Object AerisWindowControlsNative+POINT
+[void][AerisWindowControlsNative]::GetPhysicalCursorPos([ref]$originalCursor)
 try {
     $active = Start-TestWindow "live"
     $autoloadDiagnostics = Wait-LiveSnapshot $active
@@ -466,14 +466,14 @@ try {
     $captionMouseDownsBefore = $streamingDiagnostics.ChartMouseDowns
     $warmPoints = Assert-HitTests $active.Handle
     Assert-GlyphPixels $active.Handle $warmPoints
-    $beforeWarmMaximize = [AsceifyWindowControlsNative]::IsZoomed($active.Handle)
+    $beforeWarmMaximize = [AerisWindowControlsNative]::IsZoomed($active.Handle)
     Invoke-NativeClick $active.Handle $HTMAXBUTTON $warmPoints.Maximize
-    Wait-State { [AsceifyWindowControlsNative]::IsZoomed($active.Handle) -ne $beforeWarmMaximize } "Warm maximize did not transition while live ticks were active."
+    Wait-State { [AerisWindowControlsNative]::IsZoomed($active.Handle) -ne $beforeWarmMaximize } "Warm maximize did not transition while live ticks were active."
     $warmPoints = Get-ControlPoints $active.Handle
     Invoke-NativeClick $active.Handle $HTMINBUTTON $warmPoints.Minimize
-    Wait-State { [AsceifyWindowControlsNative]::IsIconic($active.Handle) } "Warm minimize did not transition while live ticks were active."
-    [void][AsceifyWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
-    Wait-State { -not [AsceifyWindowControlsNative]::IsIconic($active.Handle) } "Warm restore after minimize did not transition."
+    Wait-State { [AerisWindowControlsNative]::IsIconic($active.Handle) } "Warm minimize did not transition while live ticks were active."
+    [void][AerisWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
+    Wait-State { -not [AerisWindowControlsNative]::IsIconic($active.Handle) } "Warm restore after minimize did not transition."
     $warmPoints = Get-ControlPoints $active.Handle
     Invoke-RealClientClick $active.Handle $warmPoints.Interactive
     Start-Sleep -Milliseconds 150
@@ -486,31 +486,31 @@ try {
     Assert-GlyphPixels $active.Handle $points
 
     for ($cycle = 0; $cycle -lt $MaximizeCycles; $cycle++) {
-        $before = [AsceifyWindowControlsNative]::IsZoomed($active.Handle)
+        $before = [AerisWindowControlsNative]::IsZoomed($active.Handle)
         $points = Get-ControlPoints $active.Handle
         Invoke-NativeClick $active.Handle $HTMAXBUTTON $points.Maximize
-        Wait-State { [AsceifyWindowControlsNative]::IsZoomed($active.Handle) -ne $before } "Maximize cycle $cycle did not transition once."
+        Wait-State { [AerisWindowControlsNative]::IsZoomed($active.Handle) -ne $before } "Maximize cycle $cycle did not transition once."
         Start-Sleep -Milliseconds 100
         [void](Assert-HitTests $active.Handle $false)
     }
 
     $points = Get-ControlPoints $active.Handle
-    $beforeCrossRelease = [AsceifyWindowControlsNative]::IsZoomed($active.Handle)
+    $beforeCrossRelease = [AerisWindowControlsNative]::IsZoomed($active.Handle)
     Invoke-CrossRelease $active.Handle $HTMAXBUTTON $points.Maximize $HTMINBUTTON $points.Minimize
     Start-Sleep -Milliseconds 100
-    Assert-True ([AsceifyWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeCrossRelease) "Cross-button release changed window state."
+    Assert-True ([AerisWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeCrossRelease) "Cross-button release changed window state."
 
     $points = Get-ControlPoints $active.Handle
-    $beforeOutsideRelease = [AsceifyWindowControlsNative]::IsZoomed($active.Handle)
+    $beforeOutsideRelease = [AerisWindowControlsNative]::IsZoomed($active.Handle)
     Invoke-CrossRelease $active.Handle $HTMAXBUTTON $points.Maximize $HTCAPTION $points.Drag
     Start-Sleep -Milliseconds 100
-    Assert-True ([AsceifyWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeOutsideRelease) "Release outside the pressed caption changed window state."
+    Assert-True ([AerisWindowControlsNative]::IsZoomed($active.Handle) -eq $beforeOutsideRelease) "Release outside the pressed caption changed window state."
 
     $points = Get-ControlPoints $active.Handle
     Invoke-NativeClick $active.Handle $HTMINBUTTON $points.Minimize
-    Wait-State { [AsceifyWindowControlsNative]::IsIconic($active.Handle) } "Minimize did not transition."
-    [void][AsceifyWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
-    Wait-State { -not [AsceifyWindowControlsNative]::IsIconic($active.Handle) } "Restore after minimize did not transition."
+    Wait-State { [AerisWindowControlsNative]::IsIconic($active.Handle) } "Minimize did not transition."
+    [void][AerisWindowControlsNative]::ShowWindow($active.Handle, $SW_RESTORE)
+    Wait-State { -not [AerisWindowControlsNative]::IsIconic($active.Handle) } "Restore after minimize did not transition."
     [void](Assert-HitTests $active.Handle)
 
     Close-TestProcess $active.Process $active.Handle "Desktop did not exit after WM_CLOSE; possible orphan or stalled retirement."
@@ -529,7 +529,7 @@ try {
 
     [ordered]@{
         schema_version = 2
-        evidence_scope = "asceify_live_chart_and_native_window_controls"
+        evidence_scope = "aeris_live_chart_and_native_window_controls"
         mode = $Mode
         dpi = $observedDpi
         warmup_seconds = $WarmupSeconds
@@ -562,8 +562,8 @@ try {
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resolvedReport -Encoding UTF8
     Write-Host "Window-control conformance passed: $resolvedReport"
 } finally {
-    $env:ASCEIFY_LIVE_EVIDENCE = $originalLiveEvidence
-    [void][AsceifyWindowControlsNative]::SetPhysicalCursorPos($originalCursor.X, $originalCursor.Y)
+    $env:AERIS_LIVE_EVIDENCE = $originalLiveEvidence
+    [void][AerisWindowControlsNative]::SetPhysicalCursorPos($originalCursor.X, $originalCursor.Y)
     if ($null -ne $active -and -not $active.Process.HasExited) {
         Stop-Process -Id $active.Process.Id -Force
     }

@@ -1,5 +1,5 @@
 [package]
-name = "asceify_rithmic_protocol_adapter"
+name = "aeris_rithmic_protocol_adapter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,10 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-asceify_market_data = { path = "../../domain/market_data" }
-asceify_observability = { path = "../../observability" }
-asceify_platform_runtime = { path = "../../platform_runtime" }
-asceify_provider_history = { path = "../../provider_history" }
+aeris_market_data = { path = "../../domain/market_data" }
+aeris_observability = { path = "../../observability" }
+aeris_platform_runtime = { path = "../../platform_runtime" }
+aeris_provider_history = { path = "../../provider_history" }
 prost.workspace = true
 rustls.workspace = true
 rpassword.workspace = true

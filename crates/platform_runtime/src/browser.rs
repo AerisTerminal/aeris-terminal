@@ -1,6 +1,6 @@
 //! System-browser opening for account-runtime authentication URLs.
 //!
-//! The in-process account runtime returns an `Asceify` authentication URL.
+//! The in-process account runtime returns an `Aeris` authentication URL.
 //! This boundary opens that URL in the user's
 //! system browser. It performs process work, so callers must keep it off the
 //! UI thread on background workers. It never handles credentials or tokens.
@@ -141,7 +141,7 @@ mod launcher_tests {
     /// no shell can split the authorization query.
     #[test]
     fn authorization_query_never_enters_launcher_argv() {
-        let url = "https://auth.example.test/api/auth/oauth2/authorize?response_type=code&client_id=asceify-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback&scope=openid%20offline_access&state=abc%7Cdef&nonce=xyz";
+        let url = "https://auth.example.test/api/auth/oauth2/authorize?response_type=code&client_id=aeris-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A43129%2Fcallback&scope=openid%20offline_access&state=abc%7Cdef&nonce=xyz";
         super::validate_authorization_url(url).expect("real authorization URL validates");
         let command = launcher_command("powershell.exe", LAUNCHER_SCRIPT);
         assert_eq!(command.get_program(), "powershell.exe");
@@ -159,7 +159,7 @@ mod launcher_tests {
 
     #[test]
     fn missing_launcher_reports_failure() {
-        let command = launcher_command("asceify-definitely-missing-launcher", LAUNCHER_SCRIPT);
+        let command = launcher_command("aeris-definitely-missing-launcher", LAUNCHER_SCRIPT);
         assert_eq!(
             run_launcher(command, "https://auth.example.test/sign-in?x=1&y=2"),
             Err("system browser could not be opened".to_string())

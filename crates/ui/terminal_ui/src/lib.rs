@@ -10,7 +10,7 @@ mod order_book;
 #[cfg(feature = "gpui")]
 mod order_book_view;
 
-pub use asceify_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
+pub use aeris_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
 pub use order_book::{OrderBookSelection, project_order_book};
 #[cfg(feature = "gpui")]
 pub use order_book_view::{

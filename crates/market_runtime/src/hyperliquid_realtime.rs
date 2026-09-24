@@ -21,17 +21,17 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use asceify_contracts::{
+use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
 };
-use asceify_hyperliquid_market_adapter::{
+use aeris_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig, HyperliquidLiveCandle,
     HyperliquidSocket, SocketEvent, WsClientEvent, decode_book_snapshot, decode_live_candle,
     decode_trades_batch, fetch_meta_bundle, is_read_timeout, parse_ws_frame,
 };
-use asceify_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
+use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
@@ -333,13 +333,13 @@ fn handle_catalog_search(
             name: None,
             product_code: None,
             instrument_type: Some(match &instrument.kind {
-                asceify_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp => {
+                aeris_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp => {
                     "perpetual".to_string()
                 }
-                asceify_hyperliquid_market_adapter::HyperliquidMarketKind::Spot { .. } => {
+                aeris_hyperliquid_market_adapter::HyperliquidMarketKind::Spot { .. } => {
                     "spot".to_string()
                 }
-                asceify_hyperliquid_market_adapter::HyperliquidMarketKind::BuilderPerp { dex } => {
+                aeris_hyperliquid_market_adapter::HyperliquidMarketKind::BuilderPerp { dex } => {
                     format!("builder-perpetual:{dex}")
                 }
             }),
@@ -449,7 +449,7 @@ fn handle_catalog_select(
 }
 
 fn instrument_matches_entitlement(
-    instrument: &asceify_hyperliquid_market_adapter::HyperliquidInstrument,
+    instrument: &aeris_hyperliquid_market_adapter::HyperliquidInstrument,
     entitlement_id: &str,
 ) -> bool {
     // The public feed has exactly one entitlement; anything else is stale.
@@ -522,18 +522,18 @@ pub(crate) fn run(
                 SessionExit::Closed if !wake.overflowed(1, generation) => return,
                 SessionExit::Closed => {}
                 SessionExit::Parked => {
-                    eprintln!("Asceify Hyperliquid realtime parked by demand owner");
+                    eprintln!("Aeris Hyperliquid realtime parked by demand owner");
                     stopped = true;
                 }
                 SessionExit::Reconnect(reason) => {
-                    eprintln!("Asceify Hyperliquid realtime reconnecting: {reason}");
+                    eprintln!("Aeris Hyperliquid realtime reconnecting: {reason}");
                 }
             },
             Err(error) => {
                 if stop.load(Ordering::Acquire) {
                     return;
                 }
-                eprintln!("Asceify Hyperliquid connection failed: {error}");
+                eprintln!("Aeris Hyperliquid connection failed: {error}");
                 if emit(
                     events,
                     HyperliquidRealtimeEvent::Recovering(generation),
@@ -819,7 +819,7 @@ fn heartbeat(
     }
     if application_ping_due(state, now) {
         if socket
-            .send_text(&asceify_hyperliquid_market_adapter::build_ping())
+            .send_text(&aeris_hyperliquid_market_adapter::build_ping())
             .is_err()
         {
             return Some("heartbeat write failed");
@@ -891,7 +891,7 @@ fn reconcile_subscriptions(
                 coin: candle.instrument.wire_coin.clone(),
                 interval: candle.interval.clone(),
             },
-            asceify_hyperliquid_market_adapter::build_candle_subscription(
+            aeris_hyperliquid_market_adapter::build_candle_subscription(
                 &candle.instrument.wire_coin,
                 &candle.interval,
             ),
@@ -911,7 +911,7 @@ fn reconcile_subscriptions(
             SubscriptionKey::Trades {
                 coin: trade.wire_coin.clone(),
             },
-            asceify_hyperliquid_market_adapter::build_trades_subscription(&trade.wire_coin),
+            aeris_hyperliquid_market_adapter::build_trades_subscription(&trade.wire_coin),
         );
         instruments.insert(trade.wire_coin.clone(), trade.clone());
     }
@@ -925,7 +925,7 @@ fn reconcile_subscriptions(
             SubscriptionKey::Bbo {
                 coin: quote.wire_coin.clone(),
             },
-            asceify_hyperliquid_market_adapter::build_bbo_subscription(&quote.wire_coin),
+            aeris_hyperliquid_market_adapter::build_bbo_subscription(&quote.wire_coin),
         );
         instruments.insert(quote.wire_coin.clone(), quote.clone());
     }
@@ -939,7 +939,7 @@ fn reconcile_subscriptions(
             SubscriptionKey::Book {
                 coin: book.wire_coin.clone(),
             },
-            asceify_hyperliquid_market_adapter::build_l2_subscription(&book.wire_coin),
+            aeris_hyperliquid_market_adapter::build_l2_subscription(&book.wire_coin),
         );
         instruments.insert(book.wire_coin.clone(), book.clone());
     }
@@ -956,7 +956,7 @@ fn reconcile_subscriptions(
             && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&frame)
             && let Some(subscription) = raw.get("subscription")
         {
-            socket.send_text(&asceify_hyperliquid_market_adapter::build_unsubscribe(
+            socket.send_text(&aeris_hyperliquid_market_adapter::build_unsubscribe(
                 subscription,
             ))?;
         }
@@ -1126,7 +1126,7 @@ impl FrameDecoder<'_> {
             ));
         };
         let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
-        let quote = asceify_hyperliquid_market_adapter::decode_bbo_quote(
+        let quote = aeris_hyperliquid_market_adapter::decode_bbo_quote(
             bbo,
             coin,
             &mapping.instrument_id,
@@ -1263,7 +1263,7 @@ fn note_decode_failure(decode_failures: &mut u32, reason: &str) {
     *decode_failures = decode_failures.saturating_add(1);
     if *decode_failures == 1 || (*decode_failures).is_multiple_of(10) {
         eprintln!(
-            "Asceify engine Hyperliquid feed dropped malformed data: {reason} ({} this connection)",
+            "Aeris engine Hyperliquid feed dropped malformed data: {reason} ({} this connection)",
             *decode_failures,
         );
     }
@@ -1280,7 +1280,7 @@ fn unix_nanos_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
+    use aeris_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
 
     type FrameHarness = (
         BTreeMap<String, HyperliquidInstrumentDemand>,

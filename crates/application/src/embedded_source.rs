@@ -6,10 +6,10 @@ use crate::provenance::{
 };
 use crate::replay_snapshot::ReplaySnapshot;
 use crate::stream::{MAX_STREAM_SNAPSHOT_ITEMS, StreamDelta, StreamProtocolError};
-use asceify_instruments::{
+use aeris_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
-use asceify_market_data::{BarDefinition, MarketBar};
+use aeris_market_data::{BarDefinition, MarketBar};
 
 /// Maximum bars accepted by the embedded replay boundary.
 pub const MAX_EMBEDDED_REPLAY_BARS: usize = MAX_STREAM_SNAPSHOT_ITEMS;

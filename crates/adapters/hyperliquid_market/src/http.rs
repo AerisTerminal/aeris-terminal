@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::candles::{HyperliquidCandlePage, decode_candle_page, hyperliquid_interval_for_period};
 use crate::endpoints::HYPERLIQUID_INFO_URL;
 use crate::meta::{HyperliquidCatalog, RawMetaBundle, decode_catalog};
-use asceify_market_data::BarPeriod;
+use aeris_market_data::BarPeriod;
 
 /// Bounds for one info request.
 #[derive(Clone, Copy, Debug)]
@@ -385,7 +385,7 @@ mod tests {
         let now_millis = i64::try_from(now_millis).expect("millis fit");
         let page = fetch_candle_snapshot(&CandleSnapshotRequest {
             wire_coin: "BTC",
-            period: asceify_market_data::BarPeriod::session(3).expect("3d"),
+            period: aeris_market_data::BarPeriod::session(3).expect("3d"),
             start_millis: 0,
             end_millis: now_millis,
             now_millis,
@@ -417,7 +417,7 @@ mod tests {
         let now_millis = i64::try_from(now_millis).expect("millis fit");
         let page = fetch_candle_snapshot(&CandleSnapshotRequest {
             wire_coin: "BTC",
-            period: asceify_market_data::BarPeriod::month(1).expect("month"),
+            period: aeris_market_data::BarPeriod::month(1).expect("month"),
             start_millis: 0,
             end_millis: now_millis,
             now_millis,

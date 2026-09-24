@@ -69,7 +69,7 @@ pub(super) fn reconcile_history_repair(
         by_timestamp.insert(bar.exchange_timestamp_unix_nanos, bar);
     }
     // Flowsurface retains every fetched kline in its BTreeMap. Do the same at
-    // Asceify's canonical owner: a provider request remains page-bounded, but
+    // Aeris's canonical owner: a provider request remains page-bounded, but
     // older successful pages must not be thrown away when the series grows.
     let mut retained = by_timestamp.into_values().collect::<Vec<_>>();
     for (index, bar) in retained.iter_mut().enumerate() {
@@ -132,7 +132,7 @@ pub(super) fn history_request_bar_limit(
 
 fn viewport_history_range(
     series: &BarSeriesKey,
-    snapshot: &asceify_market_engine::SeriesSnapshot,
+    snapshot: &aeris_market_engine::SeriesSnapshot,
     viewport: Viewport,
 ) -> Option<HistoryRange> {
     let first = snapshot.bars.first()?;
@@ -164,7 +164,7 @@ fn viewport_history_range(
 
 fn newer_viewport_history_range(
     series: &BarSeriesKey,
-    snapshot: &asceify_market_engine::SeriesSnapshot,
+    snapshot: &aeris_market_engine::SeriesSnapshot,
     viewport: Viewport,
 ) -> Option<HistoryRange> {
     let last = snapshot.bars.last()?;
@@ -191,7 +191,7 @@ fn newer_viewport_history_range(
 
 fn viewport_refill_plan(
     series: &BarSeriesKey,
-    snapshot: &asceify_market_engine::SeriesSnapshot,
+    snapshot: &aeris_market_engine::SeriesSnapshot,
     viewport: Viewport,
     detached_from_live: bool,
     live_coverage: Option<(i64, i64)>,
@@ -468,7 +468,7 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         provider_generation: ProviderGeneration,
-        snapshot: &Arc<asceify_market_engine::SeriesSnapshot>,
+        snapshot: &Arc<aeris_market_engine::SeriesSnapshot>,
     ) -> Result<bool, String> {
         let needs_covering_repair = snapshot.provider_generation != provider_generation;
         if needs_covering_repair {
@@ -532,7 +532,7 @@ impl Coordinator<'_> {
             .get(&key)
             .map_or(1, |(_, attempts, _)| attempts.saturating_add(1));
         eprintln!(
-            "Asceify engine {} history attempt {attempts} failed for {}: {error}",
+            "Aeris engine {} history attempt {attempts} failed for {}: {error}",
             series.provider_id, series.instrument_id
         );
         if attempts > MAXIMUM_HISTORY_RETRIES {
@@ -1058,11 +1058,11 @@ impl Coordinator<'_> {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
-                    eprintln!("Asceify study execution after history install failed: {error}");
+                    eprintln!("Aeris study execution after history install failed: {error}");
                 }
             }
             Err(error) => {
-                eprintln!("Asceify study execution after history install failed: {error}");
+                eprintln!("Aeris study execution after history install failed: {error}");
             }
         }
     }
@@ -1186,7 +1186,7 @@ impl Coordinator<'_> {
     /// Publishes one installed covering snapshot to every matching consumer.
     pub(super) fn publish_installed_history(
         &mut self,
-        publications: &[asceify_market_engine::ConsumerPublication],
+        publications: &[aeris_market_engine::ConsumerPublication],
     ) {
         for publication in publications {
             if let Some(events) = self.events.get_mut(&publication.consumer_id) {
@@ -1318,7 +1318,7 @@ impl Coordinator<'_> {
     pub(super) fn start_rithmic_realtime_from_snapshot(
         &mut self,
         series: &BarSeriesKey,
-        snapshot: &asceify_market_engine::SeriesSnapshot,
+        snapshot: &aeris_market_engine::SeriesSnapshot,
     ) -> Result<(), String> {
         self.ensure_realtime(series)?;
         // A retained series whose newest bar is still forming hands that bar over
@@ -1386,7 +1386,7 @@ impl Coordinator<'_> {
     pub(super) fn start_hyperliquid_realtime_from_snapshot(
         &mut self,
         series: &BarSeriesKey,
-        snapshot: &asceify_market_engine::SeriesSnapshot,
+        snapshot: &aeris_market_engine::SeriesSnapshot,
     ) -> Result<(), String> {
         self.ensure_realtime(series)?;
         // A retained series whose newest bar is still forming hands that bar
@@ -1536,7 +1536,7 @@ impl Coordinator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asceify_market_data::BarPeriod;
+    use aeris_market_data::BarPeriod;
     use std::num::NonZeroU64;
     use std::sync::{Arc as StdArc, Mutex as StdMutex, mpsc};
 
@@ -1655,7 +1655,7 @@ mod tests {
     fn detached_viewport_refill_continues_left_moves_right_and_rejoins_live() {
         let minute = 60_i64 * 1_000_000_000;
         let series = test_series("movable-window");
-        let snapshot = asceify_market_engine::SeriesSnapshot {
+        let snapshot = aeris_market_engine::SeriesSnapshot {
             series: series.clone(),
             provider_generation: ProviderGeneration(NonZeroU64::MIN),
             publication_generation: 1,
@@ -1825,7 +1825,7 @@ mod tests {
     fn viewport_history_prefetches_one_visible_span_before_the_left_edge() {
         let minute = 60_i64 * 1_000_000_000;
         let series = test_series("prefetch");
-        let snapshot = asceify_market_engine::SeriesSnapshot {
+        let snapshot = aeris_market_engine::SeriesSnapshot {
             series: series.clone(),
             provider_generation: ProviderGeneration(NonZeroU64::MIN),
             publication_generation: 1,
@@ -1854,7 +1854,7 @@ mod tests {
             })
         );
 
-        let partial = asceify_market_engine::SeriesSnapshot {
+        let partial = aeris_market_engine::SeriesSnapshot {
             bars: vec![MarketBar {
                 source_sequence: 1,
                 exchange_timestamp_seconds: 510 * 60,

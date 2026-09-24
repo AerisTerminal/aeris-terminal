@@ -4,8 +4,8 @@ use crate::errors::ReplayValidationError;
 use crate::provenance::ProvenancedMarketBar;
 use crate::replay_snapshot::{ReplaySession, ReplaySnapshot, ReplayStreamUpdate, ReplayTailUpdate};
 use crate::stream::{SequenceDecision, StreamDelta, StreamProtocolError};
-use asceify_instruments::InstrumentRevision;
-use asceify_market_data::BarDefinition;
+use aeris_instruments::InstrumentRevision;
+use aeris_market_data::BarDefinition;
 use std::{num::NonZeroU64, sync::Arc};
 
 /// Immutable application generation published atomically by one model writer.

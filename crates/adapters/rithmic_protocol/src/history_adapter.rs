@@ -4,10 +4,10 @@ use crate::{
     RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicHistoryConnection,
     RithmicProviderInstrument, RithmicSessionMessage, TimeBarReplayRequest, TimeBarType,
 };
-use asceify_market_data::{
+use aeris_market_data::{
     ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation, RithmicTimeUnit,
 };
-use asceify_provider_history::{
+use aeris_provider_history::{
     DataClass, DatasetCapability, HandoffBatch, HandoffCoordinator, HandoffState,
     HistoryCapabilities, HistoryItem, HistoryPage, HistoryPageRequest, HistoryRange,
     LiveAcceptance, PaginationStyle, ProviderHistoryAdapter, ProviderHistoryError, RateLimit,
@@ -1224,7 +1224,7 @@ mod tests {
     use super::*;
     use crate::InstrumentDescriptor;
     use crate::{BarIdentity, DecodedTickBar, ObservedHistoryRange, Ohlc, TickBarKey};
-    use asceify_provider_history::HistoryRange;
+    use aeris_provider_history::HistoryRange;
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     #[derive(Clone)]

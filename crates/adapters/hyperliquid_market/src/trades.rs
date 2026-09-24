@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use asceify_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
+use aeris_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 use serde::Deserialize;
 
 use crate::decimal::{NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE, parse_decimal_to_fixed};

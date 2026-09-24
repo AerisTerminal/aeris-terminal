@@ -1,5 +1,5 @@
-use asceify_contracts::ProviderInstrumentSummary;
-use asceify_observability::{FeedConnectionState, FeedIdentity};
+use aeris_contracts::ProviderInstrumentSummary;
+use aeris_observability::{FeedConnectionState, FeedIdentity};
 use std::num::NonZeroUsize;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

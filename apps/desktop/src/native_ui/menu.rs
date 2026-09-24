@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use asceify_design_system::{
-    AsceifyTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+use aeris_design_system::{
+    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
 use gpui::{
     Animation, AnimationElement, AnimationExt, AnyElement, App, Bounds, ClickEvent, Div, ElementId,
@@ -28,7 +28,7 @@ const POPUP_ENTER_TRAVEL: f32 = 2.0;
 /// Normalized origin used to choose the direction of native menu motion.
 ///
 /// GPUI 0.2 does not expose a general affine transform for element trees, so
-/// `Asceify` uses a short vertical fade/translation. The vertical direction
+/// `Aeris` uses a short vertical fade/translation. The vertical direction
 /// follows the trigger so menus above and below it settle toward their anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PopupAnimationOrigin {
@@ -74,7 +74,7 @@ impl PopupAnimationOrigin {
     }
 }
 
-/// Applies the shared trigger-origin entry motion to an `Asceify` popup.
+/// Applies the shared trigger-origin entry motion to an `Aeris` popup.
 /// `with_animation` automatically collapses to its final frame for reduced
 /// motion, so every caller gets the accessibility behavior for free.
 pub(crate) fn animate_popup_from_origin(
@@ -112,12 +112,12 @@ const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
     !disabled && has_activation
 }
 
-/// `Asceify`'s shared selectable row for compact menus and search results.
+/// `Aeris`'s shared selectable row for compact menus and search results.
 #[derive(IntoElement)]
 pub(crate) struct MenuRow {
     id: ElementId,
     kind: RowKind,
-    theme: AsceifyTheme,
+    theme: AerisTheme,
     resting_fill: ThemeColor,
     label: SharedString,
     leading: Option<AnyElement>,
@@ -158,7 +158,7 @@ impl MenuRow {
     pub(crate) fn compact(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        theme: &AsceifyTheme,
+        theme: &AerisTheme,
     ) -> Self {
         Self::new(id, label, theme, RowKind::Compact)
     }
@@ -166,7 +166,7 @@ impl MenuRow {
     pub(crate) fn search_result(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        theme: &AsceifyTheme,
+        theme: &AerisTheme,
     ) -> Self {
         let mut row = Self::new(id, label, theme, RowKind::SearchResult);
         row.resting_fill = theme.colors.surface;
@@ -176,7 +176,7 @@ impl MenuRow {
     fn new(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
-        theme: &AsceifyTheme,
+        theme: &AerisTheme,
         kind: RowKind,
     ) -> Self {
         Self {
@@ -399,7 +399,7 @@ fn compact_menu_panel_with_elevation(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
     elevated: bool,
 ) -> Stateful<Div> {
     let colors = theme.colors;
@@ -425,7 +425,7 @@ pub(crate) fn compact_menu_panel(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Stateful<Div> {
     compact_menu_panel_with_elevation(id, origin, width, theme, true)
 }
@@ -437,12 +437,12 @@ pub(crate) fn flat_compact_menu_panel(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Stateful<Div> {
     compact_menu_panel_with_elevation(id, origin, width, theme, false)
 }
 
-pub(crate) fn menu_separator(theme: &AsceifyTheme) -> Div {
+pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {
     div().h(SEPARATOR_HEIGHT).flex().items_center().child(
         div()
             .h_px()

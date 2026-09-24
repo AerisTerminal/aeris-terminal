@@ -22,12 +22,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use asceify_account::{
+use aeris_account::{
     AccountId, MAXIMUM_PROFILE_EMAIL_BYTES, MAXIMUM_PROFILE_NAME_BYTES,
     MAXIMUM_PROFILE_PHOTO_URL_BYTES, PlanId,
 };
-use asceify_contracts::{AccountSessionState, AccountView, LoginAuthorization};
-use asceify_platform_runtime::{CredentialVault, NativeCredentialVault};
+use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
+use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
 use zeroize::Zeroizing;
 
 use lease::{LEASE_OFFLINE_VALIDITY_SECONDS, LEASE_REFRESH_INTERVAL_SECONDS, device_id_for_key};
@@ -43,13 +43,13 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Native public client identifier currently registered with the control plane.
 ///
 /// This is an external deployment contract and remains stable across the
-/// `Asceify` product-name migration until the control plane provisions a new
+/// `Aeris` product-name migration until the control plane provisions a new
 /// client identifier.
-pub const NATIVE_CLIENT_ID: &str = "asceify-desktop";
+pub const NATIVE_CLIENT_ID: &str = "aeris-desktop";
 /// Currently provisioned control-plane OIDC issuer (the Better Auth mount).
 pub const DEFAULT_AUTH_ISSUER: &str = "";
 
-const ACCOUNT_VAULT_SERVICE: &str = "com.asceify.account";
+const ACCOUNT_VAULT_SERVICE: &str = "com.aeris.account";
 const REFRESH_VAULT_KEY: &str = "account-refresh-default-v1";
 const LEASE_VAULT_KEY: &str = "account-entitlement-lease-v1";
 const LEASE_DIRECTORY_VAULT_KEY: &str = "account-entitlement-directory-v1";
@@ -129,7 +129,7 @@ impl AccountServiceConfig {
 }
 
 fn configured_auth_issuer(mut read: impl FnMut(&str) -> Option<String>) -> String {
-    read("ASCEIFY_AUTH_ISSUER").unwrap_or_else(|| DEFAULT_AUTH_ISSUER.to_string())
+    read("AERIS_AUTH_ISSUER").unwrap_or_else(|| DEFAULT_AUTH_ISSUER.to_string())
 }
 
 struct PendingLogin {
@@ -272,7 +272,7 @@ impl AccountService {
     /// Creates an account session starting signed out.
     #[must_use]
     pub fn new(config: AccountServiceConfig) -> Self {
-        let rejected_restore_marker = asceify_platform_runtime::native_data_root()
+        let rejected_restore_marker = aeris_platform_runtime::native_data_root()
             .map_or(RejectedRestoreMarker::Unavailable, |root| {
                 RejectedRestoreMarker::Path(root.join(REJECTED_RESTORE_MARKER_FILE))
             });
@@ -404,7 +404,7 @@ impl AccountService {
         }
         let restoring = self.clone();
         if std::thread::Builder::new()
-            .name("asceify-account-restore".to_string())
+            .name("aeris-account-restore".to_string())
             .spawn(move || restoring.restore_online_session())
             .is_err()
         {
@@ -764,7 +764,7 @@ impl AccountService {
     fn spawn_cached_lease_expiry_worker(&self, expires_at_unix_seconds: u64) {
         let service = self.clone();
         std::thread::Builder::new()
-            .name("asceify-account-cached-expiry".to_string())
+            .name("aeris-account-cached-expiry".to_string())
             .spawn(move || service.run_cached_lease_expiry_worker(expires_at_unix_seconds))
             .ok();
     }
@@ -1190,7 +1190,7 @@ impl AccountService {
         );
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("asceify-account-login".to_string())
+            .name("aeris-account-login".to_string())
             .spawn(move || service.run_login_transaction(request_generation, &listener))
             .is_err()
         {
@@ -1273,7 +1273,7 @@ impl AccountService {
 
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("asceify-account-profile-refresh".to_string())
+            .name("aeris-account-profile-refresh".to_string())
             .spawn(move || {
                 service.run_profile_refresh(generation);
                 service
@@ -1356,10 +1356,10 @@ impl AccountService {
         };
         if let Some((endpoints, token)) = revocation {
             std::thread::Builder::new()
-                .name("asceify-account-revoke".to_string())
+                .name("aeris-account-revoke".to_string())
                 .spawn(move || {
                     if oidc::revoke_refresh(&endpoints, &token).is_err() {
-                        eprintln!("Asceify sign-out revocation degraded");
+                        eprintln!("Aeris sign-out revocation degraded");
                     }
                 })
                 .ok();
@@ -1519,7 +1519,7 @@ impl AccountService {
                     // retired state or weakening enforcement.
                     let service = self.clone();
                     std::thread::Builder::new()
-                        .name("asceify-account-lease-warmup".to_string())
+                        .name("aeris-account-lease-warmup".to_string())
                         .spawn(move || {
                             if let Ok(vault) = NativeCredentialVault::new(ACCOUNT_VAULT_SERVICE) {
                                 service.refresh_lease_once(
@@ -1603,7 +1603,7 @@ impl AccountService {
         };
         let service = self.clone();
         if std::thread::Builder::new()
-            .name("asceify-account-lease".to_string())
+            .name("aeris-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .is_err()
         {
@@ -1642,7 +1642,7 @@ impl AccountService {
     fn spawn_lease_worker(&self, generation: u64) -> bool {
         let service = self.clone();
         std::thread::Builder::new()
-            .name("asceify-account-lease".to_string())
+            .name("aeris-account-lease".to_string())
             .spawn(move || service.run_lease_worker(generation))
             .is_ok()
     }
@@ -1926,7 +1926,7 @@ fn lock_state(
 
 /// Redacted lease observation: outcome class only, never identities.
 fn note_lease(outcome: &str) {
-    eprintln!("Asceify lease: {outcome}");
+    eprintln!("Aeris lease: {outcome}");
 }
 
 /// Sleeps until the next lease round in interruptible slices. Returns false
@@ -2737,9 +2737,9 @@ mod tests {
         RejectedRestoreMarker, UnavailableVault, claim_profile_refresh, configured_auth_issuer,
         oidc::{self, AccountProfile, VerifiedTokens},
     };
-    use asceify_account::{AccountId, PlanId};
-    use asceify_contracts::{AccountSessionState, AccountView};
-    use asceify_platform_runtime::CredentialVault;
+    use aeris_account::{AccountId, PlanId};
+    use aeris_contracts::{AccountSessionState, AccountView};
+    use aeris_platform_runtime::CredentialVault;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::{
@@ -2757,9 +2757,9 @@ mod tests {
     static MARKER_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn auth_issuer_uses_asceify_override_or_remains_unconfigured() {
+    fn auth_issuer_uses_aeris_override_or_remains_unconfigured() {
         let preferred = configured_auth_issuer(|name| match name {
-            "ASCEIFY_AUTH_ISSUER" => Some("https://preferred.example/api/auth".to_string()),
+            "AERIS_AUTH_ISSUER" => Some("https://preferred.example/api/auth".to_string()),
             "AXIUSFLOW_AUTH_ISSUER" => Some("https://legacy.example/api/auth".to_string()),
             _ => None,
         });
@@ -3015,7 +3015,7 @@ mod tests {
         use super::oidc::OidcEndpoints;
 
         let service = AccountService::new_with_rejected_restore_marker(
-            AccountServiceConfig::try_new("https://auth.example.test/api/auth", "asceify-desktop")
+            AccountServiceConfig::try_new("https://auth.example.test/api/auth", "aeris-desktop")
                 .expect("test config builds"),
             rejected_restore_marker,
         );
@@ -3031,8 +3031,8 @@ mod tests {
                 token_endpoint: "https://auth.example.test/api/auth/oauth2/token".to_string(),
                 jwks_uri: "https://auth.example.test/api/auth/jwks".to_string(),
                 revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
-                link_endpoint: "https://auth.example.test/api/asceify/link".to_string(),
-                lease_endpoint: "https://auth.example.test/api/asceify/lease".to_string(),
+                link_endpoint: "https://auth.example.test/api/aeris/link".to_string(),
+                lease_endpoint: "https://auth.example.test/api/aeris/lease".to_string(),
             });
         service
     }
@@ -3051,7 +3051,7 @@ mod tests {
     fn marker_fixture() -> (PathBuf, PathBuf) {
         let sequence = MARKER_FIXTURE_SEQUENCE.fetch_add(1, Ordering::AcqRel);
         let root = std::env::temp_dir().join(format!(
-            "asceify-account-restore-marker-{}-{sequence}",
+            "aeris-account-restore-marker-{}-{sequence}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("marker fixture directory creates");
@@ -3097,7 +3097,7 @@ mod tests {
             "iat": now.saturating_sub(1),
             "nbf": now.saturating_sub(1),
             "exp": expires_at,
-            "aud": "asceify-desktop",
+            "aud": "aeris-desktop",
             "kid": key_id,
         });
         let encode = |value: &serde_json::Value| {
@@ -5291,7 +5291,7 @@ mod tests {
     fn unconfigured_control_plane_fails_closed() {
         let service = AccountService::new(AccountServiceConfig {
             issuer: String::new(),
-            client_id: "asceify-desktop".to_string(),
+            client_id: "aeris-desktop".to_string(),
         });
         assert!(service.begin_login(1).is_err());
         assert_eq!(
@@ -5304,7 +5304,7 @@ mod tests {
     fn unconfigured_restore_fails_local_readiness_without_network() {
         let service = AccountService::new_restoring(AccountServiceConfig {
             issuer: String::new(),
-            client_id: "asceify-desktop".to_string(),
+            client_id: "aeris-desktop".to_string(),
         });
         assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Failed);
         assert_eq!(
@@ -5317,7 +5317,7 @@ mod tests {
     fn restore_can_be_started_once_after_process_lifecycle_fencing() {
         let service = AccountService::new(AccountServiceConfig {
             issuer: String::new(),
-            client_id: "asceify-desktop".to_string(),
+            client_id: "aeris-desktop".to_string(),
         });
         assert_eq!(service.restore_readiness(), AccountRestoreReadiness::Ready);
         assert_eq!(
@@ -5571,7 +5571,7 @@ mod tests {
     #[test]
     fn sign_out_clears_state_and_deletes_vault_material() {
         use super::{DEVICE_VAULT_KEY, LEASE_VAULT_KEY, PROFILE_VAULT_KEY, REFRESH_VAULT_KEY};
-        use asceify_platform_runtime::CredentialVault as _;
+        use aeris_platform_runtime::CredentialVault as _;
 
         let service = service();
         let vault = MemoryVault::default();

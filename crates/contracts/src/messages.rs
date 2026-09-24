@@ -262,7 +262,7 @@ pub struct WorkspacePaneState {
 /// Durable chart state owned by one workspace pane.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceChartState {
-    /// Stable `Asceify` chart-type identifier.
+    /// Stable `Aeris` chart-type identifier.
     #[prost(string, tag = "1")]
     pub chart_type: String,
     /// Bounded Nucleus semantic drawing document. It contains committed

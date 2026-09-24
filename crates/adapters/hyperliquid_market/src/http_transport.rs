@@ -113,7 +113,7 @@ impl Resolver for CancellableResolver {
             } else {
                 443
             });
-        let addresses = asceify_platform_runtime::resolve_addresses(
+        let addresses = aeris_platform_runtime::resolve_addresses(
             host,
             port,
             deadline(timeout),

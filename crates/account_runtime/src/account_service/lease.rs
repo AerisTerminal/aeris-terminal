@@ -7,13 +7,13 @@
 //! redacted form and surfaced as session state; the verified plan is the
 //! desktop capability source.
 
-use asceify_account::{AccountId, LeaseClaims, PlanId};
+use aeris_account::{AccountId, LeaseClaims, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use sha2::{Digest as _, Sha256};
 
 use super::oidc::OidcEndpoints;
-use asceify_platform_runtime::CredentialVault;
+use aeris_platform_runtime::CredentialVault;
 
 /// Approved default: online lease refresh cadence.
 pub const LEASE_REFRESH_INTERVAL_SECONDS: u64 = 6 * 3600;
@@ -288,7 +288,7 @@ struct LeaseReply {
 #[cfg(test)]
 mod tests {
     use super::{device_id_for_key, untrusted_account_id, validate_compact};
-    use asceify_account::AccountId;
+    use aeris_account::AccountId;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use ed25519_dalek::{Signer as _, SigningKey};
 
@@ -307,7 +307,7 @@ mod tests {
         serde_json::json!({
             "ver": 1, "aid": "acct_01", "did": "device-01", "plan": "pro",
             "feat": 7, "rev": 7, "iat": 1_700_000_000, "nbf": 1_700_000_000,
-            "exp": 1_700_259_200, "aud": "asceify-desktop", "kid": "ent1",
+            "exp": 1_700_259_200, "aud": "aeris-desktop", "kid": "ent1",
         })
     }
 
@@ -354,8 +354,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_worker_lease_is_rejected_under_asceify_audience() {
-        // The retired worker lease must not grant access under the Asceify audience.
+    fn legacy_worker_lease_is_rejected_under_aeris_audience() {
+        // The retired worker lease must not grant access under the Aeris audience.
         let compact = "eyJhbGciOiJFZERTQSIsImtpZCI6ImVudDEiLCJ0eXAiOiJKV1QifQ.eyJ2ZXIiOjEsImFpZCI6ImFjY3RfMDEiLCJkaWQiOiJkZXZpY2UtMDEiLCJwbGFuIjoicHJvIiwiZmVhdCI6NywicmV2Ijo3LCJpYXQiOjE3MDAwMDAxMDAsIm5iZiI6MTcwMDAwMDEwMCwiZXhwIjoxNzAwMjU5MzAwLCJhdWQiOiJheGl1c2Zsb3ctZW5naW5lIiwia2lkIjoiZW50MSJ9.0a7-scnfiG-NKs3BlwuSz5JmsOMLJwhhI1BIhrMO_29qNKgM5zYORq8L75HxUQXr5IgMd8uez5wyv5dqM7VFCg";
         let raw = URL_SAFE_NO_PAD
             .decode("JoZhqPqx2aQlMfXJqcTjLHiAn9YsigCzExeB2Zblp8k")

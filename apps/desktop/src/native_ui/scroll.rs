@@ -7,7 +7,7 @@ const SCROLLBAR_WIDTH: Pixels = px(6.0);
 const MIN_THUMB_LENGTH: f32 = 18.0;
 
 /// Adds raw GPUI vertical scrolling without changing the content geometry.
-/// The `Asceify` scrollbar is painted as an overlay, so reserving a second
+/// The `Aeris` scrollbar is painted as an overlay, so reserving a second
 /// gutter here would shift centered controls away from their container center.
 #[track_caller]
 pub(crate) fn tracked_overflow_y_scrollbar(body: Div, handle: &ScrollHandle) -> Stateful<Div> {
@@ -43,7 +43,7 @@ fn thumb_metrics(viewport: f32, content: f32, offset: f32) -> Option<ThumbMetric
     })
 }
 
-/// A non-interactive, `Asceify`-painted scroll position indicator. Scrolling
+/// A non-interactive, `Aeris`-painted scroll position indicator. Scrolling
 /// itself remains owned by GPUI's `ScrollHandle`, so wheel/touchpad behavior
 /// and clipping have one state owner.
 #[derive(IntoElement)]

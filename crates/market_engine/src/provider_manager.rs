@@ -1,5 +1,5 @@
 use crate::{EngineError, MarketStream, ProviderGeneration, StreamRequirements};
-use asceify_market_data::MAXIMUM_MARKET_DATA_FIELD_BYTES;
+use aeris_market_data::MAXIMUM_MARKET_DATA_FIELD_BYTES;
 use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

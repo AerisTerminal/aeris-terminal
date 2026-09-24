@@ -8,17 +8,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asceify_contracts::{
+use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument,
 };
-use asceify_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
-use asceify_platform_runtime::{
+use aeris_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
+use aeris_platform_runtime::{
     NativeCredentialVault, NativeNetworkMonitor, NativeNetworkMonitorCancellation,
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
-use asceify_rithmic_protocol_adapter::{
+use aeris_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
     ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
     RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
@@ -195,14 +195,14 @@ impl EnvironmentMonitors {
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            panicked.push("asceify-engine-rithmic-network-monitor");
+            panicked.push("aeris-engine-rithmic-network-monitor");
         }
         if self
             .power_worker
             .take()
             .is_some_and(|worker| worker.join().is_err())
         {
-            panicked.push("asceify-engine-rithmic-power-monitor");
+            panicked.push("aeris-engine-rithmic-power-monitor");
         }
         panicked
     }
@@ -377,7 +377,7 @@ fn run_catalog_session(
         let restarted = match retries.retry_due(&mut runtime, Instant::now()) {
             Ok(started) => started.is_some(),
             Err(error) => {
-                eprintln!("Asceify Rithmic reconnect start failed: {error}");
+                eprintln!("Aeris Rithmic reconnect start failed: {error}");
                 if retries.ticket().is_none() {
                     reject_pending_catalog(
                         channels.catalog_publications,
@@ -1269,7 +1269,7 @@ fn run_demand(
         let restarted = match retries.retry_due(&mut runtime, Instant::now()) {
             Ok(started) => started.is_some(),
             Err(error) => {
-                eprintln!("Asceify Rithmic reconnect start failed: {error}");
+                eprintln!("Aeris Rithmic reconnect start failed: {error}");
                 if retries.ticket().is_none() {
                     channels.publish_realtime(RithmicRealtimeEvent::Failed(generation, error));
                     let _ = runtime.stop();
@@ -1375,7 +1375,7 @@ fn drain_live_events(
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Asceify Rithmic live session failed: {reason:?}");
+                eprintln!("Aeris Rithmic live session failed: {reason:?}");
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
                 let _ = runtime.stop();
@@ -1389,7 +1389,7 @@ fn drain_live_events(
             }
             Err(error) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Asceify Rithmic live callback failed: {error}");
+                eprintln!("Aeris Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
                 return Some(wait_for_replacement(
@@ -1563,7 +1563,7 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
     let (sender, receiver) = mpsc::sync_channel(ENVIRONMENT_CAPACITY);
     let mut network = network;
     let network_worker = spawn_environment_monitor(
-        "asceify-engine-rithmic-network-monitor",
+        "aeris-engine-rithmic-network-monitor",
         sender.clone(),
         move || {
             network
@@ -1574,7 +1574,7 @@ fn start_environment_monitors() -> Result<EnvironmentMonitors, String> {
     )?;
     let mut power = power;
     let power_worker =
-        match spawn_environment_monitor("asceify-engine-rithmic-power-monitor", sender, move || {
+        match spawn_environment_monitor("aeris-engine-rithmic-power-monitor", sender, move || {
             power
                 .next_event()
                 .map(RithmicEnvironmentEvent::Power)
@@ -1725,9 +1725,9 @@ mod tests {
         publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
         reject_pending_catalog, retire_pending_catalog_generation,
     };
-    use asceify_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
-    use asceify_platform_runtime::{NetworkEvent, PowerEvent};
-    use asceify_rithmic_protocol_adapter::{
+    use aeris_market_data::{DepthSnapshot, EventMetadata, QualifiedTimestamp};
+    use aeris_platform_runtime::{NetworkEvent, PowerEvent};
+    use aeris_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
     };
 

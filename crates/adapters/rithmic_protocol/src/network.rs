@@ -1,5 +1,5 @@
 use crate::{RithmicSessionError, RithmicSessionLimits, endpoint::RithmicEndpoint};
-use asceify_platform_runtime::cancel_tcp_stream_io;
+use aeris_platform_runtime::cancel_tcp_stream_io;
 use rustls::{ClientConfig, RootCertStore};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -279,7 +279,7 @@ fn resolve_addresses(
     deadline: Instant,
     stop: Option<&AtomicBool>,
 ) -> Result<Vec<SocketAddr>, RithmicSessionError> {
-    asceify_platform_runtime::resolve_addresses(host, port, deadline, stop).map_err(|error| {
+    aeris_platform_runtime::resolve_addresses(host, port, deadline, stop).map_err(|error| {
         match error.kind() {
             io::ErrorKind::Interrupted => RithmicSessionError::Cancelled,
             io::ErrorKind::TimedOut => RithmicSessionError::Deadline,

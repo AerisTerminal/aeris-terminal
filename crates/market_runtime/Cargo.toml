@@ -1,5 +1,5 @@
 [package]
-name = "asceify_market_runtime"
+name = "aeris_market_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,13 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-asceify_contracts = { path = "../contracts" }
-asceify_market_data = { path = "../domain/market_data" }
-asceify_market_engine = { path = "../market_engine" }
-asceify_platform_runtime = { path = "../platform_runtime" }
-asceify_provider_history = { path = "../provider_history" }
-asceify_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
-asceify_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
+aeris_contracts = { path = "../contracts" }
+aeris_market_data = { path = "../domain/market_data" }
+aeris_market_engine = { path = "../market_engine" }
+aeris_platform_runtime = { path = "../platform_runtime" }
+aeris_provider_history = { path = "../provider_history" }
+aeris_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
+aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 serde_json.workspace = true
 zeroize.workspace = true
 

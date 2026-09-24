@@ -1,6 +1,6 @@
 use crate::series_store::{SeriesSnapshot, SeriesTail, SeriesTailOperation};
 use crate::{ConsumerId, EngineError, GenerationId, ProviderGeneration};
-use asceify_market_data::{BarSeriesKey, MarketBar};
+use aeris_market_data::{BarSeriesKey, MarketBar};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

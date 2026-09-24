@@ -1,5 +1,5 @@
 use super::{
-    AsceifyTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
+    AerisTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
     Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
     IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
     OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin, RadiusToken,
@@ -31,7 +31,7 @@ pub(super) struct MarketWorkspaceState<'a> {
     pub(super) chart_is_superseded: bool,
     pub(super) chart_state: ChartState,
     pub(super) chart_status_detail: String,
-    pub(super) theme: &'a AsceifyTheme,
+    pub(super) theme: &'a AerisTheme,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -70,7 +70,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
-    pub(super) theme: &'a AsceifyTheme,
+    pub(super) theme: &'a AerisTheme,
 }
 
 pub(super) struct WatchlistPanelState {
@@ -84,7 +84,7 @@ fn order_book_side_panel(
     order_book: &Entity<ReadOnlyOrderBookView>,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Div {
     div()
         .relative()
@@ -115,7 +115,7 @@ fn watchlist_side_panel(
     app: Entity<WorkspaceSurface>,
     terminal: &Entity<TerminalApp>,
     watchlist: WatchlistPanelState,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Div {
     let WatchlistPanelState { rows, drag, scroll } = watchlist;
     div()
@@ -372,7 +372,7 @@ fn watchlist_table(
     rows: Vec<WatchlistRow>,
     watchlist_drag: Option<&WatchlistDragState>,
     watchlist_scroll: &ScrollHandle,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let mut body = div()
@@ -427,7 +427,7 @@ fn watchlist_table(
         )
 }
 
-fn watchlist_columns(theme: &AsceifyTheme) -> impl IntoElement + use<> {
+fn watchlist_columns(theme: &AerisTheme) -> impl IntoElement + use<> {
     let colors = theme.colors;
     div()
         .h(px(WATCHLIST_COLUMNS_HEIGHT))
@@ -467,7 +467,7 @@ fn watchlist_columns(theme: &AsceifyTheme) -> impl IntoElement + use<> {
 fn watchlist_header_cell(
     value: impl Into<gpui::SharedString>,
     width: f32,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> Div {
     div()
         .w(px(width))
@@ -500,7 +500,7 @@ fn watchlist_value_cell(value: impl Into<gpui::SharedString>, width: f32) -> Div
         .child(value.into())
 }
 
-fn watchlist_asset_cell(row: &WatchlistRow, theme: &AsceifyTheme) -> Div {
+fn watchlist_asset_cell(row: &WatchlistRow, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
     let asset_tone = if row.message.is_some() {
         colors.text_muted
@@ -531,7 +531,7 @@ fn watchlist_asset_cell(row: &WatchlistRow, theme: &AsceifyTheme) -> Div {
         )
 }
 
-fn watchlist_row_content(row: &WatchlistRow, theme: &AsceifyTheme) -> Stateful<Div> {
+fn watchlist_row_content(row: &WatchlistRow, theme: &AerisTheme) -> Stateful<Div> {
     let colors = theme.colors;
     let scale = row.instrument.price_scale;
     let values = market_summary_values(row.last, row.previous_close);
@@ -602,7 +602,7 @@ fn watchlist_row(
     row: &WatchlistRow,
     index: usize,
     drag: Option<&WatchlistDragState>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let instrument = row.instrument.clone();
@@ -698,7 +698,7 @@ pub(super) fn side_panel_header(
     panel: SidePanel,
     app: Entity<WorkspaceSurface>,
     order_book_column_menu_open: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let settings_app = app.clone();
@@ -771,7 +771,7 @@ pub(super) fn side_panel_header(
 
 fn watchlist_add_symbol_control(
     app: Entity<WorkspaceSurface>,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     chrome_tooltip(
@@ -806,7 +806,7 @@ pub(super) fn order_book_column_menu_layer(
     app: Entity<WorkspaceSurface>,
     order_book: &Entity<ReadOnlyOrderBookView>,
     columns: OrderBookColumnVisibility,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let dismiss_app = app;
@@ -858,7 +858,7 @@ pub(super) fn order_book_column_menu_item(
     checked: bool,
     first: bool,
     last: bool,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement {
     let available = column.available();
     let label = if available {
@@ -895,7 +895,7 @@ pub(super) fn order_book_column_menu_item(
 }
 pub(super) fn chart_notice(
     notice: ChartSurfaceNotice,
-    theme: &AsceifyTheme,
+    theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     if notice.label == ChartState::Loading.label() {

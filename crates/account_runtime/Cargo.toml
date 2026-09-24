@@ -1,5 +1,5 @@
 [package]
-name = "asceify_account_runtime"
+name = "aeris_account_runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,9 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-asceify_account = { path = "../domain/account" }
-asceify_contracts = { path = "../contracts" }
-asceify_platform_runtime = { path = "../platform_runtime" }
+aeris_account = { path = "../domain/account" }
+aeris_contracts = { path = "../contracts" }
+aeris_platform_runtime = { path = "../platform_runtime" }
 base64.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true

@@ -1,6 +1,6 @@
 //! Bounded displayed-provenance retention for the chart view.
 
-use asceify_application::{MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot};
+use aeris_application::{MarketEventProvenance, ProvenancedMarketBar, ReplaySnapshot};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 const DISPLAYED_PROVENANCE_MAX_ITEMS: usize = 4_096;
