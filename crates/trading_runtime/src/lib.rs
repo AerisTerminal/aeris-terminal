@@ -12,7 +12,7 @@ use aeris_trading::{
     OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
     TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
 };
-pub use risk::{RiskEvaluation, RiskLock, RiskProfile, TrailingDrawdownMode};
+pub use risk::{RiskEvaluation, RiskLock, RiskMeter, RiskProfile, TrailingDrawdownMode};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -190,6 +190,7 @@ pub struct TradingSnapshot {
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
     pub risk_profiles: Vec<RiskProfile>,
+    pub risk_meters: Vec<RiskMeter>,
     pub risk_locks: Vec<RiskLock>,
 }
 
@@ -1436,6 +1437,7 @@ impl Coordinator {
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             risk_profiles: self.state.risk_profiles.values().cloned().collect(),
+            risk_meters: self.risk_meters()?,
             risk_locks: self.state.risk_locks.values().cloned().collect(),
         })
     }
@@ -1504,6 +1506,68 @@ impl Coordinator {
                     unrealized_ticks: ticks
                         .and_then(|tick_value| pnl_ticks(position.unrealized_pnl, tick_value)),
                     position: position.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn risk_meters(&self) -> Result<Vec<RiskMeter>, String> {
+        self.state
+            .risk_profiles
+            .values()
+            .map(|profile| {
+                let current_realized_pnl = self.realized_since_session(profile)?;
+                let loss_used = negative_loss(current_realized_pnl)?;
+                let daily_loss_remaining = remaining_limit(profile.daily_loss_limit, loss_used)?;
+                let trailing_drawdown_remaining = profile
+                    .trailing_drawdown
+                    .map(|limit| remaining_limit(limit, loss_used))
+                    .transpose()?;
+                let projected_contracts = self
+                    .state
+                    .positions
+                    .values()
+                    .filter(|position| position.account_id == profile.account_id)
+                    .try_fold(
+                        FixedPoint::try_new(0, profile.max_contracts.scale())
+                            .map_err(|error| error.to_string())?,
+                        |total, position| {
+                            let quantity = position
+                                .net_quantity
+                                .exact_rescale(profile.max_contracts.scale())
+                                .map_err(|error| error.to_string())?;
+                            total
+                                .checked_add(
+                                    FixedPoint::try_new(
+                                        i64::try_from(quantity.units().unsigned_abs()).map_err(
+                                            |_| "risk contract quantity overflowed".to_string(),
+                                        )?,
+                                        quantity.scale(),
+                                    )
+                                    .map_err(|error| error.to_string())?,
+                                )
+                                .map_err(|error| error.to_string())
+                        },
+                    )?;
+                let contracts_remaining =
+                    remaining_limit(profile.max_contracts, projected_contracts)?;
+                Ok(RiskMeter {
+                    account_id: profile.account_id.clone(),
+                    profile_id: profile.profile_id.clone(),
+                    profile_version: profile.version,
+                    enabled: profile.enabled,
+                    current_realized_pnl,
+                    daily_loss_remaining,
+                    trailing_drawdown_remaining,
+                    contracts_remaining,
+                    consistency_max_single_trade_percent: profile
+                        .consistency_max_single_trade_percent,
+                    restricted_until_unix_nanos: profile.restricted_until_unix_nanos,
+                    lock_reason: self
+                        .state
+                        .risk_locks
+                        .get(&profile.account_id)
+                        .map(|lock| lock.reason.clone()),
                 })
             })
             .collect()
@@ -1773,6 +1837,37 @@ fn unrealized_pnl(
         .map_err(|error| error.to_string())?
         .exact_rescale(position.realized_pnl.scale())
         .map_err(|error| error.to_string())
+}
+
+fn negative_loss(value: FixedPoint) -> Result<FixedPoint, String> {
+    let units = if value.units() < 0 {
+        i64::try_from(value.units().unsigned_abs())
+            .map_err(|_| "risk loss projection overflowed".to_string())?
+    } else {
+        0
+    };
+    FixedPoint::try_new(units, value.scale()).map_err(|error| error.to_string())
+}
+
+fn remaining_limit(limit: FixedPoint, used: FixedPoint) -> Result<FixedPoint, String> {
+    let used = used
+        .exact_rescale(limit.scale())
+        .map_err(|error| error.to_string())?;
+    let negative_used = FixedPoint::try_new(
+        used.units()
+            .checked_neg()
+            .ok_or_else(|| "risk limit projection overflowed".to_string())?,
+        used.scale(),
+    )
+    .map_err(|error| error.to_string())?;
+    let remaining = limit
+        .checked_add(negative_used)
+        .map_err(|error| error.to_string())?;
+    if remaining.units() < 0 {
+        FixedPoint::try_new(0, limit.scale()).map_err(|error| error.to_string())
+    } else {
+        Ok(remaining)
+    }
 }
 
 fn tick_value(instrument: &TradingInstrument, currency_scale: u8) -> Result<FixedPoint, String> {

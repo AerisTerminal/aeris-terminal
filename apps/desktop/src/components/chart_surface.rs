@@ -71,6 +71,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     pub(super) trading_accounts: &'a [aeris_trading::TradingAccount],
     pub(super) trading_positions: &'a [aeris_trading_runtime::PositionPnl],
+    pub(super) trading_risk_meters: &'a [aeris_trading_runtime::RiskMeter],
     pub(super) trading_order_entry: &'a super::TradingOrderEntryState,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
@@ -92,6 +93,7 @@ struct OrderBookPanelState<'a> {
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     trading_accounts: &'a [aeris_trading::TradingAccount],
     trading_positions: &'a [aeris_trading_runtime::PositionPnl],
+    trading_risk_meters: &'a [aeris_trading_runtime::RiskMeter],
     trading_order_entry: &'a super::TradingOrderEntryState,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
@@ -106,6 +108,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         trading_pnl,
         trading_accounts,
         trading_positions,
+        trading_risk_meters,
         trading_order_entry,
         column_menu_open,
         columns,
@@ -130,6 +133,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
             trading_pnl,
             accounts: trading_accounts,
             positions: trading_positions,
+            risk_meters: trading_risk_meters,
             order_entry: trading_order_entry,
             theme,
         }))
@@ -153,6 +157,7 @@ struct TradingOrderControlsState<'a> {
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     accounts: &'a [aeris_trading::TradingAccount],
     positions: &'a [aeris_trading_runtime::PositionPnl],
+    risk_meters: &'a [aeris_trading_runtime::RiskMeter],
     order_entry: &'a super::TradingOrderEntryState,
     theme: &'a AerisTheme,
 }
@@ -164,6 +169,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         trading_pnl,
         accounts,
         positions,
+        risk_meters,
         order_entry,
         theme,
     } = *state;
@@ -176,6 +182,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .child(trading_pnl_summary(trading_pnl, positions, frame, theme))
+        .child(trading_risk_summary(risk_meters, order_entry, theme))
         .child(trading_order_entry(app, accounts, order_entry, theme))
         .child(market_order_buttons(frame, order_entry, theme))
         .child(order_management_buttons(frame, order_entry, theme))
@@ -452,6 +459,60 @@ fn selected_position_pnl<'a>(
         item.position.account_id.as_str() == account_id
             && item.position.instrument_id.as_str() == instrument_id
     })
+}
+
+fn trading_risk_summary(
+    risk_meters: &[aeris_trading_runtime::RiskMeter],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let meter = order_entry
+        .selected_account_id
+        .as_ref()
+        .and_then(|account_id| {
+            risk_meters
+                .iter()
+                .find(|meter| &meter.account_id == account_id)
+        });
+    let (label, color) = meter.map_or_else(
+        || ("RULE · no profile".to_string(), colors.text_muted),
+        |meter| {
+            if let Some(reason) = &meter.lock_reason {
+                return (format!("RULE LOCKED · {reason}"), colors.danger);
+            }
+            if !meter.enabled {
+                return ("RULE · disabled".to_string(), colors.text_muted);
+            }
+            let trailing = meter
+                .trailing_drawdown_remaining
+                .map_or_else(String::new, |remaining| {
+                    format!(" · trail {}", format_fixed_point(remaining))
+                });
+            let label = format!(
+                "RULE · loss {} · ctr {}{}",
+                format_fixed_point(meter.daily_loss_remaining),
+                format_fixed_point(meter.contracts_remaining),
+                trailing,
+            );
+            let color = if meter.daily_loss_remaining.units() == 0
+                || meter.contracts_remaining.units() == 0
+            {
+                colors.danger
+            } else {
+                colors.text_muted
+            };
+            (label, color)
+        },
+    );
+    div()
+        .h(px(18.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(gpui_color(color))
+        .child(label)
 }
 
 fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
@@ -827,6 +888,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         trading_pnl,
         trading_accounts,
         trading_positions,
+        trading_risk_meters,
         trading_order_entry,
         watchlist,
         order_book_column_menu_open,
@@ -845,6 +907,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 trading_pnl,
                 trading_accounts,
                 trading_positions,
+                trading_risk_meters,
                 trading_order_entry,
                 column_menu_open: order_book_column_menu_open,
                 columns: order_book_columns,

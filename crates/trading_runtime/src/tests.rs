@@ -214,6 +214,16 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
             enabled: true,
         })
         .expect("risk profile stores");
+    let meter = service.snapshot().expect("risk meter snapshot").risk_meters;
+    assert_eq!(meter.len(), 1);
+    assert_eq!(
+        meter[0].daily_loss_remaining,
+        FixedPoint::try_new(100_000, 2).expect("loss remaining")
+    );
+    assert_eq!(
+        meter[0].contracts_remaining,
+        FixedPoint::try_new(1, 0).expect("contracts remaining")
+    );
 
     let working = service
         .place_order(market_order("risk-open", OrderSide::Buy, 1, 1_000))
@@ -261,6 +271,10 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.risk_profiles.len(), 1);
     assert_eq!(restored.risk_locks.len(), 1);
+    assert_eq!(
+        restored.risk_meters[0].lock_reason.as_deref(),
+        Some("manual daily stop")
+    );
     restarted
         .unlock_account(TradingAccountId::try_new("aeris-sim-1").expect("account"))
         .expect("unlock stores");

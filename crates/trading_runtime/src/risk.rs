@@ -126,6 +126,22 @@ pub struct RiskEvaluation {
     pub current_realized_pnl: FixedPoint,
 }
 
+/// Bounded live rule-distance projection for one configured account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RiskMeter {
+    pub account_id: TradingAccountId,
+    pub profile_id: String,
+    pub profile_version: u32,
+    pub enabled: bool,
+    pub current_realized_pnl: FixedPoint,
+    pub daily_loss_remaining: FixedPoint,
+    pub trailing_drawdown_remaining: Option<FixedPoint>,
+    pub contracts_remaining: FixedPoint,
+    pub consistency_max_single_trade_percent: Option<u8>,
+    pub restricted_until_unix_nanos: Option<i64>,
+    pub lock_reason: Option<String>,
+}
+
 fn validate_positive(value: FixedPoint, label: &str) -> Result<(), String> {
     if value.units() <= 0 {
         return Err(format!("{label} must be positive"));

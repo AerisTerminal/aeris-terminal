@@ -111,10 +111,12 @@ state, and a first desktop order-control surface. The keymap owner validates nor
 and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that
 owner only when the trading chrome owns focus. The order-book surface also renders the runtime's
 currency P/L projection through a bounded asynchronous snapshot refresh, including exact position
-level tick conversion when instrument tick metadata permits it.
+level tick conversion when instrument tick metadata permits it. Configured accounts now also expose
+runtime-owned rule-distance meters for loss, trailing drawdown, contract capacity, restrictions and
+durable locks in the selected-account trading controls.
 The remaining T2 checklist items are intentionally open: the DOM ladder, bracket UX, chart
-dispatch, copier, live rule meters, and chart warning wiring still require the real runtime and
-desktop paths. The simulated order-entry panel now has quantity presets, all canonical order types
+dispatch, copier, consistency-rule evaluation, and chart warning wiring still require the real
+runtime and desktop paths. The simulated order-entry panel now has quantity presets, all canonical order types
 and time-in-force choices, and a runtime-backed account selector; per-account and global cancel,
 flatten and kill controls share the same owner path.
 
