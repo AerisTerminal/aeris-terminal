@@ -233,6 +233,7 @@ enum Command {
         SimulatedMarketObservation,
         Reply<Vec<Fill>>,
     ),
+    FlattenAll(SimulatedMarketObservation, Reply<Vec<Fill>>),
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
@@ -413,6 +414,18 @@ impl TradingService {
         self.request(|reply| Command::Flatten(account_id, observation, reply))
     }
 
+    /// Cancels working orders and closes simulated positions for every account at the observed BBO.
+    ///
+    /// # Errors
+    /// Returns an error when the observation is invalid, no accounts are registered, or
+    /// persistence fails. This administrative action remains available while risk-locked.
+    pub fn flatten_all(
+        &self,
+        observation: SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
+        self.request(|reply| Command::FlattenAll(observation, reply))
+    }
+
     /// Applies one market observation and returns fills produced by the simulated venue.
     ///
     /// # Errors
@@ -558,6 +571,9 @@ impl Coordinator {
                 }
                 Command::Flatten(account_id, observation, reply) => {
                     let _ = reply.send(self.flatten_account(&account_id, &observation));
+                }
+                Command::FlattenAll(observation, reply) => {
+                    let _ = reply.send(self.flatten_all(&observation));
                 }
                 Command::Observe(observation, reply) => {
                     let _ = reply.send(self.observe_market(&observation));
@@ -1234,6 +1250,37 @@ impl Coordinator {
         }
         let mut fills = self.observe_market(observation)?;
         self.cancel_all(Some(account_id))?;
+        fills.extend(self.flatten_positions(account_id, observation)?);
+        self.store.enforce_retention()?;
+        self.enforce_memory_retention();
+        self.bump_revision()?;
+        Ok(fills)
+    }
+
+    fn flatten_all(
+        &mut self,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
+        if self.state.accounts.is_empty() {
+            return Err("flatten requires at least one registered account".to_string());
+        }
+        let mut fills = self.observe_market(observation)?;
+        self.cancel_all(None)?;
+        let accounts = self.state.accounts.keys().cloned().collect::<Vec<_>>();
+        for account_id in accounts {
+            fills.extend(self.flatten_positions(&account_id, observation)?);
+        }
+        self.store.enforce_retention()?;
+        self.enforce_memory_retention();
+        self.bump_revision()?;
+        Ok(fills)
+    }
+
+    fn flatten_positions(
+        &mut self,
+        account_id: &TradingAccountId,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
         let position_keys = self
             .state
             .positions
@@ -1243,14 +1290,12 @@ impl Coordinator {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let mut fills = Vec::new();
         for key in position_keys {
             if let Some(fill) = self.flatten_position(account_id, &key, observation)? {
                 fills.push(fill);
             }
         }
-        self.store.enforce_retention()?;
-        self.enforce_memory_retention();
-        self.bump_revision()?;
         Ok(fills)
     }
 

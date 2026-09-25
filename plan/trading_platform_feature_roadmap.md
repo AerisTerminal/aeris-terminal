@@ -106,10 +106,10 @@ open a browser or create an account session.
 
 Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v3
 risk profiles and account locks, pre-trade checks on simulated orders, cancel/modify/cancel-all,
-flatten and kill-switch commands, mark-to-market unrealized P/L, restart-safe order state, and a
-first desktop order-control surface. The keymap owner validates normalized bindings and reserved
-desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that owner only
-when the trading chrome owns focus.
+account/global flatten and kill-switch commands, mark-to-market unrealized P/L, restart-safe order
+state, and a first desktop order-control surface. The keymap owner validates normalized bindings
+and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that
+owner only when the trading chrome owns focus.
 The remaining T2 checklist items are intentionally open: the DOM ladder, full order-entry and
 bracket UX, chart/hotkey dispatch, full flatten UX, copier, live rule meters, and chart warning
 wiring still require the real runtime and desktop paths.

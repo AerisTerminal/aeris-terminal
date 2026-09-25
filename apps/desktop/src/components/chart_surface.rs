@@ -194,6 +194,7 @@ fn order_management_buttons(
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let flatten_frame = frame.cloned();
+    let flatten_all_frame = frame.cloned();
     let cancel_service = aeris_desktop::trading::handle();
     let kill_service = cancel_service.clone();
     let flatten = div()
@@ -216,6 +217,26 @@ fn order_management_buttons(
             }
         })
         .child("FLATTEN");
+    let flatten_all = div()
+        .id("trading_flatten_all")
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.warning))
+        .text_color(gpui_color(colors.text_primary))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Flatten all simulated accounts")
+        .on_click(move |_, _, cx| {
+            if let Some(frame) = flatten_all_frame.clone() {
+                aeris_desktop::trading::flatten_simulated_accounts(&frame, cx);
+            }
+        })
+        .child("FLAT ALL");
     let cancel = div()
         .id("trading_cancel_all")
         .h(px(24.0))
@@ -267,10 +288,10 @@ fn order_management_buttons(
         .child("KILL");
     div()
         .flex()
+        .flex_col()
         .gap_1()
-        .child(cancel)
-        .child(flatten)
-        .child(kill)
+        .child(div().flex().gap_1().child(cancel).child(flatten))
+        .child(div().flex().gap_1().child(flatten_all).child(kill))
 }
 
 fn watchlist_side_panel(

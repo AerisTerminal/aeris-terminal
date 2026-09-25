@@ -122,6 +122,21 @@ pub fn flatten_simulated_account(frame: &aeris_market_data::OrderBookFrame, cx: 
         .detach();
 }
 
+/// Flattens every simulated account using the current best bid and ask off the UI thread.
+pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let Some((_, observation)) = prepare_flatten(frame) else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let _ = service.flatten_all(observation);
+        })
+        .detach();
+}
+
 /// Prepares the simulated account identity and its current BBO observation.
 #[must_use]
 pub fn prepare_flatten(
