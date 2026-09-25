@@ -341,6 +341,42 @@ pub(super) fn workspace_market_area(
         .children(price_alert_dialog)
 }
 
+fn project_working_order_markers(
+    state: &WorkspaceSurface,
+    cx: &mut Context<WorkspaceSurface>,
+) -> Vec<aeris_terminal_ui::OrderBookWorkingOrder> {
+    let selected_account = state.trading_pnl.order_entry.selected_account_id.as_ref();
+    let Some(instrument_id) = state
+        .order_book
+        .read(cx)
+        .frame()
+        .map(|frame| frame.instrument_id.as_str())
+    else {
+        return Vec::new();
+    };
+    state
+        .trading_pnl
+        .orders
+        .iter()
+        .filter(|order| order.status == aeris_trading::OrderStatus::Working)
+        .filter(|order| selected_account.is_some_and(|account_id| &order.account_id == account_id))
+        .filter(|order| order.instrument_id.as_str() == instrument_id)
+        .filter_map(|order| {
+            let price = order.limit_price?;
+            Some(aeris_terminal_ui::OrderBookWorkingOrder {
+                price: price.units(),
+                side: match order.side {
+                    aeris_trading::OrderSide::Buy => aeris_terminal_ui::OrderBookLevelSide::Ask,
+                    aeris_trading::OrderSide::Sell => aeris_terminal_ui::OrderBookLevelSide::Bid,
+                },
+                quantity: order.quantity.units(),
+                quantity_scale: order.quantity.scale(),
+            })
+        })
+        .take(8)
+        .collect()
+}
+
 fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<TerminalApp>) {
     let now = std::time::Instant::now();
     let should_refresh = {
@@ -398,6 +434,12 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
                         .as_ref()
                         .is_none_or(|account_id| account_id == &pnl.account_id)
                 });
+                let working_orders = project_working_order_markers(state, state_cx);
+                state
+                    .order_book
+                    .update(state_cx, |order_book, order_book_cx| {
+                        order_book.set_working_orders(working_orders, order_book_cx);
+                    });
                 state_cx.notify();
             }
         });
