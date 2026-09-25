@@ -154,9 +154,6 @@ pub fn reprice_simulated_order(
     frame: &aeris_market_data::OrderBookFrame,
     cx: &mut gpui::App,
 ) {
-    let Some(service) = handle() else {
-        return;
-    };
     let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
         return;
     };
@@ -167,6 +164,20 @@ pub fn reprice_simulated_order(
         return;
     };
     let Ok(limit_price) = aeris_trading::FixedPoint::try_new(level.price, frame.price_scale) else {
+        return;
+    };
+    modify_simulated_order_at_price(client_order_id, time_in_force, frame, limit_price, cx);
+}
+
+/// Modifies one working simulated limit order to an exact ladder price off the UI thread.
+pub fn modify_simulated_order_at_price(
+    client_order_id: aeris_trading::ClientOrderId,
+    time_in_force: aeris_trading::TimeInForce,
+    frame: &aeris_market_data::OrderBookFrame,
+    limit_price: aeris_trading::FixedPoint,
+    cx: &mut gpui::App,
+) {
+    let Some(service) = handle() else {
         return;
     };
     let modified_unix_nanos = now();

@@ -48,6 +48,15 @@ pub struct OrderBookLevelClick {
     pub price: i64,
     pub side: OrderBookLevelSide,
 }
+
+/// Provider-neutral ladder intent for moving a working order between price levels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderBookLevelDrop {
+    pub source_price: i64,
+    pub source_side: OrderBookLevelSide,
+    pub target_price: i64,
+    pub target_side: OrderBookLevelSide,
+}
 const PNL_WIDTH: f32 = 0.10;
 const BOOK_WIDTH: f32 = 0.30;
 const TRADE_WIDTH: f32 = 0.10;
@@ -195,6 +204,7 @@ pub struct ReadOnlyOrderBookView {
 }
 
 impl EventEmitter<OrderBookLevelClick> for ReadOnlyOrderBookView {}
+impl EventEmitter<OrderBookLevelDrop> for ReadOnlyOrderBookView {}
 
 impl ReadOnlyOrderBookView {
     #[must_use]
@@ -1242,6 +1252,18 @@ struct LadderInteraction<'a> {
     order_book: &'a Entity<ReadOnlyOrderBookView>,
 }
 
+#[derive(Clone)]
+struct OrderBookLevelDrag {
+    price: i64,
+    side: OrderBookLevelSide,
+}
+
+impl Render for OrderBookLevelDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CellAlignment {
     Left,
@@ -1309,6 +1331,9 @@ fn render_level_row(
     };
     let click_price = level.price;
     let order_book = interaction.order_book.clone();
+    let drag_side = click_side;
+    let drag_price = click_price;
+    let drop_order_book = interaction.order_book.clone();
     let trade_volumes = stats.trade_volumes.unwrap_or_else(|| {
         frame
             .traded_volumes
@@ -1347,6 +1372,23 @@ fn render_level_row(
                 });
             });
         })
+        .on_drag(
+            OrderBookLevelDrag {
+                price: drag_price,
+                side: drag_side,
+            },
+            |drag, _, _, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drop(move |drag: &OrderBookLevelDrag, _, cx| {
+            drop_order_book.update(cx, |_, order_book_cx| {
+                order_book_cx.emit(OrderBookLevelDrop {
+                    source_price: drag.price,
+                    source_side: drag.side,
+                    target_price: click_price,
+                    target_side: click_side,
+                });
+            });
+        })
         .children(
             OrderBookColumn::ALL
                 .into_iter()
@@ -1379,6 +1421,9 @@ fn render_empty_price_tick(
         BookColumnSide::Ask => OrderBookLevelSide::Ask,
     };
     let order_book = interaction.order_book.clone();
+    let drag_side = click_side;
+    let drag_price = price;
+    let drop_order_book = interaction.order_book.clone();
     let trade_volumes = stats.trade_volumes.unwrap_or_default();
     let quantity_scale = frame.quantity_scale;
     div()
@@ -1400,6 +1445,23 @@ fn render_empty_price_tick(
                 order_book_cx.emit(OrderBookLevelClick {
                     price,
                     side: click_side,
+                });
+            });
+        })
+        .on_drag(
+            OrderBookLevelDrag {
+                price: drag_price,
+                side: drag_side,
+            },
+            |drag, _, _, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drop(move |drag: &OrderBookLevelDrag, _, cx| {
+            drop_order_book.update(cx, |_, order_book_cx| {
+                order_book_cx.emit(OrderBookLevelDrop {
+                    source_price: drag.price,
+                    source_side: drag.side,
+                    target_price: price,
+                    target_side: click_side,
                 });
             });
         })

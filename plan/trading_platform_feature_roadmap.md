@@ -123,8 +123,10 @@ flatten and kill controls share the same owner path. Working simulated orders fo
 account/instrument are now surfaced in that panel with bounded per-order cancellation controls;
 working limit orders also have an explicit best-price reprice command. The DOM ladder now emits
 provider-neutral row-price intents that route through the selected account and order-entry runtime
-path; pointer drag semantics, own-order/position overlays, the P/L column and full inline ladder
-placement remain open.
+path; full drag UX, own-order/position overlays, the P/L column and full inline ladder placement
+remain open. The ladder now emits bounded same-side drag/drop intents, and the
+desktop resolves them only against a matching selected-account working limit order before issuing
+an exact-price modify command; own-order/position overlays and the P/L column remain open.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.

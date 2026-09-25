@@ -92,8 +92,8 @@ use aeris_market_runtime::{
 };
 use aeris_observability::FeedConnectionState;
 use aeris_terminal_ui::{
-    OrderBookColumn, OrderBookColumnVisibility, OrderBookLevelClick, OrderBookLevelSide,
-    ReadOnlyOrderBookView,
+    OrderBookColumn, OrderBookColumnVisibility, OrderBookLevelClick, OrderBookLevelDrop,
+    OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 use assets::UiIcon as HugeIcon;
 use chart_context_menus::{
@@ -2402,15 +2402,15 @@ fn subscribe_order_book_trading(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let workspace = workspace.clone();
-    let subscribed_order_book = order_book.clone();
+    let click_workspace = workspace.clone();
+    let click_order_book = order_book.clone();
     window
         .subscribe(
             order_book,
             cx,
             move |_, event: &OrderBookLevelClick, _, cx| {
-                let order_entry = workspace.read(cx).trading_pnl.order_entry.clone();
-                let frame = subscribed_order_book.read(cx).frame().cloned();
+                let order_entry = click_workspace.read(cx).trading_pnl.order_entry.clone();
+                let frame = click_order_book.read(cx).frame().cloned();
                 let Some(frame) = frame else {
                     return;
                 };
@@ -2427,6 +2427,59 @@ fn subscribe_order_book_trading(
                     order_entry.quantity,
                     order_entry.time_in_force,
                     event.price,
+                    cx,
+                );
+            },
+        )
+        .detach();
+    let drop_workspace = workspace.clone();
+    let drop_order_book = order_book.clone();
+    window
+        .subscribe(
+            order_book,
+            cx,
+            move |_, event: &OrderBookLevelDrop, _, cx| {
+                if event.source_side != event.target_side {
+                    return;
+                }
+                let (account_id, orders) = {
+                    let surface = drop_workspace.read(cx);
+                    let Some(account_id) =
+                        surface.trading_pnl.order_entry.selected_account_id.clone()
+                    else {
+                        return;
+                    };
+                    (account_id, surface.trading_pnl.orders.clone())
+                };
+                let Some(frame) = drop_order_book.read(cx).frame().cloned() else {
+                    return;
+                };
+                let order_side = match event.source_side {
+                    OrderBookLevelSide::Ask => aeris_trading::OrderSide::Buy,
+                    OrderBookLevelSide::Bid => aeris_trading::OrderSide::Sell,
+                };
+                let Some(order) = orders.into_iter().find(|order| {
+                    order.status == aeris_trading::OrderStatus::Working
+                        && order.order_type == aeris_trading::OrderType::Limit
+                        && order.side == order_side
+                        && order.account_id.as_str() == account_id.as_str()
+                        && order.instrument_id.as_str() == frame.instrument_id.as_str()
+                        && order
+                            .limit_price
+                            .is_some_and(|price| price.units() == event.source_price)
+                }) else {
+                    return;
+                };
+                let Ok(target_price) =
+                    aeris_trading::FixedPoint::try_new(event.target_price, frame.price_scale)
+                else {
+                    return;
+                };
+                aeris_desktop::trading::modify_simulated_order_at_price(
+                    order.client_order_id,
+                    order.time_in_force,
+                    &frame,
+                    target_price,
                     cx,
                 );
             },
