@@ -128,9 +128,14 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .observe_market(observation(9_975, 10_000, 3, 2_000))
         .expect("buy fills");
     assert_eq!(fills.len(), 1);
+    let open_snapshot = service.snapshot().expect("snapshot");
     assert_eq!(
-        service.snapshot().expect("snapshot").positions[0].unrealized_pnl,
+        open_snapshot.positions[0].unrealized_pnl,
         FixedPoint::try_new(-1_250, 2).expect("unrealized pnl")
+    );
+    assert_eq!(
+        open_snapshot.position_pnl[0].unrealized_ticks,
+        Some(FixedPoint::try_new(-1, 0).expect("unrealized ticks"))
     );
     service
         .place_order(market_order("client-close", OrderSide::Sell, 4, 3_000))
@@ -154,6 +159,10 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     assert_eq!(
         snapshot.positions[0].realized_pnl,
         FixedPoint::try_new(5_000, 2).expect("pnl")
+    );
+    assert_eq!(
+        snapshot.position_pnl[0].realized_ticks,
+        Some(FixedPoint::try_new(4, 0).expect("realized ticks"))
     );
     service
         .export(directory.0.join("export"))

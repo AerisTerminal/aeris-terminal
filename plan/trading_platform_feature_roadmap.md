@@ -110,7 +110,8 @@ account/global flatten and kill-switch commands, mark-to-market unrealized P/L, 
 state, and a first desktop order-control surface. The keymap owner validates normalized bindings
 and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that
 owner only when the trading chrome owns focus. The order-book surface also renders the runtime's
-currency P/L projection through a bounded asynchronous snapshot refresh.
+currency P/L projection through a bounded asynchronous snapshot refresh, including exact position
+level tick conversion when instrument tick metadata permits it.
 The remaining T2 checklist items are intentionally open: the DOM ladder, bracket UX, chart
 dispatch, copier, live rule meters, and chart warning wiring still require the real runtime and
 desktop paths. The simulated order-entry panel now has quantity presets, all canonical order types
@@ -131,7 +132,7 @@ M3.2 checks.
 - [x] **M2.6** Flatten and kill switch per account and globally.
 - [ ] **M2.7** Multi-account trade copier with per-account multipliers, kill switches and M3.2
       checks before each mirrored order.
-- [ ] **M2.8** Positions and PnL in currency and ticks.
+- [x] **M2.8** Positions and PnL in currency and ticks.
 - [ ] **M3.1** Prop-firm rule engine with versioned profiles and live distance meters; rule
       warnings on order lines through PD1.
 - [ ] **M3.2** Pre-trade checks and hard locks in the single order-command path; the lock survives

@@ -296,6 +296,7 @@ pub(super) fn workspace_market_area(
             order_book_frame: surface.order_book.read(cx).frame().cloned(),
             trading_pnl: surface.trading_pnl.current.as_ref(),
             trading_accounts: &surface.trading_pnl.accounts,
+            trading_positions: &surface.trading_pnl.positions,
             trading_order_entry: &surface.trading_pnl.order_entry,
             watchlist,
             order_book_column_menu_open: surface.menu_state.order_book_column_open,
@@ -364,6 +365,7 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
             if let Ok(snapshot) = result {
                 let accounts = snapshot.accounts;
                 let account_pnl = snapshot.account_pnl;
+                state.trading_pnl.positions = snapshot.position_pnl;
                 state.trading_pnl.accounts = accounts;
                 if state
                     .trading_pnl

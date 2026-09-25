@@ -187,9 +187,20 @@ pub struct TradingSnapshot {
     pub order_events: Vec<OrderEvent>,
     pub fills: Vec<Fill>,
     pub positions: Vec<Position>,
+    pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
     pub risk_profiles: Vec<RiskProfile>,
     pub risk_locks: Vec<RiskLock>,
+}
+
+/// Position-level currency and tick P/L projection for bounded desktop panels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PositionPnl {
+    pub position: Position,
+    /// Total closed P/L expressed as tick-contracts when contract metadata permits an exact value.
+    pub realized_ticks: Option<FixedPoint>,
+    /// Mark-to-market P/L expressed as tick-contracts when contract metadata permits an exact value.
+    pub unrealized_ticks: Option<FixedPoint>,
 }
 
 /// Runtime and store health visible to diagnostics/readiness.
@@ -1422,6 +1433,7 @@ impl Coordinator {
                 .cloned()
                 .collect(),
             positions: self.state.positions.values().cloned().collect(),
+            position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             risk_profiles: self.state.risk_profiles.values().cloned().collect(),
             risk_locks: self.state.risk_locks.values().cloned().collect(),
@@ -1466,6 +1478,32 @@ impl Coordinator {
                     currency: account.currency.clone(),
                     realized,
                     unrealized,
+                })
+            })
+            .collect()
+    }
+
+    fn position_pnl(&self) -> Result<Vec<PositionPnl>, String> {
+        self.state
+            .positions
+            .values()
+            .map(|position| {
+                let ticks = self
+                    .state
+                    .instruments
+                    .get(&position.instrument_id)
+                    .and_then(|instrument| {
+                        self.state
+                            .accounts
+                            .get(&position.account_id)
+                            .and_then(|account| tick_value(instrument, account.currency_scale).ok())
+                    });
+                Ok(PositionPnl {
+                    realized_ticks: ticks
+                        .and_then(|tick_value| pnl_ticks(position.realized_pnl, tick_value)),
+                    unrealized_ticks: ticks
+                        .and_then(|tick_value| pnl_ticks(position.unrealized_pnl, tick_value)),
+                    position: position.clone(),
                 })
             })
             .collect()
@@ -1735,6 +1773,39 @@ fn unrealized_pnl(
         .map_err(|error| error.to_string())?
         .exact_rescale(position.realized_pnl.scale())
         .map_err(|error| error.to_string())
+}
+
+fn tick_value(instrument: &TradingInstrument, currency_scale: u8) -> Result<FixedPoint, String> {
+    let tick_size = instrument
+        .contract
+        .tick_size
+        .ok_or_else(|| "tick size is unavailable for tick PnL".to_string())?;
+    let point_value = instrument
+        .contract
+        .point_value
+        .ok_or_else(|| "point value is unavailable for tick PnL".to_string())?;
+    let units = i128::from(tick_size.units())
+        .checked_mul(i128::from(point_value.units()))
+        .ok_or_else(|| "tick value overflowed".to_string())?;
+    let scale = tick_size
+        .scale()
+        .checked_add(point_value.scale())
+        .ok_or_else(|| "tick value scale overflowed".to_string())?;
+    FixedPoint::try_new(
+        i64::try_from(units).map_err(|_| "tick value overflowed".to_string())?,
+        scale,
+    )
+    .map_err(|error| error.to_string())?
+    .exact_rescale(currency_scale)
+    .map_err(|error| error.to_string())
+}
+
+fn pnl_ticks(pnl: FixedPoint, tick_value: FixedPoint) -> Option<FixedPoint> {
+    let pnl = pnl.exact_rescale(tick_value.scale()).ok()?;
+    let divisor = tick_value.units();
+    (divisor != 0 && pnl.units() % divisor == 0)
+        .then(|| FixedPoint::try_new(pnl.units() / divisor, 0).ok())
+        .flatten()
 }
 
 #[cfg(test)]

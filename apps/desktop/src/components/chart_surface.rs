@@ -70,6 +70,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) order_book_frame: Option<aeris_market_data::OrderBookFrame>,
     pub(super) trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     pub(super) trading_accounts: &'a [aeris_trading::TradingAccount],
+    pub(super) trading_positions: &'a [aeris_trading_runtime::PositionPnl],
     pub(super) trading_order_entry: &'a super::TradingOrderEntryState,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
@@ -90,6 +91,7 @@ struct OrderBookPanelState<'a> {
     order_book_frame: Option<&'a aeris_market_data::OrderBookFrame>,
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     trading_accounts: &'a [aeris_trading::TradingAccount],
+    trading_positions: &'a [aeris_trading_runtime::PositionPnl],
     trading_order_entry: &'a super::TradingOrderEntryState,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
@@ -103,6 +105,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         order_book_frame,
         trading_pnl,
         trading_accounts,
+        trading_positions,
         trading_order_entry,
         column_menu_open,
         columns,
@@ -126,6 +129,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
             frame: order_book_frame,
             trading_pnl,
             accounts: trading_accounts,
+            positions: trading_positions,
             order_entry: trading_order_entry,
             theme,
         }))
@@ -148,6 +152,7 @@ struct TradingOrderControlsState<'a> {
     frame: Option<&'a aeris_market_data::OrderBookFrame>,
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     accounts: &'a [aeris_trading::TradingAccount],
+    positions: &'a [aeris_trading_runtime::PositionPnl],
     order_entry: &'a super::TradingOrderEntryState,
     theme: &'a AerisTheme,
 }
@@ -158,6 +163,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         frame,
         trading_pnl,
         accounts,
+        positions,
         order_entry,
         theme,
     } = *state;
@@ -169,7 +175,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         .p_1()
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .child(trading_pnl_summary(trading_pnl, theme))
+        .child(trading_pnl_summary(trading_pnl, positions, frame, theme))
         .child(trading_order_entry(app, accounts, order_entry, theme))
         .child(market_order_buttons(frame, order_entry, theme))
         .child(order_management_buttons(frame, order_entry, theme))
@@ -378,6 +384,8 @@ fn trading_choice_button<T: Into<gpui::ElementId>>(
 
 fn trading_pnl_summary(
     pnl: Option<&aeris_trading::AccountPnl>,
+    positions: &[aeris_trading_runtime::PositionPnl],
+    frame: Option<&aeris_market_data::OrderBookFrame>,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -400,14 +408,50 @@ fn trading_pnl_summary(
             (label, color)
         },
     );
+    let position_label = selected_position_pnl(pnl, positions, frame).map_or_else(
+        || "POS · flat or awaiting mark".to_string(),
+        |position| {
+            let realized = position
+                .realized_ticks
+                .map_or_else(|| "n/a".to_string(), format_fixed_point);
+            let unrealized = position
+                .unrealized_ticks
+                .map_or_else(|| "n/a".to_string(), format_fixed_point);
+            format!(
+                "POS {} · R {}t · U {}t",
+                format_fixed_point(position.position.net_quantity),
+                realized,
+                unrealized,
+            )
+        },
+    );
     div()
-        .h(px(22.0))
+        .h(px(36.0))
         .px_1()
+        .flex_col()
         .flex()
         .items_center()
         .text_xs()
         .text_color(gpui_color(color))
         .child(label)
+        .child(
+            div()
+                .text_color(gpui_color(colors.text_muted))
+                .child(position_label),
+        )
+}
+
+fn selected_position_pnl<'a>(
+    pnl: Option<&aeris_trading::AccountPnl>,
+    positions: &'a [aeris_trading_runtime::PositionPnl],
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+) -> Option<&'a aeris_trading_runtime::PositionPnl> {
+    let account_id = pnl?.account_id.as_str();
+    let instrument_id = frame?.instrument_id.as_str();
+    positions.iter().find(|item| {
+        item.position.account_id.as_str() == account_id
+            && item.position.instrument_id.as_str() == instrument_id
+    })
 }
 
 fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
@@ -782,6 +826,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         order_book_frame,
         trading_pnl,
         trading_accounts,
+        trading_positions,
         trading_order_entry,
         watchlist,
         order_book_column_menu_open,
@@ -799,6 +844,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 order_book_frame: order_book_frame.as_ref(),
                 trading_pnl,
                 trading_accounts,
+                trading_positions,
                 trading_order_entry,
                 column_menu_open: order_book_column_menu_open,
                 columns: order_book_columns,
@@ -856,20 +902,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 surface.set_side_panel_width(width, surface_cx);
             });
         })
-        .child(
-            div()
-                .id(("side_panel_resize", workspace_id))
-                .absolute()
-                .occlude()
-                .top_0()
-                .left(px(-SIDE_PANEL_RESIZE_HANDLE_WIDTH / 2.0))
-                .h_full()
-                .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
-                .cursor_col_resize()
-                .on_drag(SidePanelWidthDrag, |drag, _, _, cx| {
-                    cx.new(|_| drag.clone())
-                }),
-        )
+        .child(side_panel_width_resize_handle(workspace_id))
 }
 
 pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
@@ -938,6 +971,21 @@ fn side_panel_split_handle(workspace_id: u64, border: gpui::Hsla) -> impl IntoEl
                     cx.new(|_| drag.clone())
                 }),
         )
+}
+
+fn side_panel_width_resize_handle(workspace_id: u64) -> impl IntoElement {
+    div()
+        .id(("side_panel_resize", workspace_id))
+        .absolute()
+        .occlude()
+        .top_0()
+        .left(px(-SIDE_PANEL_RESIZE_HANDLE_WIDTH / 2.0))
+        .h_full()
+        .w(px(SIDE_PANEL_RESIZE_HANDLE_WIDTH))
+        .cursor_col_resize()
+        .on_drag(SidePanelWidthDrag, |drag, _, _, cx| {
+            cx.new(|_| drag.clone())
+        })
 }
 
 fn watchlist_table(
