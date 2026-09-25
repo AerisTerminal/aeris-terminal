@@ -91,7 +91,10 @@ use aeris_market_runtime::{
     StreamRequirements,
 };
 use aeris_observability::FeedConnectionState;
-use aeris_terminal_ui::{OrderBookColumn, OrderBookColumnVisibility, ReadOnlyOrderBookView};
+use aeris_terminal_ui::{
+    OrderBookColumn, OrderBookColumnVisibility, OrderBookLevelClick, OrderBookLevelSide,
+    ReadOnlyOrderBookView,
+};
 use assets::UiIcon as HugeIcon;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
@@ -2393,6 +2396,44 @@ struct WorkspaceSurfaceRestore {
     side_panel: Option<(u32, u32, u32)>,
 }
 
+fn subscribe_order_book_trading(
+    workspace: &Entity<WorkspaceSurface>,
+    order_book: &Entity<ReadOnlyOrderBookView>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let workspace = workspace.clone();
+    let subscribed_order_book = order_book.clone();
+    window
+        .subscribe(
+            order_book,
+            cx,
+            move |_, event: &OrderBookLevelClick, _, cx| {
+                let order_entry = workspace.read(cx).trading_pnl.order_entry.clone();
+                let frame = subscribed_order_book.read(cx).frame().cloned();
+                let Some(frame) = frame else {
+                    return;
+                };
+                let side = match event.side {
+                    OrderBookLevelSide::Ask => aeris_trading::OrderSide::Buy,
+                    OrderBookLevelSide::Bid => aeris_trading::OrderSide::Sell,
+                };
+                aeris_desktop::trading::dispatch_simulated_limit_order_at_price(
+                    &frame,
+                    side,
+                    order_entry
+                        .selected_account_id
+                        .map(|id| id.as_str().to_string()),
+                    order_entry.quantity,
+                    order_entry.time_in_force,
+                    event.price,
+                    cx,
+                );
+            },
+        )
+        .detach();
+}
+
 fn workspace_surface_entity(
     bootstrap: MarketWorkerStartup,
     market_worker: MarketDataWorker,
@@ -2426,6 +2467,8 @@ fn workspace_surface_entity(
             restored.chart,
         )
     });
+    let order_book = workspace.read(cx).order_book.clone();
+    subscribe_order_book_trading(&workspace, &order_book, window, cx);
     if let Some((visibility, width, split)) = restored.side_panel {
         workspace.update(cx, |surface, surface_cx| {
             surface.side_panel_width = width

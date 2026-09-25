@@ -7,8 +7,8 @@ use aeris_design_system::{
 };
 use aeris_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
 use gpui::{
-    AnyElement, Context, Div, Hsla, IntoElement, Render, ScrollStrategy, UniformListScrollHandle,
-    Window, div, prelude::*, px, relative, uniform_list,
+    AnyElement, Context, Div, Entity, EventEmitter, Hsla, IntoElement, Render, ScrollStrategy,
+    UniformListScrollHandle, Window, div, prelude::*, px, relative, uniform_list,
 };
 #[cfg(test)]
 use std::cmp::Ordering;
@@ -34,6 +34,20 @@ const MINIMUM_PRICE_GRID_ROWS_PER_SIDE: usize = 4_096;
 // 524,288 rows * 16 px ~= 8.4M px, comfortably below f32's 2^24
 // integer-exact boundary. Wider sparse spans fall back to the real-level list.
 const MAXIMUM_PRICE_GRID_ROWS: usize = 524_288;
+
+/// Which side of the ladder a trading click targets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderBookLevelSide {
+    Bid,
+    Ask,
+}
+
+/// Provider-neutral ladder intent emitted to the desktop command adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrderBookLevelClick {
+    pub price: i64,
+    pub side: OrderBookLevelSide,
+}
 const PNL_WIDTH: f32 = 0.10;
 const BOOK_WIDTH: f32 = 0.30;
 const TRADE_WIDTH: f32 = 0.10;
@@ -180,6 +194,8 @@ pub struct ReadOnlyOrderBookView {
     columns: OrderBookColumnVisibility,
 }
 
+impl EventEmitter<OrderBookLevelClick> for ReadOnlyOrderBookView {}
+
 impl ReadOnlyOrderBookView {
     #[must_use]
     pub fn new(theme: AerisTheme) -> Self {
@@ -313,7 +329,7 @@ fn frame_precedes(candidate: &OrderBookFrame, current: &OrderBookFrame) -> bool 
 }
 
 impl Render for ReadOnlyOrderBookView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
         let state = self.frame.as_deref().map(|frame| frame.state);
         let watermark = self
@@ -324,6 +340,7 @@ impl Render for ReadOnlyOrderBookView {
         let frame = self.frame.clone();
         let ladder_scroll = self.ladder_scroll.clone();
         let columns = self.columns;
+        let order_book = cx.entity();
 
         div()
             .id("read_only_order_book")
@@ -363,6 +380,7 @@ impl Render for ReadOnlyOrderBookView {
                         columns,
                         &self.theme,
                         &ladder_scroll,
+                        &order_book,
                     )),
             )
     }
@@ -454,6 +472,7 @@ fn render_ladder(
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
     ladder_scroll: &UniformListScrollHandle,
+    order_book: &Entity<ReadOnlyOrderBookView>,
 ) -> impl IntoElement + use<> {
     let body = div()
         .id("read_only_order_book_rows")
@@ -492,7 +511,7 @@ fn render_ladder(
                     .child(empty_copy),
             );
     }
-    let list = render_virtualized_ladder_list(&frame, columns, theme, ladder_scroll);
+    let list = render_virtualized_ladder_list(&frame, columns, theme, ladder_scroll, order_book);
 
     body.child(
         div()
@@ -509,10 +528,12 @@ fn render_virtualized_ladder_list(
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
     ladder_scroll: &UniformListScrollHandle,
+    order_book: &Entity<ReadOnlyOrderBookView>,
 ) -> AnyElement {
     let list_frame = Arc::clone(frame);
     let list_theme = *theme;
     if let Some(grid) = price_grid_layout(frame.as_ref()) {
+        let list_order_book = order_book.clone();
         return uniform_list(
             "read_only_order_book_ladder",
             grid.item_count(),
@@ -528,9 +549,12 @@ fn render_virtualized_ladder_list(
                             grid,
                             index,
                             columns,
-                            &list_theme,
                             maximum_quantity,
                             maximum_trade_quantity,
+                            LadderInteraction {
+                                theme: &list_theme,
+                                order_book: &list_order_book,
+                            },
                         )
                     })
                     .collect::<Vec<_>>()
@@ -542,6 +566,7 @@ fn render_virtualized_ladder_list(
     }
 
     let layout = ladder_layout(frame.as_ref());
+    let list_order_book = order_book.clone();
     uniform_list(
         "read_only_order_book_ladder",
         layout.item_count(),
@@ -557,9 +582,12 @@ fn render_virtualized_ladder_list(
                         layout,
                         index,
                         columns,
-                        &list_theme,
                         maximum_quantity,
                         maximum_trade_quantity,
+                        LadderInteraction {
+                            theme: &list_theme,
+                            order_book: &list_order_book,
+                        },
                     )
                 })
                 .collect::<Vec<_>>()
@@ -949,10 +977,11 @@ fn render_price_grid_item(
     layout: PriceGridLayout,
     index: usize,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
     maximum_quantity: i64,
     maximum_trade_quantity: i64,
+    interaction: LadderInteraction<'_>,
 ) -> Option<AnyElement> {
+    let theme = interaction.theme;
     match price_grid_item(layout, index)? {
         PriceGridItem::Ask(price) => Some(
             grouped_level_at_price(frame, BookColumnSide::Ask, price, layout.tick).map_or_else(
@@ -963,7 +992,7 @@ fn render_price_grid_item(
                         frame.price_scale,
                         BookColumnSide::Ask,
                         columns,
-                        theme,
+                        interaction,
                         RowRenderStats::grouped(
                             0,
                             maximum_trade_quantity,
@@ -978,7 +1007,7 @@ fn render_price_grid_item(
                         &level,
                         BookColumnSide::Ask,
                         columns,
-                        theme,
+                        interaction,
                         RowRenderStats::grouped(
                             maximum_quantity,
                             maximum_trade_quantity,
@@ -999,7 +1028,7 @@ fn render_price_grid_item(
                         frame.price_scale,
                         BookColumnSide::Bid,
                         columns,
-                        theme,
+                        interaction,
                         RowRenderStats::grouped(
                             0,
                             maximum_trade_quantity,
@@ -1014,7 +1043,7 @@ fn render_price_grid_item(
                         &level,
                         BookColumnSide::Bid,
                         columns,
-                        theme,
+                        interaction,
                         RowRenderStats::grouped(
                             maximum_quantity,
                             maximum_trade_quantity,
@@ -1133,10 +1162,11 @@ fn render_ladder_item(
     layout: LadderLayout,
     index: usize,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
     maximum_quantity: i64,
     maximum_trade_quantity: i64,
+    interaction: LadderInteraction<'_>,
 ) -> Option<AnyElement> {
+    let theme = interaction.theme;
     match ladder_item_index(layout, index)? {
         LadderItemIndex::Ask(row_index) => frame.rows.get(row_index)?.ask.as_ref().map(|level| {
             render_level_row(
@@ -1144,7 +1174,7 @@ fn render_ladder_item(
                 level,
                 BookColumnSide::Ask,
                 columns,
-                theme,
+                interaction,
                 RowRenderStats::raw(maximum_quantity, maximum_trade_quantity),
             )
             .into_any_element()
@@ -1159,7 +1189,7 @@ fn render_ladder_item(
                 level,
                 BookColumnSide::Bid,
                 columns,
-                theme,
+                interaction,
                 RowRenderStats::raw(maximum_quantity, maximum_trade_quantity),
             )
             .into_any_element()
@@ -1204,6 +1234,12 @@ fn ladder_visible_max_trade_quantity(
 enum BookColumnSide {
     Bid,
     Ask,
+}
+
+#[derive(Clone, Copy)]
+struct LadderInteraction<'a> {
+    theme: &'a AerisTheme,
+    order_book: &'a Entity<ReadOnlyOrderBookView>,
 }
 
 #[derive(Clone, Copy)]
@@ -1258,14 +1294,21 @@ fn render_level_row(
     level: &OrderBookColumnLevel,
     side: BookColumnSide,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
+    interaction: LadderInteraction<'_>,
     stats: RowRenderStats,
 ) -> impl IntoElement + use<> {
+    let theme = interaction.theme;
     let colors = theme.colors;
     let (price_color, row_id) = match side {
         BookColumnSide::Bid => (colors.primary, "order_book_bid_row"),
         BookColumnSide::Ask => (colors.danger, "order_book_ask_row"),
     };
+    let click_side = match side {
+        BookColumnSide::Bid => OrderBookLevelSide::Bid,
+        BookColumnSide::Ask => OrderBookLevelSide::Ask,
+    };
+    let click_price = level.price;
+    let order_book = interaction.order_book.clone();
     let trade_volumes = stats.trade_volumes.unwrap_or_else(|| {
         frame
             .traded_volumes
@@ -1296,6 +1339,14 @@ fn render_level_row(
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
+        .on_click(move |_, _, cx| {
+            order_book.update(cx, |_, order_book_cx| {
+                order_book_cx.emit(OrderBookLevelClick {
+                    price: click_price,
+                    side: click_side,
+                });
+            });
+        })
         .children(
             OrderBookColumn::ALL
                 .into_iter()
@@ -1314,14 +1365,20 @@ fn render_empty_price_tick(
     price_scale: u8,
     side: BookColumnSide,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
+    interaction: LadderInteraction<'_>,
     stats: RowRenderStats,
 ) -> impl IntoElement + use<> {
+    let theme = interaction.theme;
     let colors = theme.colors;
     let (price_color, row_id) = match side {
         BookColumnSide::Bid => (colors.primary, "order_book_bid_price_tick"),
         BookColumnSide::Ask => (colors.danger, "order_book_ask_price_tick"),
     };
+    let click_side = match side {
+        BookColumnSide::Bid => OrderBookLevelSide::Bid,
+        BookColumnSide::Ask => OrderBookLevelSide::Ask,
+    };
+    let order_book = interaction.order_book.clone();
     let trade_volumes = stats.trade_volumes.unwrap_or_default();
     let quantity_scale = frame.quantity_scale;
     div()
@@ -1338,6 +1395,14 @@ fn render_empty_price_tick(
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
+        .on_click(move |_, _, cx| {
+            order_book.update(cx, |_, order_book_cx| {
+                order_book_cx.emit(OrderBookLevelClick {
+                    price,
+                    side: click_side,
+                });
+            });
+        })
         .children(
             OrderBookColumn::ALL
                 .into_iter()

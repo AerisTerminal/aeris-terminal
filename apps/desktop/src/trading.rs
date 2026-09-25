@@ -79,6 +79,44 @@ pub fn dispatch_simulated_order(
         .detach();
 }
 
+/// Dispatches a simulated limit order at the clicked order-book price off the UI thread.
+pub fn dispatch_simulated_limit_order_at_price(
+    frame: &aeris_market_data::OrderBookFrame,
+    side: aeris_trading::OrderSide,
+    account_key: Option<String>,
+    quantity: u64,
+    time_in_force: aeris_trading::TimeInForce,
+    price_units: i64,
+    cx: &mut gpui::App,
+) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let Some((mut command, observation)) = prepare_simulated_order(
+        frame,
+        side,
+        account_key,
+        quantity,
+        aeris_trading::OrderType::Limit,
+        time_in_force,
+    ) else {
+        return;
+    };
+    let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, frame.price_scale) else {
+        return;
+    };
+    command.limit_price = Some(price);
+    cx.background_executor()
+        .spawn(async move {
+            if service.place_order(command).is_ok()
+                && let Some(observation) = observation
+            {
+                let _ = service.observe_market(observation);
+            }
+        })
+        .detach();
+}
+
 /// Cancels working orders for the selected simulated account off the UI thread.
 pub fn cancel_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
     let Some(service) = handle() else {

@@ -14,7 +14,8 @@ pub use aeris_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
 pub use order_book::{OrderBookSelection, project_order_book};
 #[cfg(feature = "gpui")]
 pub use order_book_view::{
-    OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, ReadOnlyOrderBookView,
+    OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, OrderBookLevelClick,
+    OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 
 /// A bounded queue that prevents background producers from growing UI work.
