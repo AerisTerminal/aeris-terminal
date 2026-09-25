@@ -112,20 +112,20 @@ and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now
 owner only when the trading chrome owns focus. The order-book surface also renders the runtime's
 currency P/L projection through a bounded asynchronous snapshot refresh.
 The remaining T2 checklist items are intentionally open: the DOM ladder, full order-entry and
-bracket UX, chart/hotkey dispatch, full flatten UX, copier, live rule meters, and chart warning
-wiring still require the real runtime and desktop paths.
+bracket UX, chart dispatch, account selection, copier, live rule meters, and chart warning wiring
+still require the real runtime and desktop paths.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.
 
-- [ ] **M7.2** Single keymap owner with conflict detection.
+- [x] **M7.2** Single keymap owner with conflict detection.
 - [ ] **M2.1** DOM trading ladder: one-click orders, drag to modify, inline orders and position,
       P/L column, recent volume at price; render cost measured during bursts.
 - [ ] **M2.2** Order entry panel: quantity presets, order types, time in force, account selector.
 - [ ] **M2.3** Bracket and strategy templates: stop and target, OCO, trailing, break-even,
       scale-out, with local-management labels where not server-side.
 - [ ] **M2.4** Chart trading mapped to trading commands with confirmation rules.
-- [ ] **M2.5** Trading hotkeys, disabled while a text field has focus.
+- [x] **M2.5** Trading hotkeys, disabled while a text field has focus.
 - [ ] **M2.6** Flatten and kill switch per account and globally.
 - [ ] **M2.7** Multi-account trade copier with per-account multipliers, kill switches and M3.2
       checks before each mirrored order.
