@@ -37,26 +37,38 @@ pub fn dispatch_simulated_market_order(
     let Some(service) = handle() else {
         return;
     };
-    let frame = frame.clone();
+    let Some((command, observation)) = prepare_simulated_market_order(frame, side) else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if service.place_order(command).is_ok()
+                && let Some(observation) = observation
+            {
+                let _ = service.observe_market(observation);
+            }
+        })
+        .detach();
+}
+
+/// Prepares a validated local market order and its optional BBO observation.
+#[must_use]
+pub fn prepare_simulated_market_order(
+    frame: &aeris_market_data::OrderBookFrame,
+    side: aeris_trading::OrderSide,
+) -> Option<(PlaceOrder, Option<SimulatedMarketObservation>)> {
     let submitted_unix_nanos = now();
-    let Ok(account_id) = aeris_trading::TradingAccountId::try_new("aeris-sim-1") else {
-        return;
-    };
-    let Ok(instrument_id) = InstrumentId::try_new(frame.instrument_id.clone()) else {
-        return;
-    };
-    let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(format!(
+    let account_id = aeris_trading::TradingAccountId::try_new("aeris-sim-1").ok()?;
+    let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
+    let client_order_id = aeris_trading::ClientOrderId::try_new(format!(
         "ui-{}-{submitted_unix_nanos}",
         match side {
             aeris_trading::OrderSide::Buy => "buy",
             aeris_trading::OrderSide::Sell => "sell",
         }
-    )) else {
-        return;
-    };
-    let Ok(quantity) = aeris_trading::FixedPoint::try_new(1, frame.quantity_scale) else {
-        return;
-    };
+    ))
+    .ok()?;
+    let quantity = aeris_trading::FixedPoint::try_new(1, frame.quantity_scale).ok()?;
     let provenance = aeris_trading::TradingProvenance {
         venue_id: "aeris-sim".to_string(),
         provider_id: frame.provider_id.clone(),
@@ -92,15 +104,7 @@ pub fn dispatch_simulated_market_order(
                 provenance,
             })
         });
-    cx.background_executor()
-        .spawn(async move {
-            if service.place_order(command).is_ok()
-                && let Some(observation) = observation
-            {
-                let _ = service.observe_market(observation);
-            }
-        })
-        .detach();
+    Some((command, observation))
 }
 
 /// Flattens the simulated account using the current best bid and ask off the UI thread.
@@ -108,43 +112,42 @@ pub fn flatten_simulated_account(frame: &aeris_market_data::OrderBookFrame, cx: 
     let Some(service) = handle() else {
         return;
     };
-    let frame = frame.clone();
-    let Ok(account_id) = aeris_trading::TradingAccountId::try_new("aeris-sim-1") else {
+    let Some((account_id, observation)) = prepare_flatten(frame) else {
         return;
-    };
-    let Some((bid, ask)) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref()) else {
-        return;
-    };
-    let Ok(instrument_id) = InstrumentId::try_new(frame.instrument_id.clone()) else {
-        return;
-    };
-    let observed_unix_nanos = now();
-    let Ok(bid) = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale) else {
-        return;
-    };
-    let Ok(ask) = aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale) else {
-        return;
-    };
-    let observation = SimulatedMarketObservation {
-        instrument_id,
-        bid,
-        ask,
-        provenance: aeris_trading::TradingProvenance {
-            venue_id: "aeris-sim".to_string(),
-            provider_id: frame.provider_id,
-            session_generation: frame.session_generation,
-            source_sequence: frame
-                .source_watermark
-                .max(frame.bbo_source_watermark)
-                .max(1),
-            observed_unix_nanos,
-        },
     };
     cx.background_executor()
         .spawn(async move {
             let _ = service.flatten_account(account_id, observation);
         })
         .detach();
+}
+
+/// Prepares the simulated account identity and its current BBO observation.
+#[must_use]
+pub fn prepare_flatten(
+    frame: &aeris_market_data::OrderBookFrame,
+) -> Option<(aeris_trading::TradingAccountId, SimulatedMarketObservation)> {
+    let account_id = aeris_trading::TradingAccountId::try_new("aeris-sim-1").ok()?;
+    let (bid, ask) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref())?;
+    let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
+    let bid = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?;
+    let ask = aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale).ok()?;
+    let observation = SimulatedMarketObservation {
+        instrument_id,
+        bid,
+        ask,
+        provenance: aeris_trading::TradingProvenance {
+            venue_id: "aeris-sim".to_string(),
+            provider_id: frame.provider_id.clone(),
+            session_generation: frame.session_generation,
+            source_sequence: frame
+                .source_watermark
+                .max(frame.bbo_source_watermark)
+                .max(1),
+            observed_unix_nanos: now(),
+        },
+    };
+    Some((account_id, observation))
 }
 
 #[must_use]

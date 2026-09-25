@@ -173,6 +173,11 @@ impl Render for TerminalApp {
                 fullscreen_focus.focus(window, cx);
             })
             .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(Self::trading_buy_market))
+            .on_action(cx.listener(Self::trading_sell_market))
+            .on_action(cx.listener(Self::trading_cancel_all))
+            .on_action(cx.listener(Self::trading_flatten_account))
+            .on_action(cx.listener(Self::trading_kill_switch))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
             .font_family(aeris_design_system::platform_font_family())
@@ -191,6 +196,135 @@ impl Render for TerminalApp {
             .children(settings_menu)
             .children(account_menu)
             .children(about_dialog)
+    }
+}
+
+impl TerminalApp {
+    fn trading_hotkeys_enabled(&self, window: &Window) -> bool {
+        self.chrome_focus.is_focused(window)
+    }
+
+    fn trading_order_frame(&self, cx: &App) -> Option<aeris_market_data::OrderBookFrame> {
+        self.active_surface()
+            .read(cx)
+            .order_book
+            .read(cx)
+            .frame()
+            .cloned()
+    }
+
+    fn trading_buy_market(
+        &mut self,
+        _: &TradingBuyMarket,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.trading_hotkeys_enabled(window)
+            && let Some(frame) = self.trading_order_frame(cx)
+            && let Some((command, observation)) =
+                aeris_desktop::trading::prepare_simulated_market_order(
+                    &frame,
+                    aeris_trading::OrderSide::Buy,
+                )
+            && let Some(service) = aeris_desktop::trading::handle()
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    if service.place_order(command).is_ok()
+                        && let Some(observation) = observation
+                    {
+                        let _ = service.observe_market(observation);
+                    }
+                })
+                .detach();
+        }
+    }
+
+    fn trading_sell_market(
+        &mut self,
+        _: &TradingSellMarket,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.trading_hotkeys_enabled(window)
+            && let Some(frame) = self.trading_order_frame(cx)
+            && let Some((command, observation)) =
+                aeris_desktop::trading::prepare_simulated_market_order(
+                    &frame,
+                    aeris_trading::OrderSide::Sell,
+                )
+            && let Some(service) = aeris_desktop::trading::handle()
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    if service.place_order(command).is_ok()
+                        && let Some(observation) = observation
+                    {
+                        let _ = service.observe_market(observation);
+                    }
+                })
+                .detach();
+        }
+    }
+
+    fn trading_cancel_all(
+        &mut self,
+        _: &TradingCancelAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.trading_hotkeys_enabled(window) {
+            return;
+        }
+        if let Some(service) = aeris_desktop::trading::handle() {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = service.cancel_all(None);
+                })
+                .detach();
+        }
+    }
+
+    fn trading_flatten_account(
+        &mut self,
+        _: &TradingFlattenAccount,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.trading_hotkeys_enabled(window)
+            && let Some(frame) = self.trading_order_frame(cx)
+            && let Some((account_id, observation)) = aeris_desktop::trading::prepare_flatten(&frame)
+            && let Some(service) = aeris_desktop::trading::handle()
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = service.flatten_account(account_id, observation);
+                })
+                .detach();
+        }
+    }
+
+    fn trading_kill_switch(
+        &mut self,
+        _: &TradingKillSwitch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.trading_hotkeys_enabled(window) {
+            return;
+        }
+        if let Some(service) = aeris_desktop::trading::handle() {
+            let locked_at = aeris_desktop::trading::now();
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = service.kill_switch(
+                        None,
+                        "manual keyboard kill switch".to_string(),
+                        locked_at,
+                    );
+                })
+                .detach();
+        }
     }
 }
 

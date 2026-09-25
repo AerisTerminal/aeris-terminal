@@ -424,6 +424,11 @@ actions!(
         SplitPaneHorizontal,
         SplitPaneVertical,
         ClosePane,
+        TradingBuyMarket,
+        TradingSellMarket,
+        TradingCancelAll,
+        TradingFlattenAccount,
+        TradingKillSwitch,
     ]
 );
 
@@ -3153,22 +3158,7 @@ fn mount_desktop(
         eprintln!("Aeris trading keymap is invalid: {error}");
         return None;
     }
-    cx.bind_keys([
-        KeyBinding::new("f11", ToggleFullscreen, None),
-        KeyBinding::new("alt-enter", ToggleFullscreen, None),
-        KeyBinding::new("alt-f9", MinimizeWindow, None),
-        KeyBinding::new("alt-f10", ZoomWindow, None),
-        KeyBinding::new("alt-f4", CloseWindow, None),
-        KeyBinding::new("ctrl-t", NewWorkspace, None),
-        KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
-        KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
-        KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
-        KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
-        KeyBinding::new("ctrl-w", CloseWorkspace, None),
-        KeyBinding::new("ctrl-alt-h", SplitPaneHorizontal, None),
-        KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
-        KeyBinding::new("ctrl-shift-w", ClosePane, None),
-    ]);
+    bind_desktop_keys(cx);
     let quit_lifecycle = lifecycle.clone();
     cx.on_app_quit(move |cx| {
         let quit = quit_lifecycle.begin_quit(cx);
@@ -3260,6 +3250,30 @@ fn validate_trading_keymap() -> Result<(), String> {
         "ctrl-alt-v",
         "ctrl-shift-w",
     ])
+}
+
+fn bind_desktop_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("f11", ToggleFullscreen, None),
+        KeyBinding::new("alt-enter", ToggleFullscreen, None),
+        KeyBinding::new("alt-f9", MinimizeWindow, None),
+        KeyBinding::new("alt-f10", ZoomWindow, None),
+        KeyBinding::new("alt-f4", CloseWindow, None),
+        KeyBinding::new("ctrl-t", NewWorkspace, None),
+        KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
+        KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
+        KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
+        KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
+        KeyBinding::new("ctrl-w", CloseWorkspace, None),
+        KeyBinding::new("ctrl-alt-h", SplitPaneHorizontal, None),
+        KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
+        KeyBinding::new("ctrl-shift-w", ClosePane, None),
+        KeyBinding::new("ctrl-b", TradingBuyMarket, None),
+        KeyBinding::new("ctrl-s", TradingSellMarket, None),
+        KeyBinding::new("ctrl-shift-x", TradingCancelAll, None),
+        KeyBinding::new("ctrl-shift-f", TradingFlattenAccount, None),
+        KeyBinding::new("ctrl-shift-k", TradingKillSwitch, None),
+    ]);
 }
 #[cfg(test)]
 mod tests;
