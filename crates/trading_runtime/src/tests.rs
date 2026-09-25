@@ -195,6 +195,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
             profile_id: "practice-rules".to_string(),
             version: 1,
             session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("session baseline"),
             daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("loss limit"),
             trailing_drawdown: Some(FixedPoint::try_new(200_000, 2).expect("drawdown")),
             trailing_mode: TrailingDrawdownMode::Intraday,

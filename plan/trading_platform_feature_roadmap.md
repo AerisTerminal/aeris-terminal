@@ -95,7 +95,7 @@ simulated execution and restart/export path. The desktop starts that owner besid
 and installs provider contract metadata through the desktop integration boundary. The release storage
 measurement (500 executions and 2,000 user records) completed in 2.619 s, reopened in 4.47 ms, and
 used 831,488 bytes. The direct desktop readiness command then exercised the real development binary
-successfully, producing schema-3 readiness with market, account and trading services ready and two
+successfully, producing schema-4 readiness with market, account and trading services ready and two
 configured providers. The command uses the existing development-mode auth boundary, so it does not
 open a browser or create an account session.
 

@@ -31,7 +31,7 @@ const REPLY_CAPACITY: usize = 1;
 const MAXIMUM_OPEN_ORDERS: usize = 4_096;
 const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
 const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -1030,27 +1030,11 @@ impl Coordinator {
     }
 
     fn realized_since_session(&self, profile: &RiskProfile) -> Result<FixedPoint, String> {
-        let account = self
+        let current = self
             .state
-            .accounts
-            .get(&profile.account_id)
-            .ok_or_else(|| "risk profile account is not registered".to_string())?;
-        let mut positions = BTreeMap::new();
-        for fill in self.state.fills.iter().filter(|fill| {
-            fill.account_id == profile.account_id
-                && fill.execution_unix_nanos >= profile.session_start_unix_nanos
-        }) {
-            let instrument = self
-                .state
-                .instruments
-                .get(&fill.instrument_id)
-                .ok_or_else(|| "risk fill instrument is not registered".to_string())?;
-            let key = (fill.account_id.clone(), fill.instrument_id.clone());
-            let position = next_position(positions.get(&key), fill, account, instrument)?;
-            positions.insert(key, position);
-        }
-        positions
+            .positions
             .values()
+            .filter(|position| position.account_id == profile.account_id)
             .map(|position| position.realized_pnl)
             .try_fold(
                 FixedPoint::try_new(0, profile.daily_loss_limit.scale())
@@ -1061,7 +1045,22 @@ impl Coordinator {
                         .map_err(|error| error.to_string())?;
                     total.checked_add(value).map_err(|error| error.to_string())
                 },
-            )
+            )?;
+        let baseline = profile
+            .session_start_realized_pnl
+            .exact_rescale(profile.daily_loss_limit.scale())
+            .map_err(|error| error.to_string())?;
+        let negative_baseline = FixedPoint::try_new(
+            baseline
+                .units()
+                .checked_neg()
+                .ok_or_else(|| "risk session baseline overflowed".to_string())?,
+            baseline.scale(),
+        )
+        .map_err(|error| error.to_string())?;
+        current
+            .checked_add(negative_baseline)
+            .map_err(|error| error.to_string())
     }
 
     fn observe_market(

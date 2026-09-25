@@ -19,7 +19,7 @@ use std::{
     path::Path,
 };
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -83,6 +83,9 @@ const MIGRATION_V2: &str = "CREATE TABLE risk_profiles (
  ) STRICT;";
 const MIGRATION_V3: &str =
     "ALTER TABLE risk_profiles ADD COLUMN session_start_unix_nanos INTEGER NOT NULL DEFAULT 1;";
+const MIGRATION_V4: &str =
+    "ALTER TABLE risk_profiles ADD COLUMN session_start_realized_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_profiles ADD COLUMN session_start_realized_scale INTEGER NOT NULL DEFAULT 2;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -181,6 +184,24 @@ impl TradingStore {
                 .map_err(|error| format!("trading schema migration could not start: {error}"))?;
             transaction
                 .execute_batch(MIGRATION_V3)
+                .map_err(|error| format!("trading schema migration failed: {error}"))?;
+            transaction
+                .pragma_update(None, "user_version", 3_u32)
+                .map_err(|error| {
+                    format!("trading schema version could not be committed: {error}")
+                })?;
+            transaction
+                .commit()
+                .map_err(|error| format!("trading migration could not commit: {error}"))?;
+            version = 3;
+        }
+        if version == 3 {
+            let transaction = self
+                .connection
+                .transaction()
+                .map_err(|error| format!("trading migration could not start: {error}"))?;
+            transaction
+                .execute_batch(MIGRATION_V4)
                 .map_err(|error| format!("trading schema migration failed: {error}"))?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -331,8 +352,9 @@ impl TradingStore {
                 "INSERT INTO risk_profiles(account_id, profile_id, version, daily_loss_units,
                     daily_loss_scale, trailing_units, trailing_scale, trailing_mode,
                     max_contracts_units, max_contracts_scale, consistency_percent,
-                    restricted_until_unix_nanos, enabled, session_start_unix_nanos)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    restricted_until_unix_nanos, enabled, session_start_unix_nanos,
+                    session_start_realized_units, session_start_realized_scale)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(account_id) DO UPDATE SET profile_id=excluded.profile_id,
                     version=excluded.version, daily_loss_units=excluded.daily_loss_units,
                     daily_loss_scale=excluded.daily_loss_scale, trailing_units=excluded.trailing_units,
@@ -342,7 +364,9 @@ impl TradingStore {
                     consistency_percent=excluded.consistency_percent,
                     restricted_until_unix_nanos=excluded.restricted_until_unix_nanos,
                     enabled=excluded.enabled,
-                    session_start_unix_nanos=excluded.session_start_unix_nanos",
+                    session_start_unix_nanos=excluded.session_start_unix_nanos,
+                    session_start_realized_units=excluded.session_start_realized_units,
+                    session_start_realized_scale=excluded.session_start_realized_scale",
                 params![
                     profile.account_id.as_str(),
                     profile.profile_id,
@@ -358,6 +382,8 @@ impl TradingStore {
                     profile.restricted_until_unix_nanos,
                     i64::from(profile.enabled),
                     profile.session_start_unix_nanos,
+                    profile.session_start_realized_pnl.units(),
+                    profile.session_start_realized_pnl.scale(),
                 ],
             )
             .map_err(database_error)?;
@@ -403,7 +429,8 @@ impl TradingStore {
                 "SELECT account_id, profile_id, version, daily_loss_units, daily_loss_scale,
                     trailing_units, trailing_scale, trailing_mode, max_contracts_units,
                     max_contracts_scale, consistency_percent, restricted_until_unix_nanos, enabled,
-                    session_start_unix_nanos
+                    session_start_unix_nanos, session_start_realized_units,
+                    session_start_realized_scale
                  FROM risk_profiles ORDER BY account_id",
             )
             .map_err(database_error)?;
@@ -424,6 +451,8 @@ impl TradingStore {
                     row.get::<_, Option<i64>>(11)?,
                     row.get::<_, i64>(12)?,
                     row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, u8>(15)?,
                 ))
             })
             .map_err(database_error)?;
@@ -443,6 +472,8 @@ impl TradingStore {
                 restricted_until_unix_nanos,
                 enabled,
                 session_start_unix_nanos,
+                session_start_realized_units,
+                session_start_realized_scale,
             ) = row.map_err(database_error)?;
             let account_id =
                 TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
@@ -455,6 +486,9 @@ impl TradingStore {
                 .map_err(|error| error.to_string())?;
             let max_contracts = FixedPoint::try_new(max_contracts_units, max_contracts_scale)
                 .map_err(|error| error.to_string())?;
+            let session_start_realized_pnl =
+                FixedPoint::try_new(session_start_realized_units, session_start_realized_scale)
+                    .map_err(|error| error.to_string())?;
             let profile = RiskProfile {
                 account_id: account_id.clone(),
                 profile_id,
@@ -467,6 +501,7 @@ impl TradingStore {
                 restricted_until_unix_nanos,
                 enabled: enabled != 0,
                 session_start_unix_nanos,
+                session_start_realized_pnl,
             };
             profile.validate()?;
             result.insert(account_id, profile);

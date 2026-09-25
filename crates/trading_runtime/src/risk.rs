@@ -31,6 +31,8 @@ pub struct RiskProfile {
     pub profile_id: String,
     pub version: u32,
     pub session_start_unix_nanos: i64,
+    /// Realized P/L at the session boundary, retained independently of fill-history retention.
+    pub session_start_realized_pnl: FixedPoint,
     pub daily_loss_limit: FixedPoint,
     pub trailing_drawdown: Option<FixedPoint>,
     pub trailing_mode: TrailingDrawdownMode,
@@ -56,6 +58,11 @@ impl RiskProfile {
             return Err("risk profile session start must be positive".to_string());
         }
         validate_positive(self.daily_loss_limit, "daily loss limit")?;
+        if self.session_start_realized_pnl.scale() != self.daily_loss_limit.scale() {
+            return Err(
+                "risk profile session baseline scale does not match daily loss scale".to_string(),
+            );
+        }
         if let Some(drawdown) = self.trailing_drawdown {
             validate_positive(drawdown, "trailing drawdown")?;
             if drawdown.scale() != self.daily_loss_limit.scale() {
