@@ -215,7 +215,7 @@ Final integrated qualification closed the residual correctness gaps found by rea
 ### Completed: initial shared TA proof
 
 - Built-in SMA, WMA, and Bollinger registrations use the same native SDK/runtime contract exposed to external trusted Rust studies.
-- WMA and Bollinger delegate formula work to pinned `nucleuscharts_indicators` instead of duplicating formula implementations in Aeris.
+- WMA and Bollinger delegate formula work to pinned `aeris_charts_indicators` instead of duplicating formula implementations in Aeris.
 - Window/gap behavior and output contracts have focused tests.
 
 ## Completed foundation and Pine-class expansion

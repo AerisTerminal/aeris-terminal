@@ -13,7 +13,6 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "assets",
     "local-data",
     "node_modules",
-    "financial-charts",
     "target",
     "third_party",
 ];
@@ -371,34 +370,34 @@ mod tests {
         assert!(!rithmic_adapter.contains("pub mod generated"));
 
         let root_manifest = manifest("Cargo.toml");
-        let expected_source = "https://github.com/Axiusflowhq/financial-charts.git";
-        let expected_revision = "534f2244930ab7581d4bfc459bedb97c0096bbac";
+        let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
+        let expected_revision = "1f75243a45bacdf54fe411c85006f603a5a7aa3e";
         for dependency in [
-            "nucleuscharts_engine",
-            "nucleuscharts_indicators",
-            "nucleuscharts_render",
-            "nucleuscharts_render_gpui",
+            "aeris_charts_engine",
+            "aeris_charts_indicators",
+            "aeris_charts_render",
+            "aeris_charts_render_gpui",
         ] {
             assert!(
                 root_manifest.contains(&format!(
                     "{dependency} = {{ git = \"{expected_source}\", rev = \"{expected_revision}\""
                 )),
-                "{dependency} must remain pinned to the approved Nucleus Charts revision"
+                "{dependency} must remain pinned to the approved Aeris Charts revision"
             );
         }
 
         for path in workspace_manifests() {
             let relative = relative_string(&path);
             let contents = fs::read_to_string(&path).expect("manifest");
-            if contents.contains("nucleuscharts_indicators.workspace") {
+            if contents.contains("aeris_charts_indicators.workspace") {
                 assert_eq!(
                     relative, "crates/study_sdk/Cargo.toml",
-                    "pure Nucleus TA must enter Aeris only through the Study SDK facade"
+                    "pure Aeris Charts TA must enter Aeris only through the Study SDK facade"
                 );
             }
-            if contents.contains("nucleuscharts_engine.workspace")
-                || contents.contains("nucleuscharts_render.workspace")
-                || contents.contains("nucleuscharts_render_gpui.workspace")
+            if contents.contains("aeris_charts_engine.workspace")
+                || contents.contains("aeris_charts_render.workspace")
+                || contents.contains("aeris_charts_render_gpui.workspace")
             {
                 assert_eq!(relative, "crates/ui/chart_integration/Cargo.toml");
             }
@@ -415,9 +414,9 @@ mod tests {
                 "aeris_chart_integration",
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
-                "nucleuscharts_engine",
-                "nucleuscharts_render",
-                "nucleuscharts_render_gpui",
+                "aeris_charts_engine",
+                "aeris_charts_render",
+                "aeris_charts_render_gpui",
                 "gpui",
                 "libloading",
             ],
@@ -1654,22 +1653,13 @@ mod tests {
                 "CI must stay on zero-cost self-hosted runners, found {hosted}"
             );
         }
-        // The chart credential rewrite must stay scoped to the job temp file:
-        // a persistent `--global` rewrite once hijacked the runner owner's
-        // own push access until it was removed by hand.
+        // The public chart dependency must not require runner credentials.
         assert!(
-            !workflow.contains("git config --global"),
-            "CI must not rewrite the runner owner's persistent git configuration"
-        );
-        assert_eq!(
-            workflow.matches("GIT_CONFIG_GLOBAL").count(),
-            2,
-            "every native workspace lane must scope its chart credential to the job"
-        );
-        assert_eq!(
-            workflow.matches("Remove job-scoped git credential").count(),
-            2,
-            "every native workspace lane must delete its job-scoped credential file"
+            !workflow.contains("NUCLEUS_CHARTS_TOKEN")
+                && !workflow.contains("Authenticate private chart dependency")
+                && !workflow.contains("GIT_CONFIG_GLOBAL")
+                && !workflow.contains("git config --global"),
+            "CI must fetch public Aeris Charts without credential rewriting"
         );
         for gate in [
             "cargo fmt --all -- --check",
@@ -1702,13 +1692,6 @@ mod tests {
                 "CI lost provenance-bound market-data evidence {artifact}"
             );
         }
-        assert_eq!(
-            workflow
-                .matches("Validate private chart credential")
-                .count(),
-            2,
-            "every native workspace lane must preflight private chart access"
-        );
         for production_release_contract in [
             "release-pair",
             "AERIS_RELEASE_IDENTITY",
@@ -1732,28 +1715,13 @@ mod tests {
     }
 
     #[test]
-    fn live_market_gates_fetch_private_charts_through_cli() {
+    fn live_market_gates_use_public_chart_source() {
         let workflow = manifest(".github/workflows/live_market_gates.yml");
-        assert_eq!(
-            workflow
-                .matches("CARGO_NET_GIT_FETCH_WITH_CLI: \"true\"")
-                .count(),
-            2,
-            "every live-market gate must fetch the private charts dependency through the git CLI"
-        );
-        assert_eq!(
-            workflow
-                .matches("Authenticate private chart dependency")
-                .count(),
-            2,
-            "every live-market gate must authenticate the private charts dependency"
-        );
-        assert_eq!(
-            workflow
-                .matches("Validate private chart credential")
-                .count(),
-            2,
-            "every live-market gate must preflight private chart access"
+        assert!(
+            !workflow.contains("NUCLEUS_CHARTS_TOKEN")
+                && !workflow.contains("Authenticate private chart dependency")
+                && !workflow.contains("GIT_CONFIG_GLOBAL"),
+            "live-market gates must fetch public Aeris Charts without chart credentials"
         );
         assert!(
             !workflow.contains("continue-on-error"),
@@ -1762,16 +1730,6 @@ mod tests {
         assert!(
             !workflow.contains("git config --global"),
             "live-market gates must not rewrite the runner owner's persistent git configuration"
-        );
-        assert_eq!(
-            workflow.matches("GIT_CONFIG_GLOBAL").count(),
-            2,
-            "every live-market gate must scope its chart credential to the job"
-        );
-        assert_eq!(
-            workflow.matches("Remove job-scoped git credential").count(),
-            2,
-            "every live-market gate must delete its job-scoped credential file"
         );
         assert_eq!(
             workflow.matches("Restore licensed Rithmic kit").count(),

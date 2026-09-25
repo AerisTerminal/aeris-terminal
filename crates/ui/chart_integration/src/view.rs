@@ -12,6 +12,15 @@ use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
+use aeris_charts_engine::{
+    AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
+    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_COLORS,
+    EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PaneId, PriceScaleTarget,
+};
+use aeris_charts_render::color::Color;
+use aeris_charts_render::draw_list::Prim;
+use aeris_charts_render_gpui::backend::measure_text;
+use aeris_charts_render_gpui::{AerisViewport, GpuiChartRenderer, PreparedAerisFrame};
 use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
     platform_typography,
@@ -22,15 +31,6 @@ use gpui::{
     MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task,
     Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
-use nucleuscharts_engine::{
-    AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
-    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_COLORS,
-    EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PaneId, PriceScaleTarget,
-};
-use nucleuscharts_render::color::Color;
-use nucleuscharts_render::draw_list::Prim;
-use nucleuscharts_render_gpui::backend::measure_text;
-use nucleuscharts_render_gpui::{GpuiChartRenderer, NucleusViewport, PreparedNucleusFrame};
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -625,13 +625,13 @@ impl ChartType {
             .find(|chart_type| chart_type.identifier() == value.trim())
     }
 
-    pub(crate) const fn series_kind(self) -> nucleuscharts_engine::SeriesKind {
+    pub(crate) const fn series_kind(self) -> aeris_charts_engine::SeriesKind {
         match self {
-            Self::Candles => nucleuscharts_engine::SeriesKind::Candlestick,
-            Self::Bars => nucleuscharts_engine::SeriesKind::Bar,
-            Self::Line => nucleuscharts_engine::SeriesKind::Line,
-            Self::Area | Self::BrushableArea => nucleuscharts_engine::SeriesKind::Area,
-            Self::Baseline => nucleuscharts_engine::SeriesKind::Baseline,
+            Self::Candles => aeris_charts_engine::SeriesKind::Candlestick,
+            Self::Bars => aeris_charts_engine::SeriesKind::Bar,
+            Self::Line => aeris_charts_engine::SeriesKind::Line,
+            Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,
+            Self::Baseline => aeris_charts_engine::SeriesKind::Baseline,
         }
     }
 }
@@ -932,7 +932,7 @@ const LEGEND_LOADING_ICON: &str = "aeris/icons/ui/loader.svg";
 /// One rotation of the legend's loading glyph.
 const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
 
-fn legend_series_value(snapshots: &[nucleuscharts_engine::SeriesValueSnapshot], id: u32) -> String {
+fn legend_series_value(snapshots: &[aeris_charts_engine::SeriesValueSnapshot], id: u32) -> String {
     snapshots
         .iter()
         .find(|snapshot| snapshot.series_id == id)
@@ -956,7 +956,7 @@ fn platform_tabular_numerals() -> gpui::FontFeatures {
 /// One legend readout for a single-output series, or nothing when the series has no value at the
 /// crosshair.
 fn legend_series_values(
-    snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
+    snapshots: &[aeris_charts_engine::SeriesValueSnapshot],
     id: u32,
 ) -> Vec<LegendValue> {
     let value = legend_series_value(snapshots, id);
@@ -970,9 +970,7 @@ fn legend_series_values(
     }
 }
 
-fn asset_legend_value_tone(
-    snapshot: &nucleuscharts_engine::SeriesValueSnapshot,
-) -> LegendValueTone {
+fn asset_legend_value_tone(snapshot: &aeris_charts_engine::SeriesValueSnapshot) -> LegendValueTone {
     match (snapshot.open, snapshot.close) {
         (Some(open), Some(close)) if close >= open => LegendValueTone::Bullish,
         (Some(_), Some(_)) => LegendValueTone::Bearish,
@@ -2394,7 +2392,7 @@ impl NucleusChartView {
             let kind = item
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
-                .and_then(nucleuscharts_engine::DrawingKind::from_name)
+                .and_then(aeris_charts_engine::DrawingKind::from_name)
                 .ok_or_else(|| "persisted drawing kind is invalid".to_string())?;
             let pane_index = item
                 .get("pane_index")
@@ -2406,7 +2404,7 @@ impl NucleusChartView {
                 .cloned()
                 .ok_or_else(|| "persisted drawing anchors are missing".to_string())?;
             let mut drawing_points =
-                serde_json::from_value::<Vec<nucleuscharts_engine::DrawingPoint>>(points.clone())
+                serde_json::from_value::<Vec<aeris_charts_engine::DrawingPoint>>(points.clone())
                     .map_err(|_| "persisted drawing anchors are invalid".to_string())?;
             if let Some(saved_points) = points.as_array() {
                 for (point, saved) in drawing_points.iter_mut().zip(saved_points) {
@@ -2757,13 +2755,13 @@ impl NucleusChartView {
     fn paint(&mut self, bounds: Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App) {
         #[cfg(feature = "diagnostics")]
         let paint_started = Instant::now();
-        let viewport = NucleusViewport::from_bounds(
+        let viewport = AerisViewport::from_bounds(
             bounds.origin.x.into(),
             bounds.origin.y.into(),
             bounds.size.width.into(),
             bounds.size.height.into(),
         );
-        let prepared = PreparedNucleusFrame::from_engine(&self.frame, &self.engine)
+        let prepared = PreparedAerisFrame::from_engine(&self.frame, &self.engine)
             .with_axis(&self.axis_prims, &[]);
         if let Err(error) =
             self.renderer

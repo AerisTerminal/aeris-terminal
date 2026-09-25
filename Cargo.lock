@@ -98,145 +98,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aes"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
-dependencies = [
- "cfg-if",
- "cipher 0.4.4",
- "cpufeatures 0.2.17",
- "zeroize",
-]
-
-[[package]]
-name = "aes"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
-dependencies = [
- "cipher 0.5.2",
- "cpubits",
- "cpufeatures 0.3.1",
-]
-
-[[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "const-random",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
-name = "aho-corasick"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "aligned"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee4508988c62edf04abd8d92897fca0c2995d907ce1dfeaf369dac3716a40685"
-dependencies = [
- "as-slice",
-]
-
-[[package]]
-name = "aligned-vec"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc890384c8602f339876ded803c97ad529f3842aba97f6392b3dba0dd171769b"
-dependencies = [
- "equator",
-]
-
-[[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
-name = "android_system_properties"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "apple-native-keyring-store"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b350bfd03649e07aa05c0a81b3e15934374e585c98204a57e20b9d49f49bb9a"
-dependencies = [
- "keyring-core",
- "log",
- "security-framework",
-]
-
-[[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-
-[[package]]
-name = "arg_enum_proc_macro"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ae92a5119aa49cdbcf6b9f893fe4e1d98b04ccbf82ee0584ad948a44a734dea"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
-name = "arrayvec"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
-name = "as-raw-xcb-connection"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
-
-[[package]]
-name = "as-slice"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "516b6b4f0e40d50dcda9365d53964ec74560ad4284da2e7fc97122cd83174516"
-dependencies = [
- "stable_deref_trait",
-]
-
-[[package]]
 name = "aeris_account"
 version = "0.2.3"
 
@@ -271,14 +132,61 @@ name = "aeris_chart_integration"
 version = "0.2.3"
 dependencies = [
  "aeris_application",
+ "aeris_charts_engine",
+ "aeris_charts_render",
+ "aeris_charts_render_gpui",
  "aeris_design_system",
  "aeris_terminal_ui",
  "gpui",
- "nucleuscharts_engine",
- "nucleuscharts_render",
- "nucleuscharts_render_gpui",
  "num-traits",
  "serde_json",
+]
+
+[[package]]
+name = "aeris_charts_core"
+version = "0.3.0"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1f75243a45bacdf54fe411c85006f603a5a7aa3e#1f75243a45bacdf54fe411c85006f603a5a7aa3e"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aeris_charts_engine"
+version = "0.3.0"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1f75243a45bacdf54fe411c85006f603a5a7aa3e#1f75243a45bacdf54fe411c85006f603a5a7aa3e"
+dependencies = [
+ "aeris_charts_core",
+ "aeris_charts_indicators",
+ "aeris_charts_render",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aeris_charts_indicators"
+version = "0.3.0"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1f75243a45bacdf54fe411c85006f603a5a7aa3e#1f75243a45bacdf54fe411c85006f603a5a7aa3e"
+
+[[package]]
+name = "aeris_charts_render"
+version = "0.3.0"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1f75243a45bacdf54fe411c85006f603a5a7aa3e#1f75243a45bacdf54fe411c85006f603a5a7aa3e"
+dependencies = [
+ "aeris_charts_core",
+]
+
+[[package]]
+name = "aeris_charts_render_gpui"
+version = "0.3.0"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=1f75243a45bacdf54fe411c85006f603a5a7aa3e#1f75243a45bacdf54fe411c85006f603a5a7aa3e"
+dependencies = [
+ "aeris_charts_core",
+ "aeris_charts_engine",
+ "aeris_charts_render",
+ "gpui",
+ "image",
+ "smallvec",
 ]
 
 [[package]]
@@ -432,9 +340,9 @@ dependencies = [
 name = "aeris_study_sdk"
 version = "0.2.3"
 dependencies = [
+ "aeris_charts_indicators",
  "aeris_market_data",
  "aeris_market_runtime",
- "nucleuscharts_indicators",
  "num-traits",
 ]
 
@@ -446,6 +354,145 @@ dependencies = [
  "aeris_instruments",
  "aeris_market_data",
  "gpui",
+]
+
+[[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher 0.4.4",
+ "cpufeatures 0.2.17",
+ "zeroize",
+]
+
+[[package]]
+name = "aes"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
+dependencies = [
+ "cipher 0.5.2",
+ "cpubits",
+ "cpufeatures 0.3.1",
+]
+
+[[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "const-random",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "aligned"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee4508988c62edf04abd8d92897fca0c2995d907ce1dfeaf369dac3716a40685"
+dependencies = [
+ "as-slice",
+]
+
+[[package]]
+name = "aligned-vec"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc890384c8602f339876ded803c97ad529f3842aba97f6392b3dba0dd171769b"
+dependencies = [
+ "equator",
+]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "android_system_properties"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "apple-native-keyring-store"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b350bfd03649e07aa05c0a81b3e15934374e585c98204a57e20b9d49f49bb9a"
+dependencies = [
+ "keyring-core",
+ "log",
+ "security-framework",
+]
+
+[[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+
+[[package]]
+name = "arg_enum_proc_macro"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ae92a5119aa49cdbcf6b9f893fe4e1d98b04ccbf82ee0584ad948a44a734dea"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
+name = "as-raw-xcb-connection"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
+
+[[package]]
+name = "as-slice"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "516b6b4f0e40d50dcda9365d53964ec74560ad4284da2e7fc97122cd83174516"
+dependencies = [
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -4318,53 +4365,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nucleuscharts_core"
-version = "0.3.0"
-source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nucleuscharts_engine"
-version = "0.3.0"
-source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
-dependencies = [
- "nucleuscharts_core",
- "nucleuscharts_indicators",
- "nucleuscharts_render",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nucleuscharts_indicators"
-version = "0.3.0"
-source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
-
-[[package]]
-name = "nucleuscharts_render"
-version = "0.3.0"
-source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
-dependencies = [
- "nucleuscharts_core",
-]
-
-[[package]]
-name = "nucleuscharts_render_gpui"
-version = "0.3.0"
-source = "git+https://github.com/Axiusflowhq/financial-charts.git?rev=534f2244930ab7581d4bfc459bedb97c0096bbac#534f2244930ab7581d4bfc459bedb97c0096bbac"
-dependencies = [
- "gpui",
- "image",
- "nucleuscharts_core",
- "nucleuscharts_engine",
- "nucleuscharts_render",
- "smallvec",
 ]
 
 [[package]]

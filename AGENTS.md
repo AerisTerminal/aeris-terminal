@@ -93,11 +93,11 @@ Architecture assertions in `tools/naming_check` are authoritative when they are 
 The licensed Rithmic Provider Kit remains outside Git. The canonical local copy is
 `C:\axiusflow-deps\provider-kit`; do not vendor or modify that permanent copy.
 
-## Nucleus Charts
+## Aeris Charts
 
-Nucleus Charts is a separate pinned Git dependency. Do not clone or vendor it into this repository.
-Host integration belongs in `crates/ui/chart_integration`. When intentionally updating Nucleus, change
-only the `nucleuscharts_*` revisions required by that update; do not update GPUI incidentally.
+Aeris Charts is a separate pinned Git dependency. Do not clone or vendor it into this repository.
+Host integration belongs in `crates/ui/chart_integration`. When intentionally updating Aeris Charts, change
+only the `aeris_charts_*` revisions required by that update; do not update GPUI incidentally.
 
 ## Authentication and website coordination
 

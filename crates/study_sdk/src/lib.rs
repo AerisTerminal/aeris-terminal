@@ -1626,7 +1626,7 @@ pub mod builtins {
         let period = positive_period(settings, BUILTIN_EMA_PERIOD_SETTING)
             .map_err(|_| "EMA period is unavailable".to_string())?;
         Ok(NativeStudyState::new_transactional(
-            nucleuscharts_indicators::IncrementalEmaState::new(period),
+            aeris_charts_indicators::IncrementalEmaState::new(period),
             ema_state_runtime_bytes,
             transactional_clone,
         ))
@@ -1640,7 +1640,7 @@ pub mod builtins {
 
     #[derive(Clone)]
     struct EmaRibbonState {
-        states: [nucleuscharts_indicators::IncrementalEmaState; 5],
+        states: [aeris_charts_indicators::IncrementalEmaState; 5],
     }
 
     fn create_ema_ribbon_state(settings: &StudySettings) -> Result<NativeStudyState, String> {
@@ -1648,7 +1648,7 @@ pub mod builtins {
             ema_ribbon_periods(settings).map_err(|_| "EMA Ribbon periods are unavailable")?;
         Ok(NativeStudyState::new_transactional(
             EmaRibbonState {
-                states: periods.map(nucleuscharts_indicators::IncrementalEmaState::new),
+                states: periods.map(aeris_charts_indicators::IncrementalEmaState::new),
             },
             ema_ribbon_state_runtime_bytes,
             transactional_clone,
@@ -1660,7 +1660,7 @@ pub mod builtins {
             state
                 .states
                 .iter()
-                .map(nucleuscharts_indicators::IncrementalEmaState::runtime_bytes)
+                .map(aeris_charts_indicators::IncrementalEmaState::runtime_bytes)
                 .sum::<usize>(),
         )
     }
@@ -1669,14 +1669,14 @@ pub mod builtins {
         let period = positive_period(settings, BUILTIN_ATR_PERIOD_SETTING)
             .map_err(|_| "ATR period is unavailable".to_string())?;
         Ok(NativeStudyState::new_transactional(
-            nucleuscharts_indicators::IncrementalAtrState::new(period),
+            aeris_charts_indicators::IncrementalAtrState::new(period),
             atr_state_runtime_bytes,
             transactional_clone,
         ))
     }
 
-    fn atr_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalAtrState) -> usize {
-        std::mem::size_of::<nucleuscharts_indicators::IncrementalAtrState>()
+    fn atr_state_runtime_bytes(state: &aeris_charts_indicators::IncrementalAtrState) -> usize {
+        std::mem::size_of::<aeris_charts_indicators::IncrementalAtrState>()
             .saturating_add(state.runtime_bytes())
     }
 
@@ -1685,14 +1685,14 @@ pub mod builtins {
             return Err("VWAP does not accept settings".to_string());
         }
         Ok(NativeStudyState::new_transactional(
-            nucleuscharts_indicators::IncrementalVwapState::new(),
+            aeris_charts_indicators::IncrementalVwapState::new(),
             vwap_state_runtime_bytes,
             transactional_clone,
         ))
     }
 
-    fn vwap_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalVwapState) -> usize {
-        std::mem::size_of::<nucleuscharts_indicators::IncrementalVwapState>()
+    fn vwap_state_runtime_bytes(state: &aeris_charts_indicators::IncrementalVwapState) -> usize {
+        std::mem::size_of::<aeris_charts_indicators::IncrementalVwapState>()
             .saturating_add(state.runtime_bytes())
     }
 
@@ -1700,14 +1700,14 @@ pub mod builtins {
         let period = positive_period(settings, BUILTIN_RSI_PERIOD_SETTING)
             .map_err(|_| "RSI period is unavailable".to_string())?;
         Ok(NativeStudyState::new_transactional(
-            nucleuscharts_indicators::IncrementalRsiState::new(period),
+            aeris_charts_indicators::IncrementalRsiState::new(period),
             rsi_state_runtime_bytes,
             transactional_clone,
         ))
     }
 
-    fn rsi_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalRsiState) -> usize {
-        std::mem::size_of::<nucleuscharts_indicators::IncrementalRsiState>()
+    fn rsi_state_runtime_bytes(state: &aeris_charts_indicators::IncrementalRsiState) -> usize {
+        std::mem::size_of::<aeris_charts_indicators::IncrementalRsiState>()
             .saturating_add(state.runtime_bytes())
     }
 
@@ -1715,14 +1715,14 @@ pub mod builtins {
         let (fast, slow, signal) =
             macd_periods(settings).map_err(|_| "MACD periods are unavailable".to_string())?;
         Ok(NativeStudyState::new_transactional(
-            nucleuscharts_indicators::IncrementalMacdState::new(fast, slow, signal),
+            aeris_charts_indicators::IncrementalMacdState::new(fast, slow, signal),
             macd_state_runtime_bytes,
             transactional_clone,
         ))
     }
 
-    fn macd_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalMacdState) -> usize {
-        std::mem::size_of::<nucleuscharts_indicators::IncrementalMacdState>()
+    fn macd_state_runtime_bytes(state: &aeris_charts_indicators::IncrementalMacdState) -> usize {
+        std::mem::size_of::<aeris_charts_indicators::IncrementalMacdState>()
             .saturating_add(state.runtime_bytes())
     }
 
@@ -1730,27 +1730,27 @@ pub mod builtins {
         let (k_period, d_period) = stochastic_periods(settings)
             .map_err(|_| "Stochastic periods are unavailable".to_string())?;
         Ok(NativeStudyState::new_transactional(
-            nucleuscharts_indicators::IncrementalStochasticState::new(k_period, d_period),
+            aeris_charts_indicators::IncrementalStochasticState::new(k_period, d_period),
             stochastic_state_runtime_bytes,
             transactional_clone,
         ))
     }
 
     fn stochastic_state_runtime_bytes(
-        state: &nucleuscharts_indicators::IncrementalStochasticState,
+        state: &aeris_charts_indicators::IncrementalStochasticState,
     ) -> usize {
-        std::mem::size_of::<nucleuscharts_indicators::IncrementalStochasticState>()
+        std::mem::size_of::<aeris_charts_indicators::IncrementalStochasticState>()
             .saturating_add(state.runtime_bytes())
     }
 
-    fn ema_state_runtime_bytes(state: &nucleuscharts_indicators::IncrementalEmaState) -> usize {
-        std::mem::size_of::<nucleuscharts_indicators::IncrementalEmaState>()
+    fn ema_state_runtime_bytes(state: &aeris_charts_indicators::IncrementalEmaState) -> usize {
+        std::mem::size_of::<aeris_charts_indicators::IncrementalEmaState>()
             .saturating_add(state.runtime_bytes())
     }
 
     fn calculate_ema(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let Some((inputs, state, outputs)) =
-            context.split_with_state::<nucleuscharts_indicators::IncrementalEmaState>()
+            context.split_with_state::<aeris_charts_indicators::IncrementalEmaState>()
         else {
             return Err("EMA runtime state is unavailable".to_string());
         };
@@ -1837,7 +1837,7 @@ pub mod builtins {
 
     fn calculate_atr(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let Some((inputs, state, outputs)) =
-            context.split_with_state::<nucleuscharts_indicators::IncrementalAtrState>()
+            context.split_with_state::<aeris_charts_indicators::IncrementalAtrState>()
         else {
             return Err("ATR runtime state is unavailable".to_string());
         };
@@ -1860,7 +1860,7 @@ pub mod builtins {
             output.len(),
             from,
             |index| {
-                Some(nucleuscharts_indicators::AtrSample {
+                Some(aeris_charts_indicators::AtrSample {
                     high: fixed_point_sample(high.value(index), divisor)?,
                     low: fixed_point_sample(low.value(index), divisor)?,
                     close: fixed_point_sample(close.value(index), divisor)?,
@@ -1877,7 +1877,7 @@ pub mod builtins {
 
     fn calculate_vwap(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let Some((inputs, state, outputs)) =
-            context.split_with_state::<nucleuscharts_indicators::IncrementalVwapState>()
+            context.split_with_state::<aeris_charts_indicators::IncrementalVwapState>()
         else {
             return Err("VWAP runtime state is unavailable".to_string());
         };
@@ -1902,7 +1902,7 @@ pub mod builtins {
             output.len(),
             from,
             |index| {
-                Some(nucleuscharts_indicators::VwapSample {
+                Some(aeris_charts_indicators::VwapSample {
                     time_unix_seconds: close
                         .exchange_timestamp_unix_nanos(index)?
                         .div_euclid(1_000_000_000),
@@ -1923,7 +1923,7 @@ pub mod builtins {
 
     fn calculate_rsi(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let Some((inputs, state, outputs)) =
-            context.split_with_state::<nucleuscharts_indicators::IncrementalRsiState>()
+            context.split_with_state::<aeris_charts_indicators::IncrementalRsiState>()
         else {
             return Err("RSI runtime state is unavailable".to_string());
         };
@@ -1969,7 +1969,7 @@ pub mod builtins {
 
     fn calculate_macd(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let Some((inputs, state, outputs)) =
-            context.split_with_state::<nucleuscharts_indicators::IncrementalMacdState>()
+            context.split_with_state::<aeris_charts_indicators::IncrementalMacdState>()
         else {
             return Err("MACD runtime state is unavailable".to_string());
         };
@@ -1985,7 +1985,7 @@ pub mod builtins {
             .input(0)
             .ok_or_else(|| "MACD requires one numeric study input".to_string())?;
         let mut write_error = None;
-        let mut write = |index: usize, point: nucleuscharts_indicators::MacdPoint| {
+        let mut write = |index: usize, point: aeris_charts_indicators::MacdPoint| {
             if write_error.is_some() {
                 return;
             }
@@ -2018,7 +2018,7 @@ pub mod builtins {
 
     fn calculate_stochastic(context: &mut StudyExecutionContext<'_>) -> Result<(), String> {
         let Some((inputs, state, outputs)) =
-            context.split_with_state::<nucleuscharts_indicators::IncrementalStochasticState>()
+            context.split_with_state::<aeris_charts_indicators::IncrementalStochasticState>()
         else {
             return Err("Stochastic runtime state is unavailable".to_string());
         };
@@ -2042,7 +2042,7 @@ pub mod builtins {
             len,
             from,
             |index| {
-                Some(nucleuscharts_indicators::StochasticSample {
+                Some(aeris_charts_indicators::StochasticSample {
                     high: fixed_point_sample(high.value(index), divisor)?,
                     low: fixed_point_sample(low.value(index), divisor)?,
                     close: fixed_point_sample(close.value(index), divisor)?,
@@ -2061,7 +2061,7 @@ pub mod builtins {
     }
 
     fn rebuild_ema_output<S, W>(
-        state: &mut nucleuscharts_indicators::IncrementalEmaState,
+        state: &mut aeris_charts_indicators::IncrementalEmaState,
         len: usize,
         from: usize,
         sample_at: S,
@@ -2194,7 +2194,7 @@ pub mod builtins {
                 .iter()
                 .filter_map(|value| *value)
                 .collect::<Vec<_>>();
-            let calculated = nucleuscharts_indicators::sma(&dense, period);
+            let calculated = aeris_charts_indicators::sma(&dense, period);
             result[start..end].copy_from_slice(&calculated);
             start = end;
         }
@@ -2202,22 +2202,22 @@ pub mod builtins {
     }
 
     fn wma_with_gaps(source: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
-        map_dense_segments(source, |dense| nucleuscharts_indicators::wma(dense, period))
+        map_dense_segments(source, |dense| aeris_charts_indicators::wma(dense, period))
     }
 
     fn bollinger_with_gaps(
         source: &[Option<f64>],
         period: usize,
         deviation: f64,
-    ) -> Vec<nucleuscharts_indicators::BollingerPoint> {
-        let empty = nucleuscharts_indicators::BollingerPoint {
+    ) -> Vec<aeris_charts_indicators::BollingerPoint> {
+        let empty = aeris_charts_indicators::BollingerPoint {
             middle: None,
             upper: None,
             lower: None,
         };
         let mut result = vec![empty; source.len()];
         for (start, end, dense) in dense_segments(source) {
-            let calculated = nucleuscharts_indicators::bollinger(&dense, period, deviation);
+            let calculated = aeris_charts_indicators::bollinger(&dense, period, deviation);
             result[start..end].copy_from_slice(&calculated);
         }
         result
@@ -2273,11 +2273,11 @@ pub mod builtins {
 
             assert_eq!(
                 wma_with_gaps(&source, 3),
-                nucleuscharts_indicators::wma(&dense, 3)
+                aeris_charts_indicators::wma(&dense, 3)
             );
             assert_eq!(
                 bollinger_with_gaps(&source, 3, 2.0),
-                nucleuscharts_indicators::bollinger(&dense, 3, 2.0)
+                aeris_charts_indicators::bollinger(&dense, 3, 2.0)
             );
         }
 
@@ -2308,7 +2308,7 @@ pub mod builtins {
                 .map(|index| 10_000_i64 + i64::from(index))
                 .collect::<Vec<_>>();
             let mut output = vec![None; source.len()];
-            let mut state = nucleuscharts_indicators::IncrementalEmaState::new(
+            let mut state = aeris_charts_indicators::IncrementalEmaState::new(
                 NonZeroUsize::new(20).expect("period"),
             );
             let divisor = 100.0;
@@ -2333,7 +2333,7 @@ pub mod builtins {
                 .iter()
                 .map(|value| value.to_f64().expect("test fixed-point converts") / 100.0)
                 .collect::<Vec<_>>();
-            assert_eq!(output, nucleuscharts_indicators::ema(&dense, 20));
+            assert_eq!(output, aeris_charts_indicators::ema(&dense, 20));
 
             let last = source.len() - 1;
             source[last] += 250;
@@ -2409,7 +2409,7 @@ pub mod builtins {
                 .map(|index| 10_000_i64 + i64::try_from(index).expect("small history index"))
                 .collect::<Vec<_>>();
             let mut output = vec![None; source.len()];
-            let mut state = nucleuscharts_indicators::IncrementalEmaState::new(
+            let mut state = aeris_charts_indicators::IncrementalEmaState::new(
                 NonZeroUsize::new(20).expect("period"),
             );
             let divisor = 100.0;
@@ -2474,7 +2474,7 @@ pub mod builtins {
                 Some(30.0),
             ];
             let mut output = vec![None; source.len()];
-            let mut state = nucleuscharts_indicators::IncrementalEmaState::new(
+            let mut state = aeris_charts_indicators::IncrementalEmaState::new(
                 NonZeroUsize::new(3).expect("period"),
             );
 

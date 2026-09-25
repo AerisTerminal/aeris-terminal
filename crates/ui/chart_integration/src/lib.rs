@@ -1,8 +1,8 @@
-//! `Aeris` host integration for Nucleus Charts' existing GPUI backend.
+//! `Aeris` host integration for Aeris Charts' existing GPUI backend.
 //!
 //! Nucleus owns chart state, layout, scales, interactions, frames, and rendering.
 //! This crate only negotiates GPUI window geometry and submits the resulting
-//! immutable Nucleus frame to `nucleuscharts_render_gpui`.
+//! immutable chart frame to `aeris_charts_render_gpui`.
 
 mod bridge;
 mod nucleus_bridge;
@@ -11,14 +11,14 @@ mod view;
 mod workspace;
 
 pub use aeris_application::ReplayRecoveryCommand;
-pub use bridge::ChartBridgeMetrics;
-pub use nucleuscharts_engine::ChartTheme as NucleusChartTheme;
-pub use nucleuscharts_engine::{
+pub use aeris_charts_engine::ChartTheme as NucleusChartTheme;
+pub use aeris_charts_engine::{
     AlertCondition as ChartAlertCondition, AlertCreateRequest as ChartAlertCreateRequest,
     AlertFrequency as ChartAlertFrequency, AlertId as ChartAlertId, AlertLine as ChartAlertLine,
     AlertLineStatus as ChartAlertLineStatus, AlertPriceScale as ChartAlertPriceScale,
     AlertSnapshot as ChartAlertSnapshot,
 };
+pub use bridge::ChartBridgeMetrics;
 pub use view::{
     ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingTool,
     ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyOutputDescriptor,

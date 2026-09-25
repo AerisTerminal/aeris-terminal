@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 aeris_market_data = { path = "../domain/market_data" }
 aeris_market_runtime = { path = "../market_runtime" }
-nucleuscharts_indicators.workspace = true
+aeris_charts_indicators.workspace = true
 num-traits = "=0.2.19"
 
 [lints]

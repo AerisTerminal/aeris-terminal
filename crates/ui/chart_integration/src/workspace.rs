@@ -1,6 +1,6 @@
 //! `Aeris`'s stable-pane adapter around Nucleus's authoritative split workspace.
 
-use nucleuscharts_engine::{SplitDirection, Workspace, WorkspaceError, WorkspaceLayout};
+use aeris_charts_engine::{SplitDirection, Workspace, WorkspaceError, WorkspaceLayout};
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -2,7 +2,7 @@
 
 use super::*;
 use aeris_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
-use nucleuscharts_engine::AxisTextMidpoint;
+use aeris_charts_engine::AxisTextMidpoint;
 
 fn interactive_chart() -> NucleusChartView {
     let mut chart = NucleusChartView::new();
@@ -17,7 +17,7 @@ fn interactive_chart() -> NucleusChartView {
     chart
 }
 
-fn series_entry(chart: &NucleusChartView, id: u32) -> &nucleuscharts_engine::SeriesEntry {
+fn series_entry(chart: &NucleusChartView, id: u32) -> &aeris_charts_engine::SeriesEntry {
     chart
         .engine
         .series_entries()
@@ -121,7 +121,7 @@ fn crosshair_alert_action_reaches_the_host_with_nucleus_price_context() {
     assert!((requests[0].price - price).abs() < f64::EPSILON);
     assert_eq!(
         requests[0].condition,
-        nucleuscharts_engine::AlertCondition::Crossing
+        aeris_charts_engine::AlertCondition::Crossing
     );
 }
 
@@ -193,18 +193,18 @@ fn host_chart_type_survives_snapshot_install() {
     assert_eq!(chart.chart_type(), ChartType::Line);
     assert_eq!(
         series_entry(&chart, 0).kind,
-        nucleuscharts_engine::SeriesKind::Line
+        aeris_charts_engine::SeriesKind::Line
     );
 
     chart.load_replay(&replay).expect("first snapshot installs");
     assert_eq!(chart.chart_type(), ChartType::Line);
     assert_eq!(
         series_entry(&chart, 0).kind,
-        nucleuscharts_engine::SeriesKind::Line
+        aeris_charts_engine::SeriesKind::Line
     );
     assert_eq!(
         series_entry(&chart, chart.volume_series).kind,
-        nucleuscharts_engine::SeriesKind::Histogram
+        aeris_charts_engine::SeriesKind::Histogram
     );
 }
 
@@ -251,7 +251,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     assert_eq!(chart.chart_type(), ChartType::BrushableArea);
     assert_eq!(
         series_entry(&chart, 0).kind,
-        nucleuscharts_engine::SeriesKind::Area
+        aeris_charts_engine::SeriesKind::Area
     );
     assert_eq!(chart.engine.feature_series_kind(0), None);
     let nucleus_line_width = serde_json::from_str::<serde_json::Value>(
@@ -293,7 +293,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     chart.set_chart_type(ChartType::Candles);
     assert_eq!(
         series_entry(&chart, 0).kind,
-        nucleuscharts_engine::SeriesKind::Candlestick
+        aeris_charts_engine::SeriesKind::Candlestick
     );
     assert_eq!(
         chart.engine.series_data(0)[0].high.to_bits(),
@@ -2314,10 +2314,10 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
     let histogram = &chart.study_series[&(11, 1)];
     let line_entry = series_entry(&chart, line.series_id);
     let histogram_entry = series_entry(&chart, histogram.series_id);
-    assert_eq!(line_entry.kind, nucleuscharts_engine::SeriesKind::Line);
+    assert_eq!(line_entry.kind, aeris_charts_engine::SeriesKind::Line);
     assert_eq!(
         histogram_entry.kind,
-        nucleuscharts_engine::SeriesKind::Histogram
+        aeris_charts_engine::SeriesKind::Histogram
     );
     assert_ne!(line_entry.pane_index, 0);
     assert_eq!(line_entry.pane_index, histogram_entry.pane_index);
@@ -2404,7 +2404,7 @@ fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
         .add_drawing(
             DrawingKind::HorizontalLine,
             1,
-            vec![nucleuscharts_engine::DrawingPoint {
+            vec![aeris_charts_engine::DrawingPoint {
                 logical: 10.0,
                 price: 50.0,
             }],
@@ -2446,11 +2446,11 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
             DrawingKind::TrendLine,
             0,
             vec![
-                nucleuscharts_engine::DrawingPoint {
+                aeris_charts_engine::DrawingPoint {
                     logical: 5.5,
                     price: 100.0,
                 },
-                nucleuscharts_engine::DrawingPoint {
+                aeris_charts_engine::DrawingPoint {
                     logical: 12.0,
                     price: 110.0,
                 },

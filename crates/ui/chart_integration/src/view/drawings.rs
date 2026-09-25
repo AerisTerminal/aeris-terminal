@@ -37,7 +37,7 @@ impl NucleusChartView {
     pub fn is_editing_text(&self) -> bool {
         self.engine.editing_drawing().is_some()
     }
-    pub(super) fn begin_text_edit(&mut self, id: nucleuscharts_engine::DrawingId) {
+    pub(super) fn begin_text_edit(&mut self, id: aeris_charts_engine::DrawingId) {
         self.engine.set_editing_drawing(Some(id));
         self.engine.set_selected_drawing(Some(id));
         self.invalidate_series_frame();

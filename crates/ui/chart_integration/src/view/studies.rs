@@ -70,8 +70,8 @@ impl NucleusChartView {
 
     pub(super) fn append_study_legend_rows(
         &self,
-        entries: &[nucleuscharts_engine::SeriesEntry],
-        snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
+        entries: &[aeris_charts_engine::SeriesEntry],
+        snapshots: &[aeris_charts_engine::SeriesValueSnapshot],
         rows: &mut Vec<LegendRow>,
     ) {
         let mut emitted = HashSet::new();
@@ -111,7 +111,7 @@ impl NucleusChartView {
                                 .as_ref()
                                 .map_or(value.clone(), |label| format!("{label} {value}")),
                             color: Some(series.line_color.clone().unwrap_or_else(|| {
-                                nucleuscharts_engine::DEFAULT_LINE_COLOR.to_css()
+                                aeris_charts_engine::DEFAULT_LINE_COLOR.to_css()
                             })),
                         })
                     })
@@ -329,7 +329,7 @@ fn validate_study_presentation(
 }
 
 fn apply_study_series_presentation(
-    engine: &mut nucleuscharts_engine::ChartEngine,
+    engine: &mut aeris_charts_engine::ChartEngine,
     series_id: u32,
     output_index: usize,
     descriptor: ChartStudyOutputDescriptor<'_>,
@@ -346,7 +346,7 @@ fn apply_study_series_presentation(
     let threshold =
         descriptor
             .threshold_region
-            .map(|region| nucleuscharts_engine::SeriesThresholdRegion {
+            .map(|region| aeris_charts_engine::SeriesThresholdRegion {
                 lower: region.lower,
                 upper: region.upper,
             });
@@ -390,7 +390,7 @@ fn prepare_study_columns(
 }
 
 fn set_study_series_data(
-    engine: &mut nucleuscharts_engine::ChartEngine,
+    engine: &mut aeris_charts_engine::ChartEngine,
     series_id: u32,
     columns: &PreparedStudyColumns,
 ) -> Result<(), ChartStudyOutputError> {
@@ -407,11 +407,11 @@ fn set_study_series_data(
         .map_err(|_| ChartStudyOutputError::InstallationRejected)
 }
 
-const fn study_series_kind(plot: ChartStudyPlotKind) -> nucleuscharts_engine::SeriesKind {
+const fn study_series_kind(plot: ChartStudyPlotKind) -> aeris_charts_engine::SeriesKind {
     match plot {
-        ChartStudyPlotKind::Line => nucleuscharts_engine::SeriesKind::Line,
-        ChartStudyPlotKind::Histogram => nucleuscharts_engine::SeriesKind::Histogram,
-        ChartStudyPlotKind::Area => nucleuscharts_engine::SeriesKind::Area,
+        ChartStudyPlotKind::Line => aeris_charts_engine::SeriesKind::Line,
+        ChartStudyPlotKind::Histogram => aeris_charts_engine::SeriesKind::Histogram,
+        ChartStudyPlotKind::Area => aeris_charts_engine::SeriesKind::Area,
     }
 }
 

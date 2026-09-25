@@ -305,7 +305,7 @@ impl NucleusChartView {
         normalized_y: f64,
     ) {
         if normalized_y != 0.0 {
-            let zoom = nucleuscharts_engine::wheel_zoom_scale(normalized_y);
+            let zoom = aeris_charts_engine::wheel_zoom_scale(normalized_y);
             if let Some((pane, target)) = self.price_axis_at(pane_x, y) {
                 self.engine.price_axis_wheel_zoom(pane, target, y, zoom);
             } else {
@@ -316,7 +316,7 @@ impl NucleusChartView {
             self.engine.time_scale.start_scroll(0.0);
             self.engine
                 .time_scale
-                .scroll_to(nucleuscharts_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
+                .scroll_to(aeris_charts_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
             self.engine.time_scale.end_scroll();
         }
         self.update_cursor(pane_x, y);

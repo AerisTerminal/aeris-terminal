@@ -3,7 +3,7 @@
 use crate::bridge::MergedChartData;
 use crate::view::ChartType;
 use aeris_application::{ProvenancedMarketBar, ReplaySnapshot};
-use nucleuscharts_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
+use aeris_charts_engine::{ChartEngine, PriceScaleTarget, SeriesKind};
 use num_traits::ToPrimitive;
 use std::num::NonZeroUsize;
 

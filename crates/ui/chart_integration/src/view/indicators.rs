@@ -187,8 +187,8 @@ impl NucleusChartView {
     /// Builds the price-series row, which carries the OHLC readout.
     pub(super) fn asset_legend_row(
         &self,
-        entries: &[nucleuscharts_engine::SeriesEntry],
-        snapshots: &[nucleuscharts_engine::SeriesValueSnapshot],
+        entries: &[aeris_charts_engine::SeriesEntry],
+        snapshots: &[aeris_charts_engine::SeriesValueSnapshot],
     ) -> Option<LegendRow> {
         let asset = entries
             .iter()
@@ -304,7 +304,7 @@ impl NucleusChartView {
                                     value
                                 },
                                 color: Some(series.line_color.clone().unwrap_or_else(|| {
-                                    nucleuscharts_engine::DEFAULT_LINE_COLOR.to_css()
+                                    aeris_charts_engine::DEFAULT_LINE_COLOR.to_css()
                                 })),
                             })
                         }
