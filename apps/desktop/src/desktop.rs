@@ -54,7 +54,8 @@ use aeris_chart_integration::{
     ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
     ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartIndicator, ChartIndicatorState,
+    ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
+    ChartIndicator, ChartIndicatorState,
     ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole, ChartOrderSide,
     ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSplitDirection,
     ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
@@ -1209,6 +1210,7 @@ fn chart_working_orders(
             };
             Some(ChartWorkingOrder {
                 id,
+                account_id: None,
                 pane_index: 0,
                 price_scale: ChartTradingPriceScale::Right,
                 side,
@@ -1217,6 +1219,8 @@ fn chart_working_orders(
                 status,
                 price,
                 stop_price: chart_price(order.stop_price),
+                trailing_trigger_price: None,
+                break_even_trigger_price: None,
                 quantity: chart_quantity(order.quantity)?,
                 filled_quantity: 0.0,
                 position_id: None,
@@ -1224,6 +1228,7 @@ fn chart_working_orders(
                 bracket_id: None,
                 oco_group_id: None,
                 revision: 0,
+                annotations: Vec::new(),
             })
         })
         .collect()
@@ -1259,6 +1264,7 @@ fn chart_positions(
             };
             Some(ChartTradingPosition {
                 id: position_id,
+                account_id: None,
                 pane_index: 0,
                 price_scale: ChartTradingPriceScale::Right,
                 side,
@@ -1266,6 +1272,7 @@ fn chart_positions(
                 quantity,
                 display_pnl: chart_price(Some(position.position.unrealized_pnl)),
                 currency: Some(currency.to_string()),
+                annotations: Vec::new(),
             })
         })
         .collect()
@@ -1295,6 +1302,7 @@ fn chart_executions(
             };
             Some(ChartTradingExecution {
                 id,
+                account_id: None,
                 pane_index: 0,
                 price_scale: ChartTradingPriceScale::Right,
                 side,
@@ -1304,6 +1312,8 @@ fn chart_executions(
                 quantity: chart_quantity(fill.quantity)?,
                 order_id,
                 position_id: None,
+                marker_shape: ChartExecutionMarkerShape::default(),
+                size_by_quantity: false,
             })
         })
         .collect()
@@ -1356,6 +1366,7 @@ fn chart_trading_snapshot(
         positions,
         orders,
         executions,
+        round_trips: Vec::new(),
     })
 }
 

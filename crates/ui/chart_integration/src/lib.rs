@@ -17,13 +17,15 @@ pub use aeris_charts_engine::{
     AlertFrequency as ChartAlertFrequency, AlertId as ChartAlertId, AlertLine as ChartAlertLine,
     AlertLineStatus as ChartAlertLineStatus, AlertPriceScale as ChartAlertPriceScale,
     AlertSnapshot as ChartAlertSnapshot, ExecutionId as ChartExecutionId,
-    ExecutionKind as ChartExecutionKind, InstrumentMetadata as ChartInstrumentMetadata,
+    ExecutionKind as ChartExecutionKind, ExecutionMarkerShape as ChartExecutionMarkerShape,
+    InstrumentMetadata as ChartInstrumentMetadata,
     OrderId as ChartOrderId, OrderKind as ChartOrderKind, OrderRole as ChartOrderRole,
     OrderSide as ChartOrderSide, OrderStatus as ChartOrderStatus, PositionId as ChartPositionId,
-    PositionSide as ChartPositionSide, TradingExecution as ChartTradingExecution,
-    TradingIntent as ChartTradingIntent, TradingIntentAction as ChartTradingIntentAction,
-    TradingPosition as ChartTradingPosition, TradingPriceScale as ChartTradingPriceScale,
-    TradingSnapshot as ChartTradingSnapshot, WorkingOrder as ChartWorkingOrder,
+    PositionSide as ChartPositionSide, TradingAnnotation as ChartTradingAnnotation,
+    TradingExecution as ChartTradingExecution, TradingIntent as ChartTradingIntent,
+    TradingIntentAction as ChartTradingIntentAction, TradingPosition as ChartTradingPosition,
+    TradingPriceScale as ChartTradingPriceScale, TradingSnapshot as ChartTradingSnapshot,
+    WorkingOrder as ChartWorkingOrder,
 };
 pub use bridge::ChartBridgeMetrics;
 pub use view::{
