@@ -2030,29 +2030,42 @@ fn run_desktop_readiness_command(
             }
         }
     };
-    account_service.start_restore();
+    if aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
+        account_service.start_restore();
+    }
     let result = (|| {
-        wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
-            account_service.restore_readiness()
-        })?;
+        if aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
+            wait_for_account_restore_readiness(ACCOUNT_RESTORE_READINESS_TIMEOUT, || {
+                account_service.restore_readiness()
+            })?;
+        }
         let market = aeris_market_runtime::MarketService::start()?;
+        let trading = start_trading_service()?;
         let status = market.status()?;
         if status.providers.is_empty() {
             return Err("candidate market service did not reach readiness".to_string());
         }
         let release = aeris_platform_runtime::current_release_identity();
+        let trading_status = trading.status()?;
+        if trading_status.schema_version == 0 || trading_status.account_count == 0 {
+            return Err("candidate trading service did not reach readiness".to_string());
+        }
         let report = LifecycleReadinessReport {
-            schema_version: 2,
+            schema_version: 3,
             release_identity: release.release_identity,
             install_generation: release.install_generation,
             desktop_process_id: std::process::id(),
             workspace_revision: workspace.workspace_revision,
             provider_count: status.providers.len(),
             workspace_restored: true,
-            market_service_ready: true,
-            account_runtime_ready: true,
+            services: LifecycleServiceReadiness {
+                market: true,
+                account: true,
+                trading: true,
+            },
         };
         market.shutdown(std::time::Duration::from_secs(2))?;
+        trading.shutdown(std::time::Duration::from_secs(2))?;
         let mut encoded = serde_json::to_vec(&report)
             .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
         encoded.push(b'\n');
@@ -2077,8 +2090,25 @@ struct LifecycleReadinessReport {
     workspace_revision: u64,
     provider_count: usize,
     workspace_restored: bool,
-    market_service_ready: bool,
-    account_runtime_ready: bool,
+    services: LifecycleServiceReadiness,
+}
+
+#[derive(serde::Serialize)]
+struct LifecycleServiceReadiness {
+    market: bool,
+    account: bool,
+    trading: bool,
+}
+
+fn start_trading_service() -> Result<aeris_trading_runtime::TradingService, String> {
+    let database_path = aeris_platform_runtime::native_data_root()
+        .map_err(|error| format!("trading data root is unavailable: {error}"))?
+        .join("trading")
+        .join("trading.sqlite3");
+    aeris_trading_runtime::TradingService::start(aeris_trading_runtime::TradingServiceConfig {
+        database_path,
+        retention: aeris_trading_runtime::TradingRetention::default(),
+    })
 }
 
 #[cfg(feature = "diagnostics")]
@@ -3031,15 +3061,31 @@ pub(super) fn run() {
     {
         eprintln!("Aeris launcher promotion deferred: {error}");
     }
-    let configured = match configured_market_workers() {
-        Ok(Some(configured)) => configured,
-        Ok(None) => exit_after_account_refresh_quiesce(0),
+    let trading = match start_trading_service() {
+        Ok(trading) => trading,
         Err(error) => {
-            eprintln!("Aeris market worker could not start: {error}");
+            eprintln!("Aeris trading owner could not start: {error}");
             exit_after_account_refresh_quiesce(1);
         }
     };
-    let lifecycle = DesktopLifecycle::new();
+    if let Err(error) = aeris_desktop::trading::install(trading.clone()) {
+        eprintln!("Aeris trading owner could not be installed: {error}");
+        let _ = trading.shutdown(Duration::from_secs(2));
+        exit_after_account_refresh_quiesce(1);
+    }
+    let configured = match configured_market_workers() {
+        Ok(Some(configured)) => configured,
+        Ok(None) => {
+            let _ = trading.shutdown(Duration::from_secs(2));
+            exit_after_account_refresh_quiesce(0);
+        }
+        Err(error) => {
+            eprintln!("Aeris market worker could not start: {error}");
+            let _ = trading.shutdown(Duration::from_secs(2));
+            exit_after_account_refresh_quiesce(1);
+        }
+    };
+    let lifecycle = DesktopLifecycle::new(trading);
     run_desktop(configured, lifecycle);
 }
 

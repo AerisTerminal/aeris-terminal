@@ -1918,6 +1918,10 @@ mod tests {
             "crates/platform_runtime/src/browser.rs",
             "apps/desktop/src/account.rs",
             "apps/desktop/src/desktop.rs",
+            // Trading accounts are a separate provider-neutral surface owned by
+            // trading_runtime; do not confuse TradingAccountId with SaaS identity.
+            "crates/domain/trading/src/",
+            "crates/trading_runtime/src/",
         ];
         const ACCOUNT_IDENTIFIERS: &[&str] = &[
             "AccountId",
@@ -1973,6 +1977,100 @@ mod tests {
         }
         assert!(manifest("apps/desktop/Cargo.toml").contains("aeris_account_runtime"));
         assert!(!manifest("crates/ui/chart_integration/Cargo.toml").contains("aeris_account"));
+    }
+    #[test]
+    fn trading_owner_and_store_remain_single_process_and_single_owner() {
+        let workspace = manifest("Cargo.toml");
+        for member in ["crates/domain/trading", "crates/trading_runtime"] {
+            assert!(workspace.contains(member), "workspace lost {member}");
+        }
+
+        let domain = manifest("crates/domain/trading/Cargo.toml");
+        for forbidden in [
+            "rusqlite",
+            "aeris_market_runtime",
+            "aeris_account_runtime",
+            "gpui",
+        ] {
+            assert!(
+                !domain.contains(forbidden),
+                "canonical trading domain depends on {forbidden}"
+            );
+        }
+
+        let runtime_manifest = manifest("crates/trading_runtime/Cargo.toml");
+        for required in ["aeris_trading", "aeris_instruments", "rusqlite.workspace"] {
+            assert!(
+                runtime_manifest.contains(required),
+                "trading owner lost {required}"
+            );
+        }
+        for forbidden in ["aeris_market_runtime", "aeris_account_runtime", "gpui"] {
+            assert!(
+                !runtime_manifest.contains(forbidden),
+                "trading owner depends in the wrong direction on {forbidden}"
+            );
+        }
+
+        let runtime = manifest("crates/trading_runtime/src/lib.rs");
+        for contract in [
+            "pub struct TradingService",
+            "mpsc::sync_channel(COMMAND_CAPACITY)",
+            "aeris-trading-owner",
+            "MAXIMUM_OPEN_ORDERS",
+            "MAXIMUM_SNAPSHOT_ITEMS",
+            "AccountEnvironment::Simulated",
+        ] {
+            assert!(runtime.contains(contract), "trading owner lost {contract}");
+        }
+        let store = manifest("crates/trading_runtime/src/store.rs");
+        for contract in [
+            "journal_mode\", \"WAL",
+            "user_version",
+            "CREATE TABLE order_events",
+            "CREATE TABLE fills",
+            "CREATE TABLE positions",
+            "CREATE TABLE user_records",
+            "maximum_user_records_per_kind",
+            "executions.csv",
+            "user_records.json",
+        ] {
+            assert!(store.contains(contract), "trading store lost {contract}");
+        }
+
+        for path in production_rust_sources() {
+            let relative = relative_string(&path);
+            let source = fs::read_to_string(&path).expect("source");
+            if source.contains("rusqlite") {
+                assert!(
+                    relative.starts_with("crates/trading_runtime/src/"),
+                    "{relative} introduced a second embedded-store owner"
+                );
+            }
+        }
+
+        for manifest_path in [
+            "crates/market_runtime/Cargo.toml",
+            "crates/account_runtime/Cargo.toml",
+            "crates/ui/chart_integration/Cargo.toml",
+            "crates/ui/terminal_ui/Cargo.toml",
+        ] {
+            assert!(
+                !manifest(manifest_path).contains("aeris_trading_runtime"),
+                "{manifest_path} bypasses the desktop trading command boundary"
+            );
+        }
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        assert!(desktop.contains("start_trading_service"));
+        assert!(desktop.contains("aeris_desktop::trading::install"));
+        assert!(
+            manifest("apps/desktop/src/desktop/lifecycle.rs")
+                .contains("trading.shutdown(Duration::from_secs(2))")
+        );
+        assert!(
+            manifest("AGENTS.md")
+                .contains("`trading_runtime` is the single in-process owner of broker accounts")
+        );
     }
     #[test]
     fn account_contracts_remain_plain_bounded_values() {

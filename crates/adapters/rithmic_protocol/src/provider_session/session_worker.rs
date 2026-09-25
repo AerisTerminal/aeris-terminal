@@ -1,5 +1,7 @@
 //! Session worker.
 
+use crate::InstrumentContractMetadata;
+
 use super::{
     AtomicBool, AuthenticationState, CanonicalSessionState, CatalogCommandState,
     CollectionProgress, CollectorError, DecodedCatalogMessage, DecodedControlMessage,
@@ -989,6 +991,26 @@ pub(super) fn selected_instrument(
         .minimum_price_change
         .filter(|value| *value > 0.0)
         .and_then(|value| fixed_reference_increment(value, price_scale));
+    let point_value = reference
+        .single_point_value
+        .filter(|value| *value > 0.0)
+        .and_then(fixed_reference_value);
+    let expiration_date = reference
+        .expiration_date
+        .as_deref()
+        .and_then(normalize_reference_date);
+    let contract = (point_value.is_some()
+        || reference.currency.is_some()
+        || expiration_date.is_some())
+    .then(|| {
+        Box::new(InstrumentContractMetadata {
+            point_value,
+            currency: reference.currency,
+            expiration_date,
+            first_notice_date: None,
+            last_trade_date: None,
+        })
+    });
     let descriptor = InstrumentDescriptor {
         instrument_id,
         provider_symbol: reference.symbol.clone(),
@@ -997,6 +1019,7 @@ pub(super) fn selected_instrument(
         price_scale,
         quantity_scale: 0,
         price_increment,
+        contract,
     };
     if descriptor.validate().is_err() {
         return Err(malformed());
@@ -1008,6 +1031,45 @@ pub(super) fn selected_instrument(
         quotes: selection.subscription.quotes,
         order_book: selection.subscription.order_book,
     })
+}
+
+/// Preserves the provider's finite decimal value using the shortest decimal
+/// representation that round-trips to the received IEEE-754 value.
+fn fixed_reference_value(value: f64) -> Option<(i64, u8)> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let rendered = value.to_string();
+    if rendered.contains(['e', 'E']) {
+        return None;
+    }
+    let (whole, fraction) = rendered.split_once('.').unwrap_or((&rendered, ""));
+    let scale = u8::try_from(fraction.len()).ok()?;
+    if scale > 18 || whole.starts_with('-') {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let units = digits.parse::<i64>().ok()?;
+    (units > 0).then_some((units, scale))
+}
+
+/// Rithmic reference data may carry month-only expiry labels. Trading contract dates require
+/// an exact day, so only day-precise provider values cross the canonical boundary.
+fn normalize_reference_date(value: &str) -> Option<String> {
+    let digits = value
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>();
+    if digits.len() != 8 {
+        return None;
+    }
+    let year = digits.get(0..4)?.parse::<u16>().ok()?;
+    let month = digits.get(4..6)?.parse::<u8>().ok()?;
+    let day = digits.get(6..8)?.parse::<u8>().ok()?;
+    if year == 0 || !(1..=12).contains(&month) || day == 0 || day > 31 {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
 /// Converts provider reference-data increments to the exact fixed-point price

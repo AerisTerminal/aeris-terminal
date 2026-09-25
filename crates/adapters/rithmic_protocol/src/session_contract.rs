@@ -76,6 +76,18 @@ pub struct InstrumentDescriptor {
     /// canonical prices. `None` means the provider did not supply a safely
     /// representable trading increment; decimal scale alone is not a tick.
     pub price_increment: Option<i64>,
+    /// Cold contract terms are grouped behind one allocation so bounded catalog events stay small.
+    pub contract: Option<Box<InstrumentContractMetadata>>,
+}
+
+/// Optional provider contract terms retained with their explicit precision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstrumentContractMetadata {
+    pub point_value: Option<(i64, u8)>,
+    pub currency: Option<String>,
+    pub expiration_date: Option<String>,
+    pub first_notice_date: Option<String>,
+    pub last_trade_date: Option<String>,
 }
 
 impl InstrumentDescriptor {
@@ -94,6 +106,27 @@ impl InstrumentDescriptor {
         }
         if self.price_increment.is_some_and(|increment| increment <= 0) {
             return Err(ProviderContractError::InvalidPriceIncrement);
+        }
+        if self
+            .contract
+            .as_deref()
+            .and_then(|contract| contract.point_value)
+            .is_some_and(|(value, scale)| value <= 0 || scale > 18)
+        {
+            return Err(ProviderContractError::InvalidPriceIncrement);
+        }
+        if let Some(contract) = self.contract.as_deref() {
+            for value in [
+                contract.currency.as_deref(),
+                contract.expiration_date.as_deref(),
+                contract.first_notice_date.as_deref(),
+                contract.last_trade_date.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_discovery_field("contract_metadata", value)?;
+            }
         }
         Ok(())
     }
@@ -627,6 +660,7 @@ mod tests {
             price_scale: 2,
             quantity_scale: 0,
             price_increment: Some(25),
+            contract: None,
         };
         assert_eq!(
             instrument.validate(),

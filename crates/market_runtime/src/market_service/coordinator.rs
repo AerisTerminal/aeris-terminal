@@ -1245,6 +1245,7 @@ mod tests {
             quantity_scale: 0,
             entitlement_id: "rithmic-test:CME:MNQU6".to_string(),
             price_increment: Some(25),
+            ..Default::default()
         }
     }
 
@@ -1271,6 +1272,7 @@ mod tests {
             quantity_scale: 8,
             entitlement_id: "hyperliquid-public".to_string(),
             price_increment: None,
+            ..Default::default()
         }
     }
 

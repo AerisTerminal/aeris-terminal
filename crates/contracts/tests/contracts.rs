@@ -21,6 +21,7 @@ fn workspace_tab() -> WorkspaceTabState {
         quantity_scale: 0,
         entitlement_id: "rithmic-test:CME-Delayed:MNQU6".into(),
         price_increment: Some(25),
+        ..Default::default()
     };
     let series = SeriesKey {
         provider: "rithmic".into(),

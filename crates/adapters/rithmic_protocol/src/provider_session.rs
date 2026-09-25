@@ -498,6 +498,7 @@ impl RithmicCatalogEvent {
             price_scale,
             quantity_scale,
             price_increment: None,
+            contract: None,
         };
         instrument
             .validate()
@@ -2245,6 +2246,13 @@ mod tests {
                 price_scale: 2,
                 quantity_scale: 2,
                 price_increment: Some(25),
+                contract: Some(Box::new(crate::InstrumentContractMetadata {
+                    point_value: Some((5_000, 2)),
+                    currency: Some("USD".to_string()),
+                    expiration_date: Some("2027-06-18".to_string()),
+                    first_notice_date: None,
+                    last_trade_date: None,
+                })),
             },
             entitlement_id: "rithmic-test-cme".to_string(),
             trades: true,

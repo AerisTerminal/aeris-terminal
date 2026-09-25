@@ -2,3 +2,4 @@
 
 pub mod account;
 pub mod market_worker;
+pub mod trading;

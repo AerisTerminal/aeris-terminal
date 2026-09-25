@@ -19,16 +19,29 @@ pub(super) struct DesktopLifecycle {
     workspace_persistence: Rc<RefCell<Vec<WorkspaceLayoutShutdownWait>>>,
     terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
     shutdown_started: Rc<Cell<bool>>,
+    trading: aeris_trading_runtime::TradingService,
 }
 
 impl DesktopLifecycle {
     #[must_use]
-    pub(super) fn new() -> Self {
+    pub(super) fn new(trading: aeris_trading_runtime::TradingService) -> Self {
         Self {
             retirements: Rc::new(RefCell::new(Vec::new())),
             workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
+            trading,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_for_test() -> Self {
+        Self {
+            retirements: Rc::new(RefCell::new(Vec::new())),
+            workspace_persistence: Rc::new(RefCell::new(Vec::new())),
+            terminals: Rc::new(RefCell::new(Vec::new())),
+            shutdown_started: Rc::new(Cell::new(false)),
+            trading: super::tests::test_trading_service(),
         }
     }
 
@@ -70,6 +83,7 @@ impl DesktopLifecycle {
             .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
+        let trading = self.trading.clone();
         Some(cx.background_executor().spawn(async move {
             let mut account_failure = None;
             let mut failure = None;
@@ -102,6 +116,9 @@ impl DesktopLifecycle {
                         "desktop market worker did not retire before its deadline".to_string(),
                     );
                 }
+            }
+            if let Err(error) = trading.shutdown(Duration::from_secs(2)) {
+                failure = Some(error);
             }
             if let Some(detail) = account_failure {
                 Err(DesktopShutdownError {

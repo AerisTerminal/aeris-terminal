@@ -574,6 +574,50 @@ pub struct InstallProviderInstrument {
     /// consumers must not infer one from decimal precision.
     #[prost(int64, optional, tag = "11")]
     pub price_increment: Option<i64>,
+    /// Cold provider contract terms kept behind one allocation.
+    #[prost(message, optional, boxed, tag = "12")]
+    pub contract_metadata: Option<Box<ProviderContractMetadata>>,
+}
+
+/// Provider-sourced futures contract terms. Absent fields remain unknown and are never inferred.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderContractMetadata {
+    /// Point value coefficient in explicit `point_value_scale` currency units.
+    #[prost(int64, optional, tag = "1")]
+    pub point_value: Option<i64>,
+    /// Decimal scale for `point_value`; present exactly when point value is present.
+    #[prost(uint32, optional, tag = "2")]
+    pub point_value_scale: Option<u32>,
+    /// Provider-reported settlement currency.
+    #[prost(string, optional, tag = "3")]
+    pub currency: Option<String>,
+    /// Provider-reported contract expiry as an ISO `YYYY-MM-DD` date when available.
+    #[prost(string, optional, tag = "4")]
+    pub contract_expiry: Option<String>,
+    /// Provider-reported first-notice date as ISO `YYYY-MM-DD` when available.
+    #[prost(string, optional, tag = "5")]
+    pub first_notice_date: Option<String>,
+    /// Provider-reported last-trade date as ISO `YYYY-MM-DD` when available.
+    #[prost(string, optional, tag = "6")]
+    pub last_trade_date: Option<String>,
+    /// Provider-reported weekly exchange sessions. Empty means unavailable, never 24x7.
+    #[prost(message, repeated, tag = "7")]
+    pub session_hours: Vec<ProviderSessionHours>,
+}
+
+/// One provider-reported weekly exchange session segment.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct ProviderSessionHours {
+    /// ISO weekday where Monday is 1 and Sunday is 7.
+    #[prost(uint32, tag = "1")]
+    pub weekday: u32,
+    #[prost(uint32, tag = "2")]
+    pub open_seconds: u32,
+    #[prost(uint32, tag = "3")]
+    pub close_seconds: u32,
+    /// IANA timezone identity supplied by the provider/reference mapping.
+    #[prost(string, tag = "4")]
+    pub timezone: String,
 }
 
 /// Requests one bounded exact provider-instrument search for a market consumer.

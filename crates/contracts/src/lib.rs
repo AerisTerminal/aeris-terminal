@@ -14,9 +14,10 @@ pub use account::{
 pub use messages::{
     EngineFaultCode, FailureStage, Fault, InstallProviderInstrument, PriceAlertCondition,
     PriceAlertFrequency, PriceAlertStatus, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderConnectionState, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey,
-    SeriesLoadState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
+    ProviderConnectionState, ProviderContractMetadata, ProviderInstrumentSearchResult,
+    ProviderInstrumentSummary, ProviderSessionHours, ProviderState, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
+    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
     WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,

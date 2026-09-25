@@ -90,6 +90,7 @@ fn embedded_instrument() -> Result<InstrumentRevision, ReplayValidationError> {
         trading_currency: "USD".to_string(),
         precision: InstrumentPrecision::try_new(2, 0)?,
         lifecycle: InstrumentLifecycle::Active,
+        contract: None,
     };
     instrument.validate()?;
     Ok(instrument)

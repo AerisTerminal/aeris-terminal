@@ -7,6 +7,7 @@ use super::{
     handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint, mpsc,
     process_command, set_resource_class, shared_market_runtime, thread,
 };
+use aeris_desktop::market_worker::ProviderCatalogEvent;
 
 pub(super) fn run_workers(
     client_id: u64,
@@ -235,6 +236,9 @@ fn apply_received_event(
     let (catalog, event) = classify_provider_catalog_event(event);
     let event = match catalog {
         Some(event) => {
+            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
+                aeris_desktop::trading::register_provider_instrument_if_running(instrument)?;
+            }
             let _ = endpoint
                 .messages
                 .send(MarketWorkerMessage::ProviderCatalog(event));

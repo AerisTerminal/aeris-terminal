@@ -1,0 +1,17 @@
+[package]
+name = "aeris_trading_runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aeris_instruments = { path = "../domain/instruments" }
+aeris_trading = { path = "../domain/trading" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

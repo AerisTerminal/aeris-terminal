@@ -620,6 +620,7 @@ fn default_product(product_id: &str) -> InstallProviderInstrument {
         quantity_scale: 0,
         entitlement_id: format!("rithmic-test:CME:{product_id}"),
         price_increment: None,
+        ..Default::default()
     }
 }
 
@@ -638,6 +639,7 @@ fn default_hyperliquid_product() -> InstallProviderInstrument {
         quantity_scale: 8,
         entitlement_id: "hyperliquid-public".to_string(),
         price_increment: None,
+        ..Default::default()
     }
 }
 

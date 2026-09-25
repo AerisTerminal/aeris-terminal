@@ -212,6 +212,7 @@ pub(super) fn handle_startup_catalog_event(
                 record.startup_resolution = None;
                 return Err("Hyperliquid startup selection identity mismatched".to_string());
             }
+            aeris_desktop::trading::register_provider_instrument_if_running(instrument)?;
             record.product.clone_from(instrument);
             record.startup_resolution = None;
             begin_endpoint_demand(market, client_id, record)?;

@@ -7,10 +7,12 @@ members = [
     "crates/account_runtime",
     "crates/market_engine",
     "crates/market_runtime",
+    "crates/trading_runtime",
     "crates/study_sdk",
     "crates/domain/account",
     "crates/domain/instruments",
     "crates/domain/market_data",
+    "crates/domain/trading",
     "crates/contracts",
     "crates/observability",
     "crates/platform_runtime",
@@ -69,6 +71,7 @@ gpui-base = { path = "third_party/gpui_base" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1f75243a45bacdf54fe411c85006f603a5a7aa3e", version = "=0.3.0" }
 aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1f75243a45bacdf54fe411c85006f603a5a7aa3e", version = "=0.3.0" }
 aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "1f75243a45bacdf54fe411c85006f603a5a7aa3e", version = "=0.3.0" }

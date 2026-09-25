@@ -17,6 +17,8 @@ aeris_design_system = { path = "../../crates/ui/design_system" }
 aeris_instruments = { path = "../../crates/domain/instruments" }
 aeris_market_data = { path = "../../crates/domain/market_data" }
 aeris_market_runtime = { path = "../../crates/market_runtime" }
+aeris_trading = { path = "../../crates/domain/trading" }
+aeris_trading_runtime = { path = "../../crates/trading_runtime" }
 aeris_study_sdk = { path = "../../crates/study_sdk" }
 aeris_contracts = { path = "../../crates/contracts" }
 aeris_observability = { path = "../../crates/observability" }

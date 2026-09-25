@@ -19,8 +19,8 @@ use aeris_provider_history::HistoryRange;
 
 use crate::market_service::{FormingBar, HistoryFetchWindow};
 use aeris_rithmic_protocol_adapter::{
-    InstrumentDescriptor, RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
+    InstrumentContractMetadata, InstrumentDescriptor, RITHMIC_APPLICATION_NAME,
+    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
     RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSessionLimits,
     RithmicTestSession, collect_rithmic_chart_history, collect_rithmic_trade_history,
 };
@@ -329,6 +329,20 @@ fn provider_instrument(
             quantity_scale: u8::try_from(installed.quantity_scale)
                 .map_err(|_| "Rithmic quantity scale is invalid".to_string())?,
             price_increment: installed.price_increment,
+            contract: installed.contract_metadata.as_deref().map(|metadata| {
+                Box::new(InstrumentContractMetadata {
+                    point_value: metadata
+                        .point_value
+                        .zip(metadata.point_value_scale)
+                        .and_then(|(value, scale)| {
+                            u8::try_from(scale).ok().map(|scale| (value, scale))
+                        }),
+                    currency: metadata.currency.clone(),
+                    expiration_date: metadata.contract_expiry.clone(),
+                    first_notice_date: metadata.first_notice_date.clone(),
+                    last_trade_date: metadata.last_trade_date.clone(),
+                })
+            }),
         },
         entitlement_id: installed.entitlement_id.clone(),
         trades: true,
@@ -595,6 +609,7 @@ mod tests {
             quantity_scale: 0,
             entitlement_id: series.entitlement_id,
             price_increment: Some(25),
+            ..Default::default()
         }
     }
 

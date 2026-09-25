@@ -93,7 +93,7 @@ pub use session::{
     RithmicTestSession, RithmicTickerConnection,
 };
 pub use session_contract::{
-    AuthenticationState, InstrumentDescriptor, MAXIMUM_DISCOVERY_FIELD_BYTES,
-    ProviderContractError, ProviderEnvironment, ProviderInvalidationReason, ProviderSessionCommand,
-    ProviderSessionEvent, ProviderSubscription,
+    AuthenticationState, InstrumentContractMetadata, InstrumentDescriptor,
+    MAXIMUM_DISCOVERY_FIELD_BYTES, ProviderContractError, ProviderEnvironment,
+    ProviderInvalidationReason, ProviderSessionCommand, ProviderSessionEvent, ProviderSubscription,
 };

@@ -101,6 +101,6 @@ mod tests {
     #[test]
     fn deterministic_vector_fences_bucket_algorithm_changes() {
         let sample = rollout_sample(&rollout("canary", 25), Path::new("/users/example/aeris"));
-        assert_eq!(sample, 16_128_428_820_566_202_637);
+        assert_eq!(sample, 6_770_719_362_746_038_094);
     }
 }

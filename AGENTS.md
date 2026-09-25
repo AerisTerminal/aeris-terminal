@@ -59,6 +59,9 @@ violations and missing verification explicitly, and never describe them as satis
 
 - `MarketEngine` is the single market-demand owner inside `market_runtime`. Provider sessions are
   created and owned only by that in-process runtime; never create a session/runtime per chart or UI surface.
+- `trading_runtime` is the single in-process owner of broker accounts, orders, order events, fills,
+  positions, PnL, simulated execution and the embedded user-record store. The desktop holds command/view
+  handles only; `account_runtime`, charts and UI surfaces never own or duplicate broker trading state.
 - Symbol, timeframe, viewport, tab, and layout changes must not tear down a healthy provider session.
 - `market_runtime` is the single owner that merges on-demand history and live state. Preserve one
   canonical forming candle, contiguous completed history, exact generation fencing, and explicit recovery.

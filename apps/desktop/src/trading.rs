@@ -1,0 +1,145 @@
+//! Desktop command access to the single in-process trading owner.
+
+use aeris_contracts::InstallProviderInstrument;
+use aeris_instruments::{
+    ContractDate, ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
+    SessionHours,
+};
+use aeris_trading_runtime::{TradingInstrument, TradingService};
+use std::sync::OnceLock;
+
+static TRADING_SERVICE: OnceLock<TradingService> = OnceLock::new();
+
+/// Installs the process-wide trading owner before any market worker can resolve instruments.
+///
+/// # Errors
+/// Returns an error when an owner was already installed in this process.
+pub fn install(service: TradingService) -> Result<(), String> {
+    TRADING_SERVICE
+        .set(service)
+        .map_err(|_| "desktop trading owner is already installed".to_string())
+}
+
+/// Registers complete provider contract terms on a market background worker.
+///
+/// Returns `Ok(false)` when the provider did not supply the minimum currency metadata required
+/// for trading. Missing values are never guessed from a symbol or venue.
+///
+/// # Errors
+/// Returns an error for malformed provider metadata, runtime overload, or durable-store failure.
+pub fn register_provider_instrument_if_running(
+    instrument: &InstallProviderInstrument,
+) -> Result<bool, String> {
+    let Some(service) = TRADING_SERVICE.get() else {
+        return Ok(false);
+    };
+    let Some(metadata) = instrument.contract_metadata.as_deref() else {
+        return Ok(false);
+    };
+    let Some(currency) = metadata.currency.clone() else {
+        return Ok(false);
+    };
+    let price_scale = u8_scale(instrument.price_scale)?;
+    let point_value_scale = metadata.point_value_scale.map(u8_scale).transpose()?;
+    let tick_size = instrument
+        .price_increment
+        .map(|units| InstrumentDecimal::try_new(units, price_scale))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let point_value = metadata
+        .point_value
+        .zip(point_value_scale)
+        .map(|(units, scale)| InstrumentDecimal::try_new(units, scale))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let session_hours = metadata
+        .session_hours
+        .iter()
+        .map(|session| {
+            Ok(SessionHours {
+                weekday: u8::try_from(session.weekday)
+                    .map_err(|_| "provider session weekday is invalid".to_string())?,
+                open_seconds: session.open_seconds,
+                close_seconds: session.close_seconds,
+                timezone: session.timezone.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let contract = ContractMetadata {
+        tick_size,
+        point_value,
+        currency,
+        expiry: metadata
+            .contract_expiry
+            .as_deref()
+            .map(parse_contract_date)
+            .transpose()?,
+        first_notice: metadata
+            .first_notice_date
+            .as_deref()
+            .map(parse_contract_date)
+            .transpose()?,
+        last_trade: metadata
+            .last_trade_date
+            .as_deref()
+            .map(parse_contract_date)
+            .transpose()?,
+        session_hours,
+        provenance: InstrumentMetadataProvenance {
+            provider_id: instrument.provider.clone(),
+            provider_symbol: instrument.provider_symbol.clone(),
+            session_generation: instrument.session_generation,
+        },
+    };
+    service.register_instrument(TradingInstrument {
+        instrument_id: InstrumentId::try_new(instrument.instrument_id.clone())
+            .map_err(|error| error.to_string())?,
+        price_scale,
+        quantity_scale: u8_scale(instrument.quantity_scale)?,
+        contract,
+    })?;
+    Ok(true)
+}
+
+fn u8_scale(scale: u32) -> Result<u8, String> {
+    let scale =
+        u8::try_from(scale).map_err(|_| "provider instrument scale is invalid".to_string())?;
+    if scale > 18 {
+        return Err("provider instrument scale exceeds 18".to_string());
+    }
+    Ok(scale)
+}
+
+fn parse_contract_date(value: &str) -> Result<ContractDate, String> {
+    let mut parts = value.split('-');
+    let year = parts
+        .next()
+        .and_then(|part| part.parse::<u16>().ok())
+        .ok_or_else(|| "provider contract date is invalid".to_string())?;
+    let month = parts
+        .next()
+        .and_then(|part| part.parse::<u8>().ok())
+        .ok_or_else(|| "provider contract date is invalid".to_string())?;
+    let day = parts
+        .next()
+        .and_then(|part| part.parse::<u8>().ok())
+        .ok_or_else(|| "provider contract date is invalid".to_string())?;
+    if parts.next().is_some() {
+        return Err("provider contract date is invalid".to_string());
+    }
+    let date = ContractDate { year, month, day };
+    date.validate().map_err(|error| error.to_string())?;
+    Ok(date)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_contract_date;
+
+    #[test]
+    fn contract_dates_require_an_exact_day() {
+        assert!(parse_contract_date("2026-12-18").is_ok());
+        assert!(parse_contract_date("202612").is_err());
+        assert!(parse_contract_date("2026-02-30").is_err());
+    }
+}

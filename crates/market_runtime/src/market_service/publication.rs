@@ -715,6 +715,7 @@ mod tests {
             quantity_scale: 0,
             entitlement_id: "rithmic-test:CME:MNQ".to_string(),
             price_increment: Some(25),
+            ..Default::default()
         };
         let mut order_book = ProviderOrderBook::new(instrument.clone());
         let snapshot = aeris_market_data::DepthSnapshot {

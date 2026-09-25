@@ -29,7 +29,7 @@ Updated 2026-09-25. Baseline source-confirmed 2026-09-24.
 
 | Batch | Scope | Needs from Aeris Charts | External gate | Status |
 | --- | --- | --- | --- | --- |
-| T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Next** |
+| T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Complete** |
 | T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | B1 (PD1, PD3) for chart warnings and plan levels | None | Open |
 | T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | Open |
 | T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | Open |
@@ -72,23 +72,32 @@ test alone passes.
 
 ### T1 — Trading foundations
 
-**Scope:** D1, D3, PF3, PF6, PF7, PF9. **Needs from Aeris Charts:** nothing. **Status:** next.
+**Scope:** D1, D3, PF3, PF6, PF7, PF9. **Needs from Aeris Charts:** nothing. **Status:** complete.
 
-- [ ] **D1** decided and recorded: one in-process trading owner beside `market_runtime`.
-- [ ] **D3** decided after measurement: one embedded local store.
-- [ ] **PF3** Canonical trading domain: fixed-point accounts, orders, order events, fills,
+- [x] **D1** decided and recorded: one in-process trading owner beside `market_runtime`.
+- [x] **D3** decided after measurement: one embedded local store.
+- [x] **PF3** Canonical trading domain: fixed-point accounts, orders, order events, fills,
       positions and PnL with explicit scales and provenance.
-- [ ] **PF6** Contract metadata: tick size, point value, currency, expiry, first notice, last
+- [x] **PF6** Contract metadata: tick size, point value, currency, expiry, first notice, last
       trade and session hours in the canonical instrument model.
-- [ ] **PF7** Local store for user-owned records with background I/O, schema versions,
+- [x] **PF7** Local store for user-owned records with background I/O, schema versions,
       migrations, bounded retention and CSV/JSON export.
-- [ ] **PF9** Local simulated venue with the PF3 contracts, touch fills, and simulated accounts
+- [x] **PF9** Local simulated venue with the PF3 contracts, touch fills, and simulated accounts
       that are always visually distinct.
-- [ ] `tools/naming_check` enforces the trading-owner boundary; broad gate green; committed and
+- [x] `tools/naming_check` enforces the trading-owner boundary; broad gate green; committed and
       pushed.
 
 **Acceptance:** a simulated order can be placed, filled and reflected in positions and PnL through
 the trading owner, and records survive restart.
+
+Implementation evidence: `crates/trading_runtime` owns the bounded command worker, SQLite store,
+simulated execution and restart/export path. The desktop starts that owner beside `market_runtime`
+and installs provider contract metadata through the desktop integration boundary. The release storage
+measurement (500 executions and 2,000 user records) completed in 2.619 s, reopened in 4.47 ms, and
+used 831,488 bytes. The direct desktop readiness command then exercised the real development binary
+successfully, producing schema-3 readiness with market, account and trading services ready and two
+configured providers. The command uses the existing development-mode auth boundary, so it does not
+open a browser or create an account session.
 
 ### T2 — Trading, execution and risk on the simulated venue
 
@@ -283,7 +292,7 @@ These decisions block specific items. Each is listed with the recommendation fro
 | --- | --- | --- | --- | --- |
 | D1 | Owner for broker accounts, orders, fills and positions. `account_runtime` is Aeris SaaS identity and should not absorb broker trading | PF1–PF3 and every trading feature | T1 | One in-process trading owner beside `market_runtime`, with the same single-session, bounded, generation-fenced rules. Provider sessions for orders stay provider-owned and shared, never per chart or panel |
 | D2 | Session recording versus the ban on market-history persistence | PF8, M4 replay and review, realistic simulation, local backtesting | T6 | Amend the invariant narrowly: allow an explicit, opt-in, user-owned session recording store that is separate from and never feeds the on-demand history cache. Update `AGENTS.md` and `tools/naming_check` in the same change so the ban on a second market-state model remains enforced |
-| D3 | Local storage engine for user-owned records (journal, executions, rule profiles, plans) | PF7 | T1 | Choose one embedded store after measuring; do not introduce more than one |
+| D3 | Local storage engine for user-owned records (journal, executions, rule profiles, plans) | PF7 | T1 | **Decided: SQLite via the pinned bundled `rusqlite` dependency.** The release measurement above is the recorded bounded-workload evidence; do not introduce another store |
 | D4 | Order-level data leaving the Rithmic adapter | PF4, M1.6 | T5 | Publish a bounded canonical order-level view through `domain/market_data` with provider identity, local order and sequence evidence kept separate, as `AGENTS.md` requires |
 | D5 | First additional provider (CQG or dxFeed) | PF10 | T8 | Defer until Rithmic trading is qualified; prioritize by user demand |
 | D6 | Calendar distribution without a backend | M5.1 | T4 | Ship the curated event calendar as signed data with application releases, or fetch it from a public repository file; decide once a release path exists |
@@ -300,14 +309,14 @@ Source-confirmed on 2026-09-24. This is the starting point, not a claim of compl
 | Hyperliquid | Public candles, L2 snapshots, BBO, trades, catalog and asset context; explicitly no orders or paper trading | `crates/adapters/hyperliquid_market` |
 | CQG and dxFeed | **Absent** | — |
 | Market ownership | `MarketEngine` demand ownership; `market_runtime` merges history and live state and publishes series, order-book snapshots, study outputs and price-alert triggers; no separate trade-tape stream to the UI | `market_engine`, `market_runtime` |
-| Instrument metadata | Provider price increment at install time; Rithmic reference carries minimum price change, expiration date and point value; the canonical instrument model has no tick size, point value or expiry fields | `contracts/src/messages.rs`, rithmic `catalog.rs`, `domain/instruments` |
+| Instrument metadata | Provider price increment at install time plus canonical tick size, point value, currency, expiry, first-notice, last-trade and session-hours fields; current provider reference payloads may leave optional fields unavailable rather than guessing | `contracts/src/messages.rs`, rithmic `catalog.rs`, `domain/instruments` |
 | Account runtime | Aeris SaaS sign-in (OIDC, lease, vault); disabled in development builds; not a broker trading account | `crates/account_runtime`, `apps/desktop/src/account.rs` |
 | Order book panel | Read-only price ladder with aggressor volume columns; the P/L column is an empty placeholder | `crates/ui/terminal_ui`, `SidePanel::OrderBook` |
 | Charts in the desktop | Candles, bars, line, area, baseline; drawings; price-alert lines; split workspace; study-runtime indicators. Footprint, volume profile, heatmap and trading lines exist in Aeris Charts but are not wired into the desktop | `crates/ui/chart_integration` |
 | Studies | Study runtime and SDK Phases A–E complete; editor and sandbox pending | `plan/study_runtime_sdk_roadmap.md` |
 | Alerts | Price alerts evaluated in `market_runtime` on live trades (32 per consumer) with OS notifications | `PriceAlertRegistry`, `platform_runtime/user_notifications.rs` |
-| Persistence | Workspace layouts, chart preferences, studies, alerts, watchlist and the credential vault. Market-history persistence is deliberately banned | `workspace_persistence.rs`, `tools/naming_check` |
-| Recording, replay, journal, simulator | **Absent.** "Replay" in code means bar snapshot contracts and Rithmic history requests, not session playback | `application/src/replay_snapshot.rs` |
+| Persistence | Workspace layouts, chart preferences, studies, alerts, watchlist and the credential vault; trading records now use a separate bounded SQLite store. Market-history persistence remains deliberately banned | `workspace_persistence.rs`, `crates/trading_runtime`, `tools/naming_check` |
+| Recording, replay, journal, simulator | Session recording/replay remains absent; T1 now provides durable journal/user records and a local simulated venue, while "replay" in market code still means bar snapshot contracts and Rithmic history requests | `crates/trading_runtime`, `application/src/replay_snapshot.rs` |
 | Risk controls | **Absent** | — |
 | Context data | **Absent** except a CME Globex session-day helper for week and month history buckets | `rithmic_protocol/src/calendar.rs` |
 | Workspace UX | Tabs, split panes and their shortcuts, themes, feed diagnostics; no command palette, trading hotkeys, multi-window workspace or linked symbol groups | `apps/desktop`, `crates/observability` |

@@ -40,6 +40,14 @@ use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
     SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
+
+pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
+    aeris_trading_runtime::TradingService::start(aeris_trading_runtime::TradingServiceConfig {
+        database_path: std::path::PathBuf::from(":memory:"),
+        retention: aeris_trading_runtime::TradingRetention::default(),
+    })
+    .expect("test trading service starts")
+}
 use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode};
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_observability::FeedConnectionState;
@@ -402,7 +410,7 @@ mod timeframe_input {
                     worker_label: "timeframe_test".into(),
                 })),
                 worker,
-                &DesktopLifecycle::new(),
+                &DesktopLifecycle::new_for_test(),
                 chart_chrome::ChartChromePreferences::default(),
                 WorkspaceSurfaceRestore::default(),
                 window,

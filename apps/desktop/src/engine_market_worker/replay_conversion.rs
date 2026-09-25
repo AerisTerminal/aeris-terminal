@@ -27,6 +27,7 @@ pub(crate) fn replay_runtime_snapshot(
         precision: InstrumentPrecision::try_new(snapshot.price_scale, snapshot.quantity_scale)
             .map_err(|error| error.to_string())?,
         lifecycle: InstrumentLifecycle::Active,
+        contract: None,
     };
     let definition = replay_bar_definition(series)?;
     let received = now_unix_nanos();

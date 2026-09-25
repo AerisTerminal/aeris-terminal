@@ -262,6 +262,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         quantity_scale: 8,
         entitlement_id: "hyperliquid-public".to_string(),
         price_increment: None,
+        ..Default::default()
     };
     let series = SeriesKey {
         provider: instrument.provider.clone(),

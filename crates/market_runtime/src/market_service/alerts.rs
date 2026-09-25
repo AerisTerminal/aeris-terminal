@@ -293,6 +293,7 @@ mod tests {
             quantity_scale: 2,
             entitlement_id: "hyperliquid-public".to_string(),
             price_increment: None,
+            ..Default::default()
         }
     }
 

@@ -10,8 +10,8 @@ use std::{
 
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument,
+    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+    SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_market_data::{DepthSnapshot, MarketEvent, MarketTrade, TopOfBookQuote};
 use aeris_platform_runtime::{
@@ -19,12 +19,13 @@ use aeris_platform_runtime::{
     NativePowerMonitor, NativePowerMonitorCancellation, NetworkEvent, PowerEvent,
 };
 use aeris_rithmic_protocol_adapter::{
-    AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
-    MAXIMUM_RITHMIC_SEARCH_RESULTS, ProviderInvalidationReason, ProviderSessionEvent,
-    RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
-    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCommandError,
-    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    AppliedRithmicEvent, InstrumentContractMetadata, InstrumentDescriptor,
+    MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
+    ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
+    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
+    RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
+    RithmicInstrumentSelection, RithmicProviderCommandError, RithmicProviderConfig,
+    RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
     RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeError,
     RithmicProviderRuntimeState, RithmicReadOnlySubscription, RithmicRetryScheduler,
     RithmicSessionLimits, RithmicSymbolSearch, SearchPattern, SessionGeneration,
@@ -630,18 +631,40 @@ fn protocol_instrument(
     instrument: InstrumentDescriptor,
     entitlement_id: String,
 ) -> InstallProviderInstrument {
+    let InstrumentDescriptor {
+        instrument_id,
+        provider_symbol,
+        display_symbol,
+        venue_id,
+        price_scale,
+        quantity_scale,
+        price_increment,
+        contract,
+    } = instrument;
+    let contract = contract.map(|contract| *contract);
     InstallProviderInstrument {
         provider: "rithmic".to_string(),
         session_generation: provider_generation,
         selection_generation: u64::try_from(selection_generation.get()).unwrap_or(u64::MAX),
-        instrument_id: instrument.instrument_id,
-        provider_symbol: instrument.provider_symbol,
-        display_symbol: instrument.display_symbol,
-        venue_id: instrument.venue_id,
-        price_scale: u32::from(instrument.price_scale),
-        quantity_scale: u32::from(instrument.quantity_scale),
+        instrument_id,
+        provider_symbol,
+        display_symbol,
+        venue_id,
+        price_scale: u32::from(price_scale),
+        quantity_scale: u32::from(quantity_scale),
         entitlement_id,
-        price_increment: instrument.price_increment,
+        price_increment,
+        contract_metadata: contract.map(|value| {
+            Box::new(ProviderContractMetadata {
+                point_value: value.point_value.map(|value| value.0),
+                point_value_scale: value.point_value.map(|value| u32::from(value.1)),
+                currency: value.currency,
+                contract_expiry: value.expiration_date,
+                first_notice_date: value.first_notice_date,
+                last_trade_date: value.last_trade_date,
+                session_hours: Vec::new(),
+            })
+        }),
     }
 }
 
@@ -1644,6 +1667,20 @@ fn provider_instrument(
         quantity_scale: u8::try_from(selected.quantity_scale)
             .map_err(|_| RithmicProviderCommandError::InvalidRequest)?,
         price_increment: selected.price_increment,
+        contract: selected.contract_metadata.as_deref().map(|metadata| {
+            Box::new(InstrumentContractMetadata {
+                point_value: metadata
+                    .point_value
+                    .zip(metadata.point_value_scale)
+                    .and_then(|(value, scale)| {
+                        u8::try_from(scale).ok().map(|scale| (value, scale))
+                    }),
+                currency: metadata.currency.clone(),
+                expiration_date: metadata.contract_expiry.clone(),
+                first_notice_date: metadata.first_notice_date.clone(),
+                last_trade_date: metadata.last_trade_date.clone(),
+            })
+        }),
     };
     Ok(RithmicProviderInstrument {
         descriptor,

@@ -23,8 +23,8 @@ use std::{
 
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument,
+    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+    SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig, HyperliquidLiveCandle,
@@ -441,6 +441,15 @@ fn handle_catalog_select(
                 quantity_scale: u32::from(resolved.quantity_scale),
                 entitlement_id: HYPERLIQUID_PUBLIC_ENTITLEMENT_ID.to_string(),
                 price_increment: None,
+                contract_metadata: Some(Box::new(ProviderContractMetadata {
+                    point_value: None,
+                    point_value_scale: None,
+                    currency: Some("USD".to_string()),
+                    contract_expiry: None,
+                    first_notice_date: None,
+                    last_trade_date: None,
+                    session_hours: Vec::new(),
+                })),
             },
         },
         stop,
