@@ -104,16 +104,18 @@ open a browser or create an account session.
 **Scope:** M2.1–M2.8, M3.1–M3.4, M7.2. **Needs:** T1; Aeris Charts B1 (PD1, PD3).
 **Status:** in progress.
 
-Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v3
+Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v4
 risk profiles and account locks, pre-trade checks on simulated orders, cancel/modify/cancel-all,
 account/global flatten and kill-switch commands, mark-to-market unrealized P/L, restart-safe order
 state, and a first desktop order-control surface. The keymap owner validates normalized bindings
 and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that
 owner only when the trading chrome owns focus. The order-book surface also renders the runtime's
 currency P/L projection through a bounded asynchronous snapshot refresh.
-The remaining T2 checklist items are intentionally open: the DOM ladder, full order-entry and
-bracket UX, chart dispatch, account selection, copier, live rule meters, and chart warning wiring
-still require the real runtime and desktop paths.
+The remaining T2 checklist items are intentionally open: the DOM ladder, bracket UX, chart
+dispatch, copier, live rule meters, and chart warning wiring still require the real runtime and
+desktop paths. The simulated order-entry panel now has quantity presets, all canonical order types
+and time-in-force choices, and a runtime-backed account selector; per-account and global cancel,
+flatten and kill controls share the same owner path.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.
@@ -121,12 +123,12 @@ M3.2 checks.
 - [x] **M7.2** Single keymap owner with conflict detection.
 - [ ] **M2.1** DOM trading ladder: one-click orders, drag to modify, inline orders and position,
       P/L column, recent volume at price; render cost measured during bursts.
-- [ ] **M2.2** Order entry panel: quantity presets, order types, time in force, account selector.
+- [x] **M2.2** Order entry panel: quantity presets, order types, time in force, account selector.
 - [ ] **M2.3** Bracket and strategy templates: stop and target, OCO, trailing, break-even,
       scale-out, with local-management labels where not server-side.
 - [ ] **M2.4** Chart trading mapped to trading commands with confirmation rules.
 - [x] **M2.5** Trading hotkeys, disabled while a text field has focus.
-- [ ] **M2.6** Flatten and kill switch per account and globally.
+- [x] **M2.6** Flatten and kill switch per account and globally.
 - [ ] **M2.7** Multi-account trade copier with per-account multipliers, kill switches and M3.2
       checks before each mirrored order.
 - [ ] **M2.8** Positions and PnL in currency and ticks.

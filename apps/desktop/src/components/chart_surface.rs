@@ -4,7 +4,7 @@ use super::{
     IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
     OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin, RadiusToken,
     ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH,
-    SIDE_PANEL_RESIZE_HANDLE_WIDTH, ScrollHandle, SidePanel, SidePanelVisibility,
+    SIDE_PANEL_RESIZE_HANDLE_WIDTH, ScrollHandle, SharedString, SidePanel, SidePanelVisibility,
     StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH,
     WORKSPACE_TAB_ICON_HIT, WatchlistDragState, WatchlistRow, Window, WorkspaceSurface,
     animate_popup_from_origin, chart_chrome, chart_surface_notice, chrome_close_button,
@@ -69,6 +69,8 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
     pub(super) order_book_frame: Option<aeris_market_data::OrderBookFrame>,
     pub(super) trading_pnl: Option<&'a aeris_trading::AccountPnl>,
+    pub(super) trading_accounts: &'a [aeris_trading::TradingAccount],
+    pub(super) trading_order_entry: &'a super::TradingOrderEntryState,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
@@ -81,15 +83,31 @@ pub(super) struct WatchlistPanelState {
     pub(super) scroll: ScrollHandle,
 }
 
-fn order_book_side_panel(
-    app: Entity<WorkspaceSurface>,
-    order_book: &Entity<ReadOnlyOrderBookView>,
-    order_book_frame: Option<&aeris_market_data::OrderBookFrame>,
-    trading_pnl: Option<&aeris_trading::AccountPnl>,
+#[derive(Clone, Copy)]
+struct OrderBookPanelState<'a> {
+    app: &'a Entity<WorkspaceSurface>,
+    order_book: &'a Entity<ReadOnlyOrderBookView>,
+    order_book_frame: Option<&'a aeris_market_data::OrderBookFrame>,
+    trading_pnl: Option<&'a aeris_trading::AccountPnl>,
+    trading_accounts: &'a [aeris_trading::TradingAccount],
+    trading_order_entry: &'a super::TradingOrderEntryState,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
-) -> Div {
+    theme: &'a AerisTheme,
+}
+
+fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
+    let OrderBookPanelState {
+        app,
+        order_book,
+        order_book_frame,
+        trading_pnl,
+        trading_accounts,
+        trading_order_entry,
+        column_menu_open,
+        columns,
+        theme,
+    } = *state;
     div()
         .relative()
         .flex()
@@ -99,11 +117,18 @@ fn order_book_side_panel(
         .size_full()
         .child(side_panel_header(
             SidePanel::OrderBook,
-            app.clone(),
+            (*app).clone(),
             column_menu_open,
             theme,
         ))
-        .child(trading_order_controls(order_book_frame, trading_pnl, theme))
+        .child(trading_order_controls(&TradingOrderControlsState {
+            app,
+            frame: order_book_frame,
+            trading_pnl,
+            accounts: trading_accounts,
+            order_entry: trading_order_entry,
+            theme,
+        }))
         .child(
             div()
                 .flex_1()
@@ -112,15 +137,30 @@ fn order_book_side_panel(
                 .child(order_book.clone()),
         )
         .children(
-            column_menu_open.then(|| order_book_column_menu_layer(app, order_book, columns, theme)),
+            column_menu_open
+                .then(|| order_book_column_menu_layer((*app).clone(), order_book, columns, theme)),
         )
 }
 
-fn trading_order_controls(
-    frame: Option<&aeris_market_data::OrderBookFrame>,
-    trading_pnl: Option<&aeris_trading::AccountPnl>,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
+#[derive(Clone, Copy)]
+struct TradingOrderControlsState<'a> {
+    app: &'a Entity<WorkspaceSurface>,
+    frame: Option<&'a aeris_market_data::OrderBookFrame>,
+    trading_pnl: Option<&'a aeris_trading::AccountPnl>,
+    accounts: &'a [aeris_trading::TradingAccount],
+    order_entry: &'a super::TradingOrderEntryState,
+    theme: &'a AerisTheme,
+}
+
+fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
+    let TradingOrderControlsState {
+        app,
+        frame,
+        trading_pnl,
+        accounts,
+        order_entry,
+        theme,
+    } = *state;
     let colors = theme.colors;
     div()
         .flex()
@@ -130,8 +170,210 @@ fn trading_order_controls(
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .child(trading_pnl_summary(trading_pnl, theme))
-        .child(market_order_buttons(frame, theme))
-        .child(order_management_buttons(frame, theme))
+        .child(trading_order_entry(app, accounts, order_entry, theme))
+        .child(market_order_buttons(frame, order_entry, theme))
+        .child(order_management_buttons(frame, order_entry, theme))
+}
+
+fn trading_order_entry(
+    app: &Entity<WorkspaceSurface>,
+    accounts: &[aeris_trading::TradingAccount],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let account_selector = trading_account_selector(app, accounts, order_entry, theme);
+    let quantity_buttons = trading_quantity_buttons(app, order_entry.quantity, theme);
+    let type_buttons = trading_order_type_buttons(app, order_entry.order_type, theme);
+    let tif_buttons = trading_time_in_force_buttons(app, order_entry.time_in_force, theme);
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(account_selector)
+        .child(quantity_buttons)
+        .child(type_buttons)
+        .child(tif_buttons)
+}
+
+fn trading_account_selector(
+    app: &Entity<WorkspaceSurface>,
+    accounts: &[aeris_trading::TradingAccount],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let selected_account = order_entry
+        .selected_account_id
+        .as_ref()
+        .and_then(|id| accounts.iter().find(|account| &account.id == id));
+    let account_label = selected_account.map_or_else(
+        || "ACCT · awaiting runtime".to_string(),
+        |account| format!("ACCT · {}", account.display_name),
+    );
+    let account_app = (*app).clone();
+    let account_count = accounts.len();
+    div()
+        .id("trading_account_selector")
+        .h(px(24.0))
+        .flex_1()
+        .flex()
+        .items_center()
+        .px_1()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.hover_bg))
+        .text_color(gpui_color(colors.text_primary))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Select the simulated trading account")
+        .on_click(move |_, _, cx| {
+            if account_count > 1 {
+                account_app.update(cx, |surface, surface_cx| {
+                    let current = surface
+                        .trading_pnl
+                        .order_entry
+                        .selected_account_id
+                        .as_ref()
+                        .and_then(|id| {
+                            surface
+                                .trading_pnl
+                                .accounts
+                                .iter()
+                                .position(|account| &account.id == id)
+                        })
+                        .unwrap_or(0);
+                    let next = (current + 1) % surface.trading_pnl.accounts.len();
+                    surface.trading_pnl.order_entry.selected_account_id = surface
+                        .trading_pnl
+                        .accounts
+                        .get(next)
+                        .map(|account| account.id.clone());
+                    surface.trading_pnl.current = None;
+                    surface_cx.notify();
+                });
+            }
+        })
+        .child(account_label)
+}
+
+fn trading_order_type_buttons(
+    app: &Entity<WorkspaceSurface>,
+    selected_type: aeris_trading::OrderType,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let options = [
+        (aeris_trading::OrderType::Market, "MKT"),
+        (aeris_trading::OrderType::Limit, "LMT"),
+        (aeris_trading::OrderType::Stop, "STP"),
+        (aeris_trading::OrderType::StopLimit, "STP-LMT"),
+    ];
+    let buttons = options
+        .into_iter()
+        .enumerate()
+        .map(|(index, (order_type, label))| {
+            trading_choice_button(
+                (*app).clone(),
+                ("trading_order_type", index),
+                label,
+                format!("Use {label} order type"),
+                selected_type == order_type,
+                move |surface| surface.trading_pnl.order_entry.order_type = order_type,
+                &colors,
+            )
+        });
+    div().flex().gap_1().children(buttons)
+}
+
+fn trading_time_in_force_buttons(
+    app: &Entity<WorkspaceSurface>,
+    selected_tif: aeris_trading::TimeInForce,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let options = [
+        (aeris_trading::TimeInForce::Day, "DAY"),
+        (aeris_trading::TimeInForce::GoodTillCancelled, "GTC"),
+        (aeris_trading::TimeInForce::ImmediateOrCancel, "IOC"),
+        (aeris_trading::TimeInForce::FillOrKill, "FOK"),
+    ];
+    let buttons = options
+        .into_iter()
+        .enumerate()
+        .map(|(index, (time_in_force, label))| {
+            trading_choice_button(
+                (*app).clone(),
+                ("trading_time_in_force", index),
+                label,
+                format!("Use {label} time in force"),
+                selected_tif == time_in_force,
+                move |surface| surface.trading_pnl.order_entry.time_in_force = time_in_force,
+                &colors,
+            )
+        });
+    div().flex().gap_1().children(buttons)
+}
+
+fn trading_quantity_buttons(
+    app: &Entity<WorkspaceSurface>,
+    selected_quantity: u64,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let buttons = [1_u64, 2, 5, 10].into_iter().map(|quantity| {
+        trading_choice_button(
+            (*app).clone(),
+            ("trading_quantity", quantity),
+            quantity.to_string(),
+            format!("Use quantity {quantity}"),
+            selected_quantity == quantity,
+            move |surface| surface.trading_pnl.order_entry.quantity = quantity,
+            &colors,
+        )
+    });
+    div().flex().gap_1().children(buttons)
+}
+
+fn trading_choice_button<T: Into<gpui::ElementId>>(
+    app: Entity<WorkspaceSurface>,
+    id: T,
+    label: impl Into<SharedString>,
+    aria_label: impl Into<SharedString>,
+    selected: bool,
+    update: impl Fn(&mut super::WorkspaceSurface) + 'static,
+    colors: &aeris_design_system::ThemeColors,
+) -> Stateful<Div> {
+    let label = label.into();
+    let aria_label = aria_label.into();
+    div()
+        .id(id)
+        .h(px(22.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .bg(gpui_color(if selected {
+            colors.primary
+        } else {
+            colors.hover_bg
+        }))
+        .text_color(gpui_color(if selected {
+            colors.surface
+        } else {
+            colors.text_muted
+        }))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(aria_label)
+        .on_click(move |_, _, cx| {
+            app.update(cx, |surface, surface_cx| {
+                update(surface);
+                surface_cx.notify();
+            });
+        })
+        .child(label)
 }
 
 fn trading_pnl_summary(
@@ -187,11 +429,23 @@ fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
 
 fn market_order_buttons(
     frame: Option<&aeris_market_data::OrderBookFrame>,
+    order_entry: &super::TradingOrderEntryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
     let buy_frame = frame.cloned();
     let sell_frame = frame.cloned();
+    let account_key = order_entry
+        .selected_account_id
+        .as_ref()
+        .map(|id| id.as_str().to_string());
+    let buy_order_type = order_entry.order_type;
+    let buy_time_in_force = order_entry.time_in_force;
+    let buy_quantity = order_entry.quantity;
+    let sell_account_key = account_key.clone();
+    let sell_order_type = buy_order_type;
+    let sell_time_in_force = buy_time_in_force;
+    let sell_quantity = buy_quantity;
     let buy = div()
         .id("trading_buy_market")
         .flex_1()
@@ -205,17 +459,21 @@ fn market_order_buttons(
         .text_xs()
         .cursor_pointer()
         .role(Role::Button)
-        .aria_label("Buy one simulated contract at market")
+        .aria_label("Buy the selected simulated order")
         .on_click(move |_, _, cx| {
             if let Some(frame) = buy_frame.clone() {
-                aeris_desktop::trading::dispatch_simulated_market_order(
+                aeris_desktop::trading::dispatch_simulated_order(
                     &frame,
                     aeris_trading::OrderSide::Buy,
+                    account_key.clone(),
+                    buy_quantity,
+                    buy_order_type,
+                    buy_time_in_force,
                     cx,
                 );
             }
         })
-        .child("BUY 1");
+        .child(format!("BUY {buy_quantity}"));
     let sell = div()
         .id("trading_sell_market")
         .flex_1()
@@ -229,124 +487,193 @@ fn market_order_buttons(
         .text_xs()
         .cursor_pointer()
         .role(Role::Button)
-        .aria_label("Sell one simulated contract at market")
+        .aria_label("Sell the selected simulated order")
         .on_click(move |_, _, cx| {
             if let Some(frame) = sell_frame.clone() {
-                aeris_desktop::trading::dispatch_simulated_market_order(
+                aeris_desktop::trading::dispatch_simulated_order(
                     &frame,
                     aeris_trading::OrderSide::Sell,
+                    sell_account_key.clone(),
+                    sell_quantity,
+                    sell_order_type,
+                    sell_time_in_force,
                     cx,
                 );
             }
         })
-        .child("SELL 1");
+        .child(format!("SELL {sell_quantity}"));
     div().flex().gap_1().child(buy).child(sell)
 }
 
 fn order_management_buttons(
     frame: Option<&aeris_market_data::OrderBookFrame>,
+    order_entry: &super::TradingOrderEntryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let flatten_frame = frame.cloned();
-    let flatten_all_frame = frame.cloned();
-    let cancel_service = aeris_desktop::trading::handle();
-    let kill_service = cancel_service.clone();
-    let flatten = div()
-        .id("trading_flatten")
-        .h(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(gpui_color(colors.warning))
-        .text_color(gpui_color(colors.text_primary))
-        .text_xs()
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label("Flatten the simulated account")
-        .on_click(move |_, _, cx| {
-            if let Some(frame) = flatten_frame.clone() {
-                aeris_desktop::trading::flatten_simulated_account(&frame, cx);
-            }
-        })
-        .child("FLATTEN");
-    let flatten_all = div()
-        .id("trading_flatten_all")
-        .h(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(gpui_color(colors.warning))
-        .text_color(gpui_color(colors.text_primary))
-        .text_xs()
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label("Flatten all simulated accounts")
-        .on_click(move |_, _, cx| {
-            if let Some(frame) = flatten_all_frame.clone() {
-                aeris_desktop::trading::flatten_simulated_accounts(&frame, cx);
-            }
-        })
-        .child("FLAT ALL");
-    let cancel = div()
-        .id("trading_cancel_all")
-        .h(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(gpui_color(colors.hover_bg))
-        .text_color(gpui_color(colors.text_primary))
-        .text_xs()
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label("Cancel all simulated orders")
-        .on_click(move |_, _, cx| {
-            if let Some(service) = cancel_service.clone() {
-                cx.background_executor()
-                    .spawn(async move {
-                        let _ = service.cancel_all(None);
-                    })
-                    .detach();
-            }
-        })
-        .child("CANCEL ALL");
-    let kill = div()
-        .id("trading_kill_switch")
-        .h(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(gpui_color(colors.danger))
-        .text_color(gpui_color(colors.surface))
-        .text_xs()
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label("Lock all simulated accounts")
-        .on_click(move |_, _, cx| {
-            if let Some(service) = kill_service.clone() {
-                let now = aeris_desktop::trading::now();
-                cx.background_executor()
-                    .spawn(async move {
-                        let _ = service.kill_switch(None, "manual kill switch".to_string(), now);
-                    })
-                    .detach();
-            }
-        })
-        .child("KILL");
     div()
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().flex().gap_1().child(cancel).child(flatten))
-        .child(div().flex().gap_1().child(flatten_all).child(kill))
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(cancel_account_button(
+                    order_entry
+                        .selected_account_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_string()),
+                    &colors,
+                ))
+                .child(flatten_account_button(
+                    frame.cloned(),
+                    order_entry
+                        .selected_account_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_string()),
+                    &colors,
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(cancel_all_button(&colors))
+                .child(flatten_all_button(frame.cloned(), &colors)),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_1()
+                .child(kill_account_button(
+                    order_entry
+                        .selected_account_id
+                        .as_ref()
+                        .map(|id| id.as_str().to_string()),
+                    &colors,
+                ))
+                .child(kill_all_button(&colors)),
+        )
+}
+
+fn trading_management_button(
+    id: &'static str,
+    label: &'static str,
+    aria_label: &'static str,
+    background: aeris_design_system::ThemeColor,
+    foreground: aeris_design_system::ThemeColor,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(background))
+        .text_color(gpui_color(foreground))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(aria_label)
+        .child(label)
+}
+
+fn cancel_account_button(
+    account_key: Option<String>,
+    colors: &aeris_design_system::ThemeColors,
+) -> Stateful<Div> {
+    trading_management_button(
+        "trading_cancel_account",
+        "CANCEL ACCT",
+        "Cancel simulated orders for the selected account",
+        colors.hover_bg,
+        colors.text_primary,
+    )
+    .on_click(move |_, _, cx| {
+        aeris_desktop::trading::cancel_simulated_account(account_key.clone(), cx);
+    })
+}
+
+fn cancel_all_button(colors: &aeris_design_system::ThemeColors) -> Stateful<Div> {
+    trading_management_button(
+        "trading_cancel_all",
+        "CANCEL ALL",
+        "Cancel simulated orders for every account",
+        colors.hover_bg,
+        colors.text_primary,
+    )
+    .on_click(move |_, _, cx| {
+        aeris_desktop::trading::cancel_simulated_accounts(cx);
+    })
+}
+
+fn flatten_account_button(
+    frame: Option<aeris_market_data::OrderBookFrame>,
+    account_key: Option<String>,
+    colors: &aeris_design_system::ThemeColors,
+) -> Stateful<Div> {
+    trading_management_button(
+        "trading_flatten",
+        "FLAT ACCT",
+        "Flatten the selected simulated account",
+        colors.warning,
+        colors.text_primary,
+    )
+    .on_click(move |_, _, cx| {
+        if let Some(frame) = frame.clone() {
+            aeris_desktop::trading::flatten_simulated_account_for(&frame, account_key.clone(), cx);
+        }
+    })
+}
+
+fn flatten_all_button(
+    frame: Option<aeris_market_data::OrderBookFrame>,
+    colors: &aeris_design_system::ThemeColors,
+) -> Stateful<Div> {
+    trading_management_button(
+        "trading_flatten_all",
+        "FLAT ALL",
+        "Flatten all simulated accounts",
+        colors.warning,
+        colors.text_primary,
+    )
+    .on_click(move |_, _, cx| {
+        if let Some(frame) = frame.clone() {
+            aeris_desktop::trading::flatten_simulated_accounts(&frame, cx);
+        }
+    })
+}
+
+fn kill_account_button(
+    account_key: Option<String>,
+    colors: &aeris_design_system::ThemeColors,
+) -> Stateful<Div> {
+    trading_management_button(
+        "trading_kill_switch_account",
+        "KILL ACCT",
+        "Lock the selected simulated account",
+        colors.danger,
+        colors.surface,
+    )
+    .on_click(move |_, _, cx| {
+        aeris_desktop::trading::kill_simulated_account(account_key.clone(), cx);
+    })
+}
+
+fn kill_all_button(colors: &aeris_design_system::ThemeColors) -> Stateful<Div> {
+    trading_management_button(
+        "trading_kill_switch",
+        "KILL ALL",
+        "Lock every simulated account",
+        colors.danger,
+        colors.surface,
+    )
+    .on_click(move |_, _, cx| {
+        aeris_desktop::trading::kill_simulated_accounts(cx);
+    })
 }
 
 fn watchlist_side_panel(
@@ -454,6 +781,8 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         order_book,
         order_book_frame,
         trading_pnl,
+        trading_accounts,
+        trading_order_entry,
         watchlist,
         order_book_column_menu_open,
         order_book_columns,
@@ -464,15 +793,17 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let ratio = side_panel_ratio(width, split_basis_points, both_visible);
     let order_book_panel = order_book_visible.then(|| {
         side_panel_region(
-            order_book_side_panel(
-                app.clone(),
+            order_book_side_panel(&OrderBookPanelState {
+                app: &app,
                 order_book,
-                order_book_frame.as_ref(),
+                order_book_frame: order_book_frame.as_ref(),
                 trading_pnl,
-                order_book_column_menu_open,
-                order_book_columns,
+                trading_accounts,
+                trading_order_entry,
+                column_menu_open: order_book_column_menu_open,
+                columns: order_book_columns,
                 theme,
-            ),
+            }),
             SidePanel::OrderBook,
             both_visible,
             ratio,

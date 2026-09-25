@@ -295,6 +295,8 @@ pub(super) fn workspace_market_area(
             order_book: &surface.order_book,
             order_book_frame: surface.order_book.read(cx).frame().cloned(),
             trading_pnl: surface.trading_pnl.current.as_ref(),
+            trading_accounts: &surface.trading_pnl.accounts,
+            trading_order_entry: &surface.trading_pnl.order_entry,
             watchlist,
             order_book_column_menu_open: surface.menu_state.order_book_column_open,
             order_book_columns: surface.order_book.read(cx).columns(),
@@ -360,10 +362,36 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
         surface.update(cx, |state, state_cx| {
             state.trading_pnl.refresh_pending = false;
             if let Ok(snapshot) = result {
-                state.trading_pnl.current = snapshot
-                    .account_pnl
-                    .into_iter()
-                    .find(|pnl| pnl.account_id.as_str() == "aeris-sim-1");
+                let accounts = snapshot.accounts;
+                let account_pnl = snapshot.account_pnl;
+                state.trading_pnl.accounts = accounts;
+                if state
+                    .trading_pnl
+                    .order_entry
+                    .selected_account_id
+                    .as_ref()
+                    .is_none_or(|account_id| {
+                        !state
+                            .trading_pnl
+                            .accounts
+                            .iter()
+                            .any(|account| &account.id == account_id)
+                    })
+                {
+                    state.trading_pnl.order_entry.selected_account_id = state
+                        .trading_pnl
+                        .accounts
+                        .first()
+                        .map(|account| account.id.clone());
+                }
+                state.trading_pnl.current = account_pnl.into_iter().find(|pnl| {
+                    state
+                        .trading_pnl
+                        .order_entry
+                        .selected_account_id
+                        .as_ref()
+                        .is_none_or(|account_id| account_id == &pnl.account_id)
+                });
                 state_cx.notify();
             }
         });

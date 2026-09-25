@@ -714,6 +714,8 @@ struct WorkspaceSurface {
 
 struct TradingPnlState {
     current: Option<aeris_trading::AccountPnl>,
+    accounts: Vec<aeris_trading::TradingAccount>,
+    order_entry: TradingOrderEntryState,
     refresh_pending: bool,
     next_refresh: Instant,
 }
@@ -722,8 +724,29 @@ impl Default for TradingPnlState {
     fn default() -> Self {
         Self {
             current: None,
+            accounts: Vec::new(),
+            order_entry: TradingOrderEntryState::default(),
             refresh_pending: false,
             next_refresh: Instant::now(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TradingOrderEntryState {
+    quantity: u64,
+    order_type: aeris_trading::OrderType,
+    time_in_force: aeris_trading::TimeInForce,
+    selected_account_id: Option<aeris_trading::TradingAccountId>,
+}
+
+impl Default for TradingOrderEntryState {
+    fn default() -> Self {
+        Self {
+            quantity: 1,
+            order_type: aeris_trading::OrderType::Market,
+            time_in_force: aeris_trading::TimeInForce::Day,
+            selected_account_id: None,
         }
     }
 }

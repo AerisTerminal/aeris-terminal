@@ -213,31 +213,49 @@ impl TerminalApp {
             .cloned()
     }
 
+    fn trading_order_entry(
+        &self,
+        cx: &App,
+    ) -> (
+        Option<String>,
+        u64,
+        aeris_trading::OrderType,
+        aeris_trading::TimeInForce,
+    ) {
+        let entry = &self.active_surface().read(cx).trading_pnl.order_entry;
+        (
+            entry
+                .selected_account_id
+                .as_ref()
+                .map(|id| id.as_str().to_string()),
+            entry.quantity,
+            entry.order_type,
+            entry.time_in_force,
+        )
+    }
+
     fn trading_buy_market(
         &mut self,
         _: &TradingBuyMarket,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.trading_hotkeys_enabled(window)
-            && let Some(frame) = self.trading_order_frame(cx)
-            && let Some((command, observation)) =
-                aeris_desktop::trading::prepare_simulated_market_order(
-                    &frame,
-                    aeris_trading::OrderSide::Buy,
-                )
-            && let Some(service) = aeris_desktop::trading::handle()
-        {
-            cx.background_executor()
-                .spawn(async move {
-                    if service.place_order(command).is_ok()
-                        && let Some(observation) = observation
-                    {
-                        let _ = service.observe_market(observation);
-                    }
-                })
-                .detach();
+        if !self.trading_hotkeys_enabled(window) {
+            return;
         }
+        let Some(frame) = self.trading_order_frame(cx) else {
+            return;
+        };
+        let (account_id, quantity, order_type, time_in_force) = self.trading_order_entry(cx);
+        aeris_desktop::trading::dispatch_simulated_order(
+            &frame,
+            aeris_trading::OrderSide::Buy,
+            account_id,
+            quantity,
+            order_type,
+            time_in_force,
+            cx,
+        );
     }
 
     fn trading_sell_market(
@@ -246,25 +264,22 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.trading_hotkeys_enabled(window)
-            && let Some(frame) = self.trading_order_frame(cx)
-            && let Some((command, observation)) =
-                aeris_desktop::trading::prepare_simulated_market_order(
-                    &frame,
-                    aeris_trading::OrderSide::Sell,
-                )
-            && let Some(service) = aeris_desktop::trading::handle()
-        {
-            cx.background_executor()
-                .spawn(async move {
-                    if service.place_order(command).is_ok()
-                        && let Some(observation) = observation
-                    {
-                        let _ = service.observe_market(observation);
-                    }
-                })
-                .detach();
+        if !self.trading_hotkeys_enabled(window) {
+            return;
         }
+        let Some(frame) = self.trading_order_frame(cx) else {
+            return;
+        };
+        let (account_id, quantity, order_type, time_in_force) = self.trading_order_entry(cx);
+        aeris_desktop::trading::dispatch_simulated_order(
+            &frame,
+            aeris_trading::OrderSide::Sell,
+            account_id,
+            quantity,
+            order_type,
+            time_in_force,
+            cx,
+        );
     }
 
     fn trading_cancel_all(
@@ -276,13 +291,7 @@ impl TerminalApp {
         if !self.trading_hotkeys_enabled(window) {
             return;
         }
-        if let Some(service) = aeris_desktop::trading::handle() {
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = service.cancel_all(None);
-                })
-                .detach();
-        }
+        aeris_desktop::trading::cancel_simulated_accounts(cx);
     }
 
     fn trading_flatten_account(
@@ -293,14 +302,12 @@ impl TerminalApp {
     ) {
         if self.trading_hotkeys_enabled(window)
             && let Some(frame) = self.trading_order_frame(cx)
-            && let Some((account_id, observation)) = aeris_desktop::trading::prepare_flatten(&frame)
-            && let Some(service) = aeris_desktop::trading::handle()
         {
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = service.flatten_account(account_id, observation);
-                })
-                .detach();
+            aeris_desktop::trading::flatten_simulated_account_for(
+                &frame,
+                self.trading_order_entry(cx).0,
+                cx,
+            );
         }
     }
 
@@ -313,18 +320,7 @@ impl TerminalApp {
         if !self.trading_hotkeys_enabled(window) {
             return;
         }
-        if let Some(service) = aeris_desktop::trading::handle() {
-            let locked_at = aeris_desktop::trading::now();
-            cx.background_executor()
-                .spawn(async move {
-                    let _ = service.kill_switch(
-                        None,
-                        "manual keyboard kill switch".to_string(),
-                        locked_at,
-                    );
-                })
-                .detach();
-        }
+        aeris_desktop::trading::kill_simulated_accounts(cx);
     }
 }
 

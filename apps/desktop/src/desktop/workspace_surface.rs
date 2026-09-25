@@ -1089,8 +1089,6 @@ impl WorkspaceSurface {
             connection_message,
             provider_transport_rtt_nanos: None,
             trading_pnl: TradingPnlState::default(),
-            // Reopening the menu must remain refreshable after a successful
-            // selection; see `default_listing_query` for the per-provider listing.
             symbol_browser,
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
