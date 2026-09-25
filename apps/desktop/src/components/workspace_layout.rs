@@ -427,9 +427,16 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
         surface.update(cx, |state, state_cx| {
             state.trading_pnl.refresh_pending = false;
             if let Ok(snapshot) = result {
+                let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
+                let chart_snapshot = crate::desktop::chart_trading_snapshot(
+                    &snapshot,
+                    state.product.as_ref(),
+                    selected_account_id.as_ref(),
+                );
                 let accounts = snapshot.accounts;
                 let account_pnl = snapshot.account_pnl;
                 state.trading_pnl.orders = snapshot.orders;
+                state.trading_pnl.fills = snapshot.fills;
                 state.trading_pnl.positions = snapshot.position_pnl;
                 state.trading_pnl.risk_meters = snapshot.risk_meters;
                 state.trading_pnl.accounts = accounts;
@@ -468,6 +475,15 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
                         order_book.set_working_orders(working_orders, order_book_cx);
                         order_book.set_position_marker(position_marker, order_book_cx);
                     });
+                if let (Some(chart), Some(chart_snapshot)) = (state.chart.as_ref(), chart_snapshot)
+                {
+                    let should_update = chart.read(state_cx).trading_snapshot() != chart_snapshot;
+                    if should_update {
+                        let _ = chart.update(state_cx, |chart, _| {
+                            chart.set_trading_snapshot(chart_snapshot)
+                        });
+                    }
+                }
                 state_cx.notify();
             }
         });

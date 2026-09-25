@@ -15,7 +15,8 @@ use aeris_application::{
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
     DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_COLORS,
-    EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PaneId, PriceScaleTarget,
+    EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PaneId, PriceScaleTarget, TradingIntent,
+    TradingSnapshot,
 };
 use aeris_charts_render::color::Color;
 use aeris_charts_render::draw_list::Prim;
@@ -2286,6 +2287,34 @@ impl NucleusChartView {
     /// crosshair action chip.
     pub fn take_alert_create_requests(&mut self) -> Vec<AlertCreateRequest> {
         self.engine.take_alert_create_requests()
+    }
+
+    /// Replaces the chart trading layer from host-authoritative runtime state.
+    ///
+    /// # Errors
+    /// Returns the chart engine validation error when the snapshot is malformed or over capacity.
+    pub fn set_trading_snapshot(&mut self, snapshot: TradingSnapshot) -> Result<(), String> {
+        self.engine
+            .set_trading_snapshot(snapshot)
+            .map_err(|error| error.to_string())?;
+        self.invalidate_series_frame();
+        Ok(())
+    }
+
+    /// Drains chart trading intents for the host's single command path.
+    pub fn take_trading_intents(&mut self) -> Vec<TradingIntent> {
+        self.engine.take_trading_intents()
+    }
+
+    /// Returns the chart's current host-projected trading snapshot.
+    #[must_use]
+    pub fn trading_snapshot(&self) -> TradingSnapshot {
+        self.engine.trading_snapshot()
+    }
+
+    /// Resolves one host command acknowledgement or rejection.
+    pub fn resolve_trading_intent(&mut self, sequence: u32, accepted: bool) -> bool {
+        self.engine.resolve_trading_intent(sequence, accepted)
     }
 
     /// Replaces the chart-local alert indicators from host-authoritative state.

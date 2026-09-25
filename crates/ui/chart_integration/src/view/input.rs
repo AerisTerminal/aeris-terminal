@@ -345,6 +345,16 @@ impl NucleusChartView {
         dragging: bool,
         modifiers: DrawingModifiers,
     ) {
+        if self.engine.trading_preview().is_some() {
+            if dragging {
+                self.engine.trading_drag_to(y);
+            } else {
+                self.engine.cancel_trading_drag();
+            }
+            self.update_cursor(pane_x, y);
+            self.update_crosshair(pane_x, y);
+            return;
+        }
         if self.drag.is_some() {
             if dragging {
                 self.drag_to(pane_x, y);
@@ -429,7 +439,15 @@ impl NucleusChartView {
         self.pending_activate = ActivationRequest::Pending;
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
-        if self.engine.activate_alert_create_at(pane_x, y) {
+        if self.engine.trading_activate_at(pane_x, y) {
+            self.drag = None;
+            self.cursor_style = CursorStyle::PointingHand;
+            self.invalidate_series_frame();
+        } else if !self.pointer_on_axis(pane_x, y) && self.engine.trading_drag_start_at(pane_x, y) {
+            self.drag = None;
+            self.cursor_style = CursorStyle::ClosedHand;
+            self.invalidate_series_frame();
+        } else if self.engine.activate_alert_create_at(pane_x, y) {
             self.drag = None;
             self.cursor_style = CursorStyle::PointingHand;
             self.invalidate_series_frame();
@@ -537,6 +555,11 @@ impl NucleusChartView {
     }
     pub(super) fn finish_mouse_up(&mut self, event: &MouseUpEvent) {
         let (pane_x, y) = self.local_position(event.position);
+        if self.engine.trading_preview().is_some() {
+            self.engine.trading_drag_end();
+            self.invalidate_series_frame();
+            return;
+        }
         if !self.drawing_pointer_up(pane_x, y, Self::drawing_modifiers(event.modifiers)) {
             self.end_drag(pane_x, y);
         }
