@@ -552,57 +552,7 @@ fn trading_working_orders(
         })
         .take(8)
         .enumerate()
-        .map(|(index, order)| {
-            let direction = match order.side {
-                aeris_trading::OrderSide::Buy => "B",
-                aeris_trading::OrderSide::Sell => "S",
-            };
-            let instruction = match order.order_type {
-                aeris_trading::OrderType::Market => "MKT",
-                aeris_trading::OrderType::Limit => "LMT",
-                aeris_trading::OrderType::Stop => "STP",
-                aeris_trading::OrderType::StopLimit => "STP-LMT",
-            };
-            let price = order
-                .limit_price
-                .or(order.stop_price)
-                .map_or_else(String::new, format_fixed_point);
-            let label = format!(
-                "ORD {direction} {instruction} {}{}",
-                format_fixed_point(order.quantity),
-                if price.is_empty() {
-                    String::new()
-                } else {
-                    format!(" @ {price}")
-                },
-            );
-            let client_order_key = order.client_order_id.as_str().to_string();
-            div()
-                .id(("working_order", index))
-                .h(px(20.0))
-                .flex()
-                .items_center()
-                .gap_1()
-                .text_xs()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(div().flex_1().truncate().child(label))
-                .child(
-                    div()
-                        .id(("cancel_working_order", index))
-                        .px_1()
-                        .cursor_pointer()
-                        .role(Role::Button)
-                        .aria_label("Cancel working simulated order")
-                        .text_color(gpui_color(colors.danger))
-                        .on_click(move |_, _, cx| {
-                            aeris_desktop::trading::cancel_simulated_order(
-                                client_order_key.clone(),
-                                cx,
-                            );
-                        })
-                        .child("CANCEL"),
-                )
-        })
+        .map(|(index, order)| working_order_row(order, index, frame, &colors))
         .collect::<Vec<_>>();
     let header = if rows.is_empty() {
         "ORDERS · none".to_string()
@@ -618,6 +568,86 @@ fn trading_working_orders(
         .text_color(gpui_color(colors.text_muted))
         .child(header)
         .children(rows)
+}
+
+fn working_order_row(
+    order: &aeris_trading::Order,
+    index: usize,
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+    colors: &aeris_design_system::ThemeColors,
+) -> impl IntoElement + use<> {
+    let direction = match order.side {
+        aeris_trading::OrderSide::Buy => "B",
+        aeris_trading::OrderSide::Sell => "S",
+    };
+    let instruction = match order.order_type {
+        aeris_trading::OrderType::Market => "MKT",
+        aeris_trading::OrderType::Limit => "LMT",
+        aeris_trading::OrderType::Stop => "STP",
+        aeris_trading::OrderType::StopLimit => "STP-LMT",
+    };
+    let price = order
+        .limit_price
+        .or(order.stop_price)
+        .map_or_else(String::new, format_fixed_point);
+    let label = format!(
+        "ORD {direction} {instruction} {}{}",
+        format_fixed_point(order.quantity),
+        if price.is_empty() {
+            String::new()
+        } else {
+            format!(" @ {price}")
+        },
+    );
+    let client_order_key = order.client_order_id.as_str().to_string();
+    let reprice_frame = frame.cloned();
+    let reprice_side = order.side;
+    let reprice_time_in_force = order.time_in_force;
+    let reprice_order_key = client_order_key.clone();
+    let reprice_button = (order.order_type == aeris_trading::OrderType::Limit).then(|| {
+        div()
+            .id(("reprice_working_order", index))
+            .px_1()
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label("Reprice working simulated limit order")
+            .text_color(gpui_color(colors.primary))
+            .on_click(move |_, _, cx| {
+                if let Some(frame) = reprice_frame.clone() {
+                    aeris_desktop::trading::reprice_simulated_order(
+                        reprice_order_key.clone(),
+                        reprice_side,
+                        reprice_time_in_force,
+                        &frame,
+                        cx,
+                    );
+                }
+            })
+            .child("REPRICE")
+    });
+    div()
+        .id(("working_order", index))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(gpui_color(colors.text_secondary))
+        .child(div().flex_1().truncate().child(label))
+        .child(
+            div()
+                .id(("cancel_working_order", index))
+                .px_1()
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label("Cancel working simulated order")
+                .text_color(gpui_color(colors.danger))
+                .on_click(move |_, _, cx| {
+                    aeris_desktop::trading::cancel_simulated_order(client_order_key.clone(), cx);
+                })
+                .child("CANCEL"),
+        )
+        .children(reprice_button)
 }
 
 fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {

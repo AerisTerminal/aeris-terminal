@@ -6,7 +6,7 @@ use aeris_instruments::{
     SessionHours,
 };
 use aeris_trading_runtime::{
-    PlaceOrder, SimulatedMarketObservation, TradingInstrument, TradingService,
+    ModifyOrder, PlaceOrder, SimulatedMarketObservation, TradingInstrument, TradingService,
 };
 use std::sync::OnceLock;
 
@@ -104,6 +104,55 @@ pub fn cancel_simulated_order(client_order_key: String, cx: &mut gpui::App) {
     cx.background_executor()
         .spawn(async move {
             let _ = service.cancel_order(client_order_id);
+        })
+        .detach();
+}
+
+/// Reprices one working simulated limit order to the current best bid or ask off the UI thread.
+pub fn reprice_simulated_order(
+    client_order_key: String,
+    side: aeris_trading::OrderSide,
+    time_in_force: aeris_trading::TimeInForce,
+    frame: &aeris_market_data::OrderBookFrame,
+    cx: &mut gpui::App,
+) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
+        return;
+    };
+    let Some(level) = (match side {
+        aeris_trading::OrderSide::Buy => frame.best_ask.as_ref(),
+        aeris_trading::OrderSide::Sell => frame.best_bid.as_ref(),
+    }) else {
+        return;
+    };
+    let Ok(limit_price) = aeris_trading::FixedPoint::try_new(level.price, frame.price_scale) else {
+        return;
+    };
+    let modified_unix_nanos = now();
+    let provenance = aeris_trading::TradingProvenance {
+        venue_id: "aeris-sim".to_string(),
+        provider_id: frame.provider_id.clone(),
+        session_generation: frame.session_generation,
+        source_sequence: frame
+            .source_watermark
+            .max(frame.bbo_source_watermark)
+            .max(1),
+        observed_unix_nanos: modified_unix_nanos,
+    };
+    let command = ModifyOrder {
+        client_order_id,
+        time_in_force,
+        limit_price: Some(limit_price),
+        stop_price: None,
+        modified_unix_nanos,
+        provenance,
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let _ = service.modify_order(command);
         })
         .detach();
 }

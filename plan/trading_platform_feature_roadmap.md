@@ -121,7 +121,8 @@ and time-in-force choices, a runtime-backed account selector, and explicit best-
 entry controls; per-account and global cancel,
 flatten and kill controls share the same owner path. Working simulated orders for the selected
 account/instrument are now surfaced in that panel with bounded per-order cancellation controls;
-drag-to-modify and full inline ladder placement remain open.
+working limit orders also have an explicit best-price reprice command; pointer drag semantics and
+full inline ladder placement remain open.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.
