@@ -20,11 +20,11 @@ use aeris_platform_runtime::{
 };
 use aeris_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentDescriptor, MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES,
-    ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
-    RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
-    RithmicInstrumentSelection, RithmicProviderCommandError, RithmicProviderConfig,
-    RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
+    MAXIMUM_RITHMIC_SEARCH_RESULTS, ProviderInvalidationReason, ProviderSessionEvent,
+    RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
+    RithmicCallbackLimits, RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection,
+    RithmicEnvironmentEvent, RithmicInstrumentSelection, RithmicProviderCommandError,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
     RithmicProviderRuntime, RithmicProviderRuntimeConfig, RithmicProviderRuntimeError,
     RithmicProviderRuntimeState, RithmicReadOnlySubscription, RithmicRetryScheduler,
     RithmicSessionLimits, RithmicSymbolSearch, SearchPattern, SessionGeneration,
@@ -464,21 +464,19 @@ fn dispatch_catalog_control(
                 );
                 return;
             };
-            let maximum_results = usize::try_from(search.maximum_results)
-                .ok()
-                .and_then(NonZeroUsize::new);
-            let request = maximum_results.and_then(|maximum_results| {
-                RithmicSymbolSearch::try_new(
-                    generation,
-                    search.query,
-                    None,
-                    None,
-                    None,
-                    SearchPattern::Equals,
-                    maximum_results,
-                )
-                .ok()
-            });
+            let request =
+                bounded_search_results(search.maximum_results).and_then(|maximum_results| {
+                    RithmicSymbolSearch::try_new(
+                        generation,
+                        search.query,
+                        None,
+                        None,
+                        None,
+                        SearchPattern::Equals,
+                        maximum_results,
+                    )
+                    .ok()
+                });
             if request
                 .is_some_and(|request| events.search_symbols(session_generation, request).is_ok())
             {
@@ -767,6 +765,15 @@ fn active_generation(runtime: &Runtime) -> Option<SessionGeneration> {
         | RithmicProviderRuntimeState::NetworkUnavailable
         | RithmicProviderRuntimeState::Stopped => None,
     }
+}
+
+/// A consumer's result count is an upper bound, so it is capped at the
+/// direct-session limit instead of rejecting the whole search.
+fn bounded_search_results(requested: u32) -> Option<NonZeroUsize> {
+    usize::try_from(requested)
+        .ok()
+        .map(|requested| requested.min(MAXIMUM_RITHMIC_SEARCH_RESULTS))
+        .and_then(NonZeroUsize::new)
 }
 
 fn usize_generation(generation: u64) -> Option<NonZeroUsize> {
@@ -1367,11 +1374,10 @@ fn drain_live_events(
             },
             Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket))) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
+                eprintln!("Aeris Rithmic live session recovering: {:?}", ticket.reason);
                 *subscription_generation = None;
-                channels.publish_realtime(RithmicRealtimeEvent::Recovering(
-                    generation,
-                    Some(ticket.reason),
-                ));
+                let reason = Some(ticket.reason);
+                channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, reason));
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
@@ -1721,7 +1727,8 @@ mod tests {
     };
 
     use super::{
-        EnvironmentState, RithmicCatalogEvent, catalog_selection_subscription, next_generation,
+        EnvironmentState, MAXIMUM_RITHMIC_SEARCH_RESULTS, RithmicCatalogEvent,
+        bounded_search_results, catalog_selection_subscription, next_generation,
         publish_catalog_callback, queue_depth_snapshot, reject_catalog_generation,
         reject_pending_catalog, retire_pending_catalog_generation,
     };
@@ -1730,6 +1737,16 @@ mod tests {
     use aeris_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
     };
+
+    #[test]
+    fn oversized_consumer_search_bound_is_capped_at_the_session_limit() {
+        assert_eq!(
+            bounded_search_results(256).map(NonZeroUsize::get),
+            Some(MAXIMUM_RITHMIC_SEARCH_RESULTS)
+        );
+        assert_eq!(bounded_search_results(32).map(NonZeroUsize::get), Some(32));
+        assert_eq!(bounded_search_results(0), None);
+    }
 
     #[test]
     fn engine_generation_never_regresses_across_catalog_replacements_and_retries() {

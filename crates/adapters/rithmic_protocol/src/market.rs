@@ -133,11 +133,14 @@ pub struct DepthByOrderMutation {
     pub exchange_order_id: String,
 }
 
-/// One sequenced Rithmic depth-by-order update frame.
+/// One Rithmic depth-by-order update frame.
+///
+/// Rithmic omits `sequence_number` on some frames (observed on live deletes),
+/// so it is absent rather than invented.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DepthByOrderUpdate {
     pub identity: MarketIdentity,
-    pub sequence_number: u64,
+    pub sequence_number: Option<u64>,
     pub mutations: Vec<DepthByOrderMutation>,
     pub timestamp: Option<ProviderTimestamp>,
 }
@@ -154,7 +157,8 @@ pub struct DepthByOrderSnapshotOrder {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DepthByOrderSnapshotLevel {
     pub identity: MarketIdentity,
-    pub sequence_number: u64,
+    /// Absent on some observed snapshot levels.
+    pub sequence_number: Option<u64>,
     pub side: DepthByOrderSide,
     pub price: f64,
     pub orders: Vec<DepthByOrderSnapshotOrder>,
@@ -175,7 +179,7 @@ pub enum DepthByOrderSnapshotMessage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DepthByOrderEndEvent {
     pub identities: Vec<MarketIdentity>,
-    pub sequence_number: u64,
+    pub sequence_number: Option<u64>,
     pub timestamp: Option<ProviderTimestamp>,
 }
 
@@ -230,12 +234,7 @@ fn decode_depth_by_order_snapshot(frame: &[u8]) -> Result<DecodedMarketMessage, 
                 return Err(ProtocolError::RejectedDataFrame);
             }
             let identity = identity(message.symbol, message.exchange)?;
-            let sequence_number = message
-                .sequence_number
-                .filter(|sequence| *sequence != 0)
-                .ok_or(ProtocolError::MissingField(
-                    "depth_by_order_snapshot.sequence_number",
-                ))?;
+            let sequence_number = message.sequence_number.filter(|sequence| *sequence != 0);
             let side = match message.depth_side.and_then(|side| {
                 rti::response_depth_by_order_snapshot::TransactionType::try_from(side).ok()
             }) {
@@ -513,12 +512,7 @@ fn decode_depth_by_order(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolE
 
     let message = rti::DepthByOrder::decode(frame).map_err(|_| ProtocolError::Decode)?;
     let identity = identity(message.symbol, message.exchange)?;
-    let sequence_number = message
-        .sequence_number
-        .filter(|sequence| *sequence != 0)
-        .ok_or(ProtocolError::MissingField(
-            "depth_by_order.sequence_number",
-        ))?;
+    let sequence_number = message.sequence_number.filter(|sequence| *sequence != 0);
     let count = message.update_type.len();
     if count == 0 {
         return Err(ProtocolError::MissingField("depth_by_order.update_type"));
@@ -616,12 +610,7 @@ fn decode_depth_by_order_end(frame: &[u8]) -> Result<DecodedMarketMessage, Proto
             })
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
-    let sequence_number = message
-        .sequence_number
-        .filter(|sequence| *sequence != 0)
-        .ok_or(ProtocolError::MissingField(
-            "depth_by_order_end.sequence_number",
-        ))?;
+    let sequence_number = message.sequence_number.filter(|sequence| *sequence != 0);
     Ok(DecodedMarketMessage::DepthByOrderEnd(
         DepthByOrderEndEvent {
             identities,
@@ -968,7 +957,7 @@ mod tests {
         assert!(matches!(
             codec.decode_market(&update).expect("DBO update decodes"),
             Some(DecodedMarketMessage::DepthByOrder(DepthByOrderUpdate {
-                sequence_number: 41,
+                sequence_number: Some(41),
                 mutations,
                 ..
             })) if mutations.len() == 2
@@ -990,7 +979,7 @@ mod tests {
         assert!(matches!(
             codec.decode_market(&end).expect("DBO end marker decodes"),
             Some(DecodedMarketMessage::DepthByOrderEnd(DepthByOrderEndEvent {
-                sequence_number: 41,
+                sequence_number: Some(41),
                 identities,
                 ..
             })) if identities == vec![MarketIdentity {
@@ -1022,7 +1011,7 @@ mod tests {
             codec.decode_market(&level).expect("DBO snapshot level decodes"),
             Some(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Level(DepthByOrderSnapshotLevel {
-                    sequence_number: 40,
+                    sequence_number: Some(40),
                     side: DepthByOrderSide::Bid,
                     price,
                     orders,
@@ -1085,6 +1074,41 @@ mod tests {
             Err(ProtocolError::ParallelFieldLength(
                 "depth_by_order_snapshot"
             ))
+        ));
+    }
+
+    #[test]
+    fn depth_by_order_delete_without_sequence_number_decodes_unsequenced() {
+        let update = rti::DepthByOrder {
+            template_id: 160,
+            symbol: Some("MNQZ6".to_string()),
+            exchange: Some("CME".to_string()),
+            sequence_number: None,
+            update_type: vec![rti::depth_by_order::UpdateType::Delete.into()],
+            transaction_type: vec![rti::depth_by_order::TransactionType::Buy.into()],
+            depth_price: vec![27_600.0],
+            prev_depth_price: Vec::new(),
+            prev_depth_price_flag: Vec::new(),
+            depth_size: vec![1],
+            depth_order_priority: vec![1],
+            exchange_order_id: vec!["bid-1".to_string()],
+            ssboe: Some(1_790_314_093),
+            usecs: None,
+            source_ssboe: None,
+            source_usecs: None,
+            source_nsecs: None,
+            jop_ssboe: None,
+            jop_nsecs: None,
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&update),
+            Ok(Some(DecodedMarketMessage::DepthByOrder(
+                DepthByOrderUpdate {
+                    sequence_number: None,
+                    ..
+                }
+            )))
         ));
     }
 

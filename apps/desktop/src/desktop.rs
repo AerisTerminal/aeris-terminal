@@ -549,6 +549,15 @@ fn stopped_worker_chart_detail(chart_state: ChartState, existing: &str, fallback
 
 const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
 
+/// Rithmic searches require text, so its default listing is a symbol query;
+/// Hyperliquid lists its whole catalog for an empty query.
+const fn default_listing_query(provider: TerminalProvider) -> &'static str {
+    match provider {
+        TerminalProvider::Rithmic => DEFAULT_RITHMIC_LISTING_QUERY,
+        TerminalProvider::Hyperliquid => "",
+    }
+}
+
 /// The instrument menu should open with a default provider listing instead of
 /// a blank list. A completed Rithmic selection consumes the previous search
 /// results (one-shot selection authorization), so an empty idle browser means

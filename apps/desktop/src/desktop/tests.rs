@@ -1304,6 +1304,22 @@ fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
 }
 
 #[test]
+fn first_rithmic_connection_is_not_presented_as_recovery_and_autoloads_catalog() {
+    let shell = crate::desktop::rithmic_shell::RithmicShellState::local()
+        .expect("fixed Rithmic Test profile");
+    let discovering =
+        stabilized_connection_state(Some(shell.connection()), FeedConnectionState::Discovering);
+    assert_eq!(discovering, FeedConnectionState::Discovering);
+    let ready = stabilized_connection_state(Some(discovering), FeedConnectionState::Authenticating);
+    assert_eq!(ready, FeedConnectionState::Authenticating);
+    assert!(should_autoload_rithmic_catalog(
+        ready,
+        crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE,
+        false,
+    ));
+}
+
+#[test]
 fn gpui_theme_attachment_preserves_alpha() {
     let attached = gpui_color(ThemeColor::from_rgb8(240, 240, 240).with_alpha(19.0 / 255.0));
     assert!((attached.a - 19.0 / 255.0).abs() < f32::EPSILON);

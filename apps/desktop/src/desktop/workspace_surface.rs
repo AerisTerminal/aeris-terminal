@@ -27,7 +27,15 @@ fn chart_bridge_label(chart: Option<&Entity<NucleusChartView>>, cx: &App) -> Str
     )
 }
 
-fn initial_symbol_browser() -> rithmic_shell::RithmicSymbolBrowser {
+fn initial_symbol_browser(startup: &MarketWorkerStartup) -> rithmic_shell::RithmicSymbolBrowser {
+    match startup {
+        MarketWorkerStartup::Rithmic => rithmic_shell::RithmicSymbolBrowser::default(),
+        MarketWorkerStartup::Loading(_) => demand_startup_symbol_browser(),
+    }
+}
+
+/// Market-demand endpoints issue their own startup catalog search as request 1.
+fn demand_startup_symbol_browser() -> rithmic_shell::RithmicSymbolBrowser {
     rithmic_shell::RithmicSymbolBrowser::rithmic_catalog_awaiting_search(
         std::num::NonZeroUsize::MIN,
         "",
@@ -1037,6 +1045,7 @@ impl WorkspaceSurface {
     ) -> Self {
         let theme = AerisTheme::dark();
         let restored_rithmic = restored_market_selection(&startup);
+        let symbol_browser = initial_symbol_browser(&startup);
         let TerminalStartupState {
             chart,
             chart_state,
@@ -1079,9 +1088,9 @@ impl WorkspaceSurface {
             connection_state,
             connection_message,
             provider_transport_rtt_nanos: None,
-            // Both runtime providers support the empty catalog query. Reopening
-            // the menu must remain refreshable after a successful selection.
-            symbol_browser: initial_symbol_browser(),
+            // Reopening the menu must remain refreshable after a successful
+            // selection; see `default_listing_query` for the per-provider listing.
+            symbol_browser,
             symbol_message: initial_symbol_message(provider),
             market_state: WorkspaceMarketState::default(),
             symbol_selection_target: SymbolSelectionTarget::Chart,
@@ -2768,7 +2777,7 @@ impl WorkspaceSurface {
             let provider = terminal_provider_from_id(&product.provider);
             if provider != self.provider {
                 self.provider = provider;
-                self.symbol_browser = initial_symbol_browser();
+                self.symbol_browser = demand_startup_symbol_browser();
                 self.symbol_message = initial_symbol_message(provider);
             }
             self.product = Some(product);
@@ -3224,7 +3233,7 @@ impl WorkspaceSurface {
         ) {
             return;
         }
-        let _ = self.search_symbol_query("", cx);
+        let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {

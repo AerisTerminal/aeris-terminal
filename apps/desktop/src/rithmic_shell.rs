@@ -15,8 +15,8 @@ impl RithmicShellState {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             identity,
-            connection: FeedConnectionState::Disconnected,
-            message: "Local shell ready; provider login has not started".to_string(),
+            connection: FeedConnectionState::Discovering,
+            message: "Connecting to Rithmic Test".to_string(),
         })
     }
 
@@ -301,10 +301,13 @@ mod tests {
         assert_eq!(shell.identity.provider(), "rithmic");
         assert_eq!(shell.identity.system(), "RITHMIC_TEST");
         assert_eq!(shell.identity.environment(), "Test");
-        assert_eq!(shell.connection(), FeedConnectionState::Disconnected);
-        assert_eq!(connection_label(shell.connection()), "Not connected");
+        assert_eq!(shell.connection(), FeedConnectionState::Discovering);
+        assert_eq!(
+            connection_label(shell.connection()),
+            "Discovering Test systems"
+        );
         assert_eq!(shell.profile_label(), "Rithmic / Rithmic Test / Test");
-        assert!(shell.message().contains("login has not started"));
+        assert_eq!(shell.message(), "Connecting to Rithmic Test");
     }
 
     #[test]

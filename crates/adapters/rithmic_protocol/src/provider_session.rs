@@ -1,22 +1,22 @@
 use crate::network::ConnectionAbort;
 use crate::{
-    AggregateBookAssembler, AggregateBookLimits, AggregateBookOutcome, CollectedSymbols,
-    CollectionProgress, CollectorError, DecodedCatalogMessage, DecodedControlMessage,
-    DecodedMarketMessage, DepthByOrderEndEvent as DecodedDepthByOrderEndEvent,
-    DepthByOrderMutation, DepthByOrderMutationKind, DepthByOrderSide, DepthByOrderSnapshotLevel,
-    DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
-    InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
-    MarketIdentity, OrderBookLevel, ProviderTimestamp, QuoteLevel, QuoteSideUpdate,
-    RetryDisposition, RithmicApplication, RithmicCredentialBytes, RithmicSessionError,
-    RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession, SearchPattern,
-    SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
-    SymbolSearchResult, TradeAggressor,
-};
-use crate::{
     AuthenticationState, ConnectTrigger, InstrumentDescriptor, NetworkEvent, ProviderEnvironment,
     ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent, RecoveryReason,
     RithmicProviderRuntime, RithmicProviderRuntimeError, RithmicProviderRuntimeState,
     SessionGeneration,
+};
+use crate::{
+    CollectedSymbols, CollectionProgress, CollectorError, DecodedCatalogMessage,
+    DecodedControlMessage, DecodedMarketMessage,
+    DepthByOrderEndEvent as DecodedDepthByOrderEndEvent, DepthByOrderMutation,
+    DepthByOrderMutationKind, DepthByOrderSide, DepthByOrderSnapshotLevel,
+    DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
+    InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
+    MarketIdentity, ProviderTimestamp, QuoteLevel, QuoteSideUpdate, RetryDisposition,
+    RithmicApplication, RithmicCredentialBytes, RithmicSessionError, RithmicSessionLimits,
+    RithmicSessionMessage, RithmicTestSession, SearchPattern, SubscriptionAction,
+    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest, SymbolSearchResult,
+    TradeAggressor,
 };
 use aeris_market_data::{
     AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
@@ -46,6 +46,8 @@ pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.aeris.terminal";
 /// Non-secret vault key for the default Rithmic Test account.
 pub const RITHMIC_TEST_VAULT_KEY: &str = "provider-rithmic-test-default-v1";
 const MAXIMUM_INSTRUMENTS: usize = 128;
+/// Largest result bound one direct-session symbol search accepts.
+pub const MAXIMUM_RITHMIC_SEARCH_RESULTS: usize = MAXIMUM_INSTRUMENTS;
 const MAXIMUM_IDENTITY_BYTES: usize = 256;
 const SESSION_COMMAND_CAPACITY: usize = 8;
 const SESSION_COMMAND_BATCH: usize = 4;
@@ -2276,8 +2278,7 @@ mod tests {
             Vec::new(),
         )
         .expect("empty live set validates");
-        let mut canonical =
-            CanonicalSessionState::try_new(&config, generation(1)).expect("canonical session");
+        let mut canonical = CanonicalSessionState::new(&config, generation(1));
 
         canonical.add_instrument(instrument()).expect("first");
         canonical.add_instrument(second.clone()).expect("second");
@@ -2798,8 +2799,7 @@ mod tests {
     #[test]
     fn trade_conversion_uses_registry_identity_scales_and_local_ordering() {
         let config = config();
-        let mut canonical =
-            CanonicalSessionState::try_new(&config, generation(7)).expect("state initializes");
+        let mut canonical = CanonicalSessionState::new(&config, generation(7));
         let converted = canonical
             .convert(
                 DecodedMarketMessage::Trade(TradeUpdate {
@@ -2860,8 +2860,7 @@ mod tests {
             Vec::new(),
         )
         .expect("empty dynamic catalog config validates");
-        let mut canonical =
-            CanonicalSessionState::try_new(&empty, generation(9)).expect("state initializes");
+        let mut canonical = CanonicalSessionState::new(&empty, generation(9));
         canonical
             .add_instrument(instrument())
             .expect("pending instrument installs before subscribe");
@@ -2887,8 +2886,7 @@ mod tests {
     #[test]
     fn quote_conversion_preserves_unchanged_and_cleared_sides() {
         let config = config();
-        let mut canonical =
-            CanonicalSessionState::try_new(&config, generation(3)).expect("state initializes");
+        let mut canonical = CanonicalSessionState::new(&config, generation(3));
         let bid = QuoteLevel {
             price: 5_100.25,
             size: 2,
@@ -2976,89 +2974,39 @@ mod tests {
     }
 
     #[test]
-    fn depth_conversion_publishes_only_complete_images_and_recovers_on_clear() {
+    fn price_level_frames_never_publish_depth_or_invalidate_the_session() {
         let config = config();
-        let mut canonical =
-            CanonicalSessionState::try_new(&config, generation(5)).expect("state initializes");
-        let bid = OrderBookLevel {
-            price: 5_100.25,
-            size: 2,
-            orders: Some(1),
-            implied_size: None,
-        };
-        let ask = OrderBookLevel {
-            price: 5_100.50,
-            size: 3,
-            orders: Some(2),
-            implied_size: None,
-        };
-        assert_eq!(
-            canonical.convert(
-                DecodedMarketMessage::OrderBook(OrderBookUpdate {
-                    identity: identity(),
-                    kind: OrderBookUpdateKind::Begin,
-                    present_sides: OrderBookSides {
-                        bids: true,
-                        asks: false,
-                    },
-                    bids: vec![bid],
-                    asks: Vec::new(),
-                    timestamp: None,
-                }),
-                1,
-                1,
-            ),
-            Ok(None)
-        );
-        let depth = canonical
-            .convert(
-                DecodedMarketMessage::OrderBook(OrderBookUpdate {
-                    identity: identity(),
-                    kind: OrderBookUpdateKind::End,
-                    present_sides: OrderBookSides {
-                        bids: false,
-                        asks: true,
-                    },
-                    bids: Vec::new(),
-                    asks: vec![ask],
-                    timestamp: None,
-                }),
-                2,
-                2,
-            )
-            .expect("depth image converts")
-            .expect("complete image produces a snapshot");
-        let MarketEvent::DepthSnapshot(depth) = depth else {
-            panic!("complete aggregate image must produce a depth snapshot");
-        };
-        assert_eq!(depth.metadata.source_sequence, 2);
-        assert_eq!(depth.metadata.timestamps.exchange_unix_nanos, None);
-        assert_eq!(depth.bids[0].price, 510_025);
-        assert_eq!(depth.bids[0].quantity, 200);
-        assert_eq!(depth.asks[0].price, 510_050);
-        assert_eq!(depth.asks[0].quantity, 300);
-
-        assert_eq!(
-            canonical.convert(
-                DecodedMarketMessage::OrderBook(OrderBookUpdate {
-                    identity: identity(),
-                    kind: OrderBookUpdateKind::Clear,
-                    present_sides: OrderBookSides {
-                        bids: false,
-                        asks: false,
-                    },
-                    bids: Vec::new(),
-                    asks: Vec::new(),
-                    timestamp: Some(timestamp()),
-                }),
-                3,
-                3,
-            ),
-            Err((
-                ProviderInvalidationReason::SequenceGap,
-                RetryDisposition::Transient,
-            ))
-        );
+        let mut canonical = CanonicalSessionState::new(&config, generation(5));
+        for (ordinal, kind) in [
+            OrderBookUpdateKind::Begin,
+            OrderBookUpdateKind::End,
+            OrderBookUpdateKind::Solo,
+            OrderBookUpdateKind::Clear,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ordinal = u64::try_from(ordinal).expect("small ordinal") + 1;
+            let received = i64::try_from(ordinal).expect("small timestamp");
+            assert_eq!(
+                canonical.convert(
+                    DecodedMarketMessage::OrderBook(OrderBookUpdate {
+                        identity: identity(),
+                        kind,
+                        present_sides: OrderBookSides {
+                            bids: false,
+                            asks: false,
+                        },
+                        bids: Vec::new(),
+                        asks: Vec::new(),
+                        timestamp: Some(timestamp()),
+                    }),
+                    ordinal,
+                    received,
+                ),
+                Ok(None)
+            );
+        }
     }
 
     #[test]

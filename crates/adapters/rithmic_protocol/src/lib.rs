@@ -78,9 +78,9 @@ pub use provider_runtime::{
     RithmicProviderRuntimeError, RithmicProviderRuntimeState, SessionGeneration,
 };
 pub use provider_session::{
-    AppliedRithmicEvent, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCatalogCallback,
-    RithmicCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
+    AppliedRithmicEvent, MAXIMUM_RITHMIC_SEARCH_RESULTS, RITHMIC_TEST_VAULT_KEY,
+    RITHMIC_TEST_VAULT_SERVICE, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
+    RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
     RithmicInstrumentSelection, RithmicProviderCallback, RithmicProviderCommandError,
     RithmicProviderConfig, RithmicProviderConfigError, RithmicProviderDriver,
     RithmicProviderDriverError, RithmicProviderEventError, RithmicProviderEvents,

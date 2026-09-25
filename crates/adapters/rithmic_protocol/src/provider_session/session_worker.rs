@@ -197,7 +197,7 @@ pub(super) fn collect_market(
     emitter: &SessionEmitter,
     mut initial_messages: VecDeque<RithmicSessionMessage>,
 ) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
-    let mut canonical = CanonicalSessionState::try_new(config, generation)?;
+    let mut canonical = CanonicalSessionState::new(config, generation);
     let heartbeat_interval = connection.heartbeat_interval();
     let silence_evidence_fault = config.silence_evidence_fault(generation);
     if let Some(fault) = silence_evidence_fault {
@@ -433,7 +433,16 @@ fn handle_session_message(
                             ));
                         }
                     }
-                    Some(*accepted)
+                    // Only a completion owed to a pending subscription advances
+                    // it; any other completion answers an in-session resnapshot.
+                    state
+                        .catalog
+                        .pending_subscription
+                        .as_ref()
+                        .is_some_and(|plan| {
+                            matches!(plan.phase, SubscriptionPhase::SubscribeDepthSnapshot(_))
+                        })
+                        .then_some(*accepted)
                 }
                 _ => None,
             };
@@ -444,6 +453,11 @@ fn handle_session_message(
             {
                 stop.store(true, Ordering::Release);
                 return Ok(false);
+            }
+            for instrument in canonical.take_depth_resnapshots() {
+                connection
+                    .request_depth_by_order_snapshot(instrument.depth_snapshot_request())
+                    .map_err(session_failure)?;
             }
             if snapshot_completion.is_some_and(|accepted| accepted) {
                 let complete = {
@@ -966,7 +980,10 @@ pub(super) fn selected_instrument(
     {
         return Err(malformed());
     }
-    let instrument_id = format!("rithmic:{}:{}", reference.exchange, reference.symbol);
+    let instrument_id = format!(
+        "instrument:rithmic:{}:{}",
+        reference.exchange, reference.symbol
+    );
     let price_scale = reference.price_precision.unwrap_or(0);
     let price_increment = reference
         .minimum_price_change

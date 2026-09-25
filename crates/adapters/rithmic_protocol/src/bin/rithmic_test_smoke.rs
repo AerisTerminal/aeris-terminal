@@ -487,9 +487,10 @@ fn test_depth_by_order(
         })
         .map_err(|error| format!("dbo_unsubscribe_send_failed={error}"))?;
     println!(
-        "rithmic_mbo_snapshot=passed sequence={} levels={} orders={} live_mutations={}",
+        "rithmic_mbo_snapshot=passed sequence={} levels={} unsequenced_levels={} orders={} live_mutations={}",
         snapshot.sequence.unwrap_or(0),
         snapshot.levels,
+        snapshot.unsequenced_levels,
         snapshot.orders,
         snapshot.live_mutations
     );
@@ -526,6 +527,7 @@ fn await_depth_by_order_subscription(
 struct MboSnapshotEvidence {
     sequence: Option<u64>,
     levels: usize,
+    unsequenced_levels: usize,
     orders: usize,
     live_mutations: usize,
 }
@@ -548,13 +550,17 @@ fn collect_depth_by_order_snapshot(
             )) if level.identity.symbol == selected.symbol
                 && level.identity.exchange == selected.exchange =>
             {
-                if evidence
-                    .sequence
-                    .is_some_and(|sequence| sequence != level.sequence_number)
-                {
-                    return Err("dbo_snapshot_sequence_changed".to_string());
+                if let Some(sequence) = level.sequence_number {
+                    if evidence
+                        .sequence
+                        .is_some_and(|previous| previous != sequence)
+                    {
+                        return Err("dbo_snapshot_sequence_changed".to_string());
+                    }
+                    evidence.sequence = Some(sequence);
+                } else {
+                    evidence.unsequenced_levels = evidence.unsequenced_levels.saturating_add(1);
                 }
-                evidence.sequence = Some(level.sequence_number);
                 evidence.levels = evidence.levels.saturating_add(1);
                 if level
                     .orders
