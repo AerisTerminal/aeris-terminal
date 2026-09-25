@@ -267,6 +267,43 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
 }
 
 #[test]
+fn flatten_closes_positions_and_survives_a_restart() {
+    let directory = TestDirectory::new("flatten");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .place_order(market_order("flatten-open", OrderSide::Buy, 1, 1_000))
+        .expect("buy accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("buy fills");
+    let fills = service
+        .flatten_account(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            observation(10_100, 10_125, 3, 3_000),
+        )
+        .expect("flatten succeeds");
+    assert_eq!(fills.len(), 1);
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
+    assert_eq!(snapshot.fills.len(), 2);
+    assert_eq!(snapshot.orders.len(), 2);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restored = restarted.snapshot().expect("restored snapshot");
+    assert_eq!(restored.positions[0].net_quantity.units(), 0);
+    assert_eq!(restored.fills.len(), 2);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("restarted service stops");
+}
+
+#[test]
 fn invalid_json_never_enters_the_store() {
     let directory = TestDirectory::new("invalid-json");
     let service = TradingService::start(config(&directory)).expect("service starts");

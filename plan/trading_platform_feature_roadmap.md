@@ -105,12 +105,13 @@ open a browser or create an account session.
 **Status:** in progress.
 
 Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v3
-risk profiles and account locks, pre-trade checks on simulated orders, cancel/modify/cancel-all and
-kill-switch commands, mark-to-market unrealized P/L, restart-safe order state, and a first desktop
-order-control surface. The keymap owner validates normalized bindings and reserved desktop chords.
+risk profiles and account locks, pre-trade checks on simulated orders, cancel/modify/cancel-all,
+flatten and kill-switch commands, mark-to-market unrealized P/L, restart-safe order state, and a
+first desktop order-control surface. The keymap owner validates normalized bindings and reserved
+desktop chords.
 The remaining T2 checklist items are intentionally open: the DOM ladder, full order-entry and
-bracket UX, chart/hotkey dispatch, flattening, copier, live rule meters, and chart warning wiring
-still require the real runtime and desktop paths.
+bracket UX, chart/hotkey dispatch, full flatten UX, copier, live rule meters, and chart warning
+wiring still require the real runtime and desktop paths.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.

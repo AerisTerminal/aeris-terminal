@@ -228,6 +228,11 @@ enum Command {
     LockAccount(TradingAccountId, String, i64, Reply<()>),
     UnlockAccount(TradingAccountId, Reply<()>),
     KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
+    Flatten(
+        TradingAccountId,
+        SimulatedMarketObservation,
+        Reply<Vec<Fill>>,
+    ),
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
@@ -395,6 +400,19 @@ impl TradingService {
         self.request(|reply| Command::KillSwitch(account_id, reason, locked_at_unix_nanos, reply))
     }
 
+    /// Cancels working orders and closes one account's simulated positions at the observed BBO.
+    ///
+    /// # Errors
+    /// Returns an error when the observation is invalid, the account is unknown, or persistence
+    /// fails. Flattening is an administrative action and remains available while risk-locked.
+    pub fn flatten_account(
+        &self,
+        account_id: TradingAccountId,
+        observation: SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
+        self.request(|reply| Command::Flatten(account_id, observation, reply))
+    }
+
     /// Applies one market observation and returns fills produced by the simulated venue.
     ///
     /// # Errors
@@ -537,6 +555,9 @@ impl Coordinator {
                 }
                 Command::KillSwitch(account_id, reason, locked_at, reply) => {
                     let _ = reply.send(self.kill_switch(account_id.as_ref(), &reason, locked_at));
+                }
+                Command::Flatten(account_id, observation, reply) => {
+                    let _ = reply.send(self.flatten_account(&account_id, &observation));
                 }
                 Command::Observe(observation, reply) => {
                     let _ = reply.send(self.observe_market(&observation));
@@ -1203,6 +1224,132 @@ impl Coordinator {
         Ok(changed)
     }
 
+    fn flatten_account(
+        &mut self,
+        account_id: &TradingAccountId,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
+        if !self.state.accounts.contains_key(account_id) {
+            return Err("flatten account is not registered".to_string());
+        }
+        let mut fills = self.observe_market(observation)?;
+        self.cancel_all(Some(account_id))?;
+        let position_keys = self
+            .state
+            .positions
+            .keys()
+            .filter(|(candidate, instrument_id)| {
+                candidate == account_id && instrument_id == &observation.instrument_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in position_keys {
+            if let Some(fill) = self.flatten_position(account_id, &key, observation)? {
+                fills.push(fill);
+            }
+        }
+        self.store.enforce_retention()?;
+        self.enforce_memory_retention();
+        self.bump_revision()?;
+        Ok(fills)
+    }
+
+    fn flatten_position(
+        &mut self,
+        account_id: &TradingAccountId,
+        key: &(TradingAccountId, InstrumentId),
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Option<Fill>, String> {
+        let Some(current) = self.state.positions.get(key).cloned() else {
+            return Ok(None);
+        };
+        if current.net_quantity.units() == 0 {
+            return Ok(None);
+        }
+        let instrument = self
+            .state
+            .instruments
+            .get(&observation.instrument_id)
+            .ok_or_else(|| "flatten instrument is not registered".to_string())?
+            .clone();
+        let account = self
+            .state
+            .accounts
+            .get(account_id)
+            .ok_or_else(|| "flatten account is not registered".to_string())?
+            .clone();
+        let sequence = self.state.next_sequence;
+        let side = if current.net_quantity.units() > 0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let quantity = FixedPoint::try_new(
+            i64::try_from(current.net_quantity.units().unsigned_abs())
+                .map_err(|_| "flatten quantity overflowed".to_string())?,
+            current.net_quantity.scale(),
+        )
+        .map_err(|error| error.to_string())?;
+        let price = if side == OrderSide::Sell {
+            observation.bid
+        } else {
+            observation.ask
+        };
+        let provenance = observation.provenance.clone();
+        let order = Order {
+            id: OrderId::try_new(format!("sim-flatten-order-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            client_order_id: ClientOrderId::try_new(format!("sim-flatten-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            account_id: account_id.clone(),
+            instrument_id: observation.instrument_id.clone(),
+            side,
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::ImmediateOrCancel,
+            quantity,
+            limit_price: None,
+            stop_price: None,
+            status: OrderStatus::Working,
+            submitted_unix_nanos: provenance.observed_unix_nanos,
+            provenance: provenance.clone(),
+        };
+        order.validate().map_err(|error| error.to_string())?;
+        let accepted = flatten_acceptance_event(&order, sequence)?;
+        self.store.insert_order(&order, &accepted, sequence + 1)?;
+        self.state.next_sequence = sequence + 1;
+        self.state.order_events.push_back(accepted);
+        self.state.orders.insert(order.id.clone(), order.clone());
+        let fill = Fill {
+            id: FillId::try_new(format!("sim-flatten-fill-{}", sequence + 1))
+                .map_err(|error| error.to_string())?,
+            order_id: order.id.clone(),
+            account_id: account_id.clone(),
+            instrument_id: observation.instrument_id.clone(),
+            side,
+            price,
+            quantity,
+            execution_unix_nanos: provenance.observed_unix_nanos,
+            provenance: provenance.clone(),
+        };
+        fill.validate().map_err(|error| error.to_string())?;
+        let event = flatten_fill_event(&order, &fill, sequence + 1, provenance)?;
+        let position = next_position(Some(&current), &fill, &account, &instrument)?;
+        self.store
+            .insert_fill(&order, &event, &fill, &position, sequence + 2)?;
+        self.state.next_sequence = sequence + 2;
+        self.state.order_events.push_back(event);
+        self.state.fills.push_back(fill.clone());
+        self.state.orders.insert(
+            order.id.clone(),
+            Order {
+                status: OrderStatus::Filled,
+                ..order
+            },
+        );
+        self.state.positions.insert(key.clone(), position);
+        Ok(Some(fill))
+    }
+
     fn snapshot(&self) -> Result<TradingSnapshot, String> {
         if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.orders.len() > MAXIMUM_SNAPSHOT_ITEMS
@@ -1306,6 +1453,41 @@ impl Coordinator {
             self.state.orders.remove(&retired);
         }
     }
+}
+
+fn flatten_acceptance_event(order: &Order, sequence: u64) -> Result<OrderEvent, String> {
+    let event = OrderEvent {
+        id: OrderEventId::try_new(format!("sim-flatten-event-{sequence}"))
+            .map_err(|error| error.to_string())?,
+        order_id: order.id.clone(),
+        sequence,
+        kind: OrderEventKind::Accepted,
+        event_unix_nanos: order.submitted_unix_nanos,
+        detail: Some("accepted by local flatten command".to_string()),
+        provenance: order.provenance.clone(),
+    };
+    event.validate().map_err(|error| error.to_string())?;
+    Ok(event)
+}
+
+fn flatten_fill_event(
+    order: &Order,
+    fill: &Fill,
+    sequence: u64,
+    provenance: TradingProvenance,
+) -> Result<OrderEvent, String> {
+    let event = OrderEvent {
+        id: OrderEventId::try_new(format!("sim-flatten-event-{sequence}"))
+            .map_err(|error| error.to_string())?,
+        order_id: order.id.clone(),
+        sequence,
+        kind: OrderEventKind::Filled,
+        event_unix_nanos: fill.execution_unix_nanos,
+        detail: Some("filled by local flatten command".to_string()),
+        provenance,
+    };
+    event.validate().map_err(|error| error.to_string())?;
+    Ok(event)
 }
 
 fn touch_price(order: &Order, observation: &SimulatedMarketObservation) -> Option<FixedPoint> {

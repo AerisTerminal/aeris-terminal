@@ -103,6 +103,50 @@ pub fn dispatch_simulated_market_order(
         .detach();
 }
 
+/// Flattens the simulated account using the current best bid and ask off the UI thread.
+pub fn flatten_simulated_account(frame: &aeris_market_data::OrderBookFrame, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let frame = frame.clone();
+    let Ok(account_id) = aeris_trading::TradingAccountId::try_new("aeris-sim-1") else {
+        return;
+    };
+    let Some((bid, ask)) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref()) else {
+        return;
+    };
+    let Ok(instrument_id) = InstrumentId::try_new(frame.instrument_id.clone()) else {
+        return;
+    };
+    let observed_unix_nanos = now();
+    let Ok(bid) = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale) else {
+        return;
+    };
+    let Ok(ask) = aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale) else {
+        return;
+    };
+    let observation = SimulatedMarketObservation {
+        instrument_id,
+        bid,
+        ask,
+        provenance: aeris_trading::TradingProvenance {
+            venue_id: "aeris-sim".to_string(),
+            provider_id: frame.provider_id,
+            session_generation: frame.session_generation,
+            source_sequence: frame
+                .source_watermark
+                .max(frame.bbo_source_watermark)
+                .max(1),
+            observed_unix_nanos,
+        },
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let _ = service.flatten_account(account_id, observation);
+        })
+        .detach();
+}
+
 #[must_use]
 pub fn now() -> i64 {
     std::time::SystemTime::now()
