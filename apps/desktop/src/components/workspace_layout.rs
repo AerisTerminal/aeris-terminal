@@ -264,8 +264,9 @@ pub(super) fn workspace_market_area(
     drawing_toolbar_collapsed: bool,
     watchlist: WatchlistPanelState,
     theme: &AerisTheme,
-    cx: &App,
+    cx: &mut Context<TerminalApp>,
 ) -> impl IntoElement + use<> {
+    refresh_trading_pnl(active_surface.clone(), cx);
     let grid = workspace_pane_grid(terminal, workspace, theme, cx);
     let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
         let surface = pane.surface.read(cx);
@@ -293,6 +294,7 @@ pub(super) fn workspace_market_area(
             split_basis_points: surface.side_panel_split_basis_points,
             order_book: &surface.order_book,
             order_book_frame: surface.order_book.read(cx).frame().cloned(),
+            trading_pnl: surface.trading_pnl.current.as_ref(),
             watchlist,
             order_book_column_menu_open: surface.menu_state.order_book_column_open,
             order_book_columns: surface.order_book.read(cx).columns(),
@@ -332,4 +334,39 @@ pub(super) fn workspace_market_area(
             ))
         })
         .children(price_alert_dialog)
+}
+
+fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<TerminalApp>) {
+    let now = std::time::Instant::now();
+    let should_refresh = {
+        let state = surface.read(cx);
+        !state.trading_pnl.refresh_pending && now >= state.trading_pnl.next_refresh
+    };
+    if !should_refresh {
+        return;
+    }
+    let Some(service) = aeris_desktop::trading::handle() else {
+        return;
+    };
+    surface.update(cx, |state, _| {
+        state.trading_pnl.refresh_pending = true;
+        state.trading_pnl.next_refresh = now + std::time::Duration::from_millis(250);
+    });
+    let snapshot = cx
+        .background_executor()
+        .spawn(async move { service.snapshot() });
+    cx.spawn(async move |_, cx| {
+        let result = snapshot.await;
+        surface.update(cx, |state, state_cx| {
+            state.trading_pnl.refresh_pending = false;
+            if let Ok(snapshot) = result {
+                state.trading_pnl.current = snapshot
+                    .account_pnl
+                    .into_iter()
+                    .find(|pnl| pnl.account_id.as_str() == "aeris-sim-1");
+                state_cx.notify();
+            }
+        });
+    })
+    .detach();
 }

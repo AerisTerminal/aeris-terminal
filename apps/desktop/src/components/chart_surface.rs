@@ -68,6 +68,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) split_basis_points: u32,
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
     pub(super) order_book_frame: Option<aeris_market_data::OrderBookFrame>,
+    pub(super) trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
@@ -84,6 +85,7 @@ fn order_book_side_panel(
     app: Entity<WorkspaceSurface>,
     order_book: &Entity<ReadOnlyOrderBookView>,
     order_book_frame: Option<&aeris_market_data::OrderBookFrame>,
+    trading_pnl: Option<&aeris_trading::AccountPnl>,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
@@ -101,7 +103,7 @@ fn order_book_side_panel(
             column_menu_open,
             theme,
         ))
-        .child(trading_order_controls(order_book_frame, theme))
+        .child(trading_order_controls(order_book_frame, trading_pnl, theme))
         .child(
             div()
                 .flex_1()
@@ -116,6 +118,7 @@ fn order_book_side_panel(
 
 fn trading_order_controls(
     frame: Option<&aeris_market_data::OrderBookFrame>,
+    trading_pnl: Option<&aeris_trading::AccountPnl>,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -126,8 +129,60 @@ fn trading_order_controls(
         .p_1()
         .border_b_1()
         .border_color(gpui_color(colors.border))
+        .child(trading_pnl_summary(trading_pnl, theme))
         .child(market_order_buttons(frame, theme))
         .child(order_management_buttons(frame, theme))
+}
+
+fn trading_pnl_summary(
+    pnl: Option<&aeris_trading::AccountPnl>,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let (label, color) = pnl.map_or_else(
+        || ("P/L · awaiting runtime".to_string(), colors.text_muted),
+        |pnl| {
+            let total = pnl.realized.units().saturating_add(pnl.unrealized.units());
+            let label = format!(
+                "P/L {}{} · U {}{}",
+                pnl.currency,
+                format_fixed_point(pnl.realized),
+                pnl.currency,
+                format_fixed_point(pnl.unrealized),
+            );
+            let color = if total >= 0 {
+                colors.bullish
+            } else {
+                colors.bearish
+            };
+            (label, color)
+        },
+    );
+    div()
+        .h(px(22.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(gpui_color(color))
+        .child(label)
+}
+
+fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
+    let scale = usize::from(value.scale());
+    let units = value.units();
+    let sign = if units < 0 { "-" } else { "+" };
+    let magnitude = units.unsigned_abs();
+    if scale == 0 {
+        return format!("{sign}{magnitude}");
+    }
+    let base = 10_u64.saturating_pow(u32::try_from(scale).unwrap_or(18));
+    format!(
+        "{sign}{}.{:0scale$}",
+        magnitude / base,
+        magnitude % base,
+        scale = scale
+    )
 }
 
 fn market_order_buttons(
@@ -398,6 +453,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         split_basis_points,
         order_book,
         order_book_frame,
+        trading_pnl,
         watchlist,
         order_book_column_menu_open,
         order_book_columns,
@@ -412,6 +468,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 app.clone(),
                 order_book,
                 order_book_frame.as_ref(),
+                trading_pnl,
                 order_book_column_menu_open,
                 order_book_columns,
                 theme,

@@ -109,7 +109,8 @@ risk profiles and account locks, pre-trade checks on simulated orders, cancel/mo
 account/global flatten and kill-switch commands, mark-to-market unrealized P/L, restart-safe order
 state, and a first desktop order-control surface. The keymap owner validates normalized bindings
 and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that
-owner only when the trading chrome owns focus.
+owner only when the trading chrome owns focus. The order-book surface also renders the runtime's
+currency P/L projection through a bounded asynchronous snapshot refresh.
 The remaining T2 checklist items are intentionally open: the DOM ladder, full order-entry and
 bracket UX, chart/hotkey dispatch, full flatten UX, copier, live rule meters, and chart warning
 wiring still require the real runtime and desktop paths.

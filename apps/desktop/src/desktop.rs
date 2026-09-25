@@ -168,7 +168,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     task::{Context as TaskContext, Poll, Waker},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use study_settings_dialog::study_settings_dialog_layer;
 use symbol_menu::{
@@ -194,9 +194,6 @@ use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use workspace_layout::workspace_market_area;
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
-
-#[cfg(feature = "diagnostics")]
-use std::time::Instant;
 
 fn install_platform_http_client(cx: &mut App) {
     match ReqwestClient::user_agent(concat!("Aeris/", env!("CARGO_PKG_VERSION"))) {
@@ -655,6 +652,7 @@ struct WorkspaceSurface {
     connection_state: Option<FeedConnectionState>,
     connection_message: Option<String>,
     provider_transport_rtt_nanos: Option<u64>,
+    trading_pnl: TradingPnlState,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
     market_state: WorkspaceMarketState,
@@ -712,6 +710,22 @@ struct WorkspaceSurface {
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
+}
+
+struct TradingPnlState {
+    current: Option<aeris_trading::AccountPnl>,
+    refresh_pending: bool,
+    next_refresh: Instant,
+}
+
+impl Default for TradingPnlState {
+    fn default() -> Self {
+        Self {
+            current: None,
+            refresh_pending: false,
+            next_refresh: Instant::now(),
+        }
+    }
 }
 
 #[derive(Clone)]
