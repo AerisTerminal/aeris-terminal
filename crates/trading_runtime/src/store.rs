@@ -1,4 +1,6 @@
-use super::{TradingInstrument, TradingRetention, UserRecord};
+use super::{
+    RiskLock, RiskProfile, TradingInstrument, TradingRetention, TrailingDrawdownMode, UserRecord,
+};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
     SessionHours,
@@ -17,7 +19,7 @@ use std::{
     path::Path,
 };
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -68,6 +70,19 @@ const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      updated_unix_nanos INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(kind, id)
  ) STRICT;
  CREATE INDEX user_records_retention ON user_records(kind, updated_unix_nanos);";
+const MIGRATION_V2: &str = "CREATE TABLE risk_profiles (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), profile_id TEXT NOT NULL,
+     version INTEGER NOT NULL, daily_loss_units INTEGER NOT NULL, daily_loss_scale INTEGER NOT NULL,
+     trailing_units INTEGER, trailing_scale INTEGER, trailing_mode TEXT NOT NULL,
+     max_contracts_units INTEGER NOT NULL, max_contracts_scale INTEGER NOT NULL,
+     consistency_percent INTEGER, restricted_until_unix_nanos INTEGER, enabled INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE risk_locks (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), reason TEXT NOT NULL,
+     locked_at_unix_nanos INTEGER NOT NULL, profile_id TEXT, profile_version INTEGER
+ ) STRICT;";
+const MIGRATION_V3: &str =
+    "ALTER TABLE risk_profiles ADD COLUMN session_start_unix_nanos INTEGER NOT NULL DEFAULT 1;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -78,6 +93,8 @@ pub(super) struct StoredState {
     pub order_events: VecDeque<OrderEvent>,
     pub fills: VecDeque<Fill>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
+    pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
+    pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
 }
 
 pub(super) struct TradingStore {
@@ -112,7 +129,7 @@ impl TradingStore {
     }
 
     fn migrate(&mut self) -> Result<(), String> {
-        let version = self
+        let mut version = self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .map_err(|error| format!("trading schema version could not be read: {error}"))?;
@@ -128,6 +145,42 @@ impl TradingStore {
                 .map_err(|error| format!("trading migration could not start: {error}"))?;
             transaction
                 .execute_batch(INITIAL_SCHEMA)
+                .map_err(|error| format!("trading schema migration failed: {error}"))?;
+            transaction
+                .pragma_update(None, "user_version", 1_u32)
+                .map_err(|error| {
+                    format!("trading schema version could not be committed: {error}")
+                })?;
+            transaction
+                .commit()
+                .map_err(|error| format!("trading migration could not commit: {error}"))?;
+            version = 1;
+        }
+        if version == 1 {
+            let transaction = self
+                .connection
+                .transaction()
+                .map_err(|error| format!("trading schema migration could not start: {error}"))?;
+            transaction
+                .execute_batch(MIGRATION_V2)
+                .map_err(|error| format!("trading schema migration failed: {error}"))?;
+            transaction
+                .pragma_update(None, "user_version", 2_u32)
+                .map_err(|error| {
+                    format!("trading schema version could not be committed: {error}")
+                })?;
+            transaction
+                .commit()
+                .map_err(|error| format!("trading migration could not commit: {error}"))?;
+            version = 2;
+        }
+        if version == 2 {
+            let transaction = self
+                .connection
+                .transaction()
+                .map_err(|error| format!("trading schema migration could not start: {error}"))?;
+            transaction
+                .execute_batch(MIGRATION_V3)
                 .map_err(|error| format!("trading schema migration failed: {error}"))?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -195,6 +248,8 @@ impl TradingStore {
         let order_events = self.load_events()?;
         let fills = self.load_fills()?;
         let positions = self.load_positions()?;
+        let risk_profiles = self.load_risk_profiles()?;
+        let risk_locks = self.load_risk_locks()?;
         Ok(StoredState {
             revision,
             next_sequence,
@@ -204,6 +259,8 @@ impl TradingStore {
             order_events,
             fills,
             positions,
+            risk_profiles,
+            risk_locks,
         })
     }
 
@@ -267,6 +324,194 @@ impl TradingStore {
         Ok(())
     }
 
+    pub(super) fn put_risk_profile(&self, profile: &RiskProfile) -> Result<(), String> {
+        profile.validate()?;
+        self.connection
+            .execute(
+                "INSERT INTO risk_profiles(account_id, profile_id, version, daily_loss_units,
+                    daily_loss_scale, trailing_units, trailing_scale, trailing_mode,
+                    max_contracts_units, max_contracts_scale, consistency_percent,
+                    restricted_until_unix_nanos, enabled, session_start_unix_nanos)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(account_id) DO UPDATE SET profile_id=excluded.profile_id,
+                    version=excluded.version, daily_loss_units=excluded.daily_loss_units,
+                    daily_loss_scale=excluded.daily_loss_scale, trailing_units=excluded.trailing_units,
+                    trailing_scale=excluded.trailing_scale, trailing_mode=excluded.trailing_mode,
+                    max_contracts_units=excluded.max_contracts_units,
+                    max_contracts_scale=excluded.max_contracts_scale,
+                    consistency_percent=excluded.consistency_percent,
+                    restricted_until_unix_nanos=excluded.restricted_until_unix_nanos,
+                    enabled=excluded.enabled,
+                    session_start_unix_nanos=excluded.session_start_unix_nanos",
+                params![
+                    profile.account_id.as_str(),
+                    profile.profile_id,
+                    profile.version,
+                    profile.daily_loss_limit.units(),
+                    profile.daily_loss_limit.scale(),
+                    profile.trailing_drawdown.map(FixedPoint::units),
+                    profile.trailing_drawdown.map(FixedPoint::scale),
+                    profile.trailing_mode.as_str(),
+                    profile.max_contracts.units(),
+                    profile.max_contracts.scale(),
+                    profile.consistency_max_single_trade_percent,
+                    profile.restricted_until_unix_nanos,
+                    i64::from(profile.enabled),
+                    profile.session_start_unix_nanos,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub(super) fn put_risk_lock(&self, lock: &RiskLock) -> Result<(), String> {
+        lock.validate()?;
+        self.connection
+            .execute(
+                "INSERT INTO risk_locks(account_id, reason, locked_at_unix_nanos, profile_id,
+                    profile_version) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(account_id) DO UPDATE SET reason=excluded.reason,
+                    locked_at_unix_nanos=excluded.locked_at_unix_nanos,
+                    profile_id=excluded.profile_id, profile_version=excluded.profile_version",
+                params![
+                    lock.account_id.as_str(),
+                    lock.reason,
+                    lock.locked_at_unix_nanos,
+                    lock.profile_id,
+                    lock.profile_version,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub(super) fn delete_risk_lock(&self, account_id: &TradingAccountId) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM risk_locks WHERE account_id = ?1",
+                [account_id.as_str()],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    fn load_risk_profiles(&self) -> Result<BTreeMap<TradingAccountId, RiskProfile>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, profile_id, version, daily_loss_units, daily_loss_scale,
+                    trailing_units, trailing_scale, trailing_mode, max_contracts_units,
+                    max_contracts_scale, consistency_percent, restricted_until_unix_nanos, enabled,
+                    session_start_unix_nanos
+                 FROM risk_profiles ORDER BY account_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<u8>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, u8>(9)?,
+                    row.get::<_, Option<u8>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (
+                account,
+                profile_id,
+                version,
+                daily_loss_units,
+                daily_loss_scale,
+                trailing_units,
+                trailing_scale,
+                trailing_mode,
+                max_contracts_units,
+                max_contracts_scale,
+                consistency_percent,
+                restricted_until_unix_nanos,
+                enabled,
+                session_start_unix_nanos,
+            ) = row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+            let daily_loss_limit = FixedPoint::try_new(daily_loss_units, daily_loss_scale)
+                .map_err(|error| error.to_string())?;
+            let trailing_drawdown = trailing_units
+                .zip(trailing_scale)
+                .map(|(units, scale)| FixedPoint::try_new(units, scale))
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            let max_contracts = FixedPoint::try_new(max_contracts_units, max_contracts_scale)
+                .map_err(|error| error.to_string())?;
+            let profile = RiskProfile {
+                account_id: account_id.clone(),
+                profile_id,
+                version,
+                daily_loss_limit,
+                trailing_drawdown,
+                trailing_mode: TrailingDrawdownMode::parse(&trailing_mode)?,
+                max_contracts,
+                consistency_max_single_trade_percent: consistency_percent,
+                restricted_until_unix_nanos,
+                enabled: enabled != 0,
+                session_start_unix_nanos,
+            };
+            profile.validate()?;
+            result.insert(account_id, profile);
+        }
+        Ok(result)
+    }
+
+    fn load_risk_locks(&self) -> Result<BTreeMap<TradingAccountId, RiskLock>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, reason, locked_at_unix_nanos, profile_id, profile_version
+                 FROM risk_locks ORDER BY account_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<u32>>(4)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account, reason, locked_at_unix_nanos, profile_id, profile_version) =
+                row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+            let lock = RiskLock {
+                account_id: account_id.clone(),
+                reason,
+                locked_at_unix_nanos,
+                profile_id,
+                profile_version,
+            };
+            lock.validate()?;
+            result.insert(account_id, lock);
+        }
+        Ok(result)
+    }
+
     pub(super) fn insert_order(
         &mut self,
         order: &Order,
@@ -318,6 +563,58 @@ impl TradingStore {
             .map_err(database_error)?;
         upsert_position(&transaction, position)?;
         update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn cancel_order(
+        &mut self,
+        order: &Order,
+        event: &OrderEvent,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE orders SET status = 'cancelled' WHERE id = ?1 AND status = 'working'",
+                [order.id.as_str()],
+            )
+            .map_err(database_error)?;
+        insert_event_row(&transaction, event)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn modify_order(
+        &mut self,
+        order: &Order,
+        event: &OrderEvent,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE orders SET time_in_force = ?1, limit_units = ?2, limit_scale = ?3,
+                    stop_units = ?4, stop_scale = ?5, provenance_json = ?6
+                 WHERE id = ?7 AND status = 'working'",
+                params![
+                    order.time_in_force.as_str(),
+                    order.limit_price.map(FixedPoint::units),
+                    order.limit_price.map(FixedPoint::scale),
+                    order.stop_price.map(FixedPoint::units),
+                    order.stop_price.map(FixedPoint::scale),
+                    encode_provenance(&order.provenance),
+                    order.id.as_str(),
+                ],
+            )
+            .map_err(database_error)?;
+        insert_event_row(&transaction, event)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn update_position(&mut self, position: &Position) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        upsert_position(&transaction, position)?;
         transaction.commit().map_err(database_error)
     }
 
@@ -1037,6 +1334,7 @@ fn parse_status(value: &str) -> Result<OrderStatus, String> {
 fn parse_event_kind(value: &str) -> Result<OrderEventKind, String> {
     match value {
         "accepted" => Ok(OrderEventKind::Accepted),
+        "modified" => Ok(OrderEventKind::Modified),
         "filled" => Ok(OrderEventKind::Filled),
         "cancelled" => Ok(OrderEventKind::Cancelled),
         "rejected" => Ok(OrderEventKind::Rejected),

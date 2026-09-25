@@ -128,6 +128,10 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .observe_market(observation(9_975, 10_000, 3, 2_000))
         .expect("buy fills");
     assert_eq!(fills.len(), 1);
+    assert_eq!(
+        service.snapshot().expect("snapshot").positions[0].unrealized_pnl,
+        FixedPoint::try_new(-1_250, 2).expect("unrealized pnl")
+    );
     service
         .place_order(market_order("client-close", OrderSide::Sell, 4, 3_000))
         .expect("sell accepted");
@@ -172,6 +176,90 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         fs::read_to_string(directory.0.join("export/user_records.json"))
             .expect("JSON export")
             .contains("disciplined trade")
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("restarted service stops");
+}
+
+#[test]
+fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
+    let directory = TestDirectory::new("risk");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "practice-rules".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("loss limit"),
+            trailing_drawdown: Some(FixedPoint::try_new(200_000, 2).expect("drawdown")),
+            trailing_mode: TrailingDrawdownMode::Intraday,
+            max_contracts: FixedPoint::try_new(1, 0).expect("contracts"),
+            consistency_max_single_trade_percent: Some(50),
+            restricted_until_unix_nanos: None,
+            enabled: true,
+        })
+        .expect("risk profile stores");
+
+    let working = service
+        .place_order(market_order("risk-open", OrderSide::Buy, 1, 1_000))
+        .expect("first order accepted");
+    let modified = service
+        .modify_order(ModifyOrder {
+            client_order_id: working.client_order_id.clone(),
+            time_in_force: TimeInForce::GoodTillCancelled,
+            limit_price: None,
+            stop_price: None,
+            modified_unix_nanos: 1_500,
+            provenance: provenance(2, 1_500),
+        })
+        .expect("modify accepted");
+    assert_eq!(modified.time_in_force, TimeInForce::GoodTillCancelled);
+    let cancelled = service
+        .cancel_order(working.client_order_id.clone())
+        .expect("cancel accepted");
+    assert_eq!(cancelled.status, OrderStatus::Cancelled);
+    assert!(
+        service
+            .snapshot()
+            .expect("snapshot")
+            .order_events
+            .iter()
+            .any(|event| event.kind == OrderEventKind::Cancelled)
+    );
+
+    service
+        .lock_account(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            "manual daily stop".to_string(),
+            2_000,
+        )
+        .expect("lock stores");
+    let locked = service
+        .place_order(market_order("risk-locked", OrderSide::Buy, 2, 2_001))
+        .expect_err("locked account rejects order");
+    assert!(locked.contains("risk-locked"));
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restored = restarted.snapshot().expect("restored snapshot");
+    assert_eq!(restored.risk_profiles.len(), 1);
+    assert_eq!(restored.risk_locks.len(), 1);
+    restarted
+        .unlock_account(TradingAccountId::try_new("aeris-sim-1").expect("account"))
+        .expect("unlock stores");
+    assert!(
+        restarted
+            .snapshot()
+            .expect("snapshot")
+            .risk_locks
+            .is_empty()
     );
     restarted
         .shutdown(Duration::from_secs(2))

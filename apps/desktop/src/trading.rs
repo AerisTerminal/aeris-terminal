@@ -5,7 +5,9 @@ use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
     SessionHours,
 };
-use aeris_trading_runtime::{TradingInstrument, TradingService};
+use aeris_trading_runtime::{
+    PlaceOrder, SimulatedMarketObservation, TradingInstrument, TradingService,
+};
 use std::sync::OnceLock;
 
 static TRADING_SERVICE: OnceLock<TradingService> = OnceLock::new();
@@ -18,6 +20,96 @@ pub fn install(service: TradingService) -> Result<(), String> {
     TRADING_SERVICE
         .set(service)
         .map_err(|_| "desktop trading owner is already installed".to_string())
+}
+
+/// Returns a cloneable command handle without exposing the owner to UI state.
+#[must_use]
+pub fn handle() -> Option<TradingService> {
+    TRADING_SERVICE.get().cloned()
+}
+
+/// Dispatches a market order and its immediate simulated-market observation off the UI thread.
+pub fn dispatch_simulated_market_order(
+    frame: &aeris_market_data::OrderBookFrame,
+    side: aeris_trading::OrderSide,
+    cx: &mut gpui::App,
+) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let frame = frame.clone();
+    let submitted_unix_nanos = now();
+    let Ok(account_id) = aeris_trading::TradingAccountId::try_new("aeris-sim-1") else {
+        return;
+    };
+    let Ok(instrument_id) = InstrumentId::try_new(frame.instrument_id.clone()) else {
+        return;
+    };
+    let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(format!(
+        "ui-{}-{submitted_unix_nanos}",
+        match side {
+            aeris_trading::OrderSide::Buy => "buy",
+            aeris_trading::OrderSide::Sell => "sell",
+        }
+    )) else {
+        return;
+    };
+    let Ok(quantity) = aeris_trading::FixedPoint::try_new(1, frame.quantity_scale) else {
+        return;
+    };
+    let provenance = aeris_trading::TradingProvenance {
+        venue_id: "aeris-sim".to_string(),
+        provider_id: frame.provider_id.clone(),
+        session_generation: frame.session_generation,
+        source_sequence: frame
+            .source_watermark
+            .max(frame.bbo_source_watermark)
+            .max(1),
+        observed_unix_nanos: submitted_unix_nanos,
+    };
+    let command = PlaceOrder {
+        client_order_id,
+        account_id,
+        instrument_id: instrument_id.clone(),
+        side,
+        order_type: aeris_trading::OrderType::Market,
+        time_in_force: aeris_trading::TimeInForce::Day,
+        quantity,
+        limit_price: None,
+        stop_price: None,
+        submitted_unix_nanos,
+        provenance: provenance.clone(),
+    };
+    let observation = frame
+        .best_bid
+        .as_ref()
+        .zip(frame.best_ask.as_ref())
+        .and_then(|(bid, ask)| {
+            Some(SimulatedMarketObservation {
+                instrument_id,
+                bid: aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?,
+                ask: aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale).ok()?,
+                provenance,
+            })
+        });
+    cx.background_executor()
+        .spawn(async move {
+            if service.place_order(command).is_ok()
+                && let Some(observation) = observation
+            {
+                let _ = service.observe_market(observation);
+            }
+        })
+        .detach();
+}
+
+#[must_use]
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(1)
 }
 
 /// Registers complete provider contract terms on a market background worker.

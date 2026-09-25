@@ -67,6 +67,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) width: f32,
     pub(super) split_basis_points: u32,
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
+    pub(super) order_book_frame: Option<aeris_market_data::OrderBookFrame>,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
     pub(super) order_book_columns: OrderBookColumnVisibility,
@@ -82,6 +83,7 @@ pub(super) struct WatchlistPanelState {
 fn order_book_side_panel(
     app: Entity<WorkspaceSurface>,
     order_book: &Entity<ReadOnlyOrderBookView>,
+    order_book_frame: Option<&aeris_market_data::OrderBookFrame>,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
@@ -99,6 +101,7 @@ fn order_book_side_panel(
             column_menu_open,
             theme,
         ))
+        .child(trading_order_controls(order_book_frame, theme))
         .child(
             div()
                 .flex_1()
@@ -109,6 +112,136 @@ fn order_book_side_panel(
         .children(
             column_menu_open.then(|| order_book_column_menu_layer(app, order_book, columns, theme)),
         )
+}
+
+fn trading_order_controls(
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_1()
+        .border_b_1()
+        .border_color(gpui_color(colors.border))
+        .child(market_order_buttons(frame, theme))
+        .child(order_management_buttons(theme))
+}
+
+fn market_order_buttons(
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let buy_frame = frame.cloned();
+    let sell_frame = frame.cloned();
+    let buy = div()
+        .id("trading_buy_market")
+        .flex_1()
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.bullish))
+        .text_color(gpui_color(colors.surface))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Buy one simulated contract at market")
+        .on_click(move |_, _, cx| {
+            if let Some(frame) = buy_frame.clone() {
+                aeris_desktop::trading::dispatch_simulated_market_order(
+                    &frame,
+                    aeris_trading::OrderSide::Buy,
+                    cx,
+                );
+            }
+        })
+        .child("BUY 1");
+    let sell = div()
+        .id("trading_sell_market")
+        .flex_1()
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.bearish))
+        .text_color(gpui_color(colors.surface))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Sell one simulated contract at market")
+        .on_click(move |_, _, cx| {
+            if let Some(frame) = sell_frame.clone() {
+                aeris_desktop::trading::dispatch_simulated_market_order(
+                    &frame,
+                    aeris_trading::OrderSide::Sell,
+                    cx,
+                );
+            }
+        })
+        .child("SELL 1");
+    div().flex().gap_1().child(buy).child(sell)
+}
+
+fn order_management_buttons(theme: &AerisTheme) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let cancel_service = aeris_desktop::trading::handle();
+    let kill_service = cancel_service.clone();
+    let cancel = div()
+        .id("trading_cancel_all")
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.hover_bg))
+        .text_color(gpui_color(colors.text_primary))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Cancel all simulated orders")
+        .on_click(move |_, _, cx| {
+            if let Some(service) = cancel_service.clone() {
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = service.cancel_all(None);
+                    })
+                    .detach();
+            }
+        })
+        .child("CANCEL ALL");
+    let kill = div()
+        .id("trading_kill_switch")
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.danger))
+        .text_color(gpui_color(colors.surface))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Lock all simulated accounts")
+        .on_click(move |_, _, cx| {
+            if let Some(service) = kill_service.clone() {
+                let now = aeris_desktop::trading::now();
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = service.kill_switch(None, "manual kill switch".to_string(), now);
+                    })
+                    .detach();
+            }
+        })
+        .child("KILL");
+    div().flex().gap_1().child(cancel).child(kill)
 }
 
 fn watchlist_side_panel(
@@ -214,6 +347,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         width,
         split_basis_points,
         order_book,
+        order_book_frame,
         watchlist,
         order_book_column_menu_open,
         order_book_columns,
@@ -227,6 +361,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
             order_book_side_panel(
                 app.clone(),
                 order_book,
+                order_book_frame.as_ref(),
                 order_book_column_menu_open,
                 order_book_columns,
                 theme,

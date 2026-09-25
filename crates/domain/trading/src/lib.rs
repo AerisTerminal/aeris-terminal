@@ -356,6 +356,7 @@ impl Order {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderEventKind {
     Accepted,
+    Modified,
     Filled,
     Cancelled,
     Rejected,
@@ -367,6 +368,7 @@ impl OrderEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
+            Self::Modified => "modified",
             Self::Filled => "filled",
             Self::Cancelled => "cancelled",
             Self::Rejected => "rejected",

@@ -3149,6 +3149,10 @@ fn mount_desktop(
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     let chart_chrome = configured.chart_chrome;
+    if let Err(error) = validate_trading_keymap() {
+        eprintln!("Aeris trading keymap is invalid: {error}");
+        return None;
+    }
     cx.bind_keys([
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
@@ -3236,6 +3240,26 @@ fn mount_desktop(
     }
     cx.activate(true);
     existing_root
+}
+
+fn validate_trading_keymap() -> Result<(), String> {
+    let keymap = aeris_desktop::keymap::KeymapOwner::defaults()?;
+    keymap.validate_against_reserved(&[
+        "f11",
+        "alt-enter",
+        "alt-f9",
+        "alt-f10",
+        "alt-f4",
+        "ctrl-t",
+        "ctrl-tab",
+        "ctrl-shift-tab",
+        "ctrl-shift-pageup",
+        "ctrl-shift-pagedown",
+        "ctrl-w",
+        "ctrl-alt-h",
+        "ctrl-alt-v",
+        "ctrl-shift-w",
+    ])
 }
 #[cfg(test)]
 mod tests;

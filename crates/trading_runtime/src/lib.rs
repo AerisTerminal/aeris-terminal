@@ -3,14 +3,16 @@
 //! The service owns its bounded command queue, canonical orders/fills/positions, and the one
 //! embedded user-record store. Callers must invoke blocking request methods from background work.
 
+mod risk;
 mod store;
 
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::{
-    AccountEnvironment, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce,
-    TradingAccount, TradingAccountId, TradingProvenance,
+    AccountEnvironment, AccountPnl, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
+    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
+    TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
 };
+pub use risk::{RiskEvaluation, RiskLock, RiskProfile, TrailingDrawdownMode};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -29,7 +31,7 @@ const REPLY_CAPACITY: usize = 1;
 const MAXIMUM_OPEN_ORDERS: usize = 4_096;
 const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
 const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -97,6 +99,17 @@ pub struct PlaceOrder {
     pub limit_price: Option<FixedPoint>,
     pub stop_price: Option<FixedPoint>,
     pub submitted_unix_nanos: i64,
+    pub provenance: TradingProvenance,
+}
+
+/// Modification of one working order without changing its stable client identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModifyOrder {
+    pub client_order_id: ClientOrderId,
+    pub time_in_force: TimeInForce,
+    pub limit_price: Option<FixedPoint>,
+    pub stop_price: Option<FixedPoint>,
+    pub modified_unix_nanos: i64,
     pub provenance: TradingProvenance,
 }
 
@@ -174,6 +187,9 @@ pub struct TradingSnapshot {
     pub order_events: Vec<OrderEvent>,
     pub fills: Vec<Fill>,
     pub positions: Vec<Position>,
+    pub account_pnl: Vec<AccountPnl>,
+    pub risk_profiles: Vec<RiskProfile>,
+    pub risk_locks: Vec<RiskLock>,
 }
 
 /// Runtime and store health visible to diagnostics/readiness.
@@ -204,6 +220,14 @@ enum Command {
     RegisterAccount(TradingAccount, Reply<()>),
     RegisterInstrument(TradingInstrument, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
+    EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
+    Modify(ModifyOrder, Reply<Order>),
+    Cancel(ClientOrderId, Reply<Order>),
+    CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
+    RegisterRiskProfile(RiskProfile, Reply<()>),
+    LockAccount(TradingAccountId, String, i64, Reply<()>),
+    UnlockAccount(TradingAccountId, Reply<()>),
+    KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
@@ -294,6 +318,81 @@ impl TradingService {
     /// Returns an error when validation, routing, capacity, or persistence fails.
     pub fn place_order(&self, order: PlaceOrder) -> Result<Order, String> {
         self.request(|reply| Command::Place(order, reply))
+    }
+
+    /// Runs the same authoritative pre-trade checks used by order placement.
+    ///
+    /// # Errors
+    /// Returns an error when the account is locked, the order violates a rule, or the owner queue
+    /// is unavailable.
+    pub fn evaluate_risk(&self, order: PlaceOrder) -> Result<RiskEvaluation, String> {
+        self.request(|reply| Command::EvaluateRisk(order, reply))
+    }
+
+    /// Modifies a working order through the same bounded owner queue.
+    ///
+    /// # Errors
+    /// Returns an error when the order is missing, not working, invalid, or the owner is busy.
+    pub fn modify_order(&self, order: ModifyOrder) -> Result<Order, String> {
+        self.request(|reply| Command::Modify(order, reply))
+    }
+
+    /// Cancels one working order through the authoritative command path.
+    ///
+    /// # Errors
+    /// Returns an error when the order is missing, storage fails, or the owner is unavailable.
+    pub fn cancel_order(&self, client_order_id: ClientOrderId) -> Result<Order, String> {
+        self.request(|reply| Command::Cancel(client_order_id, reply))
+    }
+
+    /// Cancels every working order for one account, or all accounts when no account is supplied.
+    ///
+    /// # Errors
+    /// Returns an error when cancellation persistence fails or the owner queue is unavailable.
+    pub fn cancel_all(&self, account_id: Option<TradingAccountId>) -> Result<Vec<Order>, String> {
+        self.request(|reply| Command::CancelAll(account_id, reply))
+    }
+
+    /// Installs a versioned deterministic pre-trade rule profile.
+    ///
+    /// # Errors
+    /// Returns an error when the profile is invalid, its account is unknown, or storage fails.
+    pub fn register_risk_profile(&self, profile: RiskProfile) -> Result<(), String> {
+        self.request(|reply| Command::RegisterRiskProfile(profile, reply))
+    }
+
+    /// Persists a hard account lock. Every order surface observes the same lock.
+    ///
+    /// # Errors
+    /// Returns an error when the account is unknown, the lock is invalid, or storage fails.
+    pub fn lock_account(
+        &self,
+        account_id: TradingAccountId,
+        reason: String,
+        locked_at_unix_nanos: i64,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::LockAccount(account_id, reason, locked_at_unix_nanos, reply))
+    }
+
+    /// Clears an account lock through the owner. Callers still need an explicit user action.
+    ///
+    /// # Errors
+    /// Returns an error when storage fails or the owner is unavailable.
+    pub fn unlock_account(&self, account_id: TradingAccountId) -> Result<(), String> {
+        self.request(|reply| Command::UnlockAccount(account_id, reply))
+    }
+
+    /// Locks one account or every account and cancels its working orders atomically on the owner.
+    ///
+    /// # Errors
+    /// Returns an error when no target account exists, locking fails, or cancellation fails.
+    pub fn kill_switch(
+        &self,
+        account_id: Option<TradingAccountId>,
+        reason: String,
+        locked_at_unix_nanos: i64,
+    ) -> Result<usize, String> {
+        self.request(|reply| Command::KillSwitch(account_id, reason, locked_at_unix_nanos, reply))
     }
 
     /// Applies one market observation and returns fills produced by the simulated venue.
@@ -415,6 +514,30 @@ impl Coordinator {
                 Command::Place(order, reply) => {
                     let _ = reply.send(self.place_order(order));
                 }
+                Command::EvaluateRisk(order, reply) => {
+                    let _ = reply.send(self.evaluate_order_risk(&order));
+                }
+                Command::Modify(order, reply) => {
+                    let _ = reply.send(self.modify_order(order));
+                }
+                Command::Cancel(client_order_id, reply) => {
+                    let _ = reply.send(self.cancel_order(&client_order_id));
+                }
+                Command::CancelAll(account_id, reply) => {
+                    let _ = reply.send(self.cancel_all(account_id.as_ref()));
+                }
+                Command::RegisterRiskProfile(profile, reply) => {
+                    let _ = reply.send(self.register_risk_profile(profile));
+                }
+                Command::LockAccount(account_id, reason, locked_at, reply) => {
+                    let _ = reply.send(self.lock_account(account_id, reason, locked_at));
+                }
+                Command::UnlockAccount(account_id, reply) => {
+                    let _ = reply.send(self.unlock_account(&account_id));
+                }
+                Command::KillSwitch(account_id, reason, locked_at, reply) => {
+                    let _ = reply.send(self.kill_switch(account_id.as_ref(), &reason, locked_at));
+                }
                 Command::Observe(observation, reply) => {
                     let _ = reply.send(self.observe_market(&observation));
                 }
@@ -474,6 +597,191 @@ impl Coordinator {
         self.bump_revision()
     }
 
+    fn register_risk_profile(&mut self, profile: RiskProfile) -> Result<(), String> {
+        profile.validate()?;
+        if !self.state.accounts.contains_key(&profile.account_id) {
+            return Err("risk profile account is not registered".to_string());
+        }
+        self.store.put_risk_profile(&profile)?;
+        self.state
+            .risk_profiles
+            .insert(profile.account_id.clone(), profile);
+        self.bump_revision()
+    }
+
+    fn lock_account(
+        &mut self,
+        account_id: TradingAccountId,
+        reason: String,
+        locked_at_unix_nanos: i64,
+    ) -> Result<(), String> {
+        if !self.state.accounts.contains_key(&account_id) {
+            return Err("risk lock account is not registered".to_string());
+        }
+        let profile = self.state.risk_profiles.get(&account_id);
+        let lock = RiskLock {
+            account_id: account_id.clone(),
+            reason,
+            locked_at_unix_nanos,
+            profile_id: profile.map(|profile| profile.profile_id.clone()),
+            profile_version: profile.map(|profile| profile.version),
+        };
+        self.store.put_risk_lock(&lock)?;
+        self.state.risk_locks.insert(account_id, lock);
+        self.bump_revision()
+    }
+
+    fn unlock_account(&mut self, account_id: &TradingAccountId) -> Result<(), String> {
+        self.store.delete_risk_lock(account_id)?;
+        self.state.risk_locks.remove(account_id);
+        self.bump_revision()
+    }
+
+    fn kill_switch(
+        &mut self,
+        account_id: Option<&TradingAccountId>,
+        reason: &str,
+        locked_at_unix_nanos: i64,
+    ) -> Result<usize, String> {
+        let accounts = self
+            .state
+            .accounts
+            .keys()
+            .filter(|candidate| {
+                account_id
+                    .as_ref()
+                    .is_none_or(|account_id| *candidate == *account_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if accounts.is_empty() {
+            return Err("kill switch account is not registered".to_string());
+        }
+        let cancelled = self.cancel_all(account_id)?;
+        for account in &accounts {
+            self.lock_account(account.clone(), reason.to_string(), locked_at_unix_nanos)?;
+        }
+        Ok(cancelled.len())
+    }
+
+    fn cancel_order(&mut self, client_order_id: &ClientOrderId) -> Result<Order, String> {
+        let order = self
+            .state
+            .orders
+            .values()
+            .find(|order| order.client_order_id == *client_order_id)
+            .cloned()
+            .ok_or_else(|| "order client identifier is not registered".to_string())?;
+        if order.status != OrderStatus::Working {
+            return Ok(order);
+        }
+        let sequence = self.state.next_sequence;
+        let provenance = order.provenance.clone();
+        let event = OrderEvent {
+            id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            order_id: order.id.clone(),
+            sequence,
+            kind: OrderEventKind::Cancelled,
+            event_unix_nanos: provenance.observed_unix_nanos,
+            detail: Some("cancelled by local command".to_string()),
+            provenance,
+        };
+        event.validate().map_err(|error| error.to_string())?;
+        self.store.cancel_order(&order, &event, sequence + 1)?;
+        self.state.next_sequence = sequence + 1;
+        self.state.order_events.push_back(event);
+        let cancelled = Order {
+            status: OrderStatus::Cancelled,
+            ..order
+        };
+        self.state
+            .orders
+            .insert(cancelled.id.clone(), cancelled.clone());
+        self.bump_revision()?;
+        Ok(cancelled)
+    }
+
+    fn modify_order(&mut self, command: ModifyOrder) -> Result<Order, String> {
+        let order = self
+            .state
+            .orders
+            .values()
+            .find(|order| order.client_order_id == command.client_order_id)
+            .cloned()
+            .ok_or_else(|| "order client identifier is not registered".to_string())?;
+        if order.status != OrderStatus::Working {
+            return Err("only working orders can be modified".to_string());
+        }
+        let instrument = self
+            .state
+            .instruments
+            .get(&order.instrument_id)
+            .ok_or_else(|| "trading instrument is not registered".to_string())?;
+        if command.modified_unix_nanos <= 0 {
+            return Err("order modification timestamp must be positive".to_string());
+        }
+        command
+            .provenance
+            .validate()
+            .map_err(|error| error.to_string())?;
+        if command
+            .limit_price
+            .into_iter()
+            .chain(command.stop_price)
+            .any(|price| price.scale() != instrument.price_scale)
+        {
+            return Err("modified order scales do not match the instrument".to_string());
+        }
+        let modified = Order {
+            time_in_force: command.time_in_force,
+            limit_price: command.limit_price,
+            stop_price: command.stop_price,
+            provenance: command.provenance.clone(),
+            ..order.clone()
+        };
+        modified.validate().map_err(|error| error.to_string())?;
+        let sequence = self.state.next_sequence;
+        let event = OrderEvent {
+            id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            order_id: order.id.clone(),
+            sequence,
+            kind: OrderEventKind::Modified,
+            event_unix_nanos: command.modified_unix_nanos,
+            detail: Some("modified by local command".to_string()),
+            provenance: command.provenance,
+        };
+        event.validate().map_err(|error| error.to_string())?;
+        self.store.modify_order(&modified, &event, sequence + 1)?;
+        self.state.next_sequence = sequence + 1;
+        self.state.order_events.push_back(event);
+        self.state
+            .orders
+            .insert(modified.id.clone(), modified.clone());
+        self.bump_revision()?;
+        Ok(modified)
+    }
+
+    fn cancel_all(&mut self, account_id: Option<&TradingAccountId>) -> Result<Vec<Order>, String> {
+        let client_order_ids = self
+            .state
+            .orders
+            .values()
+            .filter(|order| order.status == OrderStatus::Working)
+            .filter(|order| {
+                account_id
+                    .as_ref()
+                    .is_none_or(|account_id| &order.account_id == *account_id)
+            })
+            .map(|order| order.client_order_id.clone())
+            .collect::<Vec<_>>();
+        client_order_ids
+            .into_iter()
+            .map(|client_order_id| self.cancel_order(&client_order_id))
+            .collect()
+    }
+
     fn place_order(&mut self, command: PlaceOrder) -> Result<Order, String> {
         if let Some(existing) = self
             .state
@@ -491,6 +799,7 @@ impl Coordinator {
         if account.environment != AccountEnvironment::Simulated {
             return Err("T1 routes orders only to the simulated venue".to_string());
         }
+        self.evaluate_order_risk(&command)?;
         let instrument = self
             .state
             .instruments
@@ -552,6 +861,172 @@ impl Coordinator {
         Ok(order)
     }
 
+    fn evaluate_order_risk(&mut self, command: &PlaceOrder) -> Result<RiskEvaluation, String> {
+        if let Some(lock) = self.state.risk_locks.get(&command.account_id) {
+            return Err(format!("account is risk-locked: {}", lock.reason));
+        }
+        let Some(profile) = self.state.risk_profiles.get(&command.account_id).cloned() else {
+            return Ok(RiskEvaluation {
+                warnings: Vec::new(),
+                projected_contracts: command.quantity,
+                current_realized_pnl: FixedPoint::try_new(0, 2)
+                    .map_err(|error| error.to_string())?,
+            });
+        };
+        if !profile.enabled {
+            return Ok(RiskEvaluation {
+                warnings: Vec::new(),
+                projected_contracts: command.quantity,
+                current_realized_pnl: FixedPoint::try_new(0, profile.daily_loss_limit.scale())
+                    .map_err(|error| error.to_string())?,
+            });
+        }
+        self.check_restriction(command, &profile)?;
+        let current_realized = self.realized_since_session(&profile)?;
+        self.check_loss_limits(command, &profile, current_realized)?;
+        let projected_contracts = self.projected_contracts(command)?;
+        let maximum_contracts = profile
+            .max_contracts
+            .exact_rescale(command.quantity.scale())
+            .map_err(|error| error.to_string())?;
+        if projected_contracts > maximum_contracts.units().unsigned_abs() {
+            return Err("order exceeds the account maximum-contract rule".to_string());
+        }
+        let warnings = Self::risk_warnings(&profile, current_realized);
+        Ok(RiskEvaluation {
+            warnings,
+            projected_contracts: FixedPoint::try_new(
+                i64::try_from(projected_contracts)
+                    .map_err(|_| "projected contract quantity overflowed".to_string())?,
+                command.quantity.scale(),
+            )
+            .map_err(|error| error.to_string())?,
+            current_realized_pnl: current_realized,
+        })
+    }
+
+    fn check_restriction(
+        &mut self,
+        command: &PlaceOrder,
+        profile: &RiskProfile,
+    ) -> Result<(), String> {
+        if profile
+            .restricted_until_unix_nanos
+            .is_some_and(|until| command.submitted_unix_nanos < until)
+        {
+            self.lock_account(
+                command.account_id.clone(),
+                "news/session restriction is active".to_string(),
+                command.submitted_unix_nanos,
+            )?;
+            return Err("account is risk-locked: news/session restriction is active".to_string());
+        }
+        Ok(())
+    }
+
+    fn check_loss_limits(
+        &mut self,
+        command: &PlaceOrder,
+        profile: &RiskProfile,
+        current_realized: FixedPoint,
+    ) -> Result<(), String> {
+        let loss = current_realized.units().unsigned_abs();
+        if current_realized.units() < 0 && loss >= profile.daily_loss_limit.units().unsigned_abs() {
+            self.lock_account(
+                command.account_id.clone(),
+                "daily loss limit reached".to_string(),
+                command.submitted_unix_nanos,
+            )?;
+            return Err("account is risk-locked: daily loss limit reached".to_string());
+        }
+        if let Some(drawdown) = profile.trailing_drawdown {
+            let drawdown = drawdown
+                .exact_rescale(current_realized.scale())
+                .map_err(|error| error.to_string())?;
+            if current_realized.units() < 0 && loss >= drawdown.units().unsigned_abs() {
+                self.lock_account(
+                    command.account_id.clone(),
+                    format!(
+                        "{} trailing drawdown reached",
+                        profile.trailing_mode.as_str()
+                    ),
+                    command.submitted_unix_nanos,
+                )?;
+                return Err("account is risk-locked: trailing drawdown reached".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn projected_contracts(&self, command: &PlaceOrder) -> Result<u64, String> {
+        let current = self
+            .state
+            .positions
+            .values()
+            .filter(|position| position.account_id == command.account_id)
+            .try_fold(0_u64, |total, position| {
+                let quantity = position
+                    .net_quantity
+                    .exact_rescale(command.quantity.scale())
+                    .map_err(|error| error.to_string())?;
+                total
+                    .checked_add(quantity.units().unsigned_abs())
+                    .ok_or_else(|| "risk contract quantity overflowed".to_string())
+            })?;
+        command
+            .quantity
+            .units()
+            .unsigned_abs()
+            .checked_add(current)
+            .ok_or_else(|| "risk contract quantity overflowed".to_string())
+    }
+
+    fn risk_warnings(profile: &RiskProfile, current_realized: FixedPoint) -> Vec<String> {
+        if current_realized.units() < 0
+            && current_realized.units().unsigned_abs() * 100
+                >= profile.daily_loss_limit.units().unsigned_abs() * 80
+        {
+            vec!["account is within 20% of its daily loss limit".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn realized_since_session(&self, profile: &RiskProfile) -> Result<FixedPoint, String> {
+        let account = self
+            .state
+            .accounts
+            .get(&profile.account_id)
+            .ok_or_else(|| "risk profile account is not registered".to_string())?;
+        let mut positions = BTreeMap::new();
+        for fill in self.state.fills.iter().filter(|fill| {
+            fill.account_id == profile.account_id
+                && fill.execution_unix_nanos >= profile.session_start_unix_nanos
+        }) {
+            let instrument = self
+                .state
+                .instruments
+                .get(&fill.instrument_id)
+                .ok_or_else(|| "risk fill instrument is not registered".to_string())?;
+            let key = (fill.account_id.clone(), fill.instrument_id.clone());
+            let position = next_position(positions.get(&key), fill, account, instrument)?;
+            positions.insert(key, position);
+        }
+        positions
+            .values()
+            .map(|position| position.realized_pnl)
+            .try_fold(
+                FixedPoint::try_new(0, profile.daily_loss_limit.scale())
+                    .map_err(|error| error.to_string())?,
+                |total, value| {
+                    let value = value
+                        .exact_rescale(profile.daily_loss_limit.scale())
+                        .map_err(|error| error.to_string())?;
+                    total.checked_add(value).map_err(|error| error.to_string())
+                },
+            )
+    }
+
     fn observe_market(
         &mut self,
         observation: &SimulatedMarketObservation,
@@ -576,6 +1051,27 @@ impl Coordinator {
             return Err("market observation scale does not match the instrument".to_string());
         }
         let candidates = market_fill_candidates(&self.state.orders, observation);
+        let candidate_ids = candidates
+            .iter()
+            .map(|(order_id, _)| order_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let fills = self.execute_market_fills(candidates, observation, &instrument)?;
+        let mut positions_changed = self.update_mark_to_market(observation, &instrument)?;
+        positions_changed |= self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
+        if positions_changed {
+            self.store.enforce_retention()?;
+            self.enforce_memory_retention();
+            self.bump_revision()?;
+        }
+        Ok(fills)
+    }
+
+    fn execute_market_fills(
+        &mut self,
+        candidates: Vec<(OrderId, FixedPoint)>,
+        observation: &SimulatedMarketObservation,
+        instrument: &TradingInstrument,
+    ) -> Result<Vec<Fill>, String> {
         let mut fills = Vec::with_capacity(candidates.len());
         for (order_id, price) in candidates {
             let order = self
@@ -617,7 +1113,7 @@ impl Coordinator {
                     .accounts
                     .get(&order.account_id)
                     .ok_or_else(|| "fill account disappeared".to_string())?,
-                &instrument,
+                instrument,
             )?;
             self.store
                 .insert_fill(&order, &event, &fill, &position, sequence + 1)?;
@@ -637,12 +1133,74 @@ impl Coordinator {
             );
             fills.push(fill);
         }
-        if !fills.is_empty() {
-            self.store.enforce_retention()?;
-            self.enforce_memory_retention();
-            self.bump_revision()?;
-        }
         Ok(fills)
+    }
+
+    fn update_mark_to_market(
+        &mut self,
+        observation: &SimulatedMarketObservation,
+        instrument: &TradingInstrument,
+    ) -> Result<bool, String> {
+        let mut positions_changed = false;
+        let position_keys = self
+            .state
+            .positions
+            .keys()
+            .filter(|(_, instrument_id)| instrument_id == &observation.instrument_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in position_keys {
+            let Some(current) = self.state.positions.get(&key).cloned() else {
+                continue;
+            };
+            if current.net_quantity.units() == 0 {
+                continue;
+            }
+            let mark = if current.net_quantity.units() > 0 {
+                observation.bid
+            } else {
+                observation.ask
+            };
+            let unrealized = unrealized_pnl(&current, mark, instrument)?;
+            if current.unrealized_pnl != unrealized {
+                let updated = Position {
+                    unrealized_pnl: unrealized,
+                    ..current
+                };
+                self.store.update_position(&updated)?;
+                self.state.positions.insert(key, updated);
+                positions_changed = true;
+            }
+        }
+        Ok(positions_changed)
+    }
+
+    fn cancel_unfilled_immediate_orders(
+        &mut self,
+        observation: &SimulatedMarketObservation,
+        candidate_ids: &std::collections::BTreeSet<OrderId>,
+    ) -> Result<bool, String> {
+        let immediate_or_cancel = self
+            .state
+            .orders
+            .values()
+            .filter(|order| {
+                order.status == OrderStatus::Working
+                    && order.instrument_id == observation.instrument_id
+                    && matches!(
+                        order.time_in_force,
+                        TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
+                    )
+                    && !candidate_ids.contains(&order.id)
+            })
+            .map(|order| order.client_order_id.clone())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for client_order_id in immediate_or_cancel {
+            self.cancel_order(&client_order_id)?;
+            changed = true;
+        }
+        Ok(changed)
     }
 
     fn snapshot(&self) -> Result<TradingSnapshot, String> {
@@ -673,7 +1231,53 @@ impl Coordinator {
                 .cloned()
                 .collect(),
             positions: self.state.positions.values().cloned().collect(),
+            account_pnl: self.account_pnl()?,
+            risk_profiles: self.state.risk_profiles.values().cloned().collect(),
+            risk_locks: self.state.risk_locks.values().cloned().collect(),
         })
+    }
+
+    fn account_pnl(&self) -> Result<Vec<AccountPnl>, String> {
+        self.state
+            .accounts
+            .values()
+            .map(|account| -> Result<AccountPnl, String> {
+                let zero = FixedPoint::try_new(0, account.currency_scale)
+                    .map_err(|error| error.to_string())?;
+                let (realized, unrealized) = self
+                    .state
+                    .positions
+                    .values()
+                    .filter(|position| position.account_id == account.id)
+                    .try_fold(
+                        (zero, zero),
+                        |(realized, unrealized), position| -> Result<_, String> {
+                            let realized_value = position
+                                .realized_pnl
+                                .exact_rescale(account.currency_scale)
+                                .map_err(|error| error.to_string())?;
+                            let unrealized_value = position
+                                .unrealized_pnl
+                                .exact_rescale(account.currency_scale)
+                                .map_err(|error| error.to_string())?;
+                            Ok((
+                                realized
+                                    .checked_add(realized_value)
+                                    .map_err(|error| error.to_string())?,
+                                unrealized
+                                    .checked_add(unrealized_value)
+                                    .map_err(|error| error.to_string())?,
+                            ))
+                        },
+                    )?;
+                Ok(AccountPnl {
+                    account_id: account.id.clone(),
+                    currency: account.currency.clone(),
+                    realized,
+                    unrealized,
+                })
+            })
+            .collect()
     }
 
     fn bump_revision(&mut self) -> Result<(), String> {
@@ -873,6 +1477,37 @@ fn realized_pnl(
     FixedPoint::try_new(raw, raw_scale)
         .map_err(|error| error.to_string())?
         .exact_rescale(currency_scale)
+        .map_err(|error| error.to_string())
+}
+
+fn unrealized_pnl(
+    position: &Position,
+    mark: FixedPoint,
+    instrument: &TradingInstrument,
+) -> Result<FixedPoint, String> {
+    let entry = position
+        .average_entry_price
+        .ok_or_else(|| "position average is unavailable for unrealized PnL".to_string())?;
+    let point_value = instrument
+        .contract
+        .point_value
+        .ok_or_else(|| "point value is unavailable for unrealized PnL".to_string())?;
+    let price_difference = i128::from(mark.units()) - i128::from(entry.units());
+    let raw = price_difference
+        .checked_mul(i128::from(position.net_quantity.units().signum()))
+        .and_then(|value| {
+            value.checked_mul(i128::from(position.net_quantity.units().unsigned_abs()))
+        })
+        .and_then(|value| value.checked_mul(i128::from(point_value.units())))
+        .ok_or_else(|| "unrealized PnL overflowed".to_string())?;
+    let raw_scale = entry
+        .scale()
+        .checked_add(point_value.scale())
+        .ok_or_else(|| "unrealized PnL scale overflowed".to_string())?;
+    let raw = i64::try_from(raw).map_err(|_| "unrealized PnL overflowed".to_string())?;
+    FixedPoint::try_new(raw, raw_scale)
+        .map_err(|error| error.to_string())?
+        .exact_rescale(position.realized_pnl.scale())
         .map_err(|error| error.to_string())
 }
 

@@ -30,7 +30,7 @@ Updated 2026-09-25. Baseline source-confirmed 2026-09-24.
 | Batch | Scope | Needs from Aeris Charts | External gate | Status |
 | --- | --- | --- | --- | --- |
 | T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Complete** |
-| T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | B1 (PD1, PD3) for chart warnings and plan levels | None | Open |
+| T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | B1 (PD1, PD3) for chart warnings and plan levels | None | **In progress** |
 | T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | Open |
 | T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | Open |
 | T5 | Rithmic live trading: PF1, PF2, PF4, M1.6, live qualification of T2 | B1 (PD1); B6 (PD8) for chart markers of M1.6 | Rithmic onboarding, conformance, live accounts, D4 | Blocked (onboarding) |
@@ -102,7 +102,15 @@ open a browser or create an account session.
 ### T2 — Trading, execution and risk on the simulated venue
 
 **Scope:** M2.1–M2.8, M3.1–M3.4, M7.2. **Needs:** T1; Aeris Charts B1 (PD1, PD3).
-**Status:** open.
+**Status:** in progress.
+
+Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v3
+risk profiles and account locks, pre-trade checks on simulated orders, cancel/modify/cancel-all and
+kill-switch commands, mark-to-market unrealized P/L, restart-safe order state, and a first desktop
+order-control surface. The keymap owner validates normalized bindings and reserved desktop chords.
+The remaining T2 checklist items are intentionally open: the DOM ladder, full order-entry and
+bracket UX, chart/hotkey dispatch, flattening, copier, live rule meters, and chart warning wiring
+still require the real runtime and desktop paths.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.
@@ -317,7 +325,7 @@ Source-confirmed on 2026-09-24. This is the starting point, not a claim of compl
 | Alerts | Price alerts evaluated in `market_runtime` on live trades (32 per consumer) with OS notifications | `PriceAlertRegistry`, `platform_runtime/user_notifications.rs` |
 | Persistence | Workspace layouts, chart preferences, studies, alerts, watchlist and the credential vault; trading records now use a separate bounded SQLite store. Market-history persistence remains deliberately banned | `workspace_persistence.rs`, `crates/trading_runtime`, `tools/naming_check` |
 | Recording, replay, journal, simulator | Session recording/replay remains absent; T1 now provides durable journal/user records and a local simulated venue, while "replay" in market code still means bar snapshot contracts and Rithmic history requests | `crates/trading_runtime`, `application/src/replay_snapshot.rs` |
-| Risk controls | **Absent** | — |
+| Risk controls | Durable simulated-venue profiles, locks, pre-trade checks and kill-switch foundation; full rule meters and UI remain T2 work | `crates/trading_runtime`, `apps/desktop/src/keymap.rs` |
 | Context data | **Absent** except a CME Globex session-day helper for week and month history buckets | `rithmic_protocol/src/calendar.rs` |
 | Workspace UX | Tabs, split panes and their shortcuts, themes, feed diagnostics; no command palette, trading hotkeys, multi-window workspace or linked symbol groups | `apps/desktop`, `crates/observability` |
 | Distribution | Launcher, signed release identity and lifecycle code; automatic updates and publication disabled until a release backend exists | `platform_runtime`, `apps/desktop/src/update.rs` |

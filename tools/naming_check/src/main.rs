@@ -1918,6 +1918,9 @@ mod tests {
             "crates/platform_runtime/src/browser.rs",
             "apps/desktop/src/account.rs",
             "apps/desktop/src/desktop.rs",
+            // Trading command adapters may construct provider-neutral trading account IDs;
+            // they do not own SaaS identity or account-runtime state.
+            "apps/desktop/src/trading.rs",
             // Trading accounts are a separate provider-neutral surface owned by
             // trading_runtime; do not confuse TradingAccountId with SaaS identity.
             "crates/domain/trading/src/",

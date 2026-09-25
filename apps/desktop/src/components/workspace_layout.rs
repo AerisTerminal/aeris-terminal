@@ -292,6 +292,7 @@ pub(super) fn workspace_market_area(
             width: surface.side_panel_width,
             split_basis_points: surface.side_panel_split_basis_points,
             order_book: &surface.order_book,
+            order_book_frame: surface.order_book.read(cx).frame().cloned(),
             watchlist,
             order_book_column_menu_open: surface.menu_state.order_book_column_open,
             order_book_columns: surface.order_book.read(cx).columns(),
