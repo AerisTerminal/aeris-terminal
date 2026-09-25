@@ -66,6 +66,15 @@ pub struct OrderBookWorkingOrder {
     pub quantity: i64,
     pub quantity_scale: u8,
 }
+
+/// Bounded presentation data for the selected net position's average-entry level.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderBookPositionMarker {
+    pub price: i64,
+    pub side: OrderBookLevelSide,
+    pub quantity: i64,
+    pub quantity_scale: u8,
+}
 const PNL_WIDTH: f32 = 0.10;
 const BOOK_WIDTH: f32 = 0.30;
 const TRADE_WIDTH: f32 = 0.10;
@@ -206,6 +215,7 @@ impl OrderBookColumnVisibility {
 pub struct ReadOnlyOrderBookView {
     frame: Option<Arc<OrderBookFrame>>,
     working_orders: Vec<OrderBookWorkingOrder>,
+    position_marker: Option<OrderBookPositionMarker>,
     unavailable: bool,
     connection_state: OrderBookConnectionState,
     theme: AerisTheme,
@@ -222,6 +232,7 @@ impl ReadOnlyOrderBookView {
         Self {
             frame: None,
             working_orders: Vec::new(),
+            position_marker: None,
             unavailable: false,
             connection_state: OrderBookConnectionState::Online,
             theme,
@@ -242,6 +253,17 @@ impl ReadOnlyOrderBookView {
     ) {
         if self.working_orders != working_orders {
             self.working_orders = working_orders;
+            cx.notify();
+        }
+    }
+
+    pub fn set_position_marker(
+        &mut self,
+        position_marker: Option<OrderBookPositionMarker>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.position_marker != position_marker {
+            self.position_marker = position_marker;
             cx.notify();
         }
     }
@@ -371,6 +393,7 @@ impl Render for ReadOnlyOrderBookView {
         let empty_copy = empty_book_copy(self.unavailable, self.frame.is_some());
         let frame = self.frame.clone();
         let working_orders = self.working_orders.clone();
+        let position_marker = self.position_marker.clone();
         let ladder_scroll = self.ladder_scroll.clone();
         let columns = self.columns;
         let order_book = cx.entity();
@@ -411,10 +434,13 @@ impl Render for ReadOnlyOrderBookView {
                         frame,
                         empty_copy,
                         columns,
-                        &self.theme,
                         &ladder_scroll,
-                        &order_book,
-                        &working_orders,
+                        LadderInteraction {
+                            theme: &self.theme,
+                            order_book: &order_book,
+                            working_orders: &working_orders,
+                            position_marker: position_marker.as_ref(),
+                        },
                     )),
             )
     }
@@ -504,11 +530,10 @@ fn render_ladder(
     frame: Option<Arc<OrderBookFrame>>,
     empty_copy: &'static str,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
     ladder_scroll: &UniformListScrollHandle,
-    order_book: &Entity<ReadOnlyOrderBookView>,
-    working_orders: &[OrderBookWorkingOrder],
+    interaction: LadderInteraction<'_>,
 ) -> impl IntoElement + use<> {
+    let theme = interaction.theme;
     let body = div()
         .id("read_only_order_book_rows")
         .flex()
@@ -546,14 +571,7 @@ fn render_ladder(
                     .child(empty_copy),
             );
     }
-    let list = render_virtualized_ladder_list(
-        &frame,
-        columns,
-        theme,
-        ladder_scroll,
-        order_book,
-        working_orders,
-    );
+    let list = render_virtualized_ladder_list(&frame, columns, ladder_scroll, interaction);
 
     body.child(
         div()
@@ -568,16 +586,15 @@ fn render_ladder(
 fn render_virtualized_ladder_list(
     frame: &Arc<OrderBookFrame>,
     columns: OrderBookColumnVisibility,
-    theme: &AerisTheme,
     ladder_scroll: &UniformListScrollHandle,
-    order_book: &Entity<ReadOnlyOrderBookView>,
-    working_orders: &[OrderBookWorkingOrder],
+    interaction: LadderInteraction<'_>,
 ) -> AnyElement {
     let list_frame = Arc::clone(frame);
-    let list_theme = *theme;
-    let list_working_orders = working_orders.to_vec();
+    let list_theme = *interaction.theme;
+    let list_order_book = interaction.order_book.clone();
+    let list_working_orders = interaction.working_orders.to_vec();
+    let list_position_marker = interaction.position_marker.cloned();
     if let Some(grid) = price_grid_layout(frame.as_ref()) {
-        let list_order_book = order_book.clone();
         return uniform_list(
             "read_only_order_book_ladder",
             grid.item_count(),
@@ -599,6 +616,7 @@ fn render_virtualized_ladder_list(
                                 theme: &list_theme,
                                 order_book: &list_order_book,
                                 working_orders: &list_working_orders,
+                                position_marker: list_position_marker.as_ref(),
                             },
                         )
                     })
@@ -611,7 +629,6 @@ fn render_virtualized_ladder_list(
     }
 
     let layout = ladder_layout(frame.as_ref());
-    let list_order_book = order_book.clone();
     uniform_list(
         "read_only_order_book_ladder",
         layout.item_count(),
@@ -633,6 +650,7 @@ fn render_virtualized_ladder_list(
                             theme: &list_theme,
                             order_book: &list_order_book,
                             working_orders: &list_working_orders,
+                            position_marker: list_position_marker.as_ref(),
                         },
                     )
                 })
@@ -1282,11 +1300,19 @@ enum BookColumnSide {
     Ask,
 }
 
+const fn order_book_level_side(side: BookColumnSide) -> OrderBookLevelSide {
+    match side {
+        BookColumnSide::Bid => OrderBookLevelSide::Bid,
+        BookColumnSide::Ask => OrderBookLevelSide::Ask,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LadderInteraction<'a> {
     theme: &'a AerisTheme,
     order_book: &'a Entity<ReadOnlyOrderBookView>,
     working_orders: &'a [OrderBookWorkingOrder],
+    position_marker: Option<&'a OrderBookPositionMarker>,
 }
 
 #[derive(Clone)]
@@ -1318,6 +1344,7 @@ struct LevelCellContext<'a> {
     trade_volumes: AggressorTradeVolumes,
     quantity_scale: u8,
     working_order: Option<&'a OrderBookWorkingOrder>,
+    position_marker: Option<&'a OrderBookPositionMarker>,
 }
 
 #[derive(Clone, Copy)]
@@ -1363,10 +1390,7 @@ fn render_level_row(
         BookColumnSide::Bid => (colors.primary, "order_book_bid_row"),
         BookColumnSide::Ask => (colors.danger, "order_book_ask_row"),
     };
-    let click_side = match side {
-        BookColumnSide::Bid => OrderBookLevelSide::Bid,
-        BookColumnSide::Ask => OrderBookLevelSide::Ask,
-    };
+    let click_side = order_book_level_side(side);
     let click_price = level.price;
     let order_book = interaction.order_book.clone();
     let drag_side = click_side;
@@ -1387,13 +1411,12 @@ fn render_level_row(
         maximum_trade_quantity: stats.maximum_trade_quantity,
         trade_volumes,
         quantity_scale: frame.quantity_scale,
-        working_order: interaction.working_orders.iter().find(|order| {
-            order.price == level.price
-                && order.side
-                    == match side {
-                        BookColumnSide::Bid => OrderBookLevelSide::Bid,
-                        BookColumnSide::Ask => OrderBookLevelSide::Ask,
-                    }
+        working_order: interaction
+            .working_orders
+            .iter()
+            .find(|order| order.price == level.price && order.side == order_book_level_side(side)),
+        position_marker: interaction.position_marker.filter(|marker| {
+            marker.price == level.price && marker.side == order_book_level_side(side)
         }),
     };
     div()
@@ -1462,21 +1485,14 @@ fn render_empty_price_tick(
         BookColumnSide::Bid => (colors.primary, "order_book_bid_price_tick"),
         BookColumnSide::Ask => (colors.danger, "order_book_ask_price_tick"),
     };
-    let click_side = match side {
-        BookColumnSide::Bid => OrderBookLevelSide::Bid,
-        BookColumnSide::Ask => OrderBookLevelSide::Ask,
-    };
+    let click_side = order_book_level_side(side);
     let order_book = interaction.order_book.clone();
     let drag_price = price;
     let drop_order_book = interaction.order_book.clone();
-    let working_order = interaction.working_orders.iter().find(|order| {
-        order.price == price
-            && order.side
-                == match side {
-                    BookColumnSide::Bid => OrderBookLevelSide::Bid,
-                    BookColumnSide::Ask => OrderBookLevelSide::Ask,
-                }
-    });
+    let working_order = interaction
+        .working_orders
+        .iter()
+        .find(|order| order.price == price && order.side == order_book_level_side(side));
     let trade_volumes = stats.trade_volumes.unwrap_or_default();
     let quantity_scale = frame.quantity_scale;
     div()
@@ -1549,9 +1565,16 @@ fn render_empty_price_tick(
                             stats.maximum_trade_quantity,
                         )
                         .into_any_element(),
-                        OrderBookColumn::Orders => {
-                            working_order_cell(width, working_order, None, theme).into_any_element()
-                        }
+                        OrderBookColumn::Orders => working_order_cell(
+                            width,
+                            working_order,
+                            interaction.position_marker.filter(|marker| {
+                                marker.price == price && marker.side == click_side
+                            }),
+                            None,
+                            theme,
+                        )
+                        .into_any_element(),
                         _ => table_cell(width).into_any_element(),
                     }
                 }),
@@ -1624,6 +1647,7 @@ fn render_level_cell(
         OrderBookColumn::Orders => working_order_cell(
             width,
             context.working_order,
+            context.position_marker,
             level.order_count,
             context.theme,
         )
@@ -1634,19 +1658,32 @@ fn render_level_cell(
 fn working_order_cell(
     width: f32,
     working_order: Option<&OrderBookWorkingOrder>,
+    position_marker: Option<&OrderBookPositionMarker>,
     order_count: Option<u32>,
     theme: &AerisTheme,
 ) -> Div {
     table_cell(width)
         .px_1()
         .text_right()
-        .text_color(gpui_color(if working_order.is_some() {
-            theme.colors.primary
-        } else {
-            theme.colors.text_secondary
-        }))
+        .text_color(gpui_color(
+            if working_order.is_some() || position_marker.is_some() {
+                theme.colors.primary
+            } else {
+                theme.colors.text_secondary
+            },
+        ))
         .child(working_order.map_or_else(
-            || order_count.map_or_else(String::new, |count| count.to_string()),
+            || {
+                position_marker.map_or_else(
+                    || order_count.map_or_else(String::new, |count| count.to_string()),
+                    |marker| {
+                        format!(
+                            "POS {}",
+                            compact_quantity_text(marker.quantity, marker.quantity_scale)
+                        )
+                    },
+                )
+            },
             |order| {
                 format!(
                     "YOU {}",

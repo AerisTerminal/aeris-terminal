@@ -344,7 +344,10 @@ pub(super) fn workspace_market_area(
 fn project_working_order_markers(
     state: &WorkspaceSurface,
     cx: &mut Context<WorkspaceSurface>,
-) -> Vec<aeris_terminal_ui::OrderBookWorkingOrder> {
+) -> (
+    Vec<aeris_terminal_ui::OrderBookWorkingOrder>,
+    Option<aeris_terminal_ui::OrderBookPositionMarker>,
+) {
     let selected_account = state.trading_pnl.order_entry.selected_account_id.as_ref();
     let Some(instrument_id) = state
         .order_book
@@ -352,9 +355,9 @@ fn project_working_order_markers(
         .frame()
         .map(|frame| frame.instrument_id.as_str())
     else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    state
+    let working_orders = state
         .trading_pnl
         .orders
         .iter()
@@ -374,7 +377,30 @@ fn project_working_order_markers(
             })
         })
         .take(8)
-        .collect()
+        .collect();
+    let position_marker = selected_account.and_then(|account_id| {
+        let position = state.trading_pnl.positions.iter().find(|position| {
+            &position.position.account_id == account_id
+                && position.position.instrument_id.as_str() == instrument_id
+        })?;
+        let price = position.position.average_entry_price?;
+        let net_quantity = position.position.net_quantity.units();
+        if net_quantity == 0 {
+            return None;
+        }
+        let quantity = i64::try_from(net_quantity.unsigned_abs()).ok()?;
+        Some(aeris_terminal_ui::OrderBookPositionMarker {
+            price: price.units(),
+            side: if net_quantity > 0 {
+                aeris_terminal_ui::OrderBookLevelSide::Ask
+            } else {
+                aeris_terminal_ui::OrderBookLevelSide::Bid
+            },
+            quantity,
+            quantity_scale: position.position.net_quantity.scale(),
+        })
+    });
+    (working_orders, position_marker)
 }
 
 fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<TerminalApp>) {
@@ -434,11 +460,13 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
                         .as_ref()
                         .is_none_or(|account_id| account_id == &pnl.account_id)
                 });
-                let working_orders = project_working_order_markers(state, state_cx);
+                let (working_orders, position_marker) =
+                    project_working_order_markers(state, state_cx);
                 state
                     .order_book
                     .update(state_cx, |order_book, order_book_cx| {
                         order_book.set_working_orders(working_orders, order_book_cx);
+                        order_book.set_position_marker(position_marker, order_book_cx);
                     });
                 state_cx.notify();
             }

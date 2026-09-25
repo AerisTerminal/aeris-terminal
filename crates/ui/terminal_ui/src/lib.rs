@@ -15,7 +15,8 @@ pub use order_book::{OrderBookSelection, project_order_book};
 #[cfg(feature = "gpui")]
 pub use order_book_view::{
     OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, OrderBookLevelClick,
-    OrderBookLevelDrop, OrderBookLevelSide, OrderBookWorkingOrder, ReadOnlyOrderBookView,
+    OrderBookLevelDrop, OrderBookLevelSide, OrderBookPositionMarker, OrderBookWorkingOrder,
+    ReadOnlyOrderBookView,
 };
 
 /// A bounded queue that prevents background producers from growing UI work.
