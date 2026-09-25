@@ -19,7 +19,7 @@ How to read this file:
 
 Related plans: `plan/study_runtime_sdk_roadmap.md` remains the authority for studies, the Study SDK
 and the in-app Study Editor. Chart-side prerequisites live in the Aeris Charts repository's
-`plan/Expansion.md` (items F1–F6, OF1–OF18, CT1–CT6, I1–I4 and PD1–PD10, grouped into batches
+`plan/Expansion.md` (items F1–F6, OF1–OF18, CT1–CT6, I1–I4 and PD1–PD11, grouped into batches
 B1–B9). This roadmap names those dependencies by ID and does not restate engine design. Item IDs
 here (PF, M, D) are stable; batches group them without renumbering.
 
@@ -30,7 +30,7 @@ Updated 2026-09-25. Baseline source-confirmed 2026-09-24.
 | Batch | Scope | Needs from Aeris Charts | External gate | Status |
 | --- | --- | --- | --- | --- |
 | T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Complete** |
-| T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | B1 (PD1, PD3) for chart warnings and plan levels | None | **In progress** |
+| T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | None for basic chart trading (existing Aeris Charts trading layer); B1 (PD11) for multi-account and trailing stops on charts, (PD1) for chart warnings, (PD3) for plan levels | None | **In progress** |
 | T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | Open |
 | T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | Open |
 | T5 | Rithmic live trading: PF1, PF2, PF4, M1.6, live qualification of T2 | B1 (PD1); B6 (PD8) for chart markers of M1.6 | Rithmic onboarding, conformance, live accounts, D4 | Blocked (onboarding) |
@@ -101,7 +101,9 @@ open a browser or create an account session.
 
 ### T2 — Trading, execution and risk on the simulated venue
 
-**Scope:** M2.1–M2.8, M3.1–M3.4, M7.2. **Needs:** T1; Aeris Charts B1 (PD1, PD3).
+**Scope:** M2.1–M2.8, M3.1–M3.4, M7.2. **Needs:** T1; the existing Aeris Charts trading layer
+for chart trading; Aeris Charts B1 (PD11, PD1, PD3) for account filtering, trailing and break-even
+presentation, order-line warnings and plan levels.
 **Status:** in progress.
 
 Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v4
@@ -137,7 +139,11 @@ M3.2 checks.
 - [x] **M2.2** Order entry panel: quantity presets, order types, time in force, account selector.
 - [ ] **M2.3** Bracket and strategy templates: stop and target, OCO, trailing, break-even,
       scale-out, with local-management labels where not server-side.
-- [ ] **M2.4** Chart trading mapped to trading commands with confirmation rules.
+- [ ] **M2.4** Chart trading wired to the existing Aeris Charts trading layer: runtime orders,
+      positions and fills projected into chart trading snapshots; chart intents (place bracket,
+      modify, cancel, stop/target, close) resolved through the M3.2 order-command path with
+      confirmation rules. Not blocked on B1. The canonical order states gain partially filled,
+      pending modify and pending cancel so the chart shows in-flight commands correctly.
 - [x] **M2.5** Trading hotkeys, disabled while a text field has focus.
 - [x] **M2.6** Flatten and kill switch per account and globally.
 - [ ] **M2.7** Multi-account trade copier with per-account multipliers, kill switches and M3.2
@@ -450,11 +456,11 @@ demand, and frame work stays bounded during news-release bursts.
 | --- | --- | --- | --- | --- | --- |
 | M2.1 | DOM trading ladder: one-click orders, drag to modify, working orders and position inline, P/L column, recent volume at price | Partial (read-only ladder) | Extend the existing `terminal_ui` ladder into a trading ladder over PF1–PF3: order-entry clicks and drags, own orders and queue position (PF4), fill the existing P/L column; measure ladder render cost during news bursts | — (platform widget) | T2 |
 | M2.2 | Order entry panel: quantity presets, order types, time in force, account selector | Absent | GPUI panel over PF1 | — | T2 |
-| M2.3 | Bracket and strategy templates: stop and target on entry, OCO, trailing, break-even, scale-out | Absent | Template model in PF7; server-side execution where supported; local-management labels otherwise | Existing brackets and OCO visuals | T2 |
-| M2.4 | Chart trading: place, drag and cancel orders and positions on the chart | Absent in desktop (present in Aeris Charts) | Map chart trading intents to PF1 commands with confirmation rules; stop forwarding trading gestures while a lock is active | Existing trading layer; PD1 | T2 |
+| M2.3 | Bracket and strategy templates: stop and target on entry, OCO, trailing, break-even, scale-out | Absent | Template model in PF7; server-side execution where supported; local-management labels otherwise | Existing brackets and OCO visuals; PD11 for trailing and break-even presentation | T2 |
+| M2.4 | Chart trading: place, drag and cancel orders and positions on the chart | Absent in desktop (present in Aeris Charts) | Project trading-runtime snapshots into the chart and resolve chart trading intents through the single order-command path (simulated venue first, PF1 in T5) with confirmation rules; stop forwarding trading gestures while a lock is active | Existing trading layer for basic chart trading; PD11 for accounts and exact tick prices; PD1 for warnings | T2 |
 | M2.5 | Trading hotkeys: buy/sell at bid/ask/market, flatten, cancel all, reverse, with per-hotkey confirmation settings | Absent | Keymap owner (M7.2); hotkeys disabled while a text field has focus | — | T2 |
 | M2.6 | Flatten and kill switch: flatten all positions and cancel all orders per account or globally | Absent | Single command path through PF1, visible at all times | — | T2 |
-| M2.7 | Multi-account trade copier: mirror orders to several accounts with per-account multipliers and kill switches | Absent | Local copier over PF1 with per-account risk checks (M3.2) before each mirrored order | — | T2 |
+| M2.7 | Multi-account trade copier: mirror orders to several accounts with per-account multipliers and kill switches | Absent | Local copier over PF1 with per-account risk checks (M3.2) before each mirrored order | PD11 for per-account chart filtering | T2 |
 | M2.8 | Positions and PnL display in currency and ticks | Absent | PF2 and PF6 projections to panels and charts | Existing position chips | T2 |
 
 Acceptance: no order leaves the machine without passing M3.2 checks; every trading command is
