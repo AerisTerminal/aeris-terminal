@@ -185,6 +185,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         .child(trading_risk_summary(risk_meters, order_entry, theme))
         .child(trading_order_entry(app, accounts, order_entry, theme))
         .child(market_order_buttons(frame, order_entry, theme))
+        .child(book_order_buttons(frame, order_entry, theme))
         .child(order_management_buttons(frame, order_entry, theme))
 }
 
@@ -617,6 +618,88 @@ fn market_order_buttons(
             }
         })
         .child(format!("SELL {sell_quantity}"));
+    div().flex().gap_1().child(buy).child(sell)
+}
+
+fn book_order_buttons(
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let buy_frame = frame.cloned();
+    let sell_frame = frame.cloned();
+    let account_key = order_entry
+        .selected_account_id
+        .as_ref()
+        .map(|id| id.as_str().to_string());
+    let sell_account_key = account_key.clone();
+    let quantity = order_entry.quantity;
+    let time_in_force = order_entry.time_in_force;
+    let ask_label = frame.and_then(|book| book.best_ask.as_ref()).map_or_else(
+        || "BUY ASK".to_string(),
+        |level| format!("BUY ASK {}", level.price_text),
+    );
+    let bid_label = frame.and_then(|book| book.best_bid.as_ref()).map_or_else(
+        || "SELL BID".to_string(),
+        |level| format!("SELL BID {}", level.price_text),
+    );
+    let buy = div()
+        .id("trading_buy_ask")
+        .flex_1()
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.bullish.with_alpha(0.75)))
+        .text_color(gpui_color(colors.surface))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Buy the selected simulated order at the best ask")
+        .on_click(move |_, _, cx| {
+            if let Some(frame) = buy_frame.clone() {
+                aeris_desktop::trading::dispatch_simulated_order(
+                    &frame,
+                    aeris_trading::OrderSide::Buy,
+                    account_key.clone(),
+                    quantity,
+                    aeris_trading::OrderType::Limit,
+                    time_in_force,
+                    cx,
+                );
+            }
+        })
+        .child(ask_label);
+    let sell = div()
+        .id("trading_sell_bid")
+        .flex_1()
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(gpui_color(colors.bearish.with_alpha(0.75)))
+        .text_color(gpui_color(colors.surface))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Sell the selected simulated order at the best bid")
+        .on_click(move |_, _, cx| {
+            if let Some(frame) = sell_frame.clone() {
+                aeris_desktop::trading::dispatch_simulated_order(
+                    &frame,
+                    aeris_trading::OrderSide::Sell,
+                    sell_account_key.clone(),
+                    quantity,
+                    aeris_trading::OrderType::Limit,
+                    time_in_force,
+                    cx,
+                );
+            }
+        })
+        .child(bid_label);
     div().flex().gap_1().child(buy).child(sell)
 }
 

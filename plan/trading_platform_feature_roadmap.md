@@ -117,7 +117,8 @@ durable locks in the selected-account trading controls.
 The remaining T2 checklist items are intentionally open: the DOM ladder, bracket UX, chart
 dispatch, copier, consistency-rule evaluation, and chart warning wiring still require the real
 runtime and desktop paths. The simulated order-entry panel now has quantity presets, all canonical order types
-and time-in-force choices, and a runtime-backed account selector; per-account and global cancel,
+and time-in-force choices, a runtime-backed account selector, and explicit best-ask/best-bid limit
+entry controls; per-account and global cancel,
 flatten and kill controls share the same owner path.
 
 Execution and risk ship together because no order may leave the order-command path without the
