@@ -715,6 +715,7 @@ struct WorkspaceSurface {
 struct TradingPnlState {
     current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
+    orders: Vec<aeris_trading::Order>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
     risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
     order_entry: TradingOrderEntryState,
@@ -727,6 +728,7 @@ impl Default for TradingPnlState {
         Self {
             current: None,
             accounts: Vec::new(),
+            orders: Vec::new(),
             positions: Vec::new(),
             risk_meters: Vec::new(),
             order_entry: TradingOrderEntryState::default(),

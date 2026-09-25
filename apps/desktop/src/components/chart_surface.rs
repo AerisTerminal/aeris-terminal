@@ -70,6 +70,7 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) order_book_frame: Option<aeris_market_data::OrderBookFrame>,
     pub(super) trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     pub(super) trading_accounts: &'a [aeris_trading::TradingAccount],
+    pub(super) trading_orders: &'a [aeris_trading::Order],
     pub(super) trading_positions: &'a [aeris_trading_runtime::PositionPnl],
     pub(super) trading_risk_meters: &'a [aeris_trading_runtime::RiskMeter],
     pub(super) trading_order_entry: &'a super::TradingOrderEntryState,
@@ -92,6 +93,7 @@ struct OrderBookPanelState<'a> {
     order_book_frame: Option<&'a aeris_market_data::OrderBookFrame>,
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     trading_accounts: &'a [aeris_trading::TradingAccount],
+    trading_orders: &'a [aeris_trading::Order],
     trading_positions: &'a [aeris_trading_runtime::PositionPnl],
     trading_risk_meters: &'a [aeris_trading_runtime::RiskMeter],
     trading_order_entry: &'a super::TradingOrderEntryState,
@@ -107,6 +109,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         order_book_frame,
         trading_pnl,
         trading_accounts,
+        trading_orders,
         trading_positions,
         trading_risk_meters,
         trading_order_entry,
@@ -132,6 +135,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
             frame: order_book_frame,
             trading_pnl,
             accounts: trading_accounts,
+            orders: trading_orders,
             positions: trading_positions,
             risk_meters: trading_risk_meters,
             order_entry: trading_order_entry,
@@ -156,6 +160,7 @@ struct TradingOrderControlsState<'a> {
     frame: Option<&'a aeris_market_data::OrderBookFrame>,
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     accounts: &'a [aeris_trading::TradingAccount],
+    orders: &'a [aeris_trading::Order],
     positions: &'a [aeris_trading_runtime::PositionPnl],
     risk_meters: &'a [aeris_trading_runtime::RiskMeter],
     order_entry: &'a super::TradingOrderEntryState,
@@ -168,6 +173,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         frame,
         trading_pnl,
         accounts,
+        orders,
         positions,
         risk_meters,
         order_entry,
@@ -183,6 +189,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         .border_color(gpui_color(colors.border))
         .child(trading_pnl_summary(trading_pnl, positions, frame, theme))
         .child(trading_risk_summary(risk_meters, order_entry, theme))
+        .child(trading_working_orders(frame, orders, order_entry, theme))
         .child(trading_order_entry(app, accounts, order_entry, theme))
         .child(market_order_buttons(frame, order_entry, theme))
         .child(book_order_buttons(frame, order_entry, theme))
@@ -524,6 +531,93 @@ fn trading_risk_summary(
         .text_xs()
         .text_color(gpui_color(color))
         .child(label)
+}
+
+fn trading_working_orders(
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+    orders: &[aeris_trading::Order],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let selected_account = order_entry.selected_account_id.as_ref();
+    let selected_instrument = frame.map(|book| book.instrument_id.as_str());
+    let rows = orders
+        .iter()
+        .filter(|order| order.status == aeris_trading::OrderStatus::Working)
+        .filter(|order| selected_account.is_none_or(|account_id| &order.account_id == account_id))
+        .filter(|order| {
+            selected_instrument
+                .is_none_or(|instrument_id| order.instrument_id.as_str() == instrument_id)
+        })
+        .take(8)
+        .enumerate()
+        .map(|(index, order)| {
+            let direction = match order.side {
+                aeris_trading::OrderSide::Buy => "B",
+                aeris_trading::OrderSide::Sell => "S",
+            };
+            let instruction = match order.order_type {
+                aeris_trading::OrderType::Market => "MKT",
+                aeris_trading::OrderType::Limit => "LMT",
+                aeris_trading::OrderType::Stop => "STP",
+                aeris_trading::OrderType::StopLimit => "STP-LMT",
+            };
+            let price = order
+                .limit_price
+                .or(order.stop_price)
+                .map_or_else(String::new, format_fixed_point);
+            let label = format!(
+                "ORD {direction} {instruction} {}{}",
+                format_fixed_point(order.quantity),
+                if price.is_empty() {
+                    String::new()
+                } else {
+                    format!(" @ {price}")
+                },
+            );
+            let client_order_key = order.client_order_id.as_str().to_string();
+            div()
+                .id(("working_order", index))
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_xs()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(div().flex_1().truncate().child(label))
+                .child(
+                    div()
+                        .id(("cancel_working_order", index))
+                        .px_1()
+                        .cursor_pointer()
+                        .role(Role::Button)
+                        .aria_label("Cancel working simulated order")
+                        .text_color(gpui_color(colors.danger))
+                        .on_click(move |_, _, cx| {
+                            aeris_desktop::trading::cancel_simulated_order(
+                                client_order_key.clone(),
+                                cx,
+                            );
+                        })
+                        .child("CANCEL"),
+                )
+        })
+        .collect::<Vec<_>>();
+    let header = if rows.is_empty() {
+        "ORDERS · none".to_string()
+    } else {
+        format!("ORDERS · {} working", rows.len())
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_1()
+        .text_xs()
+        .text_color(gpui_color(colors.text_muted))
+        .child(header)
+        .children(rows)
 }
 
 fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
@@ -980,6 +1074,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         order_book_frame,
         trading_pnl,
         trading_accounts,
+        trading_orders,
         trading_positions,
         trading_risk_meters,
         trading_order_entry,
@@ -999,6 +1094,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
                 order_book_frame: order_book_frame.as_ref(),
                 trading_pnl,
                 trading_accounts,
+                trading_orders,
                 trading_positions,
                 trading_risk_meters,
                 trading_order_entry,

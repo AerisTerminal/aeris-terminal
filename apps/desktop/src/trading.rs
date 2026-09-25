@@ -93,6 +93,21 @@ pub fn cancel_simulated_account(account_key: Option<String>, cx: &mut gpui::App)
         .detach();
 }
 
+/// Cancels one working simulated order off the UI thread.
+pub fn cancel_simulated_order(client_order_key: String, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let _ = service.cancel_order(client_order_id);
+        })
+        .detach();
+}
+
 /// Cancels working orders for every simulated account off the UI thread.
 pub fn cancel_simulated_accounts(cx: &mut gpui::App) {
     let Some(service) = handle() else {
