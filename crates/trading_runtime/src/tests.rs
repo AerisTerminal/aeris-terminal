@@ -304,6 +304,58 @@ fn flatten_closes_positions_and_survives_a_restart() {
 }
 
 #[test]
+fn global_flatten_closes_every_registered_account() {
+    let directory = TestDirectory::new("flatten-all");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let secondary = TradingAccountId::try_new("aeris-sim-2").expect("secondary account");
+    service
+        .register_account(TradingAccount {
+            id: secondary.clone(),
+            display_name: "Secondary SIM".to_string(),
+            environment: AccountEnvironment::Simulated,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+        })
+        .expect("secondary account registers");
+    service
+        .place_order(market_order("flatten-all-one", OrderSide::Buy, 1, 1_000))
+        .expect("primary order accepted");
+    let mut secondary_order = market_order("flatten-all-two", OrderSide::Buy, 2, 1_001);
+    secondary_order.account_id = secondary;
+    service
+        .place_order(secondary_order)
+        .expect("secondary order accepted");
+    assert_eq!(
+        service
+            .observe_market(observation(9_975, 10_000, 3, 2_000))
+            .expect("orders fill")
+            .len(),
+        2
+    );
+    assert_eq!(
+        service
+            .flatten_all(observation(10_100, 10_125, 4, 3_000))
+            .expect("global flatten succeeds")
+            .len(),
+        2
+    );
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.positions.len(), 2);
+    assert!(
+        snapshot
+            .positions
+            .iter()
+            .all(|position| position.net_quantity.units() == 0)
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
 fn invalid_json_never_enters_the_store() {
     let directory = TestDirectory::new("invalid-json");
     let service = TradingService::start(config(&directory)).expect("service starts");
