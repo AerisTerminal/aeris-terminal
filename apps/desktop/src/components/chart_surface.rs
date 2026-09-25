@@ -489,11 +489,21 @@ fn trading_risk_summary(
                 .map_or_else(String::new, |remaining| {
                     format!(" · trail {}", format_fixed_point(remaining))
                 });
+            let consistency = meter
+                .consistency_max_single_trade_percent
+                .map_or_else(String::new, |percent| format!(" · consistency ≤{percent}%"));
+            let restriction = if meter.restricted_until_unix_nanos.is_some() {
+                " · news window"
+            } else {
+                ""
+            };
             let label = format!(
-                "RULE · loss {} · ctr {}{}",
+                "RULE · loss {} · ctr {}{}{}{}",
                 format_fixed_point(meter.daily_loss_remaining),
                 format_fixed_point(meter.contracts_remaining),
                 trailing,
+                consistency,
+                restriction,
             );
             let color = if meter.daily_loss_remaining.units() == 0
                 || meter.contracts_remaining.units() == 0
