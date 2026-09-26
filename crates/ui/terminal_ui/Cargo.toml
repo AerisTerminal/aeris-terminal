@@ -14,7 +14,11 @@ gpui = ["dep:aeris_design_system", "dep:gpui"]
 aeris_instruments = { path = "../../domain/instruments" }
 aeris_design_system = { path = "../design_system", optional = true }
 aeris_market_data = { path = "../../domain/market_data" }
+aeris_trading = { path = "../../domain/trading" }
 gpui = { workspace = true, optional = true }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

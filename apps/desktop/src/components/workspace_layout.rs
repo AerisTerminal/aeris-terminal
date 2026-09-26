@@ -299,6 +299,13 @@ pub(super) fn workspace_market_area(
             trading_orders: &surface.trading_pnl.orders,
             trading_positions: &surface.trading_pnl.positions,
             trading_risk_meters: &surface.trading_pnl.risk_meters,
+            trading_risk_locks: &surface.trading_pnl.risk_locks,
+            session_plans: &surface.trading_pnl.session_plans,
+            session_reviews: &surface.trading_pnl.session_reviews,
+            trade_copiers: &surface.trading_pnl.trade_copiers,
+            copy_dispatches: &surface.trading_pnl.copy_dispatches,
+            strategy_templates: &surface.trading_pnl.strategy_templates,
+            managed_brackets: &surface.trading_pnl.managed_brackets,
             trading_order_entry: &surface.trading_pnl.order_entry,
             watchlist,
             order_book_column_menu_open: surface.menu_state.order_book_column_open,
@@ -361,7 +368,7 @@ fn project_working_order_markers(
         .trading_pnl
         .orders
         .iter()
-        .filter(|order| order.status == aeris_trading::OrderStatus::Working)
+        .filter(|order| order.status.is_open())
         .filter(|order| selected_account.is_some_and(|account_id| &order.account_id == account_id))
         .filter(|order| order.instrument_id.as_str() == instrument_id)
         .filter_map(|order| {
@@ -398,18 +405,25 @@ fn project_working_order_markers(
             },
             quantity,
             quantity_scale: position.position.net_quantity.scale(),
+            point_value: position.point_value,
+            currency_scale: position.currency_scale,
         })
     });
     (working_orders, position_marker)
 }
 
+fn trading_pnl_refresh_due(
+    surface: &Entity<WorkspaceSurface>,
+    cx: &App,
+    now: std::time::Instant,
+) -> bool {
+    let state = surface.read(cx);
+    !state.trading_pnl.refresh_pending && now >= state.trading_pnl.next_refresh
+}
+
 fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<TerminalApp>) {
     let now = std::time::Instant::now();
-    let should_refresh = {
-        let state = surface.read(cx);
-        !state.trading_pnl.refresh_pending && now >= state.trading_pnl.next_refresh
-    };
-    if !should_refresh {
+    if !trading_pnl_refresh_due(&surface, cx, now) {
         return;
     }
     let Some(service) = aeris_desktop::trading::handle() else {
@@ -433,12 +447,28 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
                     state.product.as_ref(),
                     selected_account_id.as_ref(),
                 );
+                let host_overlay = crate::desktop::chart_session_plan_overlay(
+                    &snapshot,
+                    selected_account_id.as_ref(),
+                );
+                let session_plan_levels = crate::desktop::chart_session_plan_levels(
+                    &snapshot,
+                    state.product.as_ref(),
+                    selected_account_id.as_ref(),
+                );
                 let accounts = snapshot.accounts;
                 let account_pnl = snapshot.account_pnl;
                 state.trading_pnl.orders = snapshot.orders;
                 state.trading_pnl.fills = snapshot.fills;
                 state.trading_pnl.positions = snapshot.position_pnl;
                 state.trading_pnl.risk_meters = snapshot.risk_meters;
+                state.trading_pnl.risk_locks = snapshot.risk_locks;
+                state.trading_pnl.session_plans = snapshot.session_plans;
+                state.trading_pnl.session_reviews = snapshot.session_adherence_reviews;
+                state.trading_pnl.trade_copiers = snapshot.trade_copiers;
+                state.trading_pnl.copy_dispatches = snapshot.copy_dispatches;
+                state.trading_pnl.strategy_templates = snapshot.strategy_templates;
+                state.trading_pnl.managed_brackets = snapshot.managed_brackets;
                 state.trading_pnl.accounts = accounts;
                 if state
                     .trading_pnl
@@ -475,18 +505,40 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
                         order_book.set_working_orders(working_orders, order_book_cx);
                         order_book.set_position_marker(position_marker, order_book_cx);
                     });
-                if let (Some(chart), Some(chart_snapshot)) = (state.chart.as_ref(), chart_snapshot)
-                {
-                    let should_update = chart.read(state_cx).trading_snapshot() != chart_snapshot;
-                    if should_update {
-                        let _ = chart.update(state_cx, |chart, _| {
-                            chart.set_trading_snapshot(chart_snapshot)
-                        });
-                    }
+                if let Some(chart) = state.chart.as_ref() {
+                    refresh_chart_trading_projection(
+                        chart,
+                        chart_snapshot,
+                        host_overlay,
+                        session_plan_levels,
+                        state_cx,
+                    );
                 }
                 state_cx.notify();
             }
         });
     })
     .detach();
+}
+
+fn refresh_chart_trading_projection(
+    chart: &Entity<NucleusChartView>,
+    trading: Option<ChartTradingSnapshot>,
+    host_overlay: ChartHostOverlaySnapshot,
+    session_plan_levels: Vec<(f64, String)>,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    if let Some(trading) = trading
+        && chart.read(cx).trading_snapshot() != trading
+    {
+        let _ = chart.update(cx, |chart, _| chart.set_trading_snapshot(trading));
+    }
+    if chart.read(cx).host_overlay() != host_overlay {
+        let _ = chart.update(cx, |chart, _| chart.set_host_overlay(host_overlay));
+    }
+    if chart.read(cx).session_plan_levels() != session_plan_levels {
+        let _ = chart.update(cx, |chart, _| {
+            chart.replace_session_plan_levels(session_plan_levels)
+        });
+    }
 }

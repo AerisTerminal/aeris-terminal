@@ -55,14 +55,16 @@ use aeris_chart_integration::{
     ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
     ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
-    ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind,
-    ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide,
-    ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
-    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
-    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartTradingExecution, ChartTradingIntent,
-    ChartTradingIntentAction, ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot,
-    ChartType, ChartWorkingOrder, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView,
-    NucleusWorkspace, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
+    ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole,
+    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSplitDirection,
+    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
+    ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
+    ChartStudyThresholdRegion, ChartTradingAnnotation, ChartTradingAnnotationTone,
+    ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
+    ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
+    ChartWorkingOrder, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView, NucleusWorkspace,
+    PriceAxisMenuAction, PriceAxisMenuState,
 };
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
@@ -727,6 +729,13 @@ struct TradingPnlState {
     fills: Vec<aeris_trading::Fill>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
     risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
+    risk_locks: Vec<aeris_trading_runtime::RiskLock>,
+    session_plans: Vec<aeris_trading_runtime::SessionPlan>,
+    session_reviews: Vec<aeris_trading_runtime::SessionAdherenceReview>,
+    trade_copiers: Vec<aeris_trading_runtime::TradeCopierConfig>,
+    copy_dispatches: Vec<aeris_trading_runtime::TradeCopyDispatch>,
+    strategy_templates: Vec<aeris_trading_runtime::BracketStrategyTemplate>,
+    managed_brackets: Vec<aeris_trading_runtime::ManagedBracket>,
     order_entry: TradingOrderEntryState,
     refresh_pending: bool,
     next_refresh: Instant,
@@ -741,11 +750,27 @@ impl Default for TradingPnlState {
             fills: Vec::new(),
             positions: Vec::new(),
             risk_meters: Vec::new(),
+            risk_locks: Vec::new(),
+            session_plans: Vec::new(),
+            session_reviews: Vec::new(),
+            trade_copiers: Vec::new(),
+            copy_dispatches: Vec::new(),
+            strategy_templates: Vec::new(),
+            managed_brackets: Vec::new(),
             order_entry: TradingOrderEntryState::default(),
             refresh_pending: false,
             next_refresh: Instant::now(),
         }
     }
+}
+
+fn selected_account_lock_reason(state: &TradingPnlState) -> Option<&str> {
+    let account_id = state.order_entry.selected_account_id.as_ref()?;
+    state
+        .risk_locks
+        .iter()
+        .find(|lock| &lock.account_id == account_id)
+        .map(|lock| lock.reason.as_str())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -754,6 +779,7 @@ struct TradingOrderEntryState {
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
     selected_account_id: Option<aeris_trading::TradingAccountId>,
+    selected_strategy_template_id: Option<String>,
 }
 
 impl Default for TradingOrderEntryState {
@@ -763,6 +789,7 @@ impl Default for TradingOrderEntryState {
             order_type: aeris_trading::OrderType::Market,
             time_in_force: aeris_trading::TimeInForce::Day,
             selected_account_id: None,
+            selected_strategy_template_id: None,
         }
     }
 }
@@ -1181,6 +1208,7 @@ fn chart_working_orders(
     snapshot: &aeris_trading_runtime::TradingSnapshot,
     account_id: &aeris_trading::TradingAccountId,
     instrument_id: &str,
+    price_increment: Option<f64>,
 ) -> Vec<ChartWorkingOrder> {
     snapshot
         .orders
@@ -1204,10 +1232,14 @@ fn chart_working_orders(
             let status = match order.status {
                 aeris_trading::OrderStatus::Pending => ChartOrderStatus::PendingSubmit,
                 aeris_trading::OrderStatus::Working => ChartOrderStatus::Working,
+                aeris_trading::OrderStatus::PendingModify => ChartOrderStatus::PendingModify,
+                aeris_trading::OrderStatus::PartiallyFilled => ChartOrderStatus::PartiallyFilled,
+                aeris_trading::OrderStatus::PendingCancel => ChartOrderStatus::PendingCancel,
                 aeris_trading::OrderStatus::Filled => ChartOrderStatus::Filled,
                 aeris_trading::OrderStatus::Cancelled => ChartOrderStatus::Cancelled,
                 aeris_trading::OrderStatus::Rejected => ChartOrderStatus::Rejected,
             };
+            let semantics = chart_order_semantics(snapshot, order, price_increment);
             Some(ChartWorkingOrder {
                 id,
                 account_id: None,
@@ -1215,23 +1247,160 @@ fn chart_working_orders(
                 price_scale: ChartTradingPriceScale::Right,
                 side,
                 kind,
-                role: ChartOrderRole::Working,
+                role: semantics.role,
                 status,
                 price,
                 stop_price: chart_price(order.stop_price),
-                trailing_trigger_price: None,
-                break_even_trigger_price: None,
+                trailing_trigger_price: semantics.trailing_trigger_price,
+                break_even_trigger_price: semantics.break_even_trigger_price,
                 quantity: chart_quantity(order.quantity)?,
-                filled_quantity: 0.0,
-                position_id: None,
-                parent_order_id: None,
-                bracket_id: None,
-                oco_group_id: None,
+                filled_quantity: chart_quantity(order.filled_quantity)?,
+                position_id: semantics.position_id,
+                parent_order_id: semantics.parent_order_id,
+                bracket_id: semantics.bracket_id.clone(),
+                oco_group_id: semantics.bracket_id,
                 revision: 0,
-                annotations: Vec::new(),
+                annotations: semantics.annotations,
             })
         })
         .collect()
+}
+
+struct ChartOrderSemantics {
+    role: ChartOrderRole,
+    position_id: Option<ChartPositionId>,
+    parent_order_id: Option<ChartOrderId>,
+    bracket_id: Option<ChartTradingGroupId>,
+    trailing_trigger_price: Option<f64>,
+    break_even_trigger_price: Option<f64>,
+    annotations: Vec<ChartTradingAnnotation>,
+}
+
+fn chart_order_semantics(
+    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    order: &aeris_trading::Order,
+    price_increment: Option<f64>,
+) -> ChartOrderSemantics {
+    let managed = snapshot.managed_brackets.iter().find(|bracket| {
+        bracket.stop_client_order_id.as_ref() == Some(&order.client_order_id)
+            || bracket
+                .target_client_order_ids
+                .contains(&order.client_order_id)
+    });
+    let protective = snapshot
+        .protective_orders
+        .iter()
+        .find(|protective| protective.client_order_id == order.client_order_id);
+    let role = managed.map_or_else(
+        || {
+            protective.map_or(ChartOrderRole::Working, |protective| {
+                match protective.role {
+                    aeris_trading_runtime::ProtectiveOrderRole::StopLoss => {
+                        ChartOrderRole::StopLoss
+                    }
+                    aeris_trading_runtime::ProtectiveOrderRole::TakeProfit => {
+                        ChartOrderRole::TakeProfit
+                    }
+                }
+            })
+        },
+        |bracket| {
+            if bracket.stop_client_order_id.as_ref() == Some(&order.client_order_id) {
+                ChartOrderRole::StopLoss
+            } else {
+                ChartOrderRole::TakeProfit
+            }
+        },
+    );
+    let bracket_id =
+        managed.and_then(|bracket| ChartTradingGroupId::new(bracket.bracket_id.clone()).ok());
+    let parent_order_id =
+        managed.and_then(|bracket| ChartOrderId::new(bracket.entry_client_order_id.as_str()).ok());
+    let is_protection = managed.is_some() || protective.is_some();
+    let position_id = is_protection
+        .then(|| chart_position_id(&order.account_id, order.instrument_id.as_str()))
+        .flatten();
+    let (trailing_trigger_price, break_even_trigger_price) = managed
+        .map_or((None, None), |bracket| {
+            managed_trigger_prices(snapshot, bracket, price_increment)
+        });
+    let mut annotations = if is_protection {
+        vec![ChartTradingAnnotation {
+            id: "local-managed".to_string(),
+            text: aeris_trading_runtime::ManagedBracket::MANAGEMENT_LABEL.to_string(),
+            tooltip: Some(
+                "Stop, targets, trailing, and break-even are managed by this local runtime"
+                    .to_string(),
+            ),
+            ..ChartTradingAnnotation::default()
+        }]
+    } else {
+        Vec::new()
+    };
+    if let Some(warning) = snapshot.order_events.iter().find_map(|event| {
+        (event.order_id == order.id && event.kind == aeris_trading::OrderEventKind::Accepted)
+            .then_some(event.detail.as_deref())
+            .flatten()
+            .filter(|detail| detail.starts_with("RISK WARNING"))
+    }) {
+        annotations.push(ChartTradingAnnotation {
+            id: "risk-warning".to_string(),
+            text: "RISK".to_string(),
+            tooltip: Some(warning.to_string()),
+            tone: ChartTradingAnnotationTone::Warning,
+            ..ChartTradingAnnotation::default()
+        });
+    }
+    ChartOrderSemantics {
+        role,
+        position_id,
+        parent_order_id,
+        bracket_id,
+        trailing_trigger_price,
+        break_even_trigger_price,
+        annotations,
+    }
+}
+
+fn managed_trigger_prices(
+    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    bracket: &aeris_trading_runtime::ManagedBracket,
+    price_increment: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let entry_price = bracket
+        .entry_price
+        .and_then(|price| chart_price(Some(price)));
+    let increment = price_increment.filter(|increment| increment.is_finite() && *increment > 0.0);
+    let side = snapshot
+        .orders
+        .iter()
+        .find(|order| order.client_order_id == bracket.entry_client_order_id)
+        .map(|order| order.side);
+    let signed_increment = match side {
+        Some(aeris_trading::OrderSide::Buy) => increment,
+        Some(aeris_trading::OrderSide::Sell) => increment.map(|increment| -increment),
+        None => None,
+    };
+    let trigger = |ticks: u32| {
+        entry_price
+            .zip(signed_increment)
+            .and_then(|(entry, increment)| {
+                let price = entry + increment * f64::from(ticks);
+                price.is_finite().then_some(price)
+            })
+    };
+    (
+        bracket
+            .template
+            .trailing_stop
+            .map(|rule| rule.activation_ticks)
+            .and_then(trigger),
+        bracket
+            .template
+            .break_even
+            .map(|rule| rule.activation_ticks)
+            .and_then(trigger),
+    )
 }
 
 fn chart_positions(
@@ -1249,12 +1418,7 @@ fn chart_positions(
                 && position.position.net_quantity.units() != 0
         })
         .filter_map(|position| {
-            let position_id = ChartPositionId::new(format!(
-                "position:{}:{}",
-                account_id.as_str(),
-                instrument_id
-            ))
-            .ok()?;
+            let position_id = chart_position_id(account_id, instrument_id)?;
             let average_price = chart_price(position.position.average_entry_price)?;
             let quantity = chart_quantity(position.position.net_quantity)?;
             let side = if position.position.net_quantity.units() > 0 {
@@ -1276,6 +1440,13 @@ fn chart_positions(
             })
         })
         .collect()
+}
+
+fn chart_position_id(
+    account_id: &aeris_trading::TradingAccountId,
+    instrument_id: &str,
+) -> Option<ChartPositionId> {
+    ChartPositionId::new(format!("position:{}:{instrument_id}", account_id.as_str())).ok()
 }
 
 fn chart_executions(
@@ -1355,7 +1526,7 @@ fn chart_trading_snapshot(
         currency: Some(account.currency.clone()),
     };
 
-    let orders = chart_working_orders(snapshot, account_id, instrument_id);
+    let orders = chart_working_orders(snapshot, account_id, instrument_id, price_increment);
 
     let positions = chart_positions(snapshot, account_id, instrument_id, &account.currency);
 
@@ -1370,6 +1541,75 @@ fn chart_trading_snapshot(
     })
 }
 
+fn chart_session_plan_overlay(
+    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    selected_account: Option<&aeris_trading::TradingAccountId>,
+) -> ChartHostOverlaySnapshot {
+    let Some(plan) = selected_account.and_then(|account_id| {
+        snapshot
+            .session_plans
+            .iter()
+            .find(|plan| &plan.account_id == account_id)
+    }) else {
+        return ChartHostOverlaySnapshot::default();
+    };
+    let bias = match plan.bias {
+        aeris_trading_runtime::SessionBias::Long => "LONG",
+        aeris_trading_runtime::SessionBias::Short => "SHORT",
+        aeris_trading_runtime::SessionBias::Neutral => "NEUTRAL",
+    };
+    let setup = plan.active_setup.as_deref().unwrap_or("setup pending");
+    let label = format!("PLAN {bias} · {setup} · {} levels", plan.levels.len())
+        .chars()
+        .take(96)
+        .collect::<String>();
+    ChartHostOverlaySnapshot {
+        events: vec![
+            ChartHostEventMarker {
+                id: "session-plan-start".to_string(),
+                time: plan.session_start_unix_nanos,
+                importance: 1,
+                label: label.clone(),
+                icon: None,
+            },
+            ChartHostEventMarker {
+                id: "session-plan-end".to_string(),
+                time: plan.session_end_unix_nanos,
+                importance: 1,
+                label: "PLAN END".to_string(),
+                icon: None,
+            },
+        ],
+        windows: vec![ChartHostTimeWindow {
+            id: "session-plan-window".to_string(),
+            start_time: plan.session_start_unix_nanos,
+            end_time: plan.session_end_unix_nanos,
+            label,
+        }],
+    }
+}
+
+fn chart_session_plan_levels(
+    snapshot: &aeris_trading_runtime::TradingSnapshot,
+    product: Option<&InstallProviderInstrument>,
+    selected_account: Option<&aeris_trading::TradingAccountId>,
+) -> Vec<(f64, String)> {
+    let (Some(product), Some(account_id)) = (product, selected_account) else {
+        return Vec::new();
+    };
+    snapshot
+        .session_plans
+        .iter()
+        .find(|plan| &plan.account_id == account_id)
+        .into_iter()
+        .flat_map(|plan| &plan.levels)
+        .filter(|level| level.instrument_id.as_str() == product.instrument_id)
+        .filter_map(|level| {
+            chart_price(Some(level.price)).map(|price| (price, level.label.clone()))
+        })
+        .collect()
+}
+
 fn chart_price_fixed_point(value: f64, scale: u32) -> Option<aeris_trading::FixedPoint> {
     if !value.is_finite() || scale > u32::from(aeris_trading::MAXIMUM_DECIMAL_SCALE) {
         return None;
@@ -1382,6 +1622,84 @@ fn chart_price_fixed_point(value: f64, scale: u32) -> Option<aeris_trading::Fixe
     }
     let units = rounded.to_i64()?;
     aeris_trading::FixedPoint::try_new(units, u8::try_from(scale).ok()?).ok()
+}
+
+fn chart_quantity_fixed_point(value: f64, scale: u32) -> Option<aeris_trading::FixedPoint> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    chart_price_fixed_point(value, scale)
+}
+
+fn chart_order_from_intent(
+    intent: &ChartTradingIntent,
+    app: &WorkspaceSurface,
+    frame: &aeris_market_data::OrderBookFrame,
+    order_type: aeris_trading::OrderType,
+) -> Option<(
+    aeris_trading_runtime::PlaceOrder,
+    aeris_trading_runtime::SimulatedMarketObservation,
+)> {
+    let product = app.product.as_ref()?;
+    let account_id = app.trading_pnl.order_entry.selected_account_id.clone()?;
+    let side = match intent.side? {
+        ChartOrderSide::Buy => aeris_trading::OrderSide::Buy,
+        ChartOrderSide::Sell => aeris_trading::OrderSide::Sell,
+    };
+    let price = intent
+        .price
+        .and_then(|price| chart_price_fixed_point(price, product.price_scale))?;
+    let quantity = intent
+        .quantity
+        .and_then(|quantity| chart_quantity_fixed_point(quantity, product.quantity_scale))?;
+    let submitted_unix_nanos = aeris_desktop::trading::now();
+    let provenance = aeris_trading::TradingProvenance {
+        venue_id: "aeris-sim".to_string(),
+        provider_id: frame.provider_id.clone(),
+        session_generation: frame.session_generation,
+        source_sequence: frame
+            .source_watermark
+            .max(frame.bbo_source_watermark)
+            .max(1),
+        observed_unix_nanos: submitted_unix_nanos,
+    };
+    let client_order_id = aeris_trading::ClientOrderId::try_new(format!(
+        "chart-{}-{submitted_unix_nanos}",
+        intent.sequence
+    ))
+    .ok()?;
+    let (limit_price, stop_price) = match order_type {
+        aeris_trading::OrderType::Market => (None, None),
+        aeris_trading::OrderType::Limit => (Some(price), None),
+        aeris_trading::OrderType::Stop => (None, Some(price)),
+        aeris_trading::OrderType::StopLimit => (Some(price), Some(price)),
+    };
+    let instrument_id =
+        aeris_instruments::InstrumentId::try_new(product.instrument_id.clone()).ok()?;
+    let order = aeris_trading_runtime::PlaceOrder {
+        client_order_id,
+        account_id,
+        instrument_id: instrument_id.clone(),
+        side,
+        order_type,
+        time_in_force: app.trading_pnl.order_entry.time_in_force,
+        quantity,
+        limit_price,
+        stop_price,
+        submitted_unix_nanos,
+        provenance: provenance.clone(),
+    };
+    let bid = frame.best_bid.as_ref()?;
+    let ask = frame.best_ask.as_ref()?;
+    Some((
+        order,
+        aeris_trading_runtime::SimulatedMarketObservation {
+            instrument_id,
+            bid: aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?,
+            ask: aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale).ok()?,
+            provenance,
+        },
+    ))
 }
 
 fn resolve_chart_intent(
@@ -1405,6 +1723,178 @@ fn dispatch_chart_cancel(
     let task = cx
         .background_executor()
         .spawn(async move { service.cancel_order(client_order_id).is_ok() });
+    cx.spawn(async move |_, cx| {
+        let accepted = task.await;
+        chart.update(cx, |chart, _| {
+            chart.resolve_trading_intent(sequence, accepted);
+        });
+    })
+    .detach();
+}
+
+fn chart_tick_offset(
+    first: aeris_trading::FixedPoint,
+    second: aeris_trading::FixedPoint,
+    tick: i64,
+) -> Option<u32> {
+    if first.scale() != second.scale() || tick <= 0 {
+        return None;
+    }
+    let distance = first.units().abs_diff(second.units());
+    let tick = u64::try_from(tick).ok()?;
+    (distance > 0 && distance.is_multiple_of(tick))
+        .then(|| u32::try_from(distance / tick).ok())
+        .flatten()
+}
+
+fn dispatch_chart_place_bracket(
+    chart: Entity<NucleusChartView>,
+    intent: &ChartTradingIntent,
+    app: &WorkspaceSurface,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    let sequence = intent.sequence;
+    let Some(frame) = app.order_book.read(cx).frame().cloned() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some((entry, observation)) =
+        chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::Limit)
+    else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(product) = app.product.as_ref() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(stop_price) = intent
+        .stop_loss_price
+        .and_then(|price| chart_price_fixed_point(price, product.price_scale))
+    else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(target_price) = intent
+        .take_profit_price
+        .and_then(|price| chart_price_fixed_point(price, product.price_scale))
+    else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(entry_price) = entry.limit_price else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let tick = product.price_increment.filter(|tick| *tick > 0);
+    let valid_relation = match entry.side {
+        aeris_trading::OrderSide::Buy => {
+            stop_price.units() < entry_price.units() && target_price.units() > entry_price.units()
+        }
+        aeris_trading::OrderSide::Sell => {
+            stop_price.units() > entry_price.units() && target_price.units() < entry_price.units()
+        }
+    };
+    let Some((stop_offset_ticks, target_offset_ticks)) = tick.and_then(|tick| {
+        valid_relation.then(|| {
+            Some((
+                chart_tick_offset(entry_price, stop_price, tick)?,
+                chart_tick_offset(entry_price, target_price, tick)?,
+            ))
+        })?
+    }) else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let template = aeris_trading_runtime::BracketStrategyTemplate {
+        template_id: format!("chart-bracket-{}", entry.client_order_id.as_str()),
+        revision: 1,
+        name: "Chart bracket".to_string(),
+        stop_offset_ticks,
+        targets: vec![aeris_trading_runtime::BracketTarget {
+            offset_ticks: target_offset_ticks,
+            quantity_percent: 100,
+        }],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    };
+    let Some(service) = aeris_desktop::trading::handle() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let task = cx.background_executor().spawn(async move {
+        service
+            .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket { entry, template })
+            .and_then(|_| service.observe_market(observation).map(|_| ()))
+            .is_ok()
+    });
+    cx.spawn(async move |_, cx| {
+        let accepted = task.await;
+        chart.update(cx, |chart, _| {
+            chart.resolve_trading_intent(sequence, accepted);
+        });
+    })
+    .detach();
+}
+
+fn dispatch_chart_create_protection(
+    chart: Entity<NucleusChartView>,
+    intent: &ChartTradingIntent,
+    app: &WorkspaceSurface,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    let sequence = intent.sequence;
+    let Some(account_id) = app.trading_pnl.order_entry.selected_account_id.as_ref() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(product) = app.product.as_ref() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let identity_matches = intent.position_id.as_ref().is_some_and(|position_id| {
+        chart_position_id(account_id, &product.instrument_id).as_ref() == Some(position_id)
+    }) || intent.order_id.as_ref().is_some_and(|order_id| {
+        app.trading_pnl.orders.iter().any(|order| {
+            order.client_order_id.as_str() == order_id.as_str()
+                && &order.account_id == account_id
+                && order.instrument_id.as_str() == product.instrument_id
+        })
+    });
+    if !identity_matches {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    }
+    let Some(frame) = app.order_book.read(cx).frame().cloned() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let order_type = if intent.action == ChartTradingIntentAction::CreateStopLoss {
+        aeris_trading::OrderType::Stop
+    } else {
+        aeris_trading::OrderType::Limit
+    };
+    let Some((order, observation)) = chart_order_from_intent(intent, app, &frame, order_type)
+    else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(service) = aeris_desktop::trading::handle() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let role = if intent.action == ChartTradingIntentAction::CreateStopLoss {
+        aeris_trading_runtime::ProtectiveOrderRole::StopLoss
+    } else {
+        aeris_trading_runtime::ProtectiveOrderRole::TakeProfit
+    };
+    let task = cx.background_executor().spawn(async move {
+        service
+            .place_protective_order(aeris_trading_runtime::PlaceProtectiveOrder { order, role })
+            .and_then(|_| service.observe_market(observation).map(|_| ()))
+            .is_ok()
+    });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
         chart.update(cx, |chart, _| {
@@ -1487,6 +1977,61 @@ fn dispatch_chart_modify(
     .detach();
 }
 
+fn dispatch_chart_close_position(
+    chart: Entity<NucleusChartView>,
+    intent: &ChartTradingIntent,
+    app: &WorkspaceSurface,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    let sequence = intent.sequence;
+    let Some(account_id) = app.trading_pnl.order_entry.selected_account_id.as_ref() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(product) = app.product.as_ref() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(expected_position_id) = chart_position_id(account_id, &product.instrument_id) else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    if intent.position_id.as_ref() != Some(&expected_position_id)
+        || !app.trading_pnl.positions.iter().any(|position| {
+            &position.position.account_id == account_id
+                && position.position.instrument_id.as_str() == product.instrument_id
+                && position.position.net_quantity.units() != 0
+        })
+    {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    }
+    let Some(frame) = app.order_book.read(cx).frame().cloned() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some((account_id, observation)) =
+        aeris_desktop::trading::prepare_flatten_for(&frame, Some(account_id.as_str().to_string()))
+    else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let Some(service) = aeris_desktop::trading::handle() else {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    };
+    let task = cx
+        .background_executor()
+        .spawn(async move { service.flatten_account(account_id, observation).is_ok() });
+    cx.spawn(async move |_, cx| {
+        let accepted = task.await;
+        chart.update(cx, |chart, _| {
+            chart.resolve_trading_intent(sequence, accepted);
+        });
+    })
+    .detach();
+}
+
 fn dispatch_chart_trading_intent(
     chart: Entity<NucleusChartView>,
     intent: &ChartTradingIntent,
@@ -1495,12 +2040,45 @@ fn dispatch_chart_trading_intent(
 ) {
     let sequence = intent.sequence;
     let action = intent.action;
+    if !chart_intent_has_confirmation_evidence(intent) {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    }
+    if selected_account_lock_reason(&app.trading_pnl).is_some()
+        && !matches!(
+            action,
+            ChartTradingIntentAction::CancelOrder | ChartTradingIntentAction::ClosePosition
+        )
+    {
+        resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    }
     let supported = matches!(
         action,
-        ChartTradingIntentAction::ModifyOrder | ChartTradingIntentAction::CancelOrder
+        ChartTradingIntentAction::PlaceBracketOrder
+            | ChartTradingIntentAction::ModifyOrder
+            | ChartTradingIntentAction::CancelOrder
+            | ChartTradingIntentAction::CreateStopLoss
+            | ChartTradingIntentAction::CreateTakeProfit
+            | ChartTradingIntentAction::ClosePosition
     );
     if !supported {
         resolve_chart_intent(&chart, sequence, false, cx);
+        return;
+    }
+    if action == ChartTradingIntentAction::ClosePosition {
+        dispatch_chart_close_position(chart, intent, app, cx);
+        return;
+    }
+    if action == ChartTradingIntentAction::PlaceBracketOrder {
+        dispatch_chart_place_bracket(chart, intent, app, cx);
+        return;
+    }
+    if matches!(
+        action,
+        ChartTradingIntentAction::CreateStopLoss | ChartTradingIntentAction::CreateTakeProfit
+    ) {
+        dispatch_chart_create_protection(chart, intent, app, cx);
         return;
     }
     let Some(order_id) = intent.order_id.as_ref().map(ChartOrderId::as_str) else {
@@ -1545,6 +2123,30 @@ fn dispatch_chart_trading_intent(
             dispatch_chart_modify(chart, intent, order, app, cx);
         }
         _ => resolve_chart_intent(&chart, sequence, false, cx),
+    }
+}
+
+fn chart_intent_has_confirmation_evidence(intent: &ChartTradingIntent) -> bool {
+    match intent.action {
+        ChartTradingIntentAction::PlaceBracketOrder => {
+            intent.drawing_id.is_some()
+                && intent.side.is_some()
+                && intent.price.is_some()
+                && intent.stop_loss_price.is_some()
+                && intent.take_profit_price.is_some()
+                && intent.quantity.is_some()
+        }
+        ChartTradingIntentAction::ModifyOrder => {
+            intent.order_id.is_some() && intent.price.is_some()
+        }
+        ChartTradingIntentAction::CancelOrder => intent.order_id.is_some(),
+        ChartTradingIntentAction::CreateStopLoss | ChartTradingIntentAction::CreateTakeProfit => {
+            (intent.position_id.is_some() || intent.order_id.is_some())
+                && intent.side.is_some()
+                && intent.price.is_some()
+                && intent.quantity.is_some()
+        }
+        ChartTradingIntentAction::ClosePosition => intent.position_id.is_some(),
     }
 }
 
@@ -2804,7 +3406,13 @@ fn subscribe_order_book_trading(
             order_book,
             cx,
             move |_, event: &OrderBookLevelClick, _, cx| {
-                let order_entry = click_workspace.read(cx).trading_pnl.order_entry.clone();
+                let order_entry = {
+                    let surface = click_workspace.read(cx);
+                    if selected_account_lock_reason(&surface.trading_pnl).is_some() {
+                        return;
+                    }
+                    surface.trading_pnl.order_entry.clone()
+                };
                 let frame = click_order_book.read(cx).frame().cloned();
                 let Some(frame) = frame else {
                     return;
@@ -2839,6 +3447,9 @@ fn subscribe_order_book_trading(
                 }
                 let (account_id, orders) = {
                     let surface = drop_workspace.read(cx);
+                    if selected_account_lock_reason(&surface.trading_pnl).is_some() {
+                        return;
+                    }
                     let Some(account_id) =
                         surface.trading_pnl.order_entry.selected_account_id.clone()
                     else {
@@ -2854,7 +3465,7 @@ fn subscribe_order_book_trading(
                     OrderBookLevelSide::Bid => aeris_trading::OrderSide::Sell,
                 };
                 let Some(order) = orders.into_iter().find(|order| {
-                    order.status == aeris_trading::OrderStatus::Working
+                    order.status.is_open()
                         && order.order_type == aeris_trading::OrderType::Limit
                         && order.side == order_side
                         && order.account_id.as_str() == account_id.as_str()

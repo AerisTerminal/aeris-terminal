@@ -73,6 +73,13 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) trading_orders: &'a [aeris_trading::Order],
     pub(super) trading_positions: &'a [aeris_trading_runtime::PositionPnl],
     pub(super) trading_risk_meters: &'a [aeris_trading_runtime::RiskMeter],
+    pub(super) trading_risk_locks: &'a [aeris_trading_runtime::RiskLock],
+    pub(super) session_plans: &'a [aeris_trading_runtime::SessionPlan],
+    pub(super) session_reviews: &'a [aeris_trading_runtime::SessionAdherenceReview],
+    pub(super) trade_copiers: &'a [aeris_trading_runtime::TradeCopierConfig],
+    pub(super) copy_dispatches: &'a [aeris_trading_runtime::TradeCopyDispatch],
+    pub(super) strategy_templates: &'a [aeris_trading_runtime::BracketStrategyTemplate],
+    pub(super) managed_brackets: &'a [aeris_trading_runtime::ManagedBracket],
     pub(super) trading_order_entry: &'a super::TradingOrderEntryState,
     pub(super) watchlist: WatchlistPanelState,
     pub(super) order_book_column_menu_open: bool,
@@ -96,6 +103,13 @@ struct OrderBookPanelState<'a> {
     trading_orders: &'a [aeris_trading::Order],
     trading_positions: &'a [aeris_trading_runtime::PositionPnl],
     trading_risk_meters: &'a [aeris_trading_runtime::RiskMeter],
+    trading_risk_locks: &'a [aeris_trading_runtime::RiskLock],
+    session_plans: &'a [aeris_trading_runtime::SessionPlan],
+    session_reviews: &'a [aeris_trading_runtime::SessionAdherenceReview],
+    trade_copiers: &'a [aeris_trading_runtime::TradeCopierConfig],
+    copy_dispatches: &'a [aeris_trading_runtime::TradeCopyDispatch],
+    strategy_templates: &'a [aeris_trading_runtime::BracketStrategyTemplate],
+    managed_brackets: &'a [aeris_trading_runtime::ManagedBracket],
     trading_order_entry: &'a super::TradingOrderEntryState,
     column_menu_open: bool,
     columns: OrderBookColumnVisibility,
@@ -112,6 +126,13 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         trading_orders,
         trading_positions,
         trading_risk_meters,
+        trading_risk_locks,
+        session_plans,
+        session_reviews,
+        trade_copiers,
+        copy_dispatches,
+        strategy_templates,
+        managed_brackets,
         trading_order_entry,
         column_menu_open,
         columns,
@@ -138,6 +159,13 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
             orders: trading_orders,
             positions: trading_positions,
             risk_meters: trading_risk_meters,
+            risk_locks: trading_risk_locks,
+            session_plans,
+            session_reviews,
+            trade_copiers,
+            copy_dispatches,
+            strategy_templates,
+            managed_brackets,
             order_entry: trading_order_entry,
             theme,
         }))
@@ -163,6 +191,13 @@ struct TradingOrderControlsState<'a> {
     orders: &'a [aeris_trading::Order],
     positions: &'a [aeris_trading_runtime::PositionPnl],
     risk_meters: &'a [aeris_trading_runtime::RiskMeter],
+    risk_locks: &'a [aeris_trading_runtime::RiskLock],
+    session_plans: &'a [aeris_trading_runtime::SessionPlan],
+    session_reviews: &'a [aeris_trading_runtime::SessionAdherenceReview],
+    trade_copiers: &'a [aeris_trading_runtime::TradeCopierConfig],
+    copy_dispatches: &'a [aeris_trading_runtime::TradeCopyDispatch],
+    strategy_templates: &'a [aeris_trading_runtime::BracketStrategyTemplate],
+    managed_brackets: &'a [aeris_trading_runtime::ManagedBracket],
     order_entry: &'a super::TradingOrderEntryState,
     theme: &'a AerisTheme,
 }
@@ -176,10 +211,21 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         orders,
         positions,
         risk_meters,
+        risk_locks,
+        session_plans,
+        session_reviews,
+        trade_copiers,
+        copy_dispatches,
+        strategy_templates,
+        managed_brackets,
         order_entry,
         theme,
     } = *state;
     let colors = theme.colors;
+    let order_entry_locked = order_entry
+        .selected_account_id
+        .as_ref()
+        .is_some_and(|account_id| risk_locks.iter().any(|lock| &lock.account_id == account_id));
     div()
         .flex()
         .flex_col()
@@ -188,17 +234,65 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .child(trading_pnl_summary(trading_pnl, positions, frame, theme))
-        .child(trading_risk_summary(risk_meters, order_entry, theme))
-        .child(trading_working_orders(frame, orders, order_entry, theme))
-        .child(trading_order_entry(app, accounts, order_entry, theme))
-        .child(market_order_buttons(frame, order_entry, theme))
-        .child(book_order_buttons(frame, order_entry, theme))
+        .child(trading_risk_summary(
+            risk_meters,
+            risk_locks,
+            order_entry,
+            theme,
+        ))
+        .child(trading_plan_summary(
+            session_plans,
+            session_reviews,
+            order_entry,
+            theme,
+        ))
+        .child(trading_copier_controls(
+            accounts,
+            orders,
+            trade_copiers,
+            copy_dispatches,
+            order_entry,
+            theme,
+        ))
+        .child(trading_working_orders(
+            frame,
+            orders,
+            order_entry,
+            order_entry_locked,
+            theme,
+        ))
+        .child(trading_strategy_summary(
+            strategy_templates,
+            managed_brackets,
+            order_entry,
+            theme,
+        ))
+        .child(trading_order_entry(
+            app,
+            accounts,
+            strategy_templates,
+            order_entry,
+            theme,
+        ))
+        .child(market_order_buttons(
+            frame,
+            order_entry,
+            order_entry_locked,
+            theme,
+        ))
+        .child(book_order_buttons(
+            frame,
+            order_entry,
+            order_entry_locked,
+            theme,
+        ))
         .child(order_management_buttons(frame, order_entry, theme))
 }
 
 fn trading_order_entry(
     app: &Entity<WorkspaceSurface>,
     accounts: &[aeris_trading::TradingAccount],
+    strategy_templates: &[aeris_trading_runtime::BracketStrategyTemplate],
     order_entry: &super::TradingOrderEntryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
@@ -206,6 +300,7 @@ fn trading_order_entry(
     let quantity_buttons = trading_quantity_buttons(app, order_entry.quantity, theme);
     let type_buttons = trading_order_type_buttons(app, order_entry.order_type, theme);
     let tif_buttons = trading_time_in_force_buttons(app, order_entry.time_in_force, theme);
+    let strategy_selector = trading_strategy_selector(app, strategy_templates, order_entry, theme);
     div()
         .flex()
         .flex_col()
@@ -214,6 +309,122 @@ fn trading_order_entry(
         .child(quantity_buttons)
         .child(type_buttons)
         .child(tif_buttons)
+        .child(strategy_selector)
+}
+
+fn trading_strategy_summary(
+    templates: &[aeris_trading_runtime::BracketStrategyTemplate],
+    brackets: &[aeris_trading_runtime::ManagedBracket],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let selected = order_entry
+        .selected_strategy_template_id
+        .as_ref()
+        .and_then(|id| {
+            templates
+                .iter()
+                .find(|template| &template.template_id == id)
+        });
+    let active = brackets
+        .iter()
+        .filter(|bracket| {
+            matches!(
+                bracket.status,
+                aeris_trading_runtime::ManagedBracketStatus::AwaitingEntry
+                    | aeris_trading_runtime::ManagedBracketStatus::Active
+            )
+        })
+        .count();
+    let label = selected.map_or_else(
+        || format!("STRATEGY OFF · {active} active"),
+        |template| {
+            format!(
+                "{} · {} · {active} active",
+                aeris_trading_runtime::ManagedBracket::MANAGEMENT_LABEL,
+                template.name
+            )
+        },
+    );
+    div()
+        .h(px(18.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(gpui_color(theme.colors.text_muted))
+        .child(label)
+}
+
+fn trading_strategy_selector(
+    app: &Entity<WorkspaceSurface>,
+    templates: &[aeris_trading_runtime::BracketStrategyTemplate],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let selected = order_entry
+        .selected_strategy_template_id
+        .as_ref()
+        .and_then(|id| {
+            templates
+                .iter()
+                .find(|template| &template.template_id == id)
+        });
+    let label = selected.map_or_else(
+        || "STRAT · OFF".to_string(),
+        |template| format!("STRAT · {}", template.name),
+    );
+    let strategy_app = (*app).clone();
+    div()
+        .id("trading_strategy_selector")
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .px_1()
+        .rounded(px(4.0))
+        .bg(gpui_color(theme.colors.hover_bg))
+        .text_color(gpui_color(theme.colors.text_primary))
+        .text_xs()
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Select a locally managed bracket strategy")
+        .on_click(move |_, _, cx| {
+            strategy_app.update(cx, |surface, surface_cx| {
+                let enabled = surface
+                    .trading_pnl
+                    .strategy_templates
+                    .iter()
+                    .filter(|template| template.enabled)
+                    .collect::<Vec<_>>();
+                let next = surface
+                    .trading_pnl
+                    .order_entry
+                    .selected_strategy_template_id
+                    .as_ref()
+                    .and_then(|selected| {
+                        enabled
+                            .iter()
+                            .position(|template| &template.template_id == selected)
+                    })
+                    .and_then(|index| enabled.get(index + 1))
+                    .map(|template| template.template_id.clone())
+                    .or_else(|| {
+                        surface
+                            .trading_pnl
+                            .order_entry
+                            .selected_strategy_template_id
+                            .is_none()
+                            .then(|| enabled.first().map(|template| template.template_id.clone()))
+                            .flatten()
+                    });
+                surface
+                    .trading_pnl
+                    .order_entry
+                    .selected_strategy_template_id = next;
+                surface_cx.notify();
+            });
+        })
+        .child(label)
 }
 
 fn trading_account_selector(
@@ -471,10 +682,19 @@ fn selected_position_pnl<'a>(
 
 fn trading_risk_summary(
     risk_meters: &[aeris_trading_runtime::RiskMeter],
+    risk_locks: &[aeris_trading_runtime::RiskLock],
     order_entry: &super::TradingOrderEntryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
+    let lock = order_entry
+        .selected_account_id
+        .as_ref()
+        .and_then(|account_id| {
+            risk_locks
+                .iter()
+                .find(|lock| &lock.account_id == account_id)
+        });
     let meter = order_entry
         .selected_account_id
         .as_ref()
@@ -483,44 +703,114 @@ fn trading_risk_summary(
                 .iter()
                 .find(|meter| &meter.account_id == account_id)
         });
-    let (label, color) = meter.map_or_else(
-        || ("RULE · no profile".to_string(), colors.text_muted),
-        |meter| {
-            if let Some(reason) = &meter.lock_reason {
-                return (format!("RULE LOCKED · {reason}"), colors.danger);
-            }
-            if !meter.enabled {
-                return ("RULE · disabled".to_string(), colors.text_muted);
-            }
-            let trailing = meter
-                .trailing_drawdown_remaining
-                .map_or_else(String::new, |remaining| {
-                    format!(" · trail {}", format_fixed_point(remaining))
+    let (label, color) = lock.map_or_else(
+        || {
+            meter.map_or_else(
+                || ("RULE · no profile".to_string(), colors.text_muted),
+                |meter| {
+                    if !meter.enabled {
+                        return ("RULE · disabled".to_string(), colors.text_muted);
+                    }
+                    let trailing = meter
+                        .trailing_drawdown_remaining
+                        .map_or_else(String::new, |remaining| {
+                            format!(" · trail {}", format_fixed_point(remaining))
+                        });
+                    let consistency = meter.consistency_max_single_trade_percent.map_or_else(
+                        String::new,
+                        |percent| {
+                            let current = meter.consistency_current_percent.unwrap_or(0);
+                            let required = meter
+                                .consistency_additional_profit_required
+                                .map_or_else(String::new, |value| {
+                                    format!(" +{}", format_fixed_point(value))
+                                });
+                            format!(" · consistency {current}/{percent}%{required}")
+                        },
+                    );
+                    let restriction = if meter.restricted_until_unix_nanos.is_some() {
+                        " · news window"
+                    } else {
+                        ""
+                    };
+                    let label = format!(
+                        "RULE · loss {} · ctr {}{}{}{}",
+                        format_fixed_point(meter.daily_loss_remaining),
+                        format_fixed_point(meter.contracts_remaining),
+                        trailing,
+                        consistency,
+                        restriction,
+                    );
+                    let color = if meter.daily_loss_remaining.units() == 0
+                        || meter.contracts_remaining.units() == 0
+                    {
+                        colors.danger
+                    } else {
+                        colors.text_muted
+                    };
+                    (label, color)
+                },
+            )
+        },
+        |lock| (format!("RULE LOCKED · {}", lock.reason), colors.danger),
+    );
+    div()
+        .h(px(18.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(gpui_color(color))
+        .child(label)
+}
+
+fn trading_plan_summary(
+    plans: &[aeris_trading_runtime::SessionPlan],
+    reviews: &[aeris_trading_runtime::SessionAdherenceReview],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let plan = order_entry
+        .selected_account_id
+        .as_ref()
+        .and_then(|account_id| plans.iter().find(|plan| &plan.account_id == account_id));
+    let review = plan.and_then(|plan| {
+        reviews.iter().find(|review| {
+            review.account_id == plan.account_id
+                && review.plan_id == plan.plan_id
+                && review.plan_revision == plan.revision
+        })
+    });
+    let (label, color) = plan.map_or_else(
+        || ("PLAN · none".to_string(), colors.text_muted),
+        |plan| {
+            let bias = match plan.bias {
+                aeris_trading_runtime::SessionBias::Long => "long",
+                aeris_trading_runtime::SessionBias::Short => "short",
+                aeris_trading_runtime::SessionBias::Neutral => "neutral",
+            };
+            let setup = plan.active_setup.as_deref().unwrap_or("setup pending");
+            let adherence = review.map_or_else(String::new, |review| {
+                format!(
+                    " · checklist {}/{} · outside {}",
+                    review.checklist_completed,
+                    review.checklist_total,
+                    review.fills_outside_planned_hours,
+                )
+            });
+            let has_violation = !plan.is_ready()
+                || review.is_some_and(|review| {
+                    !review.maximum_loss_respected || review.fills_outside_planned_hours > 0
                 });
-            let consistency = meter
-                .consistency_max_single_trade_percent
-                .map_or_else(String::new, |percent| format!(" · consistency ≤{percent}%"));
-            let restriction = if meter.restricted_until_unix_nanos.is_some() {
-                " · news window"
-            } else {
-                ""
-            };
-            let label = format!(
-                "RULE · loss {} · ctr {}{}{}{}",
-                format_fixed_point(meter.daily_loss_remaining),
-                format_fixed_point(meter.contracts_remaining),
-                trailing,
-                consistency,
-                restriction,
-            );
-            let color = if meter.daily_loss_remaining.units() == 0
-                || meter.contracts_remaining.units() == 0
-            {
-                colors.danger
-            } else {
-                colors.text_muted
-            };
-            (label, color)
+            (
+                format!("PLAN · {bias} · {setup}{adherence}"),
+                if has_violation {
+                    colors.danger
+                } else {
+                    colors.text_muted
+                },
+            )
         },
     );
     div()
@@ -533,10 +823,283 @@ fn trading_risk_summary(
         .child(label)
 }
 
+fn trading_copier_controls(
+    accounts: &[aeris_trading::TradingAccount],
+    orders: &[aeris_trading::Order],
+    configs: &[aeris_trading_runtime::TradeCopierConfig],
+    dispatches: &[aeris_trading_runtime::TradeCopyDispatch],
+    order_entry: &super::TradingOrderEntryState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let source = order_entry
+        .selected_account_id
+        .as_ref()
+        .and_then(|source_id| accounts.iter().find(|account| &account.id == source_id));
+    let current = source.and_then(|source| {
+        configs
+            .iter()
+            .find(|config| config.source_account_id == source.id)
+    });
+    let proposed =
+        source.and_then(|source| reconciled_trade_copier_config(accounts, configs, source));
+    let eligible_targets = proposed.as_ref().map_or(0, |config| config.targets.len());
+    let status = trade_copier_status(source.is_some(), current, eligible_targets);
+    let status_color = if current.is_some_and(|config| config.enabled) {
+        colors.bullish
+    } else {
+        colors.text_muted
+    };
+    let toggle = proposed.clone().map(|mut config| {
+        config.enabled = !current.is_some_and(|current| current.enabled);
+        let label = if config.enabled {
+            "COPY ON"
+        } else {
+            "COPY OFF"
+        };
+        div()
+            .id("trade_copier_toggle")
+            .h(px(20.0))
+            .px_1()
+            .flex()
+            .items_center()
+            .rounded(px(3.0))
+            .bg(gpui_color(colors.hover_bg))
+            .text_color(gpui_color(status_color))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label("Enable or pause copying from the selected account")
+            .on_click(move |_, _, cx| {
+                aeris_desktop::trading::register_trade_copier(config.clone(), cx);
+            })
+            .child(label)
+    });
+    let target_rows = proposed
+        .as_ref()
+        .map(|config| {
+            config
+                .targets
+                .iter()
+                .enumerate()
+                .filter_map(|(index, target)| {
+                    let account = accounts
+                        .iter()
+                        .find(|account| account.id == target.account_id)?;
+                    Some(trading_copier_target_row(
+                        index, account, target, config, &colors,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let last_dispatch = source
+        .and_then(|source| latest_copy_dispatch(source, orders, dispatches))
+        .map(|dispatch| trade_copy_dispatch_label(accounts, dispatch));
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_1()
+        .py_1()
+        .border_t_1()
+        .border_color(gpui_color(colors.border))
+        .text_xs()
+        .child(
+            div()
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .text_color(gpui_color(status_color))
+                .child(div().flex_1().truncate().child(status))
+                .children(toggle),
+        )
+        .children(target_rows)
+        .children(last_dispatch.map(|label| {
+            div()
+                .truncate()
+                .text_color(gpui_color(colors.text_muted))
+                .child(label)
+        }))
+}
+
+fn trade_copier_status(
+    source_selected: bool,
+    current: Option<&aeris_trading_runtime::TradeCopierConfig>,
+    eligible_targets: usize,
+) -> String {
+    match (source_selected, current, eligible_targets) {
+        (false, _, _) => "COPY · select an account".to_string(),
+        (true, _, 0) => "COPY · no same-mode target accounts".to_string(),
+        (true, Some(config), _) if config.enabled => {
+            format!("COPY ON · {} targets", config.targets.len())
+        }
+        (true, Some(config), _) => format!("COPY OFF · {} targets", config.targets.len()),
+        (true, None, _) => format!("COPY OFF · {eligible_targets} targets available"),
+    }
+}
+
+fn trade_copy_dispatch_label(
+    accounts: &[aeris_trading::TradingAccount],
+    dispatch: &aeris_trading_runtime::TradeCopyDispatch,
+) -> String {
+    let target = accounts
+        .iter()
+        .find(|account| account.id == dispatch.target_account_id)
+        .map_or(dispatch.target_account_id.as_str(), |account| {
+            account.display_name.as_str()
+        });
+    if dispatch.accepted {
+        format!("LAST · {target} accepted")
+    } else {
+        let detail = dispatch.detail.as_deref().unwrap_or("rejected");
+        format!("LAST · {target} · {}", bounded_copier_detail(detail))
+    }
+}
+
+fn reconciled_trade_copier_config(
+    accounts: &[aeris_trading::TradingAccount],
+    configs: &[aeris_trading_runtime::TradeCopierConfig],
+    source: &aeris_trading::TradingAccount,
+) -> Option<aeris_trading_runtime::TradeCopierConfig> {
+    let current = configs
+        .iter()
+        .find(|config| config.source_account_id == source.id);
+    let revision = current.map_or(Some(1), |config| config.revision.checked_add(1))?;
+    let targets = accounts
+        .iter()
+        .filter(|account| account.id != source.id && account.environment == source.environment)
+        .take(aeris_trading_runtime::MAXIMUM_COPIER_TARGETS)
+        .filter_map(|account| {
+            current
+                .and_then(|config| {
+                    config
+                        .targets
+                        .iter()
+                        .find(|target| target.account_id == account.id)
+                })
+                .cloned()
+                .or_else(|| {
+                    Some(aeris_trading_runtime::TradeCopierTarget {
+                        account_id: account.id.clone(),
+                        quantity_multiplier: aeris_trading::FixedPoint::try_new(1, 0).ok()?,
+                        enabled: true,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return None;
+    }
+    Some(aeris_trading_runtime::TradeCopierConfig {
+        source_account_id: source.id.clone(),
+        revision,
+        enabled: current.is_some_and(|config| config.enabled),
+        targets,
+    })
+}
+
+fn trading_copier_target_row(
+    index: usize,
+    account: &aeris_trading::TradingAccount,
+    target: &aeris_trading_runtime::TradeCopierTarget,
+    proposed: &aeris_trading_runtime::TradeCopierConfig,
+    colors: &aeris_design_system::ThemeColors,
+) -> Stateful<Div> {
+    let mut toggle_config = proposed.clone();
+    if let Some(target) = toggle_config.targets.get_mut(index) {
+        target.enabled = !target.enabled;
+    }
+    let mut multiplier_config = proposed.clone();
+    if let Some(target) = multiplier_config.targets.get_mut(index) {
+        target.quantity_multiplier = next_copier_multiplier(target.quantity_multiplier);
+    }
+    let enabled = target.enabled;
+    let account_label = account.display_name.clone();
+    let multiplier_label = format!(
+        "{}×",
+        format_fixed_point(target.quantity_multiplier).trim_start_matches('+')
+    );
+    div()
+        .id(("trade_copier_target", index))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_color(gpui_color(colors.text_secondary))
+        .child(div().flex_1().truncate().child(account_label))
+        .child(
+            div()
+                .id(("trade_copier_multiplier", index))
+                .px_1()
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label("Change this account's trade-copy quantity multiplier")
+                .text_color(gpui_color(colors.primary))
+                .on_click(move |_, _, cx| {
+                    aeris_desktop::trading::register_trade_copier(multiplier_config.clone(), cx);
+                })
+                .child(multiplier_label),
+        )
+        .child(
+            div()
+                .id(("trade_copier_target_toggle", index))
+                .px_1()
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label("Enable or pause trade copying to this account")
+                .text_color(gpui_color(if enabled {
+                    colors.bullish
+                } else {
+                    colors.danger
+                }))
+                .on_click(move |_, _, cx| {
+                    aeris_desktop::trading::register_trade_copier(toggle_config.clone(), cx);
+                })
+                .child(if enabled { "LIVE" } else { "PAUSED" }),
+        )
+}
+
+fn next_copier_multiplier(current: aeris_trading::FixedPoint) -> aeris_trading::FixedPoint {
+    let next = match (current.units(), current.scale()) {
+        (1, 0) => 2,
+        (2, 0) => 3,
+        _ => 1,
+    };
+    match aeris_trading::FixedPoint::try_new(next, 0) {
+        Ok(value) => value,
+        Err(_) => current,
+    }
+}
+
+fn latest_copy_dispatch<'a>(
+    source: &aeris_trading::TradingAccount,
+    orders: &[aeris_trading::Order],
+    dispatches: &'a [aeris_trading_runtime::TradeCopyDispatch],
+) -> Option<&'a aeris_trading_runtime::TradeCopyDispatch> {
+    dispatches.iter().rev().find(|dispatch| {
+        orders.iter().any(|order| {
+            order.account_id == source.id
+                && order.client_order_id.as_str() == dispatch.source_client_order_id.as_str()
+        })
+    })
+}
+
+fn bounded_copier_detail(detail: &str) -> String {
+    const MAXIMUM_CHARS: usize = 64;
+    let mut chars = detail.chars();
+    let bounded = chars.by_ref().take(MAXIMUM_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
 fn trading_working_orders(
     frame: Option<&aeris_market_data::OrderBookFrame>,
     orders: &[aeris_trading::Order],
     order_entry: &super::TradingOrderEntryState,
+    order_entry_locked: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -544,7 +1107,7 @@ fn trading_working_orders(
     let selected_instrument = frame.map(|book| book.instrument_id.as_str());
     let rows = orders
         .iter()
-        .filter(|order| order.status == aeris_trading::OrderStatus::Working)
+        .filter(|order| order.status.is_open())
         .filter(|order| selected_account.is_none_or(|account_id| &order.account_id == account_id))
         .filter(|order| {
             selected_instrument
@@ -552,7 +1115,7 @@ fn trading_working_orders(
         })
         .take(8)
         .enumerate()
-        .map(|(index, order)| working_order_row(order, index, frame, &colors))
+        .map(|(index, order)| working_order_row(order, index, frame, order_entry_locked, &colors))
         .collect::<Vec<_>>();
     let header = if rows.is_empty() {
         "ORDERS · none".to_string()
@@ -574,6 +1137,7 @@ fn working_order_row(
     order: &aeris_trading::Order,
     index: usize,
     frame: Option<&aeris_market_data::OrderBookFrame>,
+    order_entry_locked: bool,
     colors: &aeris_design_system::ThemeColors,
 ) -> impl IntoElement + use<> {
     let direction = match order.side {
@@ -604,27 +1168,28 @@ fn working_order_row(
     let reprice_side = order.side;
     let reprice_time_in_force = order.time_in_force;
     let reprice_order_key = client_order_key.clone();
-    let reprice_button = (order.order_type == aeris_trading::OrderType::Limit).then(|| {
-        div()
-            .id(("reprice_working_order", index))
-            .px_1()
-            .cursor_pointer()
-            .role(Role::Button)
-            .aria_label("Reprice working simulated limit order")
-            .text_color(gpui_color(colors.primary))
-            .on_click(move |_, _, cx| {
-                if let Some(frame) = reprice_frame.clone() {
-                    aeris_desktop::trading::reprice_simulated_order(
-                        reprice_order_key.clone(),
-                        reprice_side,
-                        reprice_time_in_force,
-                        &frame,
-                        cx,
-                    );
-                }
-            })
-            .child("REPRICE")
-    });
+    let reprice_button =
+        (order.order_type == aeris_trading::OrderType::Limit && !order_entry_locked).then(|| {
+            div()
+                .id(("reprice_working_order", index))
+                .px_1()
+                .cursor_pointer()
+                .role(Role::Button)
+                .aria_label("Reprice working simulated limit order")
+                .text_color(gpui_color(colors.primary))
+                .on_click(move |_, _, cx| {
+                    if let Some(frame) = reprice_frame.clone() {
+                        aeris_desktop::trading::reprice_simulated_order(
+                            reprice_order_key.clone(),
+                            reprice_side,
+                            reprice_time_in_force,
+                            &frame,
+                            cx,
+                        );
+                    }
+                })
+                .child("REPRICE")
+        });
     div()
         .id(("working_order", index))
         .h(px(20.0))
@@ -670,6 +1235,7 @@ fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
 fn market_order_buttons(
     frame: Option<&aeris_market_data::OrderBookFrame>,
     order_entry: &super::TradingOrderEntryState,
+    order_entry_locked: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -682,10 +1248,12 @@ fn market_order_buttons(
     let buy_order_type = order_entry.order_type;
     let buy_time_in_force = order_entry.time_in_force;
     let buy_quantity = order_entry.quantity;
+    let buy_template = order_entry.selected_strategy_template_id.clone();
     let sell_account_key = account_key.clone();
     let sell_order_type = buy_order_type;
     let sell_time_in_force = buy_time_in_force;
     let sell_quantity = buy_quantity;
+    let sell_template = buy_template.clone();
     let buy = div()
         .id("trading_buy_market")
         .flex_1()
@@ -694,24 +1262,37 @@ fn market_order_buttons(
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .bg(gpui_color(colors.bullish))
-        .text_color(gpui_color(colors.surface))
+        .bg(gpui_color(if order_entry_locked {
+            colors.hover_bg
+        } else {
+            colors.bullish
+        }))
+        .text_color(gpui_color(if order_entry_locked {
+            colors.text_muted
+        } else {
+            colors.surface
+        }))
         .text_xs()
-        .cursor_pointer()
         .role(Role::Button)
         .aria_label("Buy the selected simulated order")
-        .on_click(move |_, _, cx| {
-            if let Some(frame) = buy_frame.clone() {
-                aeris_desktop::trading::dispatch_simulated_order(
-                    &frame,
-                    aeris_trading::OrderSide::Buy,
-                    account_key.clone(),
-                    buy_quantity,
-                    buy_order_type,
-                    buy_time_in_force,
-                    cx,
-                );
-            }
+        .when(order_entry_locked, gpui::Styled::cursor_not_allowed)
+        .when(!order_entry_locked, move |button| {
+            button.cursor_pointer().on_click(move |_, _, cx| {
+                if let Some(frame) = buy_frame.clone() {
+                    aeris_desktop::trading::dispatch_simulated_selected_order(
+                        &frame,
+                        aeris_trading::OrderSide::Buy,
+                        aeris_desktop::trading::SimulatedOrderSelection {
+                            account_key: account_key.clone(),
+                            quantity: buy_quantity,
+                            order_type: buy_order_type,
+                            time_in_force: buy_time_in_force,
+                            template_id: buy_template.clone(),
+                        },
+                        cx,
+                    );
+                }
+            })
         })
         .child(format!("BUY {buy_quantity}"));
     let sell = div()
@@ -722,24 +1303,37 @@ fn market_order_buttons(
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .bg(gpui_color(colors.bearish))
-        .text_color(gpui_color(colors.surface))
+        .bg(gpui_color(if order_entry_locked {
+            colors.hover_bg
+        } else {
+            colors.bearish
+        }))
+        .text_color(gpui_color(if order_entry_locked {
+            colors.text_muted
+        } else {
+            colors.surface
+        }))
         .text_xs()
-        .cursor_pointer()
         .role(Role::Button)
         .aria_label("Sell the selected simulated order")
-        .on_click(move |_, _, cx| {
-            if let Some(frame) = sell_frame.clone() {
-                aeris_desktop::trading::dispatch_simulated_order(
-                    &frame,
-                    aeris_trading::OrderSide::Sell,
-                    sell_account_key.clone(),
-                    sell_quantity,
-                    sell_order_type,
-                    sell_time_in_force,
-                    cx,
-                );
-            }
+        .when(order_entry_locked, gpui::Styled::cursor_not_allowed)
+        .when(!order_entry_locked, move |button| {
+            button.cursor_pointer().on_click(move |_, _, cx| {
+                if let Some(frame) = sell_frame.clone() {
+                    aeris_desktop::trading::dispatch_simulated_selected_order(
+                        &frame,
+                        aeris_trading::OrderSide::Sell,
+                        aeris_desktop::trading::SimulatedOrderSelection {
+                            account_key: sell_account_key.clone(),
+                            quantity: sell_quantity,
+                            order_type: sell_order_type,
+                            time_in_force: sell_time_in_force,
+                            template_id: sell_template.clone(),
+                        },
+                        cx,
+                    );
+                }
+            })
         })
         .child(format!("SELL {sell_quantity}"));
     div().flex().gap_1().child(buy).child(sell)
@@ -748,6 +1342,7 @@ fn market_order_buttons(
 fn book_order_buttons(
     frame: Option<&aeris_market_data::OrderBookFrame>,
     order_entry: &super::TradingOrderEntryState,
+    order_entry_locked: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -760,14 +1355,10 @@ fn book_order_buttons(
     let sell_account_key = account_key.clone();
     let quantity = order_entry.quantity;
     let time_in_force = order_entry.time_in_force;
-    let ask_label = frame.and_then(|book| book.best_ask.as_ref()).map_or_else(
-        || "BUY ASK".to_string(),
-        |level| format!("BUY ASK {}", level.price_text),
-    );
-    let bid_label = frame.and_then(|book| book.best_bid.as_ref()).map_or_else(
-        || "SELL BID".to_string(),
-        |level| format!("SELL BID {}", level.price_text),
-    );
+    let buy_template = order_entry.selected_strategy_template_id.clone();
+    let sell_template = buy_template.clone();
+    let ask_label = best_book_order_label(frame, OrderBookSide::Ask);
+    let bid_label = best_book_order_label(frame, OrderBookSide::Bid);
     let buy = div()
         .id("trading_buy_ask")
         .flex_1()
@@ -776,24 +1367,37 @@ fn book_order_buttons(
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .bg(gpui_color(colors.bullish.with_alpha(0.75)))
-        .text_color(gpui_color(colors.surface))
+        .bg(gpui_color(if order_entry_locked {
+            colors.hover_bg
+        } else {
+            colors.bullish.with_alpha(0.75)
+        }))
+        .text_color(gpui_color(if order_entry_locked {
+            colors.text_muted
+        } else {
+            colors.surface
+        }))
         .text_xs()
-        .cursor_pointer()
         .role(Role::Button)
         .aria_label("Buy the selected simulated order at the best ask")
-        .on_click(move |_, _, cx| {
-            if let Some(frame) = buy_frame.clone() {
-                aeris_desktop::trading::dispatch_simulated_order(
-                    &frame,
-                    aeris_trading::OrderSide::Buy,
-                    account_key.clone(),
-                    quantity,
-                    aeris_trading::OrderType::Limit,
-                    time_in_force,
-                    cx,
-                );
-            }
+        .when(order_entry_locked, gpui::Styled::cursor_not_allowed)
+        .when(!order_entry_locked, move |button| {
+            button.cursor_pointer().on_click(move |_, _, cx| {
+                if let Some(frame) = buy_frame.clone() {
+                    aeris_desktop::trading::dispatch_simulated_selected_order(
+                        &frame,
+                        aeris_trading::OrderSide::Buy,
+                        aeris_desktop::trading::SimulatedOrderSelection {
+                            account_key: account_key.clone(),
+                            quantity,
+                            order_type: aeris_trading::OrderType::Limit,
+                            time_in_force,
+                            template_id: buy_template.clone(),
+                        },
+                        cx,
+                    );
+                }
+            })
         })
         .child(ask_label);
     let sell = div()
@@ -804,27 +1408,60 @@ fn book_order_buttons(
         .items_center()
         .justify_center()
         .rounded(px(4.0))
-        .bg(gpui_color(colors.bearish.with_alpha(0.75)))
-        .text_color(gpui_color(colors.surface))
+        .bg(gpui_color(if order_entry_locked {
+            colors.hover_bg
+        } else {
+            colors.bearish.with_alpha(0.75)
+        }))
+        .text_color(gpui_color(if order_entry_locked {
+            colors.text_muted
+        } else {
+            colors.surface
+        }))
         .text_xs()
-        .cursor_pointer()
         .role(Role::Button)
         .aria_label("Sell the selected simulated order at the best bid")
-        .on_click(move |_, _, cx| {
-            if let Some(frame) = sell_frame.clone() {
-                aeris_desktop::trading::dispatch_simulated_order(
-                    &frame,
-                    aeris_trading::OrderSide::Sell,
-                    sell_account_key.clone(),
-                    quantity,
-                    aeris_trading::OrderType::Limit,
-                    time_in_force,
-                    cx,
-                );
-            }
+        .when(order_entry_locked, gpui::Styled::cursor_not_allowed)
+        .when(!order_entry_locked, move |button| {
+            button.cursor_pointer().on_click(move |_, _, cx| {
+                if let Some(frame) = sell_frame.clone() {
+                    aeris_desktop::trading::dispatch_simulated_selected_order(
+                        &frame,
+                        aeris_trading::OrderSide::Sell,
+                        aeris_desktop::trading::SimulatedOrderSelection {
+                            account_key: sell_account_key.clone(),
+                            quantity,
+                            order_type: aeris_trading::OrderType::Limit,
+                            time_in_force,
+                            template_id: sell_template.clone(),
+                        },
+                        cx,
+                    );
+                }
+            })
         })
         .child(bid_label);
     div().flex().gap_1().child(buy).child(sell)
+}
+
+#[derive(Clone, Copy)]
+enum OrderBookSide {
+    Bid,
+    Ask,
+}
+
+fn best_book_order_label(
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+    side: OrderBookSide,
+) -> String {
+    let (prefix, level) = match side {
+        OrderBookSide::Bid => ("SELL BID", frame.and_then(|book| book.best_bid.as_ref())),
+        OrderBookSide::Ask => ("BUY ASK", frame.and_then(|book| book.best_ask.as_ref())),
+    };
+    level.map_or_else(
+        || prefix.to_string(),
+        |level| format!("{prefix} {}", level.price_text),
+    )
 }
 
 fn order_management_buttons(
@@ -1093,58 +1730,19 @@ fn side_panel_ratio(width: f32, split_basis_points: u32, both_visible: bool) -> 
 }
 
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
+    let (order_book_visible, watchlist_visible, both_visible) =
+        side_panel_visibility(state.visible);
+    let order_book_panel = workspace_order_book_panel(&state, order_book_visible, both_visible);
     let WorkspaceSidePanelState {
         app,
         terminal,
         workspace_id,
-        visible,
         width,
         split_basis_points,
-        order_book,
-        order_book_frame,
-        trading_pnl,
-        trading_accounts,
-        trading_orders,
-        trading_positions,
-        trading_risk_meters,
-        trading_order_entry,
         watchlist,
-        order_book_column_menu_open,
-        order_book_columns,
         theme,
+        ..
     } = state;
-    let colors = theme.colors;
-    let (order_book_visible, watchlist_visible, both_visible) = side_panel_visibility(visible);
-    let ratio = side_panel_ratio(width, split_basis_points, both_visible);
-    let order_book_panel = order_book_visible.then(|| {
-        side_panel_region(
-            order_book_side_panel(&OrderBookPanelState {
-                app: &app,
-                order_book,
-                order_book_frame: order_book_frame.as_ref(),
-                trading_pnl,
-                trading_accounts,
-                trading_orders,
-                trading_positions,
-                trading_risk_meters,
-                trading_order_entry,
-                column_menu_open: order_book_column_menu_open,
-                columns: order_book_columns,
-                theme,
-            }),
-            SidePanel::OrderBook,
-            both_visible,
-            ratio,
-        )
-    });
-    let watchlist_panel = watchlist_visible.then(|| {
-        side_panel_region(
-            watchlist_side_panel(app.clone(), &terminal, watchlist, theme),
-            SidePanel::Watchlist,
-            both_visible,
-            ratio,
-        )
-    });
     let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
@@ -1154,14 +1752,22 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         .relative()
         .flex()
         .overflow_hidden()
-        .bg(gpui_color(colors.surface))
+        .bg(gpui_color(theme.colors.surface))
         .border_l_1()
-        .border_color(gpui_color(colors.border))
+        .border_color(gpui_color(theme.colors.border))
         .children(order_book_panel)
         .children(
-            both_visible.then(|| side_panel_split_handle(workspace_id, gpui_color(colors.border))),
+            both_visible
+                .then(|| side_panel_split_handle(workspace_id, gpui_color(theme.colors.border))),
         )
-        .children(watchlist_panel)
+        .children(watchlist_visible.then(|| {
+            side_panel_region(
+                watchlist_side_panel(app.clone(), &terminal, watchlist, theme),
+                SidePanel::Watchlist,
+                both_visible,
+                side_panel_ratio(width, split_basis_points, both_visible),
+            )
+        }))
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
             let Some(ratio) = side_panel_split_ratio_from_drag(
                 f32::from(event.bounds.left()),
@@ -1185,6 +1791,41 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
             });
         })
         .child(side_panel_width_resize_handle(workspace_id))
+}
+
+fn workspace_order_book_panel(
+    state: &WorkspaceSidePanelState<'_>,
+    order_book_visible: bool,
+    both_visible: bool,
+) -> Option<Div> {
+    order_book_visible.then(|| {
+        side_panel_region(
+            order_book_side_panel(&OrderBookPanelState {
+                app: &state.app,
+                order_book: state.order_book,
+                order_book_frame: state.order_book_frame.as_ref(),
+                trading_pnl: state.trading_pnl,
+                trading_accounts: state.trading_accounts,
+                trading_orders: state.trading_orders,
+                trading_positions: state.trading_positions,
+                trading_risk_meters: state.trading_risk_meters,
+                trading_risk_locks: state.trading_risk_locks,
+                session_plans: state.session_plans,
+                session_reviews: state.session_reviews,
+                trade_copiers: state.trade_copiers,
+                copy_dispatches: state.copy_dispatches,
+                strategy_templates: state.strategy_templates,
+                managed_brackets: state.managed_brackets,
+                trading_order_entry: state.trading_order_entry,
+                column_menu_open: state.order_book_column_menu_open,
+                columns: state.order_book_columns,
+                theme: state.theme,
+            }),
+            SidePanel::OrderBook,
+            both_visible,
+            side_panel_ratio(state.width, state.split_basis_points, both_visible),
+        )
+    })
 }
 
 pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
@@ -1890,6 +2531,22 @@ pub(super) fn chart_notice(
 mod tests {
     use super::*;
 
+    fn trading_account(
+        id: &str,
+        environment: aeris_trading::AccountEnvironment,
+    ) -> aeris_trading::TradingAccount {
+        aeris_trading::TradingAccount {
+            id: aeris_trading::TradingAccountId::try_new(id).expect("account id"),
+            display_name: match environment {
+                aeris_trading::AccountEnvironment::Simulated => format!("SIM {id}"),
+                aeris_trading::AccountEnvironment::Live => format!("LIVE {id}"),
+            },
+            environment,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+        }
+    }
+
     #[test]
     fn simultaneous_side_panels_allocate_two_docked_columns() {
         assert!((side_panel_total_width(400.0, false) - 400.0).abs() < f32::EPSILON);
@@ -1906,5 +2563,59 @@ mod tests {
         assert!((side_panel_horizontal_ratio(400.0, 9_500) - 0.55).abs() < f32::EPSILON);
         assert!((side_panel_horizontal_ratio(480.0, 500) - 0.5).abs() < f32::EPSILON);
         assert!((side_panel_horizontal_ratio(480.0, 9_500) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn copier_configuration_keeps_same_mode_targets_and_advances_revision() {
+        let accounts = vec![
+            trading_account("source", aeris_trading::AccountEnvironment::Simulated),
+            trading_account("target-a", aeris_trading::AccountEnvironment::Simulated),
+            trading_account("target-b", aeris_trading::AccountEnvironment::Simulated),
+            trading_account("live", aeris_trading::AccountEnvironment::Live),
+        ];
+        let current = aeris_trading_runtime::TradeCopierConfig {
+            source_account_id: accounts[0].id.clone(),
+            revision: 7,
+            enabled: true,
+            targets: vec![aeris_trading_runtime::TradeCopierTarget {
+                account_id: accounts[1].id.clone(),
+                quantity_multiplier: aeris_trading::FixedPoint::try_new(3, 0).expect("multiplier"),
+                enabled: false,
+            }],
+        };
+        let config =
+            reconciled_trade_copier_config(&accounts, std::slice::from_ref(&current), &accounts[0])
+                .expect("copier config");
+
+        assert_eq!(config.revision, 8);
+        assert!(config.enabled);
+        assert_eq!(config.targets.len(), 2);
+        assert_eq!(config.targets[0], current.targets[0]);
+        assert_eq!(config.targets[1].account_id, accounts[2].id);
+        assert_eq!(config.targets[1].quantity_multiplier.units(), 1);
+        assert!(config.targets[1].enabled);
+        assert!(
+            config
+                .targets
+                .iter()
+                .all(|target| target.account_id != accounts[3].id)
+        );
+    }
+
+    #[test]
+    fn copier_multiplier_cycles_through_exact_whole_contract_values() {
+        let one = aeris_trading::FixedPoint::try_new(1, 0).expect("one");
+        let two = next_copier_multiplier(one);
+        let three = next_copier_multiplier(two);
+        assert_eq!(two.units(), 2);
+        assert_eq!(three.units(), 3);
+        assert_eq!(next_copier_multiplier(three), one);
+    }
+
+    #[test]
+    fn copier_error_presentation_is_bounded() {
+        let detail = bounded_copier_detail(&"x".repeat(100));
+        assert_eq!(detail.chars().count(), 65);
+        assert!(detail.ends_with('…'));
     }
 }

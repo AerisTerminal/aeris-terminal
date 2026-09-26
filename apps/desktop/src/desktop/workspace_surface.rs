@@ -4402,6 +4402,7 @@ mod tests {
             settings_available: false,
             threshold_region: None,
             point_style: ChartStudyPointStyle::Uniform,
+            input_requirements: ChartStudyInputRequirements::BARS,
         }
     }
 

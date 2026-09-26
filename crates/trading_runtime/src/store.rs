@@ -1,5 +1,9 @@
 use super::{
-    RiskLock, RiskProfile, TradingInstrument, TradingRetention, TrailingDrawdownMode, UserRecord,
+    BracketStrategyTemplate, BracketTarget, BreakEvenRule, DisciplineState, ManagedBracket,
+    ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, RiskLock, RiskProfile,
+    RiskRuleState, RiskTradeCycleState, SessionBias, SessionChecklistItem, SessionPlan,
+    SessionPlanLevel, TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
+    TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
@@ -11,6 +15,7 @@ use aeris_trading::{
     TradingAccount, TradingAccountId, TradingProvenance,
 };
 use rusqlite::{Connection, Transaction, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -19,7 +24,7 @@ use std::{
     path::Path,
 };
 
-const SCHEMA_VERSION: u32 = 4;
+pub(super) const SCHEMA_VERSION: u32 = 13;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -86,6 +91,71 @@ const MIGRATION_V3: &str =
 const MIGRATION_V4: &str =
     "ALTER TABLE risk_profiles ADD COLUMN session_start_realized_units INTEGER NOT NULL DEFAULT 0;
  ALTER TABLE risk_profiles ADD COLUMN session_start_realized_scale INTEGER NOT NULL DEFAULT 2;";
+const MIGRATION_V5: &str = "ALTER TABLE orders ADD COLUMN filled_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE orders ADD COLUMN filled_scale INTEGER NOT NULL DEFAULT 0;
+ UPDATE orders SET filled_scale = quantity_scale;
+ UPDATE orders SET filled_units = quantity_units WHERE status = 'filled';";
+const MIGRATION_V6: &str = "CREATE TABLE trade_copiers (
+     source_account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+     revision INTEGER NOT NULL, enabled INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE trade_copier_targets (
+     source_account_id TEXT NOT NULL REFERENCES trade_copiers(source_account_id) ON DELETE CASCADE,
+     target_account_id TEXT NOT NULL REFERENCES accounts(id), multiplier_units INTEGER NOT NULL,
+     multiplier_scale INTEGER NOT NULL, enabled INTEGER NOT NULL,
+     PRIMARY KEY(source_account_id, target_account_id)
+ ) STRICT;";
+const MIGRATION_V7: &str = "CREATE TABLE strategy_templates (
+     template_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, name TEXT NOT NULL,
+     stop_offset_ticks INTEGER NOT NULL, targets_json TEXT NOT NULL,
+     trailing_activation_ticks INTEGER, trailing_distance_ticks INTEGER,
+     break_even_activation_ticks INTEGER, break_even_offset_ticks INTEGER,
+     enabled INTEGER NOT NULL
+ ) STRICT;";
+const MIGRATION_V8: &str = "CREATE TABLE managed_brackets (
+     bracket_id TEXT PRIMARY KEY, template_json TEXT NOT NULL,
+     entry_client_order_id TEXT NOT NULL UNIQUE, stop_client_order_id TEXT,
+     target_client_order_ids_json TEXT NOT NULL, status TEXT NOT NULL,
+     entry_price_units INTEGER, entry_price_scale INTEGER
+ ) STRICT;";
+const MIGRATION_V9: &str = "CREATE TABLE protective_orders (
+     client_order_id TEXT PRIMARY KEY REFERENCES orders(client_order_id) ON DELETE CASCADE,
+     role TEXT NOT NULL
+ ) STRICT;";
+const MIGRATION_V10: &str = "CREATE TABLE risk_rule_states (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), profile_id TEXT NOT NULL,
+     profile_version INTEGER NOT NULL, peak_session_units INTEGER NOT NULL,
+     peak_session_scale INTEGER NOT NULL
+ ) STRICT;
+ INSERT INTO risk_rule_states(account_id, profile_id, profile_version,
+     peak_session_units, peak_session_scale)
+ SELECT account_id, profile_id, version, 0, daily_loss_scale FROM risk_profiles;";
+const MIGRATION_V11: &str = "ALTER TABLE risk_rule_states
+     ADD COLUMN total_winning_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_rule_states ADD COLUMN total_winning_scale INTEGER NOT NULL DEFAULT 2;
+ ALTER TABLE risk_rule_states
+     ADD COLUMN largest_winner_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_rule_states ADD COLUMN largest_winner_scale INTEGER NOT NULL DEFAULT 2;
+ CREATE TABLE risk_trade_cycles (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;";
+const MIGRATION_V12: &str = "CREATE TABLE session_plans (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), plan_id TEXT NOT NULL,
+     revision INTEGER NOT NULL, session_start_unix_nanos INTEGER NOT NULL,
+     session_end_unix_nanos INTEGER NOT NULL, plan_json TEXT NOT NULL
+ ) STRICT;";
+const MIGRATION_V13: &str = "ALTER TABLE risk_trade_cycles
+     ADD COLUMN peak_quantity_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_trade_cycles ADD COLUMN peak_quantity_scale INTEGER NOT NULL DEFAULT 0;
+ CREATE TABLE discipline_states (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), rapid_loss_count INTEGER NOT NULL,
+     loss_window_started_unix_nanos INTEGER, last_loss_unix_nanos INTEGER,
+     post_loss_quantity_units INTEGER, post_loss_quantity_scale INTEGER,
+     last_stop_fill_unix_nanos INTEGER, cooldown_until_unix_nanos INTEGER
+ ) STRICT;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -98,11 +168,26 @@ pub(super) struct StoredState {
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
+    pub risk_rule_states: BTreeMap<TradingAccountId, RiskRuleState>,
+    pub risk_trade_cycles: BTreeMap<(TradingAccountId, InstrumentId), RiskTradeCycleState>,
+    pub session_plans: BTreeMap<TradingAccountId, SessionPlan>,
+    pub discipline_states: BTreeMap<TradingAccountId, DisciplineState>,
+    pub trade_copiers: BTreeMap<TradingAccountId, TradeCopierConfig>,
+    pub strategy_templates: BTreeMap<String, BracketStrategyTemplate>,
+    pub managed_brackets: BTreeMap<String, ManagedBracket>,
+    pub protective_orders: BTreeMap<ClientOrderId, ProtectiveOrder>,
 }
 
 pub(super) struct TradingStore {
     connection: Connection,
     retention: TradingRetention,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct FillPolicyPersistence<'a> {
+    pub rule_state: Option<&'a RiskRuleState>,
+    pub trade_cycle: &'a RiskTradeCycleState,
+    pub discipline_state: &'a DisciplineState,
 }
 
 impl TradingStore {
@@ -126,7 +211,8 @@ impl TradingStore {
             retention,
         };
         store.migrate()?;
-        store.ensure_simulated_account()?;
+        store.ensure_simulated_accounts()?;
+        store.ensure_default_strategy_templates()?;
         store.enforce_retention()?;
         Ok(store)
     }
@@ -160,70 +246,139 @@ impl TradingStore {
             version = 1;
         }
         if version == 1 {
-            let transaction = self
-                .connection
-                .transaction()
-                .map_err(|error| format!("trading schema migration could not start: {error}"))?;
-            transaction
-                .execute_batch(MIGRATION_V2)
-                .map_err(|error| format!("trading schema migration failed: {error}"))?;
-            transaction
-                .pragma_update(None, "user_version", 2_u32)
-                .map_err(|error| {
-                    format!("trading schema version could not be committed: {error}")
-                })?;
-            transaction
-                .commit()
-                .map_err(|error| format!("trading migration could not commit: {error}"))?;
+            self.apply_migration(2, MIGRATION_V2)?;
             version = 2;
         }
         if version == 2 {
-            let transaction = self
-                .connection
-                .transaction()
-                .map_err(|error| format!("trading schema migration could not start: {error}"))?;
-            transaction
-                .execute_batch(MIGRATION_V3)
-                .map_err(|error| format!("trading schema migration failed: {error}"))?;
-            transaction
-                .pragma_update(None, "user_version", 3_u32)
-                .map_err(|error| {
-                    format!("trading schema version could not be committed: {error}")
-                })?;
-            transaction
-                .commit()
-                .map_err(|error| format!("trading migration could not commit: {error}"))?;
+            self.apply_migration(3, MIGRATION_V3)?;
             version = 3;
         }
         if version == 3 {
-            let transaction = self
-                .connection
-                .transaction()
-                .map_err(|error| format!("trading migration could not start: {error}"))?;
-            transaction
-                .execute_batch(MIGRATION_V4)
-                .map_err(|error| format!("trading schema migration failed: {error}"))?;
-            transaction
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(|error| {
-                    format!("trading schema version could not be committed: {error}")
-                })?;
-            transaction
-                .commit()
-                .map_err(|error| format!("trading migration could not commit: {error}"))?;
+            self.apply_migration(4, MIGRATION_V4)?;
+            version = 4;
+        }
+        if version == 4 {
+            self.apply_migration(5, MIGRATION_V5)?;
+            version = 5;
+        }
+        if version == 5 {
+            self.apply_migration(6, MIGRATION_V6)?;
+            version = 6;
+        }
+        if version == 6 {
+            self.apply_migration(7, MIGRATION_V7)?;
+            version = 7;
+        }
+        if version == 7 {
+            self.apply_migration(8, MIGRATION_V8)?;
+            version = 8;
+        }
+        if version == 8 {
+            self.apply_migration(9, MIGRATION_V9)?;
+            version = 9;
+        }
+        if version == 9 {
+            self.apply_migration(10, MIGRATION_V10)?;
+            version = 10;
+        }
+        if version == 10 {
+            self.apply_migration(11, MIGRATION_V11)?;
+            version = 11;
+        }
+        if version == 11 {
+            self.apply_migration(12, MIGRATION_V12)?;
+            version = 12;
+        }
+        if version == 12 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V13)?;
         }
         Ok(())
     }
 
-    fn ensure_simulated_account(&mut self) -> Result<(), String> {
-        let account = TradingAccount {
-            id: TradingAccountId::try_new("aeris-sim-1").map_err(|error| error.to_string())?,
-            display_name: "SIM • Aeris Practice".to_string(),
-            environment: AccountEnvironment::Simulated,
-            currency: "USD".to_string(),
-            currency_scale: 2,
-        };
-        self.put_account(&account)
+    fn apply_migration(&mut self, version: u32, sql: &str) -> Result<(), String> {
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| format!("trading schema migration could not start: {error}"))?;
+        transaction
+            .execute_batch(sql)
+            .map_err(|error| format!("trading schema migration failed: {error}"))?;
+        transaction
+            .pragma_update(None, "user_version", version)
+            .map_err(|error| format!("trading schema version could not be committed: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("trading migration could not commit: {error}"))
+    }
+
+    fn ensure_simulated_accounts(&mut self) -> Result<(), String> {
+        for (id, display_name) in [
+            ("aeris-sim-1", "SIM • Aeris Practice 1"),
+            ("aeris-sim-2", "SIM • Aeris Practice 2"),
+            ("aeris-sim-3", "SIM • Aeris Practice 3"),
+        ] {
+            let account = TradingAccount {
+                id: TradingAccountId::try_new(id).map_err(|error| error.to_string())?,
+                display_name: display_name.to_string(),
+                environment: AccountEnvironment::Simulated,
+                currency: "USD".to_string(),
+                currency_scale: 2,
+            };
+            self.put_account(&account)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_default_strategy_templates(&self) -> Result<(), String> {
+        for template in [
+            BracketStrategyTemplate {
+                template_id: "managed-bracket".to_string(),
+                revision: 1,
+                name: "Managed stop + target".to_string(),
+                stop_offset_ticks: 8,
+                targets: vec![BracketTarget {
+                    offset_ticks: 8,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: Some(TrailingStopRule {
+                    activation_ticks: 12,
+                    distance_ticks: 6,
+                }),
+                break_even: Some(BreakEvenRule {
+                    activation_ticks: 8,
+                    offset_ticks: 1,
+                }),
+                enabled: true,
+            },
+            BracketStrategyTemplate {
+                template_id: "managed-scale-out".to_string(),
+                revision: 1,
+                name: "Managed 50/50 scale-out".to_string(),
+                stop_offset_ticks: 8,
+                targets: vec![
+                    BracketTarget {
+                        offset_ticks: 8,
+                        quantity_percent: 50,
+                    },
+                    BracketTarget {
+                        offset_ticks: 16,
+                        quantity_percent: 50,
+                    },
+                ],
+                trailing_stop: Some(TrailingStopRule {
+                    activation_ticks: 12,
+                    distance_ticks: 6,
+                }),
+                break_even: Some(BreakEvenRule {
+                    activation_ticks: 8,
+                    offset_ticks: 1,
+                }),
+                enabled: true,
+            },
+        ] {
+            self.put_strategy_template(&template)?;
+        }
+        Ok(())
     }
 
     pub(super) fn load_state(&mut self) -> Result<StoredState, String> {
@@ -271,6 +426,14 @@ impl TradingStore {
         let positions = self.load_positions()?;
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
+        let risk_rule_states = self.load_risk_rule_states()?;
+        let risk_trade_cycles = self.load_risk_trade_cycles()?;
+        let session_plans = self.load_session_plans()?;
+        let discipline_states = self.load_discipline_states()?;
+        let trade_copiers = self.load_trade_copiers()?;
+        let strategy_templates = self.load_strategy_templates()?;
+        let managed_brackets = self.load_managed_brackets()?;
+        let protective_orders = self.load_protective_orders()?;
         Ok(StoredState {
             revision,
             next_sequence,
@@ -282,6 +445,14 @@ impl TradingStore {
             positions,
             risk_profiles,
             risk_locks,
+            risk_rule_states,
+            risk_trade_cycles,
+            session_plans,
+            discipline_states,
+            trade_copiers,
+            strategy_templates,
+            managed_brackets,
+            protective_orders,
         })
     }
 
@@ -345,9 +516,20 @@ impl TradingStore {
         Ok(())
     }
 
-    pub(super) fn put_risk_profile(&self, profile: &RiskProfile) -> Result<(), String> {
+    pub(super) fn put_risk_profile_and_state(
+        &mut self,
+        profile: &RiskProfile,
+        state: &RiskRuleState,
+    ) -> Result<(), String> {
         profile.validate()?;
-        self.connection
+        if state.account_id != profile.account_id
+            || state.profile_id != profile.profile_id
+            || state.profile_version != profile.version
+        {
+            return Err("risk profile state identity does not match profile".to_string());
+        }
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
             .execute(
                 "INSERT INTO risk_profiles(account_id, profile_id, version, daily_loss_units,
                     daily_loss_scale, trailing_units, trailing_scale, trailing_mode,
@@ -387,6 +569,131 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
+        upsert_risk_rule_state(&transaction, state)?;
+        transaction
+            .execute(
+                "DELETE FROM risk_trade_cycles WHERE account_id = ?1",
+                [profile.account_id.as_str()],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn put_session_plan(&self, plan: &SessionPlan) -> Result<(), String> {
+        plan.validate()?;
+        self.connection
+            .execute(
+                "INSERT INTO session_plans(account_id, plan_id, revision,
+                    session_start_unix_nanos, session_end_unix_nanos, plan_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(account_id) DO UPDATE SET plan_id=excluded.plan_id,
+                    revision=excluded.revision,
+                    session_start_unix_nanos=excluded.session_start_unix_nanos,
+                    session_end_unix_nanos=excluded.session_end_unix_nanos,
+                    plan_json=excluded.plan_json",
+                params![
+                    plan.account_id.as_str(),
+                    plan.plan_id,
+                    plan.revision,
+                    plan.session_start_unix_nanos,
+                    plan.session_end_unix_nanos,
+                    encode_session_plan(plan)?,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub(super) fn put_trade_copier(&mut self, config: &TradeCopierConfig) -> Result<(), String> {
+        config.validate()?;
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO trade_copiers(source_account_id, revision, enabled)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(source_account_id) DO UPDATE SET revision=excluded.revision,
+                    enabled=excluded.enabled WHERE excluded.revision > trade_copiers.revision",
+                params![
+                    config.source_account_id.as_str(),
+                    config.revision,
+                    i64::from(config.enabled)
+                ],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM trade_copier_targets WHERE source_account_id = ?1",
+                [config.source_account_id.as_str()],
+            )
+            .map_err(database_error)?;
+        for target in &config.targets {
+            transaction
+                .execute(
+                    "INSERT INTO trade_copier_targets(source_account_id, target_account_id,
+                        multiplier_units, multiplier_scale, enabled) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        config.source_account_id.as_str(),
+                        target.account_id.as_str(),
+                        target.quantity_multiplier.units(),
+                        target.quantity_multiplier.scale(),
+                        i64::from(target.enabled),
+                    ],
+                )
+                .map_err(database_error)?;
+        }
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn put_strategy_template(
+        &self,
+        template: &BracketStrategyTemplate,
+    ) -> Result<(), String> {
+        template.validate()?;
+        let targets = serde_json::to_string(&template.targets)
+            .map_err(|error| format!("strategy targets could not be encoded: {error}"))?;
+        self.connection
+            .execute(
+                "INSERT INTO strategy_templates(template_id, revision, name, stop_offset_ticks,
+                    targets_json, trailing_activation_ticks, trailing_distance_ticks,
+                    break_even_activation_ticks, break_even_offset_ticks, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(template_id) DO UPDATE SET revision=excluded.revision,
+                    name=excluded.name, stop_offset_ticks=excluded.stop_offset_ticks,
+                    targets_json=excluded.targets_json,
+                    trailing_activation_ticks=excluded.trailing_activation_ticks,
+                    trailing_distance_ticks=excluded.trailing_distance_ticks,
+                    break_even_activation_ticks=excluded.break_even_activation_ticks,
+                    break_even_offset_ticks=excluded.break_even_offset_ticks,
+                    enabled=excluded.enabled
+                 WHERE excluded.revision > strategy_templates.revision",
+                params![
+                    template.template_id,
+                    template.revision,
+                    template.name,
+                    template.stop_offset_ticks,
+                    targets,
+                    template.trailing_stop.map(|rule| rule.activation_ticks),
+                    template.trailing_stop.map(|rule| rule.distance_ticks),
+                    template.break_even.map(|rule| rule.activation_ticks),
+                    template.break_even.map(|rule| rule.offset_ticks),
+                    i64::from(template.enabled),
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub(super) fn put_managed_bracket(&self, bracket: &ManagedBracket) -> Result<(), String> {
+        upsert_managed_bracket(&self.connection, bracket)
+    }
+
+    pub(super) fn delete_managed_bracket(&self, bracket_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM managed_brackets WHERE bracket_id = ?1",
+                [bracket_id],
+            )
+            .map_err(database_error)?;
         Ok(())
     }
 
@@ -419,6 +726,14 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         Ok(())
+    }
+
+    pub(super) fn put_risk_rule_state(&self, state: &RiskRuleState) -> Result<(), String> {
+        upsert_risk_rule_state(&self.connection, state)
+    }
+
+    pub(super) fn put_discipline_state(&self, state: &DisciplineState) -> Result<(), String> {
+        upsert_discipline_state(&self.connection, state)
     }
 
     fn load_risk_profiles(&self) -> Result<BTreeMap<TradingAccountId, RiskProfile>, String> {
@@ -547,6 +862,422 @@ impl TradingStore {
         Ok(result)
     }
 
+    fn load_risk_rule_states(&self) -> Result<BTreeMap<TradingAccountId, RiskRuleState>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, profile_id, profile_version, peak_session_units,
+                    peak_session_scale, total_winning_units, total_winning_scale,
+                    largest_winner_units, largest_winner_scale
+                 FROM risk_rule_states ORDER BY account_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, u8>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, u8>(8)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (
+                account_id,
+                profile_id,
+                profile_version,
+                peak_units,
+                peak_scale,
+                total_units,
+                total_scale,
+                largest_units,
+                largest_scale,
+            ) = row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account_id).map_err(|error| error.to_string())?;
+            result.insert(
+                account_id.clone(),
+                RiskRuleState {
+                    account_id,
+                    profile_id,
+                    profile_version,
+                    peak_session_pnl: fixed(peak_units, peak_scale)?,
+                    total_winning_pnl: fixed(total_units, total_scale)?,
+                    largest_winning_trade_pnl: fixed(largest_units, largest_scale)?,
+                },
+            );
+        }
+        Ok(result)
+    }
+
+    fn load_risk_trade_cycles(
+        &self,
+    ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), RiskTradeCycleState>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, instrument_id, realized_units, realized_scale,
+                    peak_quantity_units, peak_quantity_scale
+                 FROM risk_trade_cycles ORDER BY account_id, instrument_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, u8>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, u8>(5)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account_id, instrument_id, units, scale, peak_units, peak_scale) =
+                row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account_id).map_err(|error| error.to_string())?;
+            let instrument_id =
+                InstrumentId::try_new(instrument_id).map_err(|error| error.to_string())?;
+            let state = RiskTradeCycleState {
+                account_id: account_id.clone(),
+                instrument_id: instrument_id.clone(),
+                realized_pnl: fixed(units, scale)?,
+                peak_quantity: fixed(peak_units, peak_scale)?,
+            };
+            result.insert((account_id, instrument_id), state);
+        }
+        Ok(result)
+    }
+
+    fn load_session_plans(&self) -> Result<BTreeMap<TradingAccountId, SessionPlan>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, plan_id, revision, session_start_unix_nanos,
+                    session_end_unix_nanos, plan_json FROM session_plans ORDER BY account_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account_id, plan_id, revision, start, end, encoded) =
+                row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account_id).map_err(|error| error.to_string())?;
+            let plan =
+                decode_session_plan(account_id.clone(), plan_id, revision, start, end, &encoded)?;
+            plan.validate()?;
+            result.insert(account_id, plan);
+        }
+        Ok(result)
+    }
+
+    fn load_discipline_states(
+        &self,
+    ) -> Result<BTreeMap<TradingAccountId, DisciplineState>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, rapid_loss_count, loss_window_started_unix_nanos,
+                    last_loss_unix_nanos, post_loss_quantity_units, post_loss_quantity_scale,
+                    last_stop_fill_unix_nanos, cooldown_until_unix_nanos
+                 FROM discipline_states ORDER BY account_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u8>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<u8>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account, count, window, last_loss, cap_units, cap_scale, last_stop, cooldown) =
+                row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+            result.insert(
+                account_id.clone(),
+                DisciplineState {
+                    account_id,
+                    rapid_loss_count: count,
+                    loss_window_started_unix_nanos: window,
+                    last_loss_unix_nanos: last_loss,
+                    post_loss_quantity_cap: optional_fixed(cap_units, cap_scale)?,
+                    last_stop_fill_unix_nanos: last_stop,
+                    cooldown_until_unix_nanos: cooldown,
+                },
+            );
+        }
+        Ok(result)
+    }
+
+    fn load_trade_copiers(&self) -> Result<BTreeMap<TradingAccountId, TradeCopierConfig>, String> {
+        let mut result = BTreeMap::new();
+        let mut configs = self
+            .connection
+            .prepare(
+                "SELECT source_account_id, revision, enabled FROM trade_copiers
+                 ORDER BY source_account_id",
+            )
+            .map_err(database_error)?;
+        let rows = configs
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (source, revision, enabled) = row.map_err(database_error)?;
+            let source_account_id =
+                TradingAccountId::try_new(source).map_err(|error| error.to_string())?;
+            let mut targets = self
+                .connection
+                .prepare(
+                    "SELECT target_account_id, multiplier_units, multiplier_scale, enabled
+                     FROM trade_copier_targets WHERE source_account_id = ?1
+                     ORDER BY target_account_id",
+                )
+                .map_err(database_error)?;
+            let targets = targets
+                .query_map([source_account_id.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, u8>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .map_err(database_error)?
+                .map(|row| {
+                    let (account, units, scale, enabled) = row.map_err(database_error)?;
+                    Ok(TradeCopierTarget {
+                        account_id: TradingAccountId::try_new(account)
+                            .map_err(|error| error.to_string())?,
+                        quantity_multiplier: fixed(units, scale)?,
+                        enabled: enabled != 0,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let config = TradeCopierConfig {
+                source_account_id: source_account_id.clone(),
+                revision,
+                enabled: enabled != 0,
+                targets,
+            };
+            config.validate()?;
+            result.insert(source_account_id, config);
+        }
+        Ok(result)
+    }
+
+    fn load_strategy_templates(&self) -> Result<BTreeMap<String, BracketStrategyTemplate>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT template_id, revision, name, stop_offset_ticks, targets_json,
+                    trailing_activation_ticks, trailing_distance_ticks,
+                    break_even_activation_ticks, break_even_offset_ticks, enabled
+                 FROM strategy_templates ORDER BY template_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<u32>>(5)?,
+                    row.get::<_, Option<u32>>(6)?,
+                    row.get::<_, Option<u32>>(7)?,
+                    row.get::<_, Option<i32>>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (
+                template_id,
+                revision,
+                name,
+                stop_offset_ticks,
+                targets,
+                trailing_activation_ticks,
+                trailing_distance_ticks,
+                break_even_activation_ticks,
+                break_even_offset_ticks,
+                enabled,
+            ) = row.map_err(database_error)?;
+            let targets = serde_json::from_str::<Vec<BracketTarget>>(&targets)
+                .map_err(|error| format!("strategy targets could not be decoded: {error}"))?;
+            let trailing_stop = match (trailing_activation_ticks, trailing_distance_ticks) {
+                (Some(activation_ticks), Some(distance_ticks)) => Some(TrailingStopRule {
+                    activation_ticks,
+                    distance_ticks,
+                }),
+                (None, None) => None,
+                _ => return Err("stored strategy trailing rule is incomplete".to_string()),
+            };
+            let break_even = match (break_even_activation_ticks, break_even_offset_ticks) {
+                (Some(activation_ticks), Some(offset_ticks)) => Some(BreakEvenRule {
+                    activation_ticks,
+                    offset_ticks,
+                }),
+                (None, None) => None,
+                _ => return Err("stored strategy break-even rule is incomplete".to_string()),
+            };
+            let template = BracketStrategyTemplate {
+                template_id: template_id.clone(),
+                revision,
+                name,
+                stop_offset_ticks,
+                targets,
+                trailing_stop,
+                break_even,
+                enabled: enabled != 0,
+            };
+            template.validate()?;
+            result.insert(template_id, template);
+        }
+        Ok(result)
+    }
+
+    fn load_managed_brackets(&self) -> Result<BTreeMap<String, ManagedBracket>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT bracket_id, template_json, entry_client_order_id,
+                    stop_client_order_id, target_client_order_ids_json, status,
+                    entry_price_units, entry_price_scale
+                 FROM managed_brackets ORDER BY bracket_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<u8>>(7)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (
+                bracket_id,
+                template,
+                entry_client_order_id,
+                stop_client_order_id,
+                target_client_order_ids,
+                status,
+                entry_price_units,
+                entry_price_scale,
+            ) = row.map_err(database_error)?;
+            let target_client_order_ids =
+                serde_json::from_str::<Vec<String>>(&target_client_order_ids)
+                    .map_err(|error| {
+                        format!("managed bracket targets could not be decoded: {error}")
+                    })?
+                    .into_iter()
+                    .map(ClientOrderId::try_new)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string())?;
+            let template =
+                serde_json::from_str::<BracketStrategyTemplate>(&template).map_err(|error| {
+                    format!("managed bracket template could not be decoded: {error}")
+                })?;
+            let entry_price = entry_price_units
+                .zip(entry_price_scale)
+                .map(|(units, scale)| fixed(units, scale))
+                .transpose()?;
+            if entry_price_units.is_some() != entry_price_scale.is_some() {
+                return Err("stored managed bracket entry price is incomplete".to_string());
+            }
+            let bracket = ManagedBracket {
+                bracket_id: bracket_id.clone(),
+                template,
+                entry_client_order_id: ClientOrderId::try_new(entry_client_order_id)
+                    .map_err(|error| error.to_string())?,
+                stop_client_order_id: stop_client_order_id
+                    .map(ClientOrderId::try_new)
+                    .transpose()
+                    .map_err(|error| error.to_string())?,
+                target_client_order_ids,
+                status: ManagedBracketStatus::parse(&status)?,
+                entry_price,
+            };
+            bracket.validate()?;
+            result.insert(bracket_id, bracket);
+        }
+        Ok(result)
+    }
+
+    fn load_protective_orders(&self) -> Result<BTreeMap<ClientOrderId, ProtectiveOrder>, String> {
+        let mut result = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare("SELECT client_order_id, role FROM protective_orders ORDER BY client_order_id")
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (client_order_id, role) = row.map_err(database_error)?;
+            let client_order_id =
+                ClientOrderId::try_new(client_order_id).map_err(|error| error.to_string())?;
+            result.insert(
+                client_order_id.clone(),
+                ProtectiveOrder {
+                    client_order_id,
+                    role: ProtectiveOrderRole::parse(&role)?,
+                },
+            );
+        }
+        Ok(result)
+    }
+
     pub(super) fn insert_order(
         &mut self,
         order: &Order,
@@ -560,18 +1291,75 @@ impl TradingStore {
         transaction.commit().map_err(database_error)
     }
 
+    pub(super) fn insert_order_and_managed_bracket(
+        &mut self,
+        order: &Order,
+        event: &OrderEvent,
+        bracket: &ManagedBracket,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        insert_order_row(&transaction, order)?;
+        insert_event_row(&transaction, event)?;
+        upsert_managed_bracket(&transaction, bracket)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn insert_protective_order(
+        &mut self,
+        order: &Order,
+        event: &OrderEvent,
+        protective: &ProtectiveOrder,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        insert_order_row(&transaction, order)?;
+        insert_event_row(&transaction, event)?;
+        transaction
+            .execute(
+                "INSERT INTO protective_orders(client_order_id, role) VALUES (?1, ?2)",
+                params![
+                    protective.client_order_id.as_str(),
+                    protective.role.as_str()
+                ],
+            )
+            .map_err(database_error)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn insert_managed_child_orders(
+        &mut self,
+        orders: &[(Order, OrderEvent)],
+        bracket: &ManagedBracket,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        for (order, event) in orders {
+            insert_order_row(&transaction, order)?;
+            insert_event_row(&transaction, event)?;
+        }
+        upsert_managed_bracket(&transaction, bracket)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
     pub(super) fn insert_fill(
         &mut self,
         order: &Order,
         event: &OrderEvent,
         fill: &Fill,
         position: &Position,
+        policy: FillPolicyPersistence<'_>,
         next_sequence: u64,
     ) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
             .execute(
-                "UPDATE orders SET status = 'filled' WHERE id = ?1 AND status = 'working'",
+                "UPDATE orders SET status = 'filled', filled_units = quantity_units,
+                    filled_scale = quantity_scale
+                 WHERE id = ?1 AND status IN ('working', 'partially_filled')",
                 [order.id.as_str()],
             )
             .map_err(database_error)?;
@@ -597,6 +1385,11 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         upsert_position(&transaction, position)?;
+        if let Some(rule_state) = policy.rule_state {
+            upsert_risk_rule_state(&transaction, rule_state)?;
+        }
+        upsert_risk_trade_cycle(&transaction, policy.trade_cycle)?;
+        upsert_discipline_state(&transaction, policy.discipline_state)?;
         update_next_sequence(&transaction, next_sequence)?;
         transaction.commit().map_err(database_error)
     }
@@ -610,7 +1403,9 @@ impl TradingStore {
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
             .execute(
-                "UPDATE orders SET status = 'cancelled' WHERE id = ?1 AND status = 'working'",
+                "UPDATE orders SET status = 'cancelled'
+                 WHERE id = ?1 AND status IN
+                    ('pending', 'working', 'pending_modify', 'partially_filled', 'pending_cancel')",
                 [order.id.as_str()],
             )
             .map_err(database_error)?;
@@ -630,7 +1425,7 @@ impl TradingStore {
             .execute(
                 "UPDATE orders SET time_in_force = ?1, limit_units = ?2, limit_scale = ?3,
                     stop_units = ?4, stop_scale = ?5, provenance_json = ?6
-                 WHERE id = ?7 AND status = 'working'",
+                 WHERE id = ?7 AND status IN ('working', 'partially_filled')",
                 params![
                     order.time_in_force.as_str(),
                     order.limit_price.map(FixedPoint::units),
@@ -717,7 +1512,8 @@ impl TradingStore {
         }
         let working_orders = transaction
             .query_row(
-                "SELECT COUNT(*) FROM orders WHERE status = 'working'",
+                "SELECT COUNT(*) FROM orders WHERE status IN
+                    ('pending', 'working', 'pending_modify', 'partially_filled', 'pending_cancel')",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -731,7 +1527,9 @@ impl TradingStore {
                 .execute(
                     &format!(
                         "DELETE FROM {table} WHERE order_id IN (
-                            SELECT id FROM orders WHERE status != 'working'
+                            SELECT id FROM orders WHERE status NOT IN
+                                ('pending', 'working', 'pending_modify', 'partially_filled',
+                                 'pending_cancel')
                             ORDER BY submitted_unix_nanos DESC LIMIT -1 OFFSET ?1
                          )"
                     ),
@@ -742,7 +1540,9 @@ impl TradingStore {
         transaction
             .execute(
                 "DELETE FROM orders WHERE id IN (
-                    SELECT id FROM orders WHERE status != 'working'
+                    SELECT id FROM orders WHERE status NOT IN
+                        ('pending', 'working', 'pending_modify', 'partially_filled',
+                         'pending_cancel')
                     ORDER BY submitted_unix_nanos DESC LIMIT -1 OFFSET ?1
                  )",
                 [retained_closed_orders],
@@ -866,7 +1666,8 @@ impl TradingStore {
             .prepare(
                 "SELECT id, client_order_id, account_id, instrument_id, side, order_type,
                     time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
-                    stop_units, stop_scale, status, submitted_unix_nanos, provenance_json
+                    stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
+                    filled_units, filled_scale
              FROM orders ORDER BY submitted_unix_nanos",
             )
             .map_err(database_error)?;
@@ -889,6 +1690,8 @@ impl TradingStore {
                     row.get::<_, String>(13)?,
                     row.get::<_, i64>(14)?,
                     row.get::<_, String>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, u8>(17)?,
                 ))
             })
             .map_err(database_error)?;
@@ -910,6 +1713,8 @@ impl TradingStore {
                 status,
                 submitted,
                 provenance,
+                filled_units,
+                filled_scale,
             ) = row.map_err(database_error)?;
             let id = OrderId::try_new(id).map_err(|error| error.to_string())?;
             let order = Order {
@@ -924,6 +1729,7 @@ impl TradingStore {
                 order_type: parse_order_type(&order_type)?,
                 time_in_force: parse_time_in_force(&tif)?,
                 quantity: fixed(quantity_units, quantity_scale)?,
+                filled_quantity: fixed(filled_units, filled_scale)?,
                 limit_price: optional_fixed(limit_units, limit_scale)?,
                 stop_price: optional_fixed(stop_units, stop_scale)?,
                 status: parse_status(&status)?,
@@ -1097,6 +1903,134 @@ impl TradingStore {
     }
 }
 
+fn upsert_risk_rule_state(connection: &Connection, state: &RiskRuleState) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO risk_rule_states(account_id, profile_id, profile_version,
+                peak_session_units, peak_session_scale, total_winning_units,
+                total_winning_scale, largest_winner_units, largest_winner_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(account_id) DO UPDATE SET profile_id=excluded.profile_id,
+                profile_version=excluded.profile_version,
+                peak_session_units=excluded.peak_session_units,
+                peak_session_scale=excluded.peak_session_scale,
+                total_winning_units=excluded.total_winning_units,
+                total_winning_scale=excluded.total_winning_scale,
+                largest_winner_units=excluded.largest_winner_units,
+                largest_winner_scale=excluded.largest_winner_scale",
+            params![
+                state.account_id.as_str(),
+                state.profile_id,
+                state.profile_version,
+                state.peak_session_pnl.units(),
+                state.peak_session_pnl.scale(),
+                state.total_winning_pnl.units(),
+                state.total_winning_pnl.scale(),
+                state.largest_winning_trade_pnl.units(),
+                state.largest_winning_trade_pnl.scale(),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn upsert_risk_trade_cycle(
+    connection: &Connection,
+    state: &RiskTradeCycleState,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO risk_trade_cycles(account_id, instrument_id, realized_units,
+                realized_scale, peak_quantity_units, peak_quantity_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(account_id, instrument_id) DO UPDATE SET
+                realized_units=excluded.realized_units,
+                realized_scale=excluded.realized_scale,
+                peak_quantity_units=excluded.peak_quantity_units,
+                peak_quantity_scale=excluded.peak_quantity_scale",
+            params![
+                state.account_id.as_str(),
+                state.instrument_id.as_str(),
+                state.realized_pnl.units(),
+                state.realized_pnl.scale(),
+                state.peak_quantity.units(),
+                state.peak_quantity.scale(),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn upsert_discipline_state(connection: &Connection, state: &DisciplineState) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO discipline_states(account_id, rapid_loss_count,
+                loss_window_started_unix_nanos, last_loss_unix_nanos,
+                post_loss_quantity_units, post_loss_quantity_scale,
+                last_stop_fill_unix_nanos, cooldown_until_unix_nanos)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id) DO UPDATE SET rapid_loss_count=excluded.rapid_loss_count,
+                loss_window_started_unix_nanos=excluded.loss_window_started_unix_nanos,
+                last_loss_unix_nanos=excluded.last_loss_unix_nanos,
+                post_loss_quantity_units=excluded.post_loss_quantity_units,
+                post_loss_quantity_scale=excluded.post_loss_quantity_scale,
+                last_stop_fill_unix_nanos=excluded.last_stop_fill_unix_nanos,
+                cooldown_until_unix_nanos=excluded.cooldown_until_unix_nanos",
+            params![
+                state.account_id.as_str(),
+                state.rapid_loss_count,
+                state.loss_window_started_unix_nanos,
+                state.last_loss_unix_nanos,
+                state.post_loss_quantity_cap.map(FixedPoint::units),
+                state.post_loss_quantity_cap.map(FixedPoint::scale),
+                state.last_stop_fill_unix_nanos,
+                state.cooldown_until_unix_nanos,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn upsert_managed_bracket(connection: &Connection, bracket: &ManagedBracket) -> Result<(), String> {
+    bracket.validate()?;
+    let target_client_order_ids = bracket
+        .target_client_order_ids
+        .iter()
+        .map(ClientOrderId::as_str)
+        .collect::<Vec<_>>();
+    let target_client_order_ids = serde_json::to_string(&target_client_order_ids)
+        .map_err(|error| format!("managed bracket targets could not be encoded: {error}"))?;
+    let template = serde_json::to_string(&bracket.template)
+        .map_err(|error| format!("managed bracket template could not be encoded: {error}"))?;
+    connection
+        .execute(
+            "INSERT INTO managed_brackets(bracket_id, template_json,
+                entry_client_order_id, stop_client_order_id, target_client_order_ids_json,
+                status, entry_price_units, entry_price_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(bracket_id) DO UPDATE SET
+                stop_client_order_id=excluded.stop_client_order_id,
+                target_client_order_ids_json=excluded.target_client_order_ids_json,
+                status=excluded.status, entry_price_units=excluded.entry_price_units,
+                entry_price_scale=excluded.entry_price_scale",
+            params![
+                bracket.bracket_id,
+                template,
+                bracket.entry_client_order_id.as_str(),
+                bracket
+                    .stop_client_order_id
+                    .as_ref()
+                    .map(ClientOrderId::as_str),
+                target_client_order_ids,
+                bracket.status.as_str(),
+                bracket.entry_price.map(FixedPoint::units),
+                bracket.entry_price.map(FixedPoint::scale),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
 fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> Result<(), String> {
     let (limit_units, limit_scale) = split_optional(order.limit_price);
     let (stop_units, stop_scale) = split_optional(order.stop_price);
@@ -1104,8 +2038,9 @@ fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> Result<(), 
         .execute(
             "INSERT INTO orders(id, client_order_id, account_id, instrument_id, side, order_type,
             time_in_force, quantity_units, quantity_scale, limit_units, limit_scale, stop_units,
-            stop_scale, status, submitted_unix_nanos, provenance_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            stop_scale, status, submitted_unix_nanos, provenance_json, filled_units, filled_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18)",
             params![
                 order.id.as_str(),
                 order.client_order_id.as_str(),
@@ -1122,7 +2057,9 @@ fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> Result<(), 
                 stop_scale,
                 order.status.as_str(),
                 order.submitted_unix_nanos,
-                encode_provenance(&order.provenance)
+                encode_provenance(&order.provenance),
+                order.filled_quantity.units(),
+                order.filled_quantity.scale(),
             ],
         )
         .map_err(database_error)?;
@@ -1180,6 +2117,115 @@ fn update_next_sequence(transaction: &Transaction<'_>, next: u64) -> Result<(), 
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredSessionPlanPayload {
+    bias: String,
+    maximum_loss_units: i64,
+    maximum_loss_scale: u8,
+    session_start_realized_units: i64,
+    session_start_realized_scale: u8,
+    allowed_setups: Vec<String>,
+    active_setup: Option<String>,
+    checklist: Vec<StoredChecklistItem>,
+    levels: Vec<StoredPlanLevel>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredChecklistItem {
+    item_id: String,
+    label: String,
+    completed: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredPlanLevel {
+    instrument_id: String,
+    label: String,
+    price_units: i64,
+    price_scale: u8,
+}
+
+fn encode_session_plan(plan: &SessionPlan) -> Result<String, String> {
+    let payload = StoredSessionPlanPayload {
+        bias: plan.bias.as_str().to_string(),
+        maximum_loss_units: plan.maximum_loss.units(),
+        maximum_loss_scale: plan.maximum_loss.scale(),
+        session_start_realized_units: plan.session_start_realized_pnl.units(),
+        session_start_realized_scale: plan.session_start_realized_pnl.scale(),
+        allowed_setups: plan.allowed_setups.clone(),
+        active_setup: plan.active_setup.clone(),
+        checklist: plan
+            .checklist
+            .iter()
+            .map(|item| StoredChecklistItem {
+                item_id: item.item_id.clone(),
+                label: item.label.clone(),
+                completed: item.completed,
+            })
+            .collect(),
+        levels: plan
+            .levels
+            .iter()
+            .map(|level| StoredPlanLevel {
+                instrument_id: level.instrument_id.as_str().to_string(),
+                label: level.label.clone(),
+                price_units: level.price.units(),
+                price_scale: level.price.scale(),
+            })
+            .collect(),
+    };
+    serde_json::to_string(&payload)
+        .map_err(|error| format!("session plan could not be encoded: {error}"))
+}
+
+fn decode_session_plan(
+    account_id: TradingAccountId,
+    plan_id: String,
+    revision: u32,
+    session_start_unix_nanos: i64,
+    session_end_unix_nanos: i64,
+    raw: &str,
+) -> Result<SessionPlan, String> {
+    let payload: StoredSessionPlanPayload = serde_json::from_str(raw)
+        .map_err(|error| format!("stored session plan is invalid: {error}"))?;
+    Ok(SessionPlan {
+        account_id,
+        plan_id,
+        revision,
+        session_start_unix_nanos,
+        session_end_unix_nanos,
+        bias: SessionBias::parse(&payload.bias)?,
+        maximum_loss: fixed(payload.maximum_loss_units, payload.maximum_loss_scale)?,
+        session_start_realized_pnl: fixed(
+            payload.session_start_realized_units,
+            payload.session_start_realized_scale,
+        )?,
+        allowed_setups: payload.allowed_setups,
+        active_setup: payload.active_setup,
+        checklist: payload
+            .checklist
+            .into_iter()
+            .map(|item| SessionChecklistItem {
+                item_id: item.item_id,
+                label: item.label,
+                completed: item.completed,
+            })
+            .collect(),
+        levels: payload
+            .levels
+            .into_iter()
+            .map(|level| {
+                Ok(SessionPlanLevel {
+                    instrument_id: InstrumentId::try_new(level.instrument_id)
+                        .map_err(|error| error.to_string())?,
+                    label: level.label,
+                    price: fixed(level.price_units, level.price_scale)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    })
 }
 
 fn encode_provenance(value: &TradingProvenance) -> String {
@@ -1360,6 +2406,9 @@ fn parse_status(value: &str) -> Result<OrderStatus, String> {
     match value {
         "pending" => Ok(OrderStatus::Pending),
         "working" => Ok(OrderStatus::Working),
+        "pending_modify" => Ok(OrderStatus::PendingModify),
+        "partially_filled" => Ok(OrderStatus::PartiallyFilled),
+        "pending_cancel" => Ok(OrderStatus::PendingCancel),
         "filled" => Ok(OrderStatus::Filled),
         "cancelled" => Ok(OrderStatus::Cancelled),
         "rejected" => Ok(OrderStatus::Rejected),
@@ -1390,6 +2439,7 @@ fn json_u64(value: &Value, field: &str) -> Result<u64, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("stored {field} is invalid"))
 }
+
 fn json_i64(value: &Value, field: &str) -> Result<i64, String> {
     value
         .get(field)
@@ -1435,4 +2485,74 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     fs::rename(&temporary, path)
         .map_err(|error| format!("trading export could not be committed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_schema_migrates_historical_order_fill_progress() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection
+            .execute_batch(INITIAL_SCHEMA)
+            .and_then(|()| connection.execute_batch(MIGRATION_V2))
+            .and_then(|()| connection.execute_batch(MIGRATION_V3))
+            .and_then(|()| connection.execute_batch(MIGRATION_V4))
+            .expect("schema four fixture");
+        connection
+            .pragma_update(None, "user_version", 4_u32)
+            .expect("schema version");
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id, display_name, environment, currency, currency_scale)
+                    VALUES ('account', 'SIM account', 'simulated', 'USD', 2);
+                 INSERT INTO instruments(id, price_scale, quantity_scale, contract_json)
+                    VALUES ('instrument', 2, 0, '{}');",
+            )
+            .expect("order parents");
+        for (id, status) in [("filled-order", "filled"), ("working-order", "working")] {
+            connection
+                .execute(
+                    "INSERT INTO orders(id, client_order_id, account_id, instrument_id, side,
+                        order_type, time_in_force, quantity_units, quantity_scale, limit_units,
+                        limit_scale, stop_units, stop_scale, status, submitted_unix_nanos,
+                        provenance_json)
+                     VALUES (?1, ?2, 'account', 'instrument', 'buy', 'limit', 'day', 4, 0,
+                        5000, 2, NULL, NULL, ?3, 1, '{}')",
+                    params![id, format!("client-{id}"), status],
+                )
+                .expect("historical order");
+        }
+
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        store.migrate().expect("schema five migration");
+
+        let version = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .expect("migrated version");
+        assert_eq!(version, SCHEMA_VERSION);
+        let filled = store
+            .connection
+            .query_row(
+                "SELECT filled_units, filled_scale FROM orders WHERE id = 'filled-order'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u8>(1)?)),
+            )
+            .expect("filled progress");
+        assert_eq!(filled, (4, 0));
+        let working = store
+            .connection
+            .query_row(
+                "SELECT filled_units, filled_scale FROM orders WHERE id = 'working-order'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u8>(1)?)),
+            )
+            .expect("working progress");
+        assert_eq!(working, (0, 0));
+    }
 }

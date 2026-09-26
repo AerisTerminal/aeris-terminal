@@ -25,12 +25,12 @@ here (PF, M, D) are stable; batches group them without renumbering.
 
 ## Status at a glance
 
-Updated 2026-09-25. Baseline source-confirmed 2026-09-24.
+Updated 2026-09-26. Baseline source-confirmed 2026-09-24.
 
 | Batch | Scope | Needs from Aeris Charts | External gate | Status |
 | --- | --- | --- | --- | --- |
 | T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Complete** |
-| T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | None for basic chart trading (existing Aeris Charts trading layer); B1 (PD11) for multi-account and trailing stops on charts, (PD1) for chart warnings, (PD3) for plan levels | None | **In progress** |
+| T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | None for basic chart trading (existing Aeris Charts trading layer); B1 (PD11) for multi-account and trailing stops on charts, (PD1) for chart warnings, (PD3) for plan levels | None | **Complete** |
 | T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | Open |
 | T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | Open |
 | T5 | Rithmic live trading: PF1, PF2, PF4, M1.6, live qualification of T2 | B1 (PD1); B6 (PD8) for chart markers of M1.6 | Rithmic onboarding, conformance, live accounts, D4 | Blocked (onboarding) |
@@ -104,58 +104,56 @@ open a browser or create an account session.
 **Scope:** M2.1–M2.8, M3.1–M3.4, M7.2. **Needs:** T1; the existing Aeris Charts trading layer
 for chart trading; Aeris Charts B1 (PD11, PD1, PD3) for account filtering, trailing and break-even
 presentation, order-line warnings and plan levels.
-**Status:** in progress.
+**Status:** complete.
 
-Implementation progress (2026-09-25): the single `trading_runtime` owner now has durable schema-v4
-risk profiles and account locks, pre-trade checks on simulated orders, cancel/modify/cancel-all,
-account/global flatten and kill-switch commands, mark-to-market unrealized P/L, restart-safe order
-state, and a first desktop order-control surface. The keymap owner validates normalized bindings
-and reserved desktop chords, and global buy/sell/cancel/flatten/kill actions now route through that
-owner only when the trading chrome owns focus. The order-book surface also renders the runtime's
-currency P/L projection through a bounded asynchronous snapshot refresh, including exact position
-level tick conversion when instrument tick metadata permits it. Configured accounts now also expose
-runtime-owned rule-distance meters for loss, trailing drawdown, contract capacity, restrictions and
-durable locks in the selected-account trading controls.
-The remaining T2 checklist items are intentionally open: the DOM ladder, bracket UX, chart
-dispatch, copier, consistency-rule evaluation, and chart warning wiring still require the real
-runtime and desktop paths. The simulated order-entry panel now has quantity presets, all canonical order types
-and time-in-force choices, a runtime-backed account selector, and explicit best-ask/best-bid limit
-entry controls; per-account and global cancel,
-flatten and kill controls share the same owner path. Working simulated orders for the selected
-account/instrument are now surfaced in that panel with bounded per-order cancellation controls;
-working limit orders also have an explicit best-price reprice command. The DOM ladder now emits
-provider-neutral row-price intents that route through the selected account and order-entry runtime
-path; full drag UX, position overlays, the P/L column and full inline ladder placement remain open.
-The ladder now projects bounded selected-account working-order markers, emits same-side drag/drop
-intents, and the desktop resolves them only against a matching selected-account working limit order
-before issuing an exact-price modify command; position overlays and the P/L column remain open.
+Implementation evidence (2026-09-26): the single `trading_runtime` owner now carries schema-v13
+durable accounts, orders, fills, managed strategies, copier configurations, versioned risk profiles,
+rule state, consistency cycles, session plans and discipline state. The DOM provides one-click
+placement, exact-price drag modification, inline orders and positions, currency P/L and recent
+aggressor volume. Its manual release burst measurement rendered 512 changing frames in 1.490 s with
+a maximum measured render-tree construction cost of 56,000 ns against a 16 ms frame budget.
+
+Bracket templates activate locally managed OCO stops, targets, trailing, break-even and scale-out
+rules after entry fills. Chart trading projects runtime orders, positions and fills and resolves
+place, modify, cancel, stop, target and close intents through the same checked command path. The
+copier applies bounded per-account multipliers and performs independent risk checks for every target.
+The desktop keymap, order panel, DOM, chart and copier do not own or bypass trading state.
+
+Risk evaluation covers daily loss, intraday and end-of-day trailing drawdown, all-working-order
+maximum-contract scenarios, completed-trade consistency, news restrictions and exact bracket
+loss-at-stop. Rule meters update on price observations; hard locks, trailing peaks and consistency
+state survive restart. Accepted warnings are retained on order events and projected with warning
+tone on chart order lines. Deterministic discipline rules provide a two-loss cooldown, post-loss
+size cap, fast stop re-entry warning and planned-hours enforcement. Revisioned session plans enforce
+hours, checklist, setup and maximum loss, retain adherence reviews, and project their time window
+and price levels as transient chart overlays separate from user drawing persistence.
 
 Execution and risk ship together because no order may leave the order-command path without the
 M3.2 checks.
 
 - [x] **M7.2** Single keymap owner with conflict detection.
-- [ ] **M2.1** DOM trading ladder: one-click orders, drag to modify, inline orders and position,
+- [x] **M2.1** DOM trading ladder: one-click orders, drag to modify, inline orders and position,
       P/L column, recent volume at price; render cost measured during bursts.
 - [x] **M2.2** Order entry panel: quantity presets, order types, time in force, account selector.
-- [ ] **M2.3** Bracket and strategy templates: stop and target, OCO, trailing, break-even,
+- [x] **M2.3** Bracket and strategy templates: stop and target, OCO, trailing, break-even,
       scale-out, with local-management labels where not server-side.
-- [ ] **M2.4** Chart trading wired to the existing Aeris Charts trading layer: runtime orders,
+- [x] **M2.4** Chart trading wired to the existing Aeris Charts trading layer: runtime orders,
       positions and fills projected into chart trading snapshots; chart intents (place bracket,
       modify, cancel, stop/target, close) resolved through the M3.2 order-command path with
       confirmation rules. Not blocked on B1. The canonical order states gain partially filled,
       pending modify and pending cancel so the chart shows in-flight commands correctly.
 - [x] **M2.5** Trading hotkeys, disabled while a text field has focus.
 - [x] **M2.6** Flatten and kill switch per account and globally.
-- [ ] **M2.7** Multi-account trade copier with per-account multipliers, kill switches and M3.2
+- [x] **M2.7** Multi-account trade copier with per-account multipliers, kill switches and M3.2
       checks before each mirrored order.
 - [x] **M2.8** Positions and PnL in currency and ticks.
-- [ ] **M3.1** Prop-firm rule engine with versioned profiles and live distance meters; rule
+- [x] **M3.1** Prop-firm rule engine with versioned profiles and live distance meters; rule
       warnings on order lines through PD1.
-- [ ] **M3.2** Pre-trade checks and hard locks in the single order-command path; the lock survives
+- [x] **M3.2** Pre-trade checks and hard locks in the single order-command path; the lock survives
       restart and blocks DOM, chart, copier and hotkeys.
-- [ ] **M3.3** Tilt detection with documented deterministic rules.
-- [ ] **M3.4** Session plan and checklist, with plan levels on charts through PD3.
-- [ ] Broad gate green; committed and pushed.
+- [x] **M3.3** Tilt detection with documented deterministic rules.
+- [x] **M3.4** Session plan and checklist, with plan levels on charts through PD3.
+- [x] Broad gate green; committed and pushed.
 
 **Acceptance:** the M2 and M3 acceptance criteria pass on the simulated venue: every command is
 idempotent across reconnects, simulated and live accounts cannot be confused, and rule evaluation
@@ -454,14 +452,14 @@ demand, and frame work stays bounded during news-release bursts.
 
 | ID | Feature | Status | Platform work | Aeris Charts | Batch |
 | --- | --- | --- | --- | --- | --- |
-| M2.1 | DOM trading ladder: one-click orders, drag to modify, working orders and position inline, P/L column, recent volume at price | Partial (read-only ladder) | Extend the existing `terminal_ui` ladder into a trading ladder over PF1–PF3: order-entry clicks and drags, own orders and queue position (PF4), fill the existing P/L column; measure ladder render cost during news bursts | — (platform widget) | T2 |
-| M2.2 | Order entry panel: quantity presets, order types, time in force, account selector | Absent | GPUI panel over PF1 | — | T2 |
-| M2.3 | Bracket and strategy templates: stop and target on entry, OCO, trailing, break-even, scale-out | Absent | Template model in PF7; server-side execution where supported; local-management labels otherwise | Existing brackets and OCO visuals; PD11 for trailing and break-even presentation | T2 |
-| M2.4 | Chart trading: place, drag and cancel orders and positions on the chart | Absent in desktop (present in Aeris Charts) | Project trading-runtime snapshots into the chart and resolve chart trading intents through the single order-command path (simulated venue first, PF1 in T5) with confirmation rules; stop forwarding trading gestures while a lock is active | Existing trading layer for basic chart trading; PD11 for accounts and exact tick prices; PD1 for warnings | T2 |
-| M2.5 | Trading hotkeys: buy/sell at bid/ask/market, flatten, cancel all, reverse, with per-hotkey confirmation settings | Absent | Keymap owner (M7.2); hotkeys disabled while a text field has focus | — | T2 |
-| M2.6 | Flatten and kill switch: flatten all positions and cancel all orders per account or globally | Absent | Single command path through PF1, visible at all times | — | T2 |
-| M2.7 | Multi-account trade copier: mirror orders to several accounts with per-account multipliers and kill switches | Absent | Local copier over PF1 with per-account risk checks (M3.2) before each mirrored order | PD11 for per-account chart filtering | T2 |
-| M2.8 | Positions and PnL display in currency and ticks | Absent | PF2 and PF6 projections to panels and charts | Existing position chips | T2 |
+| M2.1 | DOM trading ladder: one-click orders, drag to modify, working orders and position inline, P/L column, recent volume at price | Present | Extend the existing `terminal_ui` ladder into a trading ladder over PF1–PF3: order-entry clicks and drags, own orders and queue position (PF4), fill the existing P/L column; measure ladder render cost during news bursts | — (platform widget) | T2 |
+| M2.2 | Order entry panel: quantity presets, order types, time in force, account selector | Present | GPUI panel over PF1 | — | T2 |
+| M2.3 | Bracket and strategy templates: stop and target on entry, OCO, trailing, break-even, scale-out | Present | Template model in PF7; server-side execution where supported; local-management labels otherwise | Existing brackets and OCO visuals; PD11 for trailing and break-even presentation | T2 |
+| M2.4 | Chart trading: place, drag and cancel orders and positions on the chart | Present | Project trading-runtime snapshots into the chart and resolve chart trading intents through the single order-command path (simulated venue first, PF1 in T5) with confirmation rules; stop forwarding trading gestures while a lock is active | Existing trading layer for basic chart trading; PD11 for accounts and exact tick prices; PD1 for warnings | T2 |
+| M2.5 | Trading hotkeys: buy/sell at bid/ask/market, flatten, cancel all, reverse, with per-hotkey confirmation settings | Present | Keymap owner (M7.2); hotkeys disabled while a text field has focus | — | T2 |
+| M2.6 | Flatten and kill switch: flatten all positions and cancel all orders per account or globally | Present | Single command path through PF1, visible at all times | — | T2 |
+| M2.7 | Multi-account trade copier: mirror orders to several accounts with per-account multipliers and kill switches | Present | Local copier over PF1 with per-account risk checks (M3.2) before each mirrored order | PD11 for per-account chart filtering | T2 |
+| M2.8 | Positions and PnL display in currency and ticks | Present | PF2 and PF6 projections to panels and charts | Existing position chips | T2 |
 
 Acceptance: no order leaves the machine without passing M3.2 checks; every trading command is
 idempotent across reconnects; simulated and live accounts can never be confused.
@@ -470,10 +468,10 @@ idempotent across reconnects; simulated and live accounts can never be confused.
 
 | ID | Feature | Status | Platform work | Aeris Charts | Batch |
 | --- | --- | --- | --- | --- | --- |
-| M3.1 | Prop-firm rule engine: profiles for daily loss limit, trailing drawdown (intraday or end-of-day), max contracts, consistency rules and news-time restrictions; live distance meters | Absent | Declarative, versioned rule profiles in PF7; deterministic evaluation on every fill and price update; broker-reported limits (PF2) take precedence when present | PD1 | T2 |
-| M3.2 | Pre-trade checks and hard locks: warn on or block any order that would break a rule if its stop is hit; a day lock the trader cannot easily undo | Absent | Check runs inside the single order-command path, including the DOM, chart trading, copier and hotkeys. While locked, the desktop stops forwarding chart trading gestures, rejects any trading intent, disables DOM order entry and shows the lock reason in platform chrome | PD1 for warnings on order lines; lock needs none | T2 |
-| M3.3 | Tilt detection: rapid losses, rising size after losses, fast re-entry after a stop, trading outside planned hours | Absent | Documented deterministic rules over the local execution log; actions are warn, cool-down timer (through the M3.2 lock) or size reduction | — | T2 |
-| M3.4 | Session plan and checklist: key levels, bias, max loss and allowed setups before trading; end-of-day adherence review | Absent | Plan model in PF7; plan levels projected as host overlays | PD3 | T2 |
+| M3.1 | Prop-firm rule engine: profiles for daily loss limit, trailing drawdown (intraday or end-of-day), max contracts, consistency rules and news-time restrictions; live distance meters | Present | Declarative, versioned rule profiles in PF7; deterministic evaluation on every fill and price update; broker-reported limits (PF2) take precedence when present | PD1 | T2 |
+| M3.2 | Pre-trade checks and hard locks: warn on or block any order that would break a rule if its stop is hit; a day lock the trader cannot easily undo | Present | Check runs inside the single order-command path, including the DOM, chart trading, copier and hotkeys. While locked, the desktop stops forwarding chart trading gestures, rejects any trading intent, disables DOM order entry and shows the lock reason in platform chrome | PD1 for warnings on order lines; lock needs none | T2 |
+| M3.3 | Tilt detection: rapid losses, rising size after losses, fast re-entry after a stop, trading outside planned hours | Present | Documented deterministic rules over the local execution log; actions are warn, cool-down timer (through the M3.2 lock) or size reduction | — | T2 |
+| M3.4 | Session plan and checklist: key levels, bias, max loss and allowed setups before trading; end-of-day adherence review | Present | Plan model in PF7; plan levels projected as host overlays | PD3 | T2 |
 
 Acceptance: rule evaluation is reproducible from recorded fills; a lock survives application
 restart; prop-firm profiles are versioned because firms change their rules.

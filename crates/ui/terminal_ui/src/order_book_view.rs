@@ -6,13 +6,14 @@ use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_typography,
 };
 use aeris_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
+use aeris_trading::{FixedPoint, project_unrealized_pnl};
 use gpui::{
     AnyElement, Context, Div, Entity, EventEmitter, Hsla, IntoElement, Render, ScrollStrategy,
     UniformListScrollHandle, Window, div, prelude::*, px, relative, uniform_list,
 };
 #[cfg(test)]
 use std::cmp::Ordering;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 16.0;
@@ -74,6 +75,25 @@ pub struct OrderBookPositionMarker {
     pub side: OrderBookLevelSide,
     pub quantity: i64,
     pub quantity_scale: u8,
+    pub point_value: Option<FixedPoint>,
+    pub currency_scale: u8,
+}
+
+/// Bounded construction-time telemetry for the virtualized ladder render tree.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OrderBookRenderMetrics {
+    pub sample_count: u64,
+    pub last_nanos: u64,
+    pub maximum_nanos: u64,
+}
+
+impl OrderBookRenderMetrics {
+    fn record(&mut self, elapsed_nanos: u128) {
+        let elapsed_nanos = u64::try_from(elapsed_nanos).unwrap_or(u64::MAX);
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.last_nanos = elapsed_nanos;
+        self.maximum_nanos = self.maximum_nanos.max(elapsed_nanos);
+    }
 }
 const PNL_WIDTH: f32 = 0.10;
 const BOOK_WIDTH: f32 = 0.30;
@@ -158,10 +178,9 @@ impl OrderBookColumn {
         }
     }
 
-    /// P/L stays unavailable until order routing can supply authoritative values.
     #[must_use]
     pub const fn available(self) -> bool {
-        !matches!(self, Self::ProfitLoss)
+        true
     }
 }
 
@@ -221,6 +240,7 @@ pub struct ReadOnlyOrderBookView {
     theme: AerisTheme,
     ladder_scroll: UniformListScrollHandle,
     columns: OrderBookColumnVisibility,
+    render_metrics: OrderBookRenderMetrics,
 }
 
 impl EventEmitter<OrderBookLevelClick> for ReadOnlyOrderBookView {}
@@ -238,6 +258,7 @@ impl ReadOnlyOrderBookView {
             theme,
             ladder_scroll: UniformListScrollHandle::new(),
             columns: OrderBookColumnVisibility::default(),
+            render_metrics: OrderBookRenderMetrics::default(),
         }
     }
 
@@ -271,6 +292,12 @@ impl ReadOnlyOrderBookView {
     #[must_use]
     pub const fn columns(&self) -> OrderBookColumnVisibility {
         self.columns
+    }
+
+    /// Returns bounded ladder render-tree construction telemetry.
+    #[must_use]
+    pub const fn render_metrics(&self) -> OrderBookRenderMetrics {
+        self.render_metrics
     }
 
     pub fn toggle_column(&mut self, column: OrderBookColumn, cx: &mut Context<Self>) {
@@ -384,6 +411,7 @@ fn frame_precedes(candidate: &OrderBookFrame, current: &OrderBookFrame) -> bool 
 
 impl Render for ReadOnlyOrderBookView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_started = Instant::now();
         let colors = self.theme.colors;
         let state = self.frame.as_deref().map(|frame| frame.state);
         let watermark = self
@@ -398,7 +426,7 @@ impl Render for ReadOnlyOrderBookView {
         let columns = self.columns;
         let order_book = cx.entity();
 
-        div()
+        let content = div()
             .id("read_only_order_book")
             .flex()
             .flex_col()
@@ -442,7 +470,10 @@ impl Render for ReadOnlyOrderBookView {
                             position_marker: position_marker.as_ref(),
                         },
                     )),
-            )
+            );
+        self.render_metrics
+            .record(render_started.elapsed().as_nanos());
+        content
     }
 }
 
@@ -1319,11 +1350,29 @@ struct LadderInteraction<'a> {
 struct OrderBookLevelDrag {
     price: i64,
     side: OrderBookLevelSide,
+    label: String,
+    theme: AerisTheme,
 }
 
 impl Render for OrderBookLevelDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size(px(1.0)).opacity(0.0)
+        let colors = self.theme.colors;
+        let color = match self.side {
+            OrderBookLevelSide::Bid => colors.primary,
+            OrderBookLevelSide::Ask => colors.danger,
+        };
+        div()
+            .h(px(ROW_HEIGHT + 6.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded(px(3.0))
+            .border_1()
+            .border_color(gpui_color(color))
+            .bg(gpui_color(colors.surface.with_alpha(0.96)))
+            .text_size(px(TEXT_SIZE))
+            .text_color(gpui_color(color))
+            .child(self.label.clone())
     }
 }
 
@@ -1343,6 +1392,7 @@ struct LevelCellContext<'a> {
     maximum_trade_quantity: i64,
     trade_volumes: AggressorTradeVolumes,
     quantity_scale: u8,
+    price_scale: u8,
     working_order: Option<&'a OrderBookWorkingOrder>,
     position_marker: Option<&'a OrderBookPositionMarker>,
 }
@@ -1393,8 +1443,6 @@ fn render_level_row(
     let click_side = order_book_level_side(side);
     let click_price = level.price;
     let order_book = interaction.order_book.clone();
-    let drag_side = click_side;
-    let drag_price = click_price;
     let drop_order_book = interaction.order_book.clone();
     let trade_volumes = stats.trade_volumes.unwrap_or_else(|| {
         frame
@@ -1403,6 +1451,12 @@ fn render_level_row(
             .copied()
             .unwrap_or_default()
     });
+    let working_order = interaction
+        .working_orders
+        .iter()
+        .find(|order| order.price == level.price && order.side == order_book_level_side(side));
+    let drag = working_order
+        .map(|order| working_order_drag(order, level.price, frame.price_scale, interaction.theme));
     let context = LevelCellContext {
         columns,
         price_color,
@@ -1411,16 +1465,14 @@ fn render_level_row(
         maximum_trade_quantity: stats.maximum_trade_quantity,
         trade_volumes,
         quantity_scale: frame.quantity_scale,
-        working_order: interaction
-            .working_orders
-            .iter()
-            .find(|order| order.price == level.price && order.side == order_book_level_side(side)),
+        price_scale: frame.price_scale,
+        working_order,
         position_marker: interaction.position_marker.filter(|marker| {
             marker.price == level.price && marker.side == order_book_level_side(side)
         }),
     };
     div()
-        .id((row_id, u64::try_from(level.price).unwrap_or(0)))
+        .id((row_id, signed_price_element_id(level.price)))
         .w_full()
         .h(px(ROW_HEIGHT))
         .flex_none()
@@ -1441,13 +1493,6 @@ fn render_level_row(
                 });
             });
         })
-        .on_drag(
-            OrderBookLevelDrag {
-                price: drag_price,
-                side: drag_side,
-            },
-            |drag, _, _, cx| cx.new(|_| drag.clone()),
-        )
         .on_drop(move |drag: &OrderBookLevelDrag, _, cx| {
             drop_order_book.update(cx, |_, order_book_cx| {
                 order_book_cx.emit(OrderBookLevelDrop {
@@ -1457,6 +1502,9 @@ fn render_level_row(
                     target_side: click_side,
                 });
             });
+        })
+        .when_some(drag, |row, drag| {
+            row.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
         })
         .children(
             OrderBookColumn::ALL
@@ -1487,7 +1535,6 @@ fn render_empty_price_tick(
     };
     let click_side = order_book_level_side(side);
     let order_book = interaction.order_book.clone();
-    let drag_price = price;
     let drop_order_book = interaction.order_book.clone();
     let working_order = interaction
         .working_orders
@@ -1495,8 +1542,10 @@ fn render_empty_price_tick(
         .find(|order| order.price == price && order.side == order_book_level_side(side));
     let trade_volumes = stats.trade_volumes.unwrap_or_default();
     let quantity_scale = frame.quantity_scale;
+    let drag =
+        working_order.map(|order| working_order_drag(order, price, price_scale, interaction.theme));
     div()
-        .id((row_id, u64::try_from(price).unwrap_or(0)))
+        .id((row_id, signed_price_element_id(price)))
         .w_full()
         .h(px(ROW_HEIGHT))
         .flex_none()
@@ -1517,13 +1566,6 @@ fn render_empty_price_tick(
                 });
             });
         })
-        .on_drag(
-            OrderBookLevelDrag {
-                price: drag_price,
-                side: click_side,
-            },
-            |drag, _, _, cx| cx.new(|_| drag.clone()),
-        )
         .on_drop(move |drag: &OrderBookLevelDrag, _, cx| {
             drop_order_book.update(cx, |_, order_book_cx| {
                 order_book_cx.emit(OrderBookLevelDrop {
@@ -1534,51 +1576,118 @@ fn render_empty_price_tick(
                 });
             });
         })
+        .when_some(drag, |row, drag| {
+            row.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+        })
         .children(
             OrderBookColumn::ALL
                 .into_iter()
                 .filter(|column| columns.is_visible(*column))
                 .map(|column| {
-                    let width = columns.width(column);
-                    match column {
-                        OrderBookColumn::Price => table_cell(width)
-                            .px_1()
-                            .text_center()
-                            .text_color(gpui_color(price_color))
-                            .child(grouped_fixed_point_text(price, price_scale))
-                            .into_any_element(),
-                        OrderBookColumn::SellTrades => trade_volume_cell(
-                            width,
-                            trade_volumes.sell,
-                            quantity_scale,
-                            theme.colors.danger,
-                            true,
-                            stats.maximum_trade_quantity,
-                        )
-                        .into_any_element(),
-                        OrderBookColumn::BuyTrades => trade_volume_cell(
-                            width,
-                            trade_volumes.buy,
-                            quantity_scale,
-                            theme.colors.primary,
-                            false,
-                            stats.maximum_trade_quantity,
-                        )
-                        .into_any_element(),
-                        OrderBookColumn::Orders => working_order_cell(
-                            width,
-                            working_order,
-                            interaction.position_marker.filter(|marker| {
-                                marker.price == price && marker.side == click_side
-                            }),
-                            None,
-                            theme,
-                        )
-                        .into_any_element(),
-                        _ => table_cell(width).into_any_element(),
-                    }
+                    render_empty_price_cell(&EmptyPriceCellContext {
+                        column,
+                        columns,
+                        price,
+                        price_scale,
+                        price_color,
+                        quantity_scale,
+                        trade_volumes,
+                        working_order,
+                        click_side,
+                        interaction,
+                        maximum_trade_quantity: stats.maximum_trade_quantity,
+                    })
                 }),
         )
+}
+
+fn working_order_drag(
+    order: &OrderBookWorkingOrder,
+    price: i64,
+    price_scale: u8,
+    theme: &AerisTheme,
+) -> OrderBookLevelDrag {
+    let side = match order.side {
+        OrderBookLevelSide::Bid => "SELL",
+        OrderBookLevelSide::Ask => "BUY",
+    };
+    OrderBookLevelDrag {
+        price,
+        side: order.side,
+        label: format!(
+            "{side} {} @ {}",
+            compact_quantity_text(order.quantity, order.quantity_scale),
+            grouped_fixed_point_text(price, price_scale),
+        ),
+        theme: *theme,
+    }
+}
+
+const fn signed_price_element_id(price: i64) -> u64 {
+    u64::from_ne_bytes(price.to_ne_bytes())
+}
+
+struct EmptyPriceCellContext<'a> {
+    column: OrderBookColumn,
+    columns: OrderBookColumnVisibility,
+    price: i64,
+    price_scale: u8,
+    price_color: ThemeColor,
+    quantity_scale: u8,
+    trade_volumes: AggressorTradeVolumes,
+    working_order: Option<&'a OrderBookWorkingOrder>,
+    click_side: OrderBookLevelSide,
+    interaction: LadderInteraction<'a>,
+    maximum_trade_quantity: i64,
+}
+
+fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
+    let width = context.columns.width(context.column);
+    match context.column {
+        OrderBookColumn::Price => table_cell(width)
+            .px_1()
+            .text_center()
+            .text_color(gpui_color(context.price_color))
+            .child(grouped_fixed_point_text(context.price, context.price_scale))
+            .into_any_element(),
+        OrderBookColumn::SellTrades => trade_volume_cell(
+            width,
+            context.trade_volumes.sell,
+            context.quantity_scale,
+            context.interaction.theme.colors.danger,
+            true,
+            context.maximum_trade_quantity,
+        )
+        .into_any_element(),
+        OrderBookColumn::BuyTrades => trade_volume_cell(
+            width,
+            context.trade_volumes.buy,
+            context.quantity_scale,
+            context.interaction.theme.colors.primary,
+            false,
+            context.maximum_trade_quantity,
+        )
+        .into_any_element(),
+        OrderBookColumn::Orders => working_order_cell(
+            width,
+            context.working_order,
+            context.interaction.position_marker.filter(|marker| {
+                marker.price == context.price && marker.side == context.click_side
+            }),
+            None,
+            context.interaction.theme,
+        )
+        .into_any_element(),
+        OrderBookColumn::ProfitLoss => pnl_cell(
+            width,
+            context.interaction.position_marker,
+            context.price,
+            context.price_scale,
+            context.interaction.theme,
+        )
+        .into_any_element(),
+        OrderBookColumn::Bid | OrderBookColumn::Ask => table_cell(width).into_any_element(),
+    }
 }
 
 fn price_grid_center_row(frame: &OrderBookFrame, theme: &AerisTheme) -> AnyElement {
@@ -1603,7 +1712,14 @@ fn render_level_cell(
 ) -> gpui::AnyElement {
     let width = context.columns.width(column);
     match column {
-        OrderBookColumn::ProfitLoss => table_cell(width).into_any_element(),
+        OrderBookColumn::ProfitLoss => pnl_cell(
+            width,
+            context.position_marker,
+            level.price,
+            context.price_scale,
+            context.theme,
+        )
+        .into_any_element(),
         OrderBookColumn::Bid => quantity_cell(
             width,
             (side == BookColumnSide::Bid).then_some(level),
@@ -1691,6 +1807,56 @@ fn working_order_cell(
                 )
             },
         ))
+}
+
+fn pnl_at_price(
+    marker: &OrderBookPositionMarker,
+    price: i64,
+    price_scale: u8,
+) -> Option<FixedPoint> {
+    let point_value = marker.point_value?;
+    let signed_quantity = match marker.side {
+        OrderBookLevelSide::Ask => marker.quantity,
+        OrderBookLevelSide::Bid => marker.quantity.checked_neg()?,
+    };
+    project_unrealized_pnl(
+        FixedPoint::try_new(marker.price, price_scale).ok()?,
+        FixedPoint::try_new(price, price_scale).ok()?,
+        FixedPoint::try_new(signed_quantity, marker.quantity_scale).ok()?,
+        point_value,
+        marker.currency_scale,
+    )
+    .ok()
+}
+
+fn pnl_cell(
+    width: f32,
+    marker: Option<&OrderBookPositionMarker>,
+    price: i64,
+    price_scale: u8,
+    theme: &AerisTheme,
+) -> Div {
+    let pnl = marker.and_then(|marker| pnl_at_price(marker, price, price_scale));
+    let color = pnl.map_or(theme.colors.text_secondary, |value| {
+        match value.units().cmp(&0) {
+            std::cmp::Ordering::Greater => theme.colors.primary,
+            std::cmp::Ordering::Less => theme.colors.danger,
+            std::cmp::Ordering::Equal => theme.colors.text_secondary,
+        }
+    });
+    let label = pnl.map_or_else(String::new, |value| {
+        let text = grouped_fixed_point_text(value.units(), value.scale());
+        if value.units() > 0 {
+            format!("+{text}")
+        } else {
+            text
+        }
+    });
+    table_cell(width)
+        .px_1()
+        .text_right()
+        .text_color(gpui_color(color))
+        .child(label)
 }
 
 fn table_cell(width: f32) -> Div {
@@ -1985,11 +2151,111 @@ mod tests {
     }
 
     #[test]
-    fn routing_columns_start_hidden_and_cannot_be_enabled() {
+    fn trading_columns_start_hidden_and_can_be_enabled() {
         let mut columns = OrderBookColumnVisibility::default();
         assert!(!columns.is_visible(OrderBookColumn::ProfitLoss));
-        assert!(!columns.toggle(OrderBookColumn::ProfitLoss));
-        assert!(!columns.is_visible(OrderBookColumn::ProfitLoss));
+        assert!(columns.toggle(OrderBookColumn::ProfitLoss));
+        assert!(columns.is_visible(OrderBookColumn::ProfitLoss));
+    }
+
+    #[test]
+    fn working_order_drag_is_visible_and_preserves_exact_source_identity() {
+        let order = OrderBookWorkingOrder {
+            price: 20_000,
+            side: OrderBookLevelSide::Ask,
+            quantity: 2,
+            quantity_scale: 0,
+        };
+        let drag = working_order_drag(&order, order.price, 2, &AerisTheme::dark());
+
+        assert_eq!(drag.price, 20_000);
+        assert_eq!(drag.side, OrderBookLevelSide::Ask);
+        assert_eq!(drag.label, "BUY 2 @ 200.00");
+    }
+
+    #[test]
+    fn render_metrics_retain_constant_space_peak_and_latest_cost() {
+        let mut metrics = OrderBookRenderMetrics::default();
+        metrics.record(400);
+        metrics.record(250);
+
+        assert_eq!(metrics.sample_count, 2);
+        assert_eq!(metrics.last_nanos, 250);
+        assert_eq!(metrics.maximum_nanos, 400);
+    }
+
+    #[gpui::test]
+    #[ignore = "manual release-mode DOM burst render measurement"]
+    fn measured_ladder_render_cost_stays_inside_one_frame(cx: &mut gpui::TestAppContext) {
+        const BURST_FRAMES: u64 = 512;
+        const FRAME_BUDGET_NANOS: u64 = 16_000_000;
+        let (view, cx) = cx.add_window_view(|_, _| ReadOnlyOrderBookView::new(AerisTheme::dark()));
+        view.update(cx, |view, _| {
+            view.working_orders = (0..32)
+                .map(|index| OrderBookWorkingOrder {
+                    price: 20_000 + i64::from(index) * 25,
+                    side: if index % 2 == 0 {
+                        OrderBookLevelSide::Ask
+                    } else {
+                        OrderBookLevelSide::Bid
+                    },
+                    quantity: i64::from(index + 1),
+                    quantity_scale: 0,
+                })
+                .collect();
+        });
+        let burst_started = Instant::now();
+        for revision in 1..=BURST_FRAMES {
+            let mut frame = price_grid_frame();
+            frame.revision = revision;
+            frame.source_watermark = revision;
+            frame.trade_source_watermark = revision;
+            frame.traded_volumes.insert(
+                20_025,
+                AggressorTradeVolumes {
+                    buy: i64::try_from(revision).expect("bounded revision"),
+                    sell: i64::try_from(BURST_FRAMES - revision).expect("bounded revision"),
+                },
+            );
+            view.update(cx, |view, view_cx| {
+                view.install_frame(Arc::new(frame), view_cx);
+            });
+            cx.update(|window, app| window.draw(app).clear(app));
+        }
+        let elapsed = burst_started.elapsed();
+        let metrics = cx.update(|_, app| view.read(app).render_metrics());
+        eprintln!(
+            "DOM burst: {BURST_FRAMES} frames in {elapsed:?}; render tree last={}ns max={}ns",
+            metrics.last_nanos, metrics.maximum_nanos
+        );
+
+        assert!(metrics.sample_count >= BURST_FRAMES);
+        assert!(metrics.sample_count <= BURST_FRAMES.saturating_mul(3));
+        assert!(metrics.maximum_nanos <= FRAME_BUDGET_NANOS);
+    }
+
+    #[test]
+    fn ladder_pnl_uses_canonical_fixed_point_projection_for_long_and_short_positions() {
+        let long = OrderBookPositionMarker {
+            price: 10_000,
+            side: OrderBookLevelSide::Ask,
+            quantity: 2,
+            quantity_scale: 0,
+            point_value: Some(FixedPoint::try_new(5_000, 2).expect("point value")),
+            currency_scale: 2,
+        };
+        assert_eq!(
+            pnl_at_price(&long, 10_025, 2),
+            Some(FixedPoint::try_new(2_500, 2).expect("long pnl"))
+        );
+        let short = OrderBookPositionMarker {
+            side: OrderBookLevelSide::Bid,
+            ..long
+        };
+        assert_eq!(
+            pnl_at_price(&short, 10_025, 2),
+            Some(FixedPoint::try_new(-2_500, 2).expect("short pnl"))
+        );
     }
 
     #[test]

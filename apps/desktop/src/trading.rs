@@ -6,7 +6,8 @@ use aeris_instruments::{
     SessionHours,
 };
 use aeris_trading_runtime::{
-    ModifyOrder, PlaceOrder, SimulatedMarketObservation, TradingInstrument, TradingService,
+    ModifyOrder, PlaceBracket, PlaceOrder, SimulatedMarketObservation, TradeCopierConfig,
+    TradingInstrument, TradingService,
 };
 use std::sync::OnceLock;
 
@@ -73,6 +74,51 @@ pub fn dispatch_simulated_order(
             if service.place_order(command).is_ok()
                 && let Some(observation) = observation
             {
+                let _ = service.observe_market(observation);
+            }
+        })
+        .detach();
+}
+
+/// User-selected order instruction with an optional runtime-owned bracket template.
+pub struct SimulatedOrderSelection {
+    pub account_key: Option<String>,
+    pub quantity: u64,
+    pub order_type: aeris_trading::OrderType,
+    pub time_in_force: aeris_trading::TimeInForce,
+    pub template_id: Option<String>,
+}
+
+/// Dispatches a plain or bracketed entry selected by the order-entry panel off the UI thread.
+pub fn dispatch_simulated_selected_order(
+    frame: &aeris_market_data::OrderBookFrame,
+    side: aeris_trading::OrderSide,
+    selection: SimulatedOrderSelection,
+    cx: &mut gpui::App,
+) {
+    let Some(service) = handle() else {
+        return;
+    };
+    let Some((entry, observation)) = prepare_simulated_order(
+        frame,
+        side,
+        selection.account_key,
+        selection.quantity,
+        selection.order_type,
+        selection.time_in_force,
+    ) else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let accepted = if let Some(template_id) = selection.template_id {
+                service
+                    .place_bracket(PlaceBracket { entry, template_id })
+                    .is_ok()
+            } else {
+                service.place_order(entry).is_ok()
+            };
+            if accepted && let Some(observation) = observation {
                 let _ = service.observe_market(observation);
             }
         })
@@ -242,6 +288,18 @@ pub fn kill_simulated_accounts(cx: &mut gpui::App) {
     cx.background_executor()
         .spawn(async move {
             let _ = service.kill_switch(None, "manual global kill switch".to_string(), locked_at);
+        })
+        .detach();
+}
+
+/// Replaces one runtime-owned trade-copier configuration off the UI thread.
+pub fn register_trade_copier(config: TradeCopierConfig, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let _ = service.register_trade_copier(config);
         })
         .detach();
 }

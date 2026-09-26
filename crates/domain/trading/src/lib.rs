@@ -127,6 +127,45 @@ impl FixedPoint {
     }
 }
 
+/// Projects open-position P/L at one price using exact fixed-point contract terms.
+///
+/// This is the canonical calculation shared by the trading owner and read-only
+/// presentation projections. Quantity scale participates in the result so
+/// fractional quantities cannot be mistaken for whole contracts.
+///
+/// # Errors
+/// Returns a validation error when price scales differ, contract terms are
+/// invalid, or the exact result cannot be represented at `currency_scale`.
+pub fn project_unrealized_pnl(
+    entry: FixedPoint,
+    mark: FixedPoint,
+    net_quantity: FixedPoint,
+    point_value: FixedPoint,
+    currency_scale: u8,
+) -> Result<FixedPoint, TradingValidationError> {
+    if entry.scale() != mark.scale() {
+        return Err(TradingValidationError::ScaleMismatch);
+    }
+    if entry.units() <= 0 || mark.units() <= 0 {
+        return Err(TradingValidationError::NonPositivePrice);
+    }
+    if point_value.units() <= 0 {
+        return Err(TradingValidationError::NonPositivePointValue);
+    }
+    let price_difference = i128::from(mark.units()) - i128::from(entry.units());
+    let raw = price_difference
+        .checked_mul(i128::from(net_quantity.units()))
+        .and_then(|value| value.checked_mul(i128::from(point_value.units())))
+        .ok_or(TradingValidationError::ArithmeticOverflow)?;
+    let raw_scale = entry
+        .scale()
+        .checked_add(net_quantity.scale())
+        .and_then(|scale| scale.checked_add(point_value.scale()))
+        .ok_or(TradingValidationError::ArithmeticOverflow)?;
+    let raw = i64::try_from(raw).map_err(|_| TradingValidationError::ArithmeticOverflow)?;
+    FixedPoint::try_new(raw, raw_scale)?.exact_rescale(currency_scale)
+}
+
 /// Provenance kept on every canonical trading mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradingProvenance {
@@ -279,6 +318,9 @@ impl TimeInForce {
 pub enum OrderStatus {
     Pending,
     Working,
+    PendingModify,
+    PartiallyFilled,
+    PendingCancel,
     Filled,
     Cancelled,
     Rejected,
@@ -291,10 +333,32 @@ impl OrderStatus {
         match self {
             Self::Pending => "pending",
             Self::Working => "working",
+            Self::PendingModify => "pending_modify",
+            Self::PartiallyFilled => "partially_filled",
+            Self::PendingCancel => "pending_cancel",
             Self::Filled => "filled",
             Self::Cancelled => "cancelled",
             Self::Rejected => "rejected",
         }
+    }
+
+    /// Whether the order still owns live quantity and must survive retention.
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(
+            self,
+            Self::Pending
+                | Self::Working
+                | Self::PendingModify
+                | Self::PartiallyFilled
+                | Self::PendingCancel
+        )
+    }
+
+    /// Whether the venue may execute additional quantity in this state.
+    #[must_use]
+    pub const fn is_executable(self) -> bool {
+        matches!(self, Self::Working | Self::PartiallyFilled)
     }
 }
 
@@ -309,6 +373,7 @@ pub struct Order {
     pub order_type: OrderType,
     pub time_in_force: TimeInForce,
     pub quantity: FixedPoint,
+    pub filled_quantity: FixedPoint,
     pub limit_price: Option<FixedPoint>,
     pub stop_price: Option<FixedPoint>,
     pub status: OrderStatus,
@@ -324,6 +389,30 @@ impl Order {
     pub fn validate(&self) -> Result<(), TradingValidationError> {
         if self.quantity.units() <= 0 {
             return Err(TradingValidationError::NonPositiveQuantity);
+        }
+        if self.filled_quantity.units() < 0
+            || self.filled_quantity.scale() != self.quantity.scale()
+            || self.filled_quantity.units() > self.quantity.units()
+            || (self.status.is_open() && self.filled_quantity == self.quantity)
+        {
+            return Err(TradingValidationError::InvalidFilledQuantity);
+        }
+        match self.status {
+            OrderStatus::PartiallyFilled
+                if self.filled_quantity.units() == 0
+                    || self.filled_quantity.units() == self.quantity.units() =>
+            {
+                return Err(TradingValidationError::InvalidFilledQuantity);
+            }
+            OrderStatus::Filled if self.filled_quantity != self.quantity => {
+                return Err(TradingValidationError::InvalidFilledQuantity);
+            }
+            OrderStatus::Pending | OrderStatus::Working | OrderStatus::Rejected
+                if self.filled_quantity.units() != 0 =>
+            {
+                return Err(TradingValidationError::InvalidFilledQuantity);
+            }
+            _ => {}
         }
         if self.submitted_unix_nanos <= 0 {
             return Err(TradingValidationError::InvalidTimestamp);
@@ -469,8 +558,10 @@ pub enum TradingValidationError {
     FieldTooLong(&'static str),
     InexactRescale,
     InvalidOrderPrices,
+    InvalidFilledQuantity,
     InvalidTimestamp,
     NonPositivePrice,
+    NonPositivePointValue,
     NonPositiveQuantity,
     ScaleMismatch,
     ScaleOutOfRange(u8),
@@ -488,8 +579,12 @@ impl fmt::Display for TradingValidationError {
                 formatter.write_str("fixed-point rescale would require rounding")
             }
             Self::InvalidOrderPrices => formatter.write_str("prices do not match the order type"),
+            Self::InvalidFilledQuantity => {
+                formatter.write_str("filled quantity does not match the order lifecycle")
+            }
             Self::InvalidTimestamp => formatter.write_str("timestamp must be positive"),
             Self::NonPositivePrice => formatter.write_str("price must be positive"),
+            Self::NonPositivePointValue => formatter.write_str("point value must be positive"),
             Self::NonPositiveQuantity => formatter.write_str("quantity must be positive"),
             Self::ScaleMismatch => formatter.write_str("fixed-point scales do not match"),
             Self::ScaleOutOfRange(scale) => write!(formatter, "decimal scale {scale} exceeds 18"),
@@ -539,6 +634,33 @@ mod tests {
     }
 
     #[test]
+    fn unrealized_pnl_projection_respects_direction_and_fractional_quantity_scale() {
+        let entry = FixedPoint::try_new(10_000, 2).expect("entry");
+        let mark = FixedPoint::try_new(10_025, 2).expect("mark");
+        let point_value = FixedPoint::try_new(5_000, 2).expect("point value");
+        assert_eq!(
+            project_unrealized_pnl(
+                entry,
+                mark,
+                FixedPoint::try_new(150, 2).expect("quantity"),
+                point_value,
+                2,
+            ),
+            Ok(FixedPoint::try_new(1_875, 2).expect("long pnl"))
+        );
+        assert_eq!(
+            project_unrealized_pnl(
+                entry,
+                mark,
+                FixedPoint::try_new(-2, 0).expect("quantity"),
+                point_value,
+                2,
+            ),
+            Ok(FixedPoint::try_new(-2_500, 2).expect("short pnl"))
+        );
+    }
+
+    #[test]
     fn simulated_accounts_are_visually_explicit() {
         let account = TradingAccount {
             id: TradingAccountId::try_new("paper-1").expect("id"),
@@ -551,5 +673,45 @@ mod tests {
             account.validate(),
             Err(TradingValidationError::SimulationLabelMissing)
         );
+    }
+
+    #[test]
+    fn order_lifecycle_validates_partial_and_terminal_filled_quantity() {
+        let quantity = FixedPoint::try_new(4, 0).expect("quantity");
+        let mut order = Order {
+            id: OrderId::try_new("order-1").expect("order id"),
+            client_order_id: ClientOrderId::try_new("client-1").expect("client id"),
+            account_id: TradingAccountId::try_new("account-1").expect("account id"),
+            instrument_id: InstrumentId::try_new("instrument:test:ES").expect("instrument"),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Day,
+            quantity,
+            filled_quantity: FixedPoint::try_new(1, 0).expect("filled quantity"),
+            limit_price: Some(FixedPoint::try_new(5_000, 2).expect("limit")),
+            stop_price: None,
+            status: OrderStatus::PartiallyFilled,
+            submitted_unix_nanos: 1,
+            provenance: TradingProvenance {
+                venue_id: "test".to_string(),
+                provider_id: "test".to_string(),
+                session_generation: 1,
+                source_sequence: 1,
+                observed_unix_nanos: 1,
+            },
+        };
+        assert!(order.validate().is_ok());
+        assert!(order.status.is_open());
+        assert!(order.status.is_executable());
+
+        order.status = OrderStatus::Filled;
+        assert_eq!(
+            order.validate(),
+            Err(TradingValidationError::InvalidFilledQuantity)
+        );
+        order.filled_quantity = quantity;
+        assert!(order.validate().is_ok());
+        assert!(!order.status.is_open());
+        assert!(!order.status.is_executable());
     }
 }

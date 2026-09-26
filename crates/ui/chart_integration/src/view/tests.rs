@@ -209,6 +209,58 @@ fn host_chart_type_survives_snapshot_install() {
 }
 
 #[test]
+fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_series() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut chart = NucleusChartView::with_replay(&replay);
+    let levels = vec![
+        (10_250.25, "opening range".to_string()),
+        (10_200.0, "invalidation".to_string()),
+    ];
+
+    chart
+        .replace_session_plan_levels(levels.clone())
+        .expect("valid plan levels install");
+    assert_eq!(chart.session_plan_levels(), levels);
+    assert_eq!(series_entry(&chart, 0).price_lines.len(), 2);
+    assert!(
+        series_entry(&chart, 0)
+            .price_lines
+            .iter()
+            .all(|line| line.title.starts_with("PLAN · "))
+    );
+
+    chart.set_chart_type(ChartType::Line);
+    assert_eq!(chart.session_plan_levels(), levels);
+    assert_eq!(series_entry(&chart, 0).price_lines.len(), 2);
+    assert_eq!(chart.engine.drawings_json(), "[]");
+
+    chart
+        .replace_session_plan_levels(Vec::new())
+        .expect("empty projection clears plan lines");
+    assert!(chart.session_plan_levels().is_empty());
+    assert!(series_entry(&chart, 0).price_lines.is_empty());
+}
+
+#[test]
+fn invalid_session_plan_level_projection_preserves_the_current_lines() {
+    let mut chart = NucleusChartView::new();
+    let levels = vec![(100.0, "planned entry".to_string())];
+    chart
+        .replace_session_plan_levels(levels.clone())
+        .expect("valid plan level installs");
+
+    assert!(
+        chart
+            .replace_session_plan_levels(vec![(f64::NAN, "bad".to_string())])
+            .is_err()
+    );
+    assert_eq!(chart.session_plan_levels(), levels);
+    assert_eq!(series_entry(&chart, 0).price_lines.len(), 1);
+}
+
+#[test]
 fn selected_price_precision_survives_snapshot_install_and_restores_a_replacement_chart() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })

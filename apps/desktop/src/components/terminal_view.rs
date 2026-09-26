@@ -234,13 +234,17 @@ impl TerminalApp {
         )
     }
 
+    fn trading_order_entry_locked(&self, cx: &App) -> bool {
+        super::selected_account_lock_reason(&self.active_surface().read(cx).trading_pnl).is_some()
+    }
+
     fn trading_buy_market(
         &mut self,
         _: &TradingBuyMarket,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window) {
+        if !self.trading_hotkeys_enabled(window) || self.trading_order_entry_locked(cx) {
             return;
         }
         let Some(frame) = self.trading_order_frame(cx) else {
@@ -264,7 +268,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window) {
+        if !self.trading_hotkeys_enabled(window) || self.trading_order_entry_locked(cx) {
             return;
         }
         let Some(frame) = self.trading_order_frame(cx) else {

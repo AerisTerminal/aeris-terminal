@@ -109,6 +109,692 @@ fn observation(bid: i64, ask: i64, sequence: u64, time: i64) -> SimulatedMarketO
     }
 }
 
+fn bracket_template() -> BracketStrategyTemplate {
+    BracketStrategyTemplate {
+        template_id: "two-target".to_string(),
+        revision: 1,
+        name: "Two target managed bracket".to_string(),
+        stop_offset_ticks: 8,
+        targets: vec![
+            BracketTarget {
+                offset_ticks: 8,
+                quantity_percent: 50,
+            },
+            BracketTarget {
+                offset_ticks: 16,
+                quantity_percent: 50,
+            },
+        ],
+        trailing_stop: Some(TrailingStopRule {
+            activation_ticks: 12,
+            distance_ticks: 6,
+        }),
+        break_even: Some(BreakEvenRule {
+            activation_ticks: 8,
+            offset_ticks: 1,
+        }),
+        enabled: true,
+    }
+}
+
+#[test]
+fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
+    let directory = TestDirectory::new("managed-bracket");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut entry = market_order("bracket-entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    let awaiting = service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: bracket_template(),
+        })
+        .expect("bracket accepted");
+    assert_eq!(awaiting.status, ManagedBracketStatus::AwaitingEntry);
+    assert!(awaiting.stop_client_order_id.is_none());
+
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    let active = service.snapshot().expect("active snapshot");
+    let bracket = &active.managed_brackets[0];
+    assert_eq!(bracket.status, ManagedBracketStatus::Active);
+    assert_eq!(bracket.target_client_order_ids.len(), 2);
+    assert_eq!(ManagedBracket::MANAGEMENT_LABEL, "LOCAL-MANAGED");
+    let working = active
+        .orders
+        .iter()
+        .filter(|order| order.status.is_open())
+        .collect::<Vec<_>>();
+    assert_eq!(working.len(), 3);
+    assert!(working.iter().any(|order| {
+        order.order_type == OrderType::Stop
+            && order.stop_price == Some(FixedPoint::try_new(9_800, 2).expect("stop"))
+            && order.quantity == FixedPoint::try_new(2, 0).expect("quantity")
+    }));
+
+    service
+        .observe_market(observation(10_200, 10_225, 3, 3_000))
+        .expect("first target fills");
+    let scaled = service.snapshot().expect("scaled snapshot");
+    let stop = scaled
+        .orders
+        .iter()
+        .find(|order| order.order_type == OrderType::Stop && order.status.is_open())
+        .expect("replacement stop");
+    assert_eq!(stop.quantity, FixedPoint::try_new(1, 0).expect("quantity"));
+    assert_eq!(
+        stop.stop_price,
+        Some(FixedPoint::try_new(10_025, 2).expect("break even stop"))
+    );
+
+    service
+        .observe_market(observation(10_000, 10_025, 4, 4_000))
+        .expect("stop fills");
+    let complete = service.snapshot().expect("complete snapshot");
+    assert_eq!(
+        complete.managed_brackets[0].status,
+        ManagedBracketStatus::Completed
+    );
+    assert!(complete.orders.iter().all(|order| !order.status.is_open()));
+    assert_eq!(complete.positions[0].net_quantity.units(), 0);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restored = restarted.snapshot().expect("restored snapshot");
+    assert_eq!(restored.managed_brackets, complete.managed_brackets);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn protective_orders_reduce_locked_positions_without_reopening_risk() {
+    let directory = TestDirectory::new("protective-order");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut entry = market_order("protected-entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    service.place_order(entry).expect("entry accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    service
+        .lock_account(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            "manual test lock".to_string(),
+            3_000,
+        )
+        .expect("account locks");
+
+    let mut protective = market_order("protective-stop", OrderSide::Sell, 3, 3_000);
+    protective.order_type = OrderType::Stop;
+    protective.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    protective.stop_price = Some(FixedPoint::try_new(9_800, 2).expect("stop"));
+    service
+        .place_protective_order(PlaceProtectiveOrder {
+            order: protective,
+            role: ProtectiveOrderRole::StopLoss,
+        })
+        .expect("reduce-only protection remains available");
+    assert!(
+        service
+            .place_order(market_order("locked-entry", OrderSide::Buy, 4, 4_000))
+            .expect_err("risk-increasing order remains locked")
+            .contains("risk-locked")
+    );
+    let mut oversized = market_order("oversized-stop", OrderSide::Sell, 5, 5_000);
+    oversized.order_type = OrderType::Stop;
+    oversized.quantity = FixedPoint::try_new(3, 0).expect("quantity");
+    oversized.stop_price = Some(FixedPoint::try_new(9_700, 2).expect("stop"));
+    assert!(
+        service
+            .place_protective_order(PlaceProtectiveOrder {
+                order: oversized,
+                role: ProtectiveOrderRole::StopLoss,
+            })
+            .expect_err("oversized protection rejected")
+            .contains("must reduce")
+    );
+    assert_eq!(
+        service.snapshot().expect("snapshot").protective_orders,
+        vec![ProtectiveOrder {
+            client_order_id: ClientOrderId::try_new("protective-stop").expect("client id"),
+            role: ProtectiveOrderRole::StopLoss,
+        }]
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    assert_eq!(
+        restarted
+            .snapshot()
+            .expect("snapshot")
+            .protective_orders
+            .len(),
+        1
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
+    let directory = TestDirectory::new("intraday-drawdown");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "intraday-100".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily loss"),
+            trailing_drawdown: Some(FixedPoint::try_new(10_000, 2).expect("drawdown")),
+            trailing_mode: TrailingDrawdownMode::Intraday,
+            max_contracts: FixedPoint::try_new(5, 0).expect("contracts"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            enabled: true,
+        })
+        .expect("profile registers");
+    service
+        .place_order(market_order("drawdown-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    service
+        .observe_market(observation(10_300, 10_325, 3, 3_000))
+        .expect("peak updates");
+    let peak = service.snapshot().expect("peak snapshot");
+    assert_eq!(
+        peak.risk_rule_states[0].peak_session_pnl,
+        FixedPoint::try_new(15_000, 2).expect("peak")
+    );
+    assert_eq!(
+        peak.risk_meters[0].trailing_drawdown_remaining,
+        Some(FixedPoint::try_new(10_000, 2).expect("remaining"))
+    );
+    service
+        .observe_market(observation(10_100, 10_125, 4, 4_000))
+        .expect("drawdown observation applies");
+    let locked = service.snapshot().expect("locked snapshot");
+    assert!(locked.risk_locks[0].reason.contains("intraday trailing"));
+    assert_eq!(
+        locked.risk_meters[0].trailing_drawdown_remaining,
+        Some(FixedPoint::try_new(0, 2).expect("remaining"))
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restored = restarted.snapshot().expect("snapshot");
+    assert_eq!(restored.risk_rule_states, locked.risk_rule_states);
+    assert_eq!(restored.risk_locks, locked.risk_locks);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn maximum_contracts_counts_all_working_order_scenarios() {
+    let directory = TestDirectory::new("working-exposure");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "two-contracts".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily loss"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::EndOfDay,
+            max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            enabled: true,
+        })
+        .expect("profile registers");
+    for (id, sequence) in [("working-one", 1), ("working-two", 2)] {
+        let mut order = market_order(
+            id,
+            OrderSide::Buy,
+            sequence,
+            i64::try_from(sequence).expect("sequence fits") * 1_000,
+        );
+        order.order_type = OrderType::Limit;
+        order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+        service.place_order(order).expect("working order accepted");
+    }
+    assert!(
+        service
+            .snapshot()
+            .expect("snapshot")
+            .order_events
+            .iter()
+            .filter(|event| event.kind == OrderEventKind::Accepted)
+            .all(|event| event
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("RISK WARNING")))
+    );
+    assert_eq!(
+        service.snapshot().expect("snapshot").risk_meters[0].contracts_remaining,
+        FixedPoint::try_new(0, 0).expect("remaining")
+    );
+    let mut third = market_order("working-three", OrderSide::Buy, 3, 3_000);
+    third.order_type = OrderType::Limit;
+    third.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    assert!(
+        service
+            .place_order(third)
+            .expect_err("third working order exceeds the limit")
+            .contains("maximum-contract")
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
+    let directory = TestDirectory::new("bracket-stop-risk");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let profile = |version, daily_loss_units| RiskProfile {
+        account_id: account_id.clone(),
+        profile_id: "bracket-risk".to_string(),
+        version,
+        session_start_unix_nanos: 1,
+        session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+        daily_loss_limit: FixedPoint::try_new(daily_loss_units, 2).expect("daily loss"),
+        trailing_drawdown: None,
+        trailing_mode: TrailingDrawdownMode::EndOfDay,
+        max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
+        consistency_max_single_trade_percent: None,
+        restricted_until_unix_nanos: None,
+        enabled: true,
+    };
+    service
+        .register_risk_profile(profile(1, 20_000))
+        .expect("profile registers");
+    let mut blocked_entry = market_order("blocked-bracket", OrderSide::Buy, 1, 1_000);
+    blocked_entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    assert!(
+        service
+            .place_inline_bracket(PlaceInlineBracket {
+                entry: blocked_entry,
+                template: bracket_template(),
+            })
+            .expect_err("eight ES ticks equal the complete two-hundred-dollar budget")
+            .contains("loss at stop")
+    );
+    service
+        .register_risk_profile(profile(2, 20_001))
+        .expect("profile revision registers");
+    let mut accepted_entry = market_order("accepted-bracket", OrderSide::Buy, 2, 2_000);
+    accepted_entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: accepted_entry,
+            template: bracket_template(),
+        })
+        .expect("risk budget above the stop loss accepts the bracket");
+    assert!(
+        service
+            .register_risk_profile(profile(2, 30_000))
+            .expect_err("profile revisions cannot regress")
+            .contains("revision must advance")
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
+    let directory = TestDirectory::new("consistency");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "fifty-percent-consistency".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily loss"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::EndOfDay,
+            max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
+            consistency_max_single_trade_percent: Some(50),
+            restricted_until_unix_nanos: None,
+            enabled: true,
+        })
+        .expect("profile registers");
+
+    for (entry_id, exit_id, sequence) in [
+        ("winner-one-entry", "winner-one-exit", 1_u64),
+        ("winner-two-entry", "winner-two-exit", 5_u64),
+    ] {
+        let sequence_time = i64::try_from(sequence).expect("sequence fits");
+        service
+            .place_order(market_order(
+                entry_id,
+                OrderSide::Buy,
+                sequence,
+                1_000 * sequence_time,
+            ))
+            .expect("entry accepted");
+        service
+            .observe_market(observation(
+                9_975,
+                10_000,
+                sequence + 1,
+                1_000 * (sequence_time + 1),
+            ))
+            .expect("entry fills");
+        service
+            .place_order(market_order(
+                exit_id,
+                OrderSide::Sell,
+                sequence + 2,
+                1_000 * (sequence_time + 2),
+            ))
+            .expect("exit accepted");
+        service
+            .observe_market(observation(
+                10_100,
+                10_125,
+                sequence + 3,
+                1_000 * (sequence_time + 3),
+            ))
+            .expect("exit fills");
+
+        let snapshot = service.snapshot().expect("snapshot");
+        let completed = if sequence == 1 { 1 } else { 2 };
+        assert_eq!(
+            snapshot.risk_rule_states[0].total_winning_pnl,
+            FixedPoint::try_new(5_000 * completed, 2).expect("gross winning P/L")
+        );
+        assert_eq!(
+            snapshot.risk_rule_states[0].largest_winning_trade_pnl,
+            FixedPoint::try_new(5_000, 2).expect("largest winner")
+        );
+        assert_eq!(
+            snapshot.risk_meters[0].consistency_current_percent,
+            Some(if sequence == 1 { 100 } else { 50 })
+        );
+        assert_eq!(
+            snapshot.risk_meters[0].consistency_additional_profit_required,
+            Some(
+                FixedPoint::try_new(if sequence == 1 { 5_000 } else { 0 }, 2)
+                    .expect("required profit")
+            )
+        );
+    }
+    let before_restart = service.snapshot().expect("snapshot").risk_rule_states;
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    assert_eq!(
+        restarted.snapshot().expect("snapshot").risk_rule_states,
+        before_restart
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
+    let directory = TestDirectory::new("session-plan");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let plan = |revision: u32, completed: bool| SessionPlan {
+        account_id: account_id.clone(),
+        plan_id: "morning-plan".to_string(),
+        revision,
+        session_start_unix_nanos: 500,
+        session_end_unix_nanos: 10_000,
+        bias: SessionBias::Long,
+        maximum_loss: FixedPoint::try_new(5_000, 2).expect("maximum loss"),
+        session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+        allowed_setups: vec!["opening-drive".to_string()],
+        active_setup: completed.then(|| "opening-drive".to_string()),
+        checklist: vec![SessionChecklistItem {
+            item_id: "news-reviewed".to_string(),
+            label: "Review scheduled news".to_string(),
+            completed,
+        }],
+        levels: vec![SessionPlanLevel {
+            instrument_id: instrument().instrument_id,
+            label: "overnight high".to_string(),
+            price: FixedPoint::try_new(10_250, 2).expect("level"),
+        }],
+    };
+    service
+        .register_session_plan(plan(1, false))
+        .expect("draft plan registers");
+    assert!(
+        service
+            .place_order(market_order("plan-not-ready", OrderSide::Buy, 1, 1_000))
+            .expect_err("incomplete checklist blocks entry")
+            .contains("checklist")
+    );
+    service
+        .register_session_plan(plan(2, true))
+        .expect("ready plan revision registers");
+    assert!(
+        service
+            .place_order(market_order("outside-hours", OrderSide::Buy, 2, 11_000))
+            .expect_err("outside-hours trade is blocked")
+            .contains("outside the session plan")
+    );
+    service
+        .place_order(market_order("planned-entry", OrderSide::Buy, 3, 1_000))
+        .expect("planned entry accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 4, 2_000))
+        .expect("entry fills");
+    service
+        .place_order(market_order("planned-loss", OrderSide::Sell, 5, 3_000))
+        .expect("planned exit accepted");
+    service
+        .observe_market(observation(9_900, 9_925, 6, 4_000))
+        .expect("loss fills and plan lock evaluates");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.session_plans, vec![plan(2, true)]);
+    assert_eq!(snapshot.session_adherence_reviews.len(), 1);
+    assert!(!snapshot.session_adherence_reviews[0].maximum_loss_respected);
+    assert!(
+        snapshot.risk_locks[0]
+            .reason
+            .contains("session plan maximum loss")
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restored = restarted.snapshot().expect("snapshot");
+    assert_eq!(restored.session_plans, snapshot.session_plans);
+    assert_eq!(
+        restored.session_adherence_reviews,
+        snapshot.session_adherence_reviews
+    );
+    assert_eq!(restored.risk_locks, snapshot.risk_locks);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn tilt_rules_apply_size_reduction_and_restart_safe_rapid_loss_cooldown() {
+    let directory = TestDirectory::new("tilt-cooldown");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+
+    let complete_losing_trade = |service: &TradingService, prefix: &str, sequence: u64| {
+        service
+            .place_order(market_order(
+                &format!("{prefix}-entry"),
+                OrderSide::Buy,
+                sequence,
+                i64::try_from(sequence).expect("sequence fits"),
+            ))
+            .expect("entry accepted");
+        service
+            .observe_market(observation(
+                9_975,
+                10_000,
+                sequence + 1,
+                i64::try_from(sequence + 1).expect("sequence fits"),
+            ))
+            .expect("entry fills");
+        service
+            .place_order(market_order(
+                &format!("{prefix}-exit"),
+                OrderSide::Sell,
+                sequence + 2,
+                i64::try_from(sequence + 2).expect("sequence fits"),
+            ))
+            .expect("exit accepted");
+        service
+            .observe_market(observation(
+                9_900,
+                9_925,
+                sequence + 3,
+                i64::try_from(sequence + 3).expect("sequence fits"),
+            ))
+            .expect("loss fills");
+    };
+    complete_losing_trade(&service, "loss-one", 1);
+    let mut larger = market_order("larger-after-loss", OrderSide::Buy, 5, 5);
+    larger.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    assert!(
+        service
+            .place_order(larger)
+            .expect_err("size increase after a loss is reduced")
+            .contains("tilt size reduction")
+    );
+    complete_losing_trade(&service, "loss-two", 6);
+    let locked = service.snapshot().expect("snapshot");
+    assert_eq!(locked.discipline_states[0].rapid_loss_count, 2);
+    let cooldown_until = locked.discipline_states[0]
+        .cooldown_until_unix_nanos
+        .expect("cooldown");
+    assert!(locked.risk_locks[0].reason.contains("rapid-loss cooldown"));
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    assert!(
+        restarted
+            .place_order(market_order(
+                "cooldown-reject",
+                OrderSide::Buy,
+                10,
+                cooldown_until - 1,
+            ))
+            .expect_err("cooldown survives restart")
+            .contains("risk-locked")
+    );
+    restarted
+        .place_order(market_order(
+            "cooldown-expired",
+            OrderSide::Buy,
+            11,
+            cooldown_until,
+        ))
+        .expect("cooldown expires at its exact boundary");
+    assert_eq!(
+        restarted.snapshot().expect("snapshot").discipline_states[0].cooldown_until_unix_nanos,
+        None
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn filled_stop_produces_a_fast_reentry_warning() {
+    let directory = TestDirectory::new("stop-reentry");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let template = BracketStrategyTemplate {
+        template_id: "single-target-stop".to_string(),
+        revision: 1,
+        name: "Single target stop".to_string(),
+        stop_offset_ticks: 8,
+        targets: vec![BracketTarget {
+            offset_ticks: 16,
+            quantity_percent: 100,
+        }],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    };
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: market_order("stopped-entry", OrderSide::Buy, 1, 1_000_000_000),
+            template,
+        })
+        .expect("bracket accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000_000_000))
+        .expect("entry fills");
+    service
+        .observe_market(observation(9_775, 9_800, 3, 3_000_000_000))
+        .expect("stop fills");
+    let evaluation = service
+        .evaluate_risk(market_order(
+            "fast-reentry",
+            OrderSide::Buy,
+            4,
+            4_000_000_000,
+        ))
+        .expect("warning does not silently reject a one-off re-entry");
+    assert!(
+        evaluation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("fast re-entry"))
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 #[test]
 fn simulated_execution_and_records_survive_restart_and_export() {
     let directory = TestDirectory::new("restart");
@@ -129,6 +815,11 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .expect("buy fills");
     assert_eq!(fills.len(), 1);
     let open_snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(open_snapshot.orders[0].status, OrderStatus::Filled);
+    assert_eq!(
+        open_snapshot.orders[0].filled_quantity,
+        open_snapshot.orders[0].quantity
+    );
     assert_eq!(
         open_snapshot.positions[0].unrealized_pnl,
         FixedPoint::try_new(-1_250, 2).expect("unrealized pnl")
@@ -174,6 +865,12 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     let restarted = TradingService::start(config(&directory)).expect("service restarts");
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.orders.len(), 2);
+    assert!(
+        restored
+            .orders
+            .iter()
+            .all(|order| order.filled_quantity == order.quantity)
+    );
     assert_eq!(restored.fills.len(), 2);
     assert_eq!(restored.positions, snapshot.positions);
     assert!(
@@ -189,6 +886,32 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("restarted service stops");
+}
+
+#[test]
+fn simulated_account_bootstrap_exposes_distinct_multi_account_targets() {
+    let directory = TestDirectory::new("simulated-accounts");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    let snapshot = service.snapshot().expect("snapshot");
+
+    assert_eq!(snapshot.accounts.len(), 3);
+    assert!(snapshot.accounts.iter().all(|account| {
+        account.environment == AccountEnvironment::Simulated
+            && account.display_name.to_ascii_uppercase().contains("SIM")
+    }));
+    assert_eq!(
+        snapshot
+            .accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+
+    service
+        .shutdown(std::time::Duration::from_secs(2))
+        .expect("shutdown");
 }
 
 #[test]
@@ -288,6 +1011,54 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("restarted service stops");
+}
+
+#[test]
+fn news_time_restriction_blocks_and_persists_a_hard_lock() {
+    let directory = TestDirectory::new("news-restriction");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "news-rules".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("loss limit"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::EndOfDay,
+            max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: Some(5_000),
+            enabled: true,
+        })
+        .expect("restricted profile stores");
+    assert!(
+        service
+            .place_order(market_order("news-window", OrderSide::Buy, 1, 4_000))
+            .expect_err("news-time restriction blocks and locks")
+            .contains("news/session restriction")
+    );
+    assert!(
+        service.snapshot().expect("snapshot").risk_locks[0]
+            .reason
+            .contains("news/session restriction")
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    assert!(
+        restarted.snapshot().expect("snapshot").risk_locks[0]
+            .reason
+            .contains("news/session restriction")
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
 }
 
 #[test]
@@ -396,6 +1167,139 @@ fn invalid_json_never_enters_the_store() {
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
+}
+
+#[test]
+fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
+    let directory = TestDirectory::new("copier");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    for id in ["aeris-sim-2", "aeris-sim-3"] {
+        service
+            .register_account(TradingAccount {
+                id: TradingAccountId::try_new(id).expect("account id"),
+                display_name: format!("SIM {id}"),
+                environment: AccountEnvironment::Simulated,
+                currency: "USD".to_string(),
+                currency_scale: 2,
+            })
+            .expect("account registers");
+    }
+    let blocked = TradingAccountId::try_new("aeris-sim-2").expect("blocked account");
+    service
+        .lock_account(blocked.clone(), "target kill switch".to_string(), 1)
+        .expect("target locks");
+    service
+        .register_trade_copier(TradeCopierConfig {
+            source_account_id: TradingAccountId::try_new("aeris-sim-1").expect("source"),
+            revision: 1,
+            enabled: true,
+            targets: vec![
+                TradeCopierTarget {
+                    account_id: blocked,
+                    quantity_multiplier: FixedPoint::try_new(1, 0).expect("multiplier"),
+                    enabled: true,
+                },
+                TradeCopierTarget {
+                    account_id: TradingAccountId::try_new("aeris-sim-3").expect("target"),
+                    quantity_multiplier: FixedPoint::try_new(2, 0).expect("multiplier"),
+                    enabled: true,
+                },
+            ],
+        })
+        .expect("copier registers");
+
+    let source = market_order("copier-source", OrderSide::Buy, 1, 1_000);
+    service.place_order(source.clone()).expect("source accepts");
+    service
+        .place_order(source)
+        .expect("source retry is idempotent");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.orders.len(), 2);
+    assert_eq!(snapshot.copy_dispatches.len(), 2);
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .find(|order| order.account_id.as_str() == "aeris-sim-3")
+            .expect("accepted copy")
+            .quantity,
+        FixedPoint::try_new(2, 0).expect("copied quantity")
+    );
+    assert!(snapshot.copy_dispatches.iter().any(|dispatch| {
+        dispatch.target_account_id.as_str() == "aeris-sim-2" && !dispatch.accepted
+    }));
+    assert!(snapshot.copy_dispatches.iter().any(|dispatch| {
+        dispatch.target_account_id.as_str() == "aeris-sim-3" && dispatch.accepted
+    }));
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restored = restarted.snapshot().expect("restored snapshot");
+    assert_eq!(restored.trade_copiers.len(), 1);
+    assert_eq!(restored.trade_copiers[0].targets.len(), 2);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("restarted service stops");
+}
+
+#[test]
+fn bracket_strategy_templates_are_revisioned_and_restart_safe() {
+    let directory = TestDirectory::new("strategy-template");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    let template = BracketStrategyTemplate {
+        template_id: "scalp-two-target".to_string(),
+        revision: 1,
+        name: "Scalp two target".to_string(),
+        stop_offset_ticks: 8,
+        targets: vec![
+            BracketTarget {
+                offset_ticks: 8,
+                quantity_percent: 50,
+            },
+            BracketTarget {
+                offset_ticks: 16,
+                quantity_percent: 50,
+            },
+        ],
+        trailing_stop: Some(TrailingStopRule {
+            activation_ticks: 12,
+            distance_ticks: 6,
+        }),
+        break_even: Some(BreakEvenRule {
+            activation_ticks: 8,
+            offset_ticks: 1,
+        }),
+        enabled: true,
+    };
+    service
+        .register_strategy_template(template.clone())
+        .expect("template registers");
+    assert!(
+        service
+            .register_strategy_template(template.clone())
+            .expect_err("stale revision rejected")
+            .contains("revision must advance")
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    assert!(
+        restarted
+            .snapshot()
+            .expect("snapshot")
+            .strategy_templates
+            .contains(&template)
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("restarted service stops");
 }
 
 #[test]

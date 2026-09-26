@@ -358,6 +358,7 @@ dependencies = [
  "aeris_design_system",
  "aeris_instruments",
  "aeris_market_data",
+ "aeris_trading",
  "gpui",
 ]
 

@@ -19,7 +19,7 @@ use aeris_charts_engine::{
     TradingSnapshot,
 };
 use aeris_charts_render::color::Color;
-use aeris_charts_render::draw_list::Prim;
+use aeris_charts_render::draw_list::{LineStyle, Prim};
 use aeris_charts_render_gpui::backend::measure_text;
 use aeris_charts_render_gpui::{AerisViewport, GpuiChartRenderer, PreparedAerisFrame};
 use aeris_design_system::{
@@ -49,6 +49,8 @@ const PANE_SEPARATOR_HIT: f64 = 4.0;
 const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
 const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
 const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
+const MAXIMUM_SESSION_PLAN_LEVELS: usize = 32;
+const SESSION_PLAN_LEVEL_COLOR: Color = Color::rgb(245, 166, 35);
 
 fn platform_theme(theme: ChartTheme) -> AerisTheme {
     match theme {
@@ -1090,6 +1092,10 @@ pub struct NucleusChartView {
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
+    /// Transient host-projected plan levels. These are deliberately separate
+    /// from Nucleus-owned user drawings and are reinstalled with price series.
+    session_plan_levels: Vec<(f64, String)>,
+    session_plan_price_line_ids: Vec<u32>,
     /// Monotonic revision of stable user-authored chart presentation state.
     /// Market-data updates, hover, cursor and transient gestures never touch it.
     user_state_revision: u64,
@@ -1166,6 +1172,8 @@ impl NucleusChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            session_plan_levels: Vec::new(),
+            session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
             clock_tick: None,
             #[cfg(feature = "diagnostics")]
@@ -1266,6 +1274,8 @@ impl NucleusChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            session_plan_levels: Vec::new(),
+            session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
             clock_tick: None,
             #[cfg(feature = "diagnostics")]
@@ -2351,6 +2361,70 @@ impl NucleusChartView {
         Ok(())
     }
 
+    /// Replaces transient, host-owned event markers and time windows.
+    ///
+    /// # Errors
+    /// Returns the engine validation error when an overlay is malformed or exceeds its caps.
+    pub fn set_host_overlay(
+        &mut self,
+        snapshot: aeris_charts_engine::HostOverlaySnapshot,
+    ) -> Result<(), String> {
+        self.engine
+            .set_host_overlay(snapshot)
+            .map_err(|error| error.to_string())?;
+        self.invalidate_series_frame();
+        Ok(())
+    }
+
+    /// Returns the current transient host overlay projection.
+    #[must_use]
+    pub fn host_overlay(&self) -> aeris_charts_engine::HostOverlaySnapshot {
+        self.engine.host_overlay().clone()
+    }
+
+    /// Replaces transient host-owned session-plan price levels.
+    ///
+    /// Plan levels do not enter Nucleus drawing persistence and are restored
+    /// automatically whenever the host replaces the primary price series.
+    ///
+    /// # Errors
+    /// Returns an error for invalid or over-capacity levels, or when a
+    /// non-empty projection has no primary right-hand price series.
+    pub fn replace_session_plan_levels(
+        &mut self,
+        levels: Vec<(f64, String)>,
+    ) -> Result<(), String> {
+        if levels.len() > MAXIMUM_SESSION_PLAN_LEVELS {
+            return Err("session plan level projection exceeds its capacity".to_string());
+        }
+        if levels.iter().any(|(price, label)| {
+            !price.is_finite() || *price <= 0.0 || label.trim().is_empty() || label.len() > 64
+        }) {
+            return Err("session plan level projection is invalid".to_string());
+        }
+        if levels == self.session_plan_levels {
+            return Ok(());
+        }
+        if !levels.is_empty()
+            && self
+                .primary_series_id_on_scale(0, PriceScaleTarget::Right)
+                .is_none()
+        {
+            return Err("session plan levels require a primary price series".to_string());
+        }
+        self.remove_session_plan_price_lines();
+        self.session_plan_levels = levels;
+        self.install_session_plan_price_lines();
+        self.invalidate_series_frame();
+        Ok(())
+    }
+
+    /// Returns the current transient session-plan price-level projection.
+    #[must_use]
+    pub fn session_plan_levels(&self) -> &[(f64, String)] {
+        &self.session_plan_levels
+    }
+
     /// Drains chart trading intents for the host's single command path.
     pub fn take_trading_intents(&mut self) -> Vec<TradingIntent> {
         self.engine.take_trading_intents()
@@ -2522,9 +2596,35 @@ impl NucleusChartView {
         if self.chart_type != ChartType::BrushableArea {
             self.teardown_brushable_interaction();
         }
+        self.remove_session_plan_price_lines();
         install_product_price_series(&mut self.engine, self.chart_type, &self.product_bars);
+        self.install_session_plan_price_lines();
         self.sync_brushable_interaction();
         self.invalidate_series_layout();
+    }
+
+    fn remove_session_plan_price_lines(&mut self) {
+        for id in self.session_plan_price_line_ids.drain(..) {
+            self.engine.remove_price_line(id);
+        }
+    }
+
+    fn install_session_plan_price_lines(&mut self) {
+        let Some(series_id) = self.primary_series_id_on_scale(0, PriceScaleTarget::Right) else {
+            return;
+        };
+        for (price, label) in &self.session_plan_levels {
+            let title = format!("PLAN · {label}");
+            let id = self.engine.create_price_line(
+                series_id,
+                *price,
+                SESSION_PLAN_LEVEL_COLOR,
+                1,
+                LineStyle::Dashed,
+                &title,
+            );
+            self.session_plan_price_line_ids.push(id);
+        }
     }
 
     fn sync_brushable_interaction(&mut self) {

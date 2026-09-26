@@ -13,7 +13,7 @@ use super::{
     WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
     WindowMoveGestureTransition, WorkspaceDragState, active_workspace_after_close,
     bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_status_detail, chart_surface_notice,
+    catalog_rejection_message, chart_position_id, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
@@ -52,6 +52,39 @@ use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode};
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
+
+#[test]
+fn chart_position_identity_is_shared_by_projection_and_intent_validation() {
+    let account = aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("account");
+    assert_eq!(
+        chart_position_id(&account, "instrument:test:ES")
+            .expect("chart position id")
+            .as_str(),
+        "position:aeris-sim-1:instrument:test:ES"
+    );
+}
+
+#[test]
+fn selected_account_lock_is_derived_from_the_runtime_meter() {
+    let account = aeris_trading::TradingAccountId::try_new("aeris-sim-2").expect("account");
+    let mut state = super::TradingPnlState::default();
+    state.order_entry.selected_account_id = Some(account.clone());
+    state.risk_locks.push(aeris_trading_runtime::RiskLock {
+        account_id: account,
+        reason: "manual test lock".to_string(),
+        locked_at_unix_nanos: 1,
+        profile_id: None,
+        profile_version: None,
+    });
+
+    assert_eq!(
+        super::selected_account_lock_reason(&state),
+        Some("manual test lock")
+    );
+    state.order_entry.selected_account_id =
+        Some(aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("other account"));
+    assert_eq!(super::selected_account_lock_reason(&state), None);
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogCommandOrderBookain {
