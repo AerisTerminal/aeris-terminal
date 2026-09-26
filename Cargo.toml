@@ -72,10 +72,10 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", default-features = false, features = ["wayland", "x11"] }
 reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1057c2cf3d5b4aefd04755e1387c7826a4d7fba6", version = "=0.1.0" }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
-aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ffbdaa116775faddc27614ed8defb2481d0d3192", version = "=0.3.0" }
-aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ffbdaa116775faddc27614ed8defb2481d0d3192", version = "=0.3.0" }
-aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ffbdaa116775faddc27614ed8defb2481d0d3192", version = "=0.3.0" }
-aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "ffbdaa116775faddc27614ed8defb2481d0d3192", version = "=0.3.0", features = ["gpui-backend"] }
+aeris_charts_engine = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3e5a700ccc4c7abd81df13659adbdec5f1c76474", version = "=0.3.0" }
+aeris_charts_indicators = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3e5a700ccc4c7abd81df13659adbdec5f1c76474", version = "=0.3.0" }
+aeris_charts_render = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3e5a700ccc4c7abd81df13659adbdec5f1c76474", version = "=0.3.0" }
+aeris_charts_render_gpui = { git = "https://github.com/AerisTerminal/aeris-charts.git", rev = "3e5a700ccc4c7abd81df13659adbdec5f1c76474", version = "=0.3.0", features = ["gpui-backend"] }
 
 [patch.crates-io]
 # Aeris Charts pins the published `gpui = 0.2.2`; replace it with the exact same reviewed Git
