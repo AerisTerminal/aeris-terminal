@@ -114,8 +114,10 @@ the 2026 benchmark bands, not Aeris data.
       subscribed.
 - [ ] Pitch prop firms a bundled or white-label deal (per-account fee or revenue share), like Topstep
       with Quantower.
-- [ ] Replace the site's Pro $29 / Elite $59 table (Elite differs only by workspace count) with these
-      plans and the competitor comparison required above.
+- [x] Replace the site's Pro $29 / Elite $59 table (Elite differs only by workspace count) with these
+      plans and the competitor comparison required above. Live at https://aeristerminal.com/pricing/
+      since 2026-09-26 (`aeris-website` commit `2b015ec`), with competitor prices re-checked on vendor
+      sites that day. Re-check them whenever the page changes.
 
 ## Sell only what ships
 
