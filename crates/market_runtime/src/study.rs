@@ -2777,6 +2777,43 @@ impl StudyRuntime {
         requirements
     }
 
+    /// Returns the transitive market streams required by one study.
+    ///
+    /// Output dependencies inherit the requirements of their upstream study;
+    /// this keeps a downstream scalar publication honest when its calculation
+    /// is fed by a trade- or depth-backed study output.
+    #[must_use]
+    pub fn input_stream_requirements(
+        &self,
+        study_id: StudyInstanceId,
+    ) -> Option<StreamRequirements> {
+        fn collect(
+            runtime: &StudyRuntime,
+            study_id: StudyInstanceId,
+            visiting: &mut BTreeSet<StudyInstanceId>,
+        ) -> Option<StreamRequirements> {
+            if !visiting.insert(study_id) {
+                return None;
+            }
+            let node = runtime.studies.get(&study_id)?;
+            let mut streams = StreamRequirements::NONE;
+            for dependency in &node.definition.dependencies {
+                match dependency {
+                    StudyDependency::Market(input) => {
+                        streams = streams.union(input.streams);
+                    }
+                    StudyDependency::Output(output) => {
+                        streams = streams.union(collect(runtime, output.study_id, visiting)?);
+                    }
+                }
+            }
+            visiting.remove(&study_id);
+            Some(streams)
+        }
+
+        collect(self, study_id, &mut BTreeSet::new())
+    }
+
     /// Returns a zero-copy canonical market-series view for one study dependency.
     ///
     /// `Ok(None)` means the dependency is valid but canonical history has not
@@ -6983,6 +7020,41 @@ mod tests {
         assert!(streams.contains(MarketStream::Bars));
         assert!(streams.contains(MarketStream::Trades));
         assert!(!streams.contains(MarketStream::Depth));
+    }
+
+    #[test]
+    fn study_input_requirements_include_transitive_trade_and_depth_bindings() {
+        let mut runtime = StudyRuntime::new(config(8));
+        let source = series("ES");
+        let upstream = runtime
+            .register(definition(
+                "microstructure",
+                vec![market(
+                    source,
+                    StreamRequirements::BARS
+                        .with(MarketStream::Trades)
+                        .with(MarketStream::Depth),
+                )],
+                1,
+                StudyInvalidationPolicy::SameRange,
+            ))
+            .expect("microstructure study registers");
+        let downstream = runtime
+            .register(definition(
+                "smoothed_microstructure",
+                vec![StudyDependency::Output(upstream.output(0))],
+                1,
+                StudyInvalidationPolicy::TrailingWindow { bars: bound(20) },
+            ))
+            .expect("downstream study registers");
+
+        let requirements = runtime
+            .input_stream_requirements(downstream)
+            .expect("downstream requirements exist");
+        assert!(requirements.contains(MarketStream::Bars));
+        assert!(requirements.contains(MarketStream::Trades));
+        assert!(requirements.contains(MarketStream::Depth));
+        assert!(!requirements.contains(MarketStream::Quotes));
     }
 
     #[test]

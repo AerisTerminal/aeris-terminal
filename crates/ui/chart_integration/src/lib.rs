@@ -18,9 +18,9 @@ pub use aeris_charts_engine::{
     AlertLineStatus as ChartAlertLineStatus, AlertPriceScale as ChartAlertPriceScale,
     AlertSnapshot as ChartAlertSnapshot, ExecutionId as ChartExecutionId,
     ExecutionKind as ChartExecutionKind, ExecutionMarkerShape as ChartExecutionMarkerShape,
-    InstrumentMetadata as ChartInstrumentMetadata,
-    OrderId as ChartOrderId, OrderKind as ChartOrderKind, OrderRole as ChartOrderRole,
-    OrderSide as ChartOrderSide, OrderStatus as ChartOrderStatus, PositionId as ChartPositionId,
+    InstrumentMetadata as ChartInstrumentMetadata, OrderId as ChartOrderId,
+    OrderKind as ChartOrderKind, OrderRole as ChartOrderRole, OrderSide as ChartOrderSide,
+    OrderStatus as ChartOrderStatus, PositionId as ChartPositionId,
     PositionSide as ChartPositionSide, TradingAnnotation as ChartTradingAnnotation,
     TradingExecution as ChartTradingExecution, TradingIntent as ChartTradingIntent,
     TradingIntentAction as ChartTradingIntentAction, TradingPosition as ChartTradingPosition,
@@ -30,9 +30,9 @@ pub use aeris_charts_engine::{
 pub use bridge::ChartBridgeMetrics;
 pub use view::{
     ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingTool,
-    ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyOutputDescriptor,
-    ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
-    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, DrawingsLockSummary,
-    NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyInputRequirements,
+    ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget,
+    ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion,
+    ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

@@ -15,6 +15,18 @@ struct PreparedStudyColumns {
 }
 
 impl NucleusChartView {
+    /// Returns the runtime-owned stream requirements retained for one output.
+    #[must_use]
+    pub fn study_output_input_requirements(
+        &self,
+        study_id: u64,
+        output_index: usize,
+    ) -> Option<ChartStudyInputRequirements> {
+        self.study_series
+            .get(&(study_id, output_index))
+            .map(|state| state.input_requirements)
+    }
+
     /// Returns whether every currently installed output for one runtime study is
     /// visible. `None` means the runtime study has not published an output yet.
     #[must_use]
@@ -183,6 +195,7 @@ impl NucleusChartView {
                 generation,
                 settings_available: descriptor.settings_available,
                 legend_label: descriptor.legend_label.map(str::to_string),
+                input_requirements: descriptor.input_requirements,
             },
         );
         if created {

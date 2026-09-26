@@ -1845,6 +1845,9 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
         settings_available: true,
         threshold_region: None,
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::BARS
+            .with(ChartStudyInputStream::Trades)
+            .with(ChartStudyInputStream::Depth),
     };
 
     assert_eq!(
@@ -1927,6 +1930,34 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
 }
 
 #[test]
+fn study_output_projection_retains_typed_input_requirements() {
+    let mut chart = NucleusChartView::empty();
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Trade depth study",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: false,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::BARS
+            .with(ChartStudyInputStream::Trades)
+            .with(ChartStudyInputStream::Depth),
+    };
+    chart
+        .install_study_output(9, 0, descriptor, 1, &[60_i64 * 1_000_000_000], &[Some(1.0)])
+        .expect("study output installs");
+    let requirements = chart
+        .study_output_input_requirements(9, 0)
+        .expect("study input metadata is retained");
+    assert!(requirements.contains(ChartStudyInputStream::Bars));
+    assert!(requirements.contains(ChartStudyInputStream::Trades));
+    assert!(requirements.contains(ChartStudyInputStream::Depth));
+    assert!(!requirements.contains(ChartStudyInputStream::Quotes));
+}
+
+#[test]
 fn study_output_projection_inherits_native_series_defaults() {
     let mut chart = NucleusChartView::empty();
     assert!(
@@ -1944,6 +1975,7 @@ fn study_output_projection_inherits_native_series_defaults() {
         settings_available: false,
         threshold_region: None,
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::NONE,
     };
     chart
         .install_study_output(
@@ -1977,6 +2009,7 @@ fn study_output_projection_rejects_invalid_presentation_before_creating_series()
             upper: 80.0,
         }),
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::NONE,
     };
 
     assert_eq!(
@@ -2047,6 +2080,7 @@ fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_lin
         settings_available: true,
         threshold_region: None,
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::NONE,
     };
     assert_eq!(
         chart.install_study_output(11, 0, descriptor, 1, &timestamps, &values),
@@ -2098,6 +2132,7 @@ fn selecting_one_runtime_study_output_selects_the_complete_indicator() {
         settings_available: true,
         threshold_region: None,
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::NONE,
     };
     assert_eq!(
         chart.install_study_output(11, 0, descriptor, 1, &timestamps, &upper),
@@ -2140,6 +2175,7 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
         settings_available: true,
         threshold_region: None,
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::NONE,
     };
     let lower = ChartStudyOutputDescriptor {
         legend_label: Some("Lower"),
@@ -2214,6 +2250,7 @@ fn study_outputs_inherit_indicator_chrome_and_live_updates_do_not_dirty_layout()
         settings_available: true,
         threshold_region: None,
         point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::NONE,
     };
 
     assert_eq!(
@@ -2252,6 +2289,7 @@ fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state()
                 settings_available: false,
                 threshold_region: None,
                 point_style: ChartStudyPointStyle::Uniform,
+                input_requirements: ChartStudyInputRequirements::NONE,
             },
             1,
             &[1_000_000_001],
@@ -2282,6 +2320,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
                 settings_available: true,
                 threshold_region: None,
                 point_style: ChartStudyPointStyle::Uniform,
+                input_requirements: ChartStudyInputRequirements::NONE,
             },
             1,
             &timestamps,
@@ -2302,6 +2341,7 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
                 settings_available: true,
                 threshold_region: None,
                 point_style: ChartStudyPointStyle::Uniform,
+                input_requirements: ChartStudyInputRequirements::NONE,
             },
             2,
             &timestamps,

@@ -151,6 +151,55 @@ struct ChartStudySeriesState {
     generation: u64,
     settings_available: bool,
     legend_label: Option<String>,
+    input_requirements: ChartStudyInputRequirements,
+}
+
+/// Provider-neutral stream requirements for one runtime study output.
+///
+/// This is metadata only. The market runtime owns the canonical streams and
+/// computes the scalar output; chart integration never retains a tape or book.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChartStudyInputRequirements(u8);
+
+impl ChartStudyInputRequirements {
+    const BARS_BIT: u8 = 1 << 0;
+    const TRADES_BIT: u8 = 1 << 1;
+    const QUOTES_BIT: u8 = 1 << 2;
+    const DEPTH_BIT: u8 = 1 << 3;
+
+    pub const NONE: Self = Self(0);
+    pub const BARS: Self = Self(Self::BARS_BIT);
+
+    #[must_use]
+    pub const fn with(self, stream: ChartStudyInputStream) -> Self {
+        let bit = match stream {
+            ChartStudyInputStream::Bars => Self::BARS_BIT,
+            ChartStudyInputStream::Trades => Self::TRADES_BIT,
+            ChartStudyInputStream::Quotes => Self::QUOTES_BIT,
+            ChartStudyInputStream::Depth => Self::DEPTH_BIT,
+        };
+        Self(self.0 | bit)
+    }
+
+    #[must_use]
+    pub const fn contains(self, stream: ChartStudyInputStream) -> bool {
+        let bit = match stream {
+            ChartStudyInputStream::Bars => Self::BARS_BIT,
+            ChartStudyInputStream::Trades => Self::TRADES_BIT,
+            ChartStudyInputStream::Quotes => Self::QUOTES_BIT,
+            ChartStudyInputStream::Depth => Self::DEPTH_BIT,
+        };
+        self.0 & bit != 0
+    }
+}
+
+/// One provider-neutral input stream a runtime study may require.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartStudyInputStream {
+    Bars,
+    Trades,
+    Quotes,
+    Depth,
 }
 
 /// Scalar plot family requested by a runtime study output.
@@ -202,6 +251,7 @@ pub struct ChartStudyOutputDescriptor<'a> {
     pub settings_available: bool,
     pub threshold_region: Option<ChartStudyThresholdRegion>,
     pub point_style: ChartStudyPointStyle,
+    pub input_requirements: ChartStudyInputRequirements,
 }
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {

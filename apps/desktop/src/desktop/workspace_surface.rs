@@ -146,6 +146,25 @@ const fn chart_study_point_style(style: StudyPointStyle) -> ChartStudyPointStyle
     }
 }
 
+const fn chart_study_input_requirements(
+    requirements: StreamRequirements,
+) -> ChartStudyInputRequirements {
+    let mut mapped = ChartStudyInputRequirements::NONE;
+    if requirements.contains(MarketStream::Bars) {
+        mapped = mapped.with(ChartStudyInputStream::Bars);
+    }
+    if requirements.contains(MarketStream::Trades) {
+        mapped = mapped.with(ChartStudyInputStream::Trades);
+    }
+    if requirements.contains(MarketStream::Quotes) {
+        mapped = mapped.with(ChartStudyInputStream::Quotes);
+    }
+    if requirements.contains(MarketStream::Depth) {
+        mapped = mapped.with(ChartStudyInputStream::Depth);
+    }
+    mapped
+}
+
 fn chart_study_threshold(
     region: Option<StudyThresholdRegion>,
 ) -> Option<ChartStudyThresholdRegion> {
@@ -2569,6 +2588,9 @@ impl WorkspaceSurface {
                     settings_available,
                     threshold_region: chart_study_threshold(snapshot.output.threshold_region),
                     point_style: chart_study_point_style(snapshot.output.point_style),
+                    input_requirements: chart_study_input_requirements(
+                        snapshot.stream_requirements,
+                    ),
                 },
                 snapshot.series.generation(),
                 snapshot.series.timestamps(),

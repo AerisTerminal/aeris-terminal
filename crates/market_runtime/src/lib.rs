@@ -131,6 +131,12 @@ pub struct MarketStudyOutputSnapshot {
     pub output_id: study::StudyOutputId,
     pub study_identifier: String,
     pub output: study::StudyOutputSpec,
+    /// Transitive market streams required by this study's dependency graph.
+    ///
+    /// The runtime remains the owner of those streams; this metadata lets a
+    /// presentation host retain the typed binding contract without receiving
+    /// or duplicating the canonical tape/book.
+    pub stream_requirements: aeris_market_engine::StreamRequirements,
     pub series: study::StudyOutputSeries,
 }
 

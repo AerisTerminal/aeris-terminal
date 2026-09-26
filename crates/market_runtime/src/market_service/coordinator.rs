@@ -798,6 +798,10 @@ impl Coordinator<'_> {
                             output_id,
                             study_identifier: study_identifier.clone(),
                             output,
+                            stream_requirements: self
+                                .studies
+                                .input_stream_requirements(study_id)
+                                .unwrap_or(StreamRequirements::NONE),
                             series,
                         },
                     ));
