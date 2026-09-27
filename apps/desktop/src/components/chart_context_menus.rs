@@ -1,9 +1,9 @@
 use super::*;
 use crate::desktop::native_ui::theme::platform_border_width;
 
-// The refresh artwork spans 18/24 of its SVG viewbox while the close artwork spans
-// 14/24. Scale the refresh canvas so both header actions have the same optical size.
-const CHART_SETTINGS_RESET_ICON_GLYPH: f32 = WORKSPACE_TAB_ICON_GLYPH * 14.0 / 18.0;
+// Settings header actions use one slightly larger canvas so their SVGs rasterize
+// consistently and retain equal control weight.
+const CHART_SETTINGS_ACTION_ICON_GLYPH: f32 = 16.0;
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
@@ -858,7 +858,7 @@ fn chart_settings_actions(
         .child(chrome_icon_button(
             "chart_settings_reset",
             HugeIcon::Refresh,
-            CHART_SETTINGS_RESET_ICON_GLYPH,
+            CHART_SETTINGS_ACTION_ICON_GLYPH,
             "Reset settings",
             ChromeIconButtonTone::Neutral,
             theme,
@@ -868,8 +868,12 @@ fn chart_settings_actions(
                 });
             },
         ))
-        .child(chrome_close_button(
+        .child(chrome_icon_button(
             "chart_settings_close",
+            HugeIcon::Close,
+            CHART_SETTINGS_ACTION_ICON_GLYPH,
+            "Close",
+            ChromeIconButtonTone::Destructive,
             theme,
             move |_, cx| {
                 close_terminal.update(cx, |terminal, terminal_cx| {
@@ -2613,10 +2617,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chart_settings_header_actions_have_equal_optical_glyph_bounds() {
-        let close_artwork = WORKSPACE_TAB_ICON_GLYPH * 14.0;
-        let reset_artwork = CHART_SETTINGS_RESET_ICON_GLYPH * 18.0;
-        assert!((close_artwork - reset_artwork).abs() < f32::EPSILON);
+    fn chart_settings_header_actions_use_the_same_larger_canvas() {
+        assert!(CHART_SETTINGS_ACTION_ICON_GLYPH > WORKSPACE_TAB_ICON_GLYPH);
+        assert_eq!(CHART_SETTINGS_ACTION_ICON_GLYPH, 16.0);
     }
 
     #[test]
