@@ -299,6 +299,46 @@ fn empty_chart_surface_accepts_its_first_real_snapshot() {
 }
 
 #[test]
+fn externally_applied_time_range_is_not_echoed_to_the_link_coordinator() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut source = NucleusChartView::with_replay(&replay);
+    let mut target = NucleusChartView::with_replay(&replay);
+    for chart in [&mut source, &mut target] {
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+        chart.engine.fit_content();
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    }
+    let times = source
+        .engine
+        .data_layer()
+        .series_data(0)
+        .expect("primary series")
+        .0;
+    let from = times[3].to_f64().expect("time");
+    let to = times[9].to_f64().expect("time");
+    source.engine.set_visible_time_range(from, to);
+    let event = source
+        .take_sync_events()
+        .into_iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                aeris_charts_engine::ChartSyncEventKind::VisibleTimeRange { .. }
+            )
+        })
+        .expect("local range event");
+    target.apply_external_sync_event(&event.kind);
+    assert!(target.take_sync_events().is_empty());
+    assert_eq!(target.engine.visible_time_range(), Some((from, to)));
+}
+
+#[test]
 fn covering_forming_snapshot_recovers_the_nucleus_view_without_a_new_candle() {
     let baseline = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })

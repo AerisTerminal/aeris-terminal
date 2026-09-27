@@ -399,6 +399,13 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         {
             chart.appearance = None;
         }
+        if chart.context_panel_tab > 4 {
+            chart.context_panel_tab = 0;
+        }
+        if chart.chart_link_group > 4 {
+            chart.chart_link_group = 0;
+        }
+        chart.chart_link_flags &= 0b11;
     }
     workspace
 }
@@ -801,6 +808,10 @@ mod tests {
                 show_trade_bubbles: true,
                 trade_bubble_minimum_volume_bits: 25.0_f64.to_bits(),
             }),
+            context_panel_visible: true,
+            context_panel_tab: 2,
+            chart_link_group: 2,
+            chart_link_flags: 3,
         }
     }
 

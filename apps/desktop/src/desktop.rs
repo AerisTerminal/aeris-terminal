@@ -14,6 +14,10 @@ mod chart_surface;
 mod chart_toolbar_menus;
 #[path = "components/chrome_menu.rs"]
 mod chrome_menu;
+#[path = "components/command_palette.rs"]
+mod command_palette;
+#[path = "components/context_panel.rs"]
+mod context_panel;
 #[path = "components/drawing_toolbar.rs"]
 mod drawing_toolbar;
 #[path = "engine_market_worker.rs"]
@@ -67,6 +71,7 @@ use aeris_chart_integration::{
     NucleusChartView, NucleusWorkspace, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
     OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
 };
+use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
@@ -134,6 +139,8 @@ use chrome_menu::{
 use chrome_menu::{
     ChromeIconButtonTone, chrome_close_button, chrome_icon_button, chrome_menu_extent,
 };
+use command_palette::command_palette_layer;
+use context_panel::{ContextPanelState, context_panel};
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
@@ -170,7 +177,7 @@ use reqwest_client::ReqwestClient;
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     pin::Pin,
     rc::Rc,
     sync::{
@@ -401,6 +408,7 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
+const CHART_SYNC_EVENTS_PER_SURFACE: usize = 32;
 const WORKSPACE_TAB_MAX_WIDTH: f32 = 248.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
@@ -437,6 +445,7 @@ actions!(
         TradingCancelAll,
         TradingFlattenAccount,
         TradingKillSwitch,
+        OpenCommandPalette,
     ]
 );
 
@@ -648,6 +657,17 @@ struct WorkspaceSurface {
     trade_tape: Option<aeris_market_runtime::MarketTradeTapeSnapshot>,
     trade_sweeps: Arc<[OrderFlowSweep]>,
     time_sales_filter: TimeSalesFilter,
+    context_view: Option<ContextView>,
+    context_snapshot: Arc<ContextSnapshot>,
+    context_panel_visible: bool,
+    context_panel_tab: ContextPanelTab,
+    context_credential_dialog: Option<ContextCredentialDialogState>,
+    context_credential_message: Option<String>,
+    economic_event_risk_message: Option<String>,
+    chart_link_group: u8,
+    chart_link_flags: u8,
+    pending_chart_sync_events: VecDeque<aeris_chart_integration::ChartSyncEvent>,
+    pending_linked_instrument: Option<InstallProviderInstrument>,
     side_panels: SidePanelVisibility,
     side_panel_width: f32,
     side_panel_split_basis_points: u32,
@@ -673,6 +693,7 @@ struct WorkspaceSurface {
     symbol_selection_target: SymbolSelectionTarget,
     pending_symbol_selection_target: Option<SymbolSelectionTarget>,
     pending_watchlist_instrument: Option<InstallProviderInstrument>,
+    pending_mnemonic_symbol: Option<String>,
     series_message: String,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
@@ -726,6 +747,10 @@ struct WorkspaceSurface {
     live_evidence_publications: u16,
 }
 
+struct ContextCredentialDialogState {
+    inputs: Vec<(ContextSource, Entity<InputState>)>,
+}
+
 struct TradingPnlState {
     current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
@@ -733,6 +758,7 @@ struct TradingPnlState {
     fills: Vec<aeris_trading::Fill>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
     risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
+    risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
     risk_locks: Vec<aeris_trading_runtime::RiskLock>,
     session_plans: Vec<aeris_trading_runtime::SessionPlan>,
     session_reviews: Vec<aeris_trading_runtime::SessionAdherenceReview>,
@@ -743,6 +769,57 @@ struct TradingPnlState {
     order_entry: TradingOrderEntryState,
     refresh_pending: bool,
     next_refresh: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ContextPanelTab {
+    #[default]
+    Calendar,
+    Energy,
+    Commitments,
+    Agriculture,
+    Macro,
+}
+
+impl ContextPanelTab {
+    const ALL: [Self; 5] = [
+        Self::Calendar,
+        Self::Energy,
+        Self::Commitments,
+        Self::Agriculture,
+        Self::Macro,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Calendar => "Calendar",
+            Self::Energy => "Energy",
+            Self::Commitments => "COT",
+            Self::Agriculture => "Agriculture",
+            Self::Macro => "Macro",
+        }
+    }
+
+    const fn persisted(self) -> u32 {
+        match self {
+            Self::Calendar => 0,
+            Self::Energy => 1,
+            Self::Commitments => 2,
+            Self::Agriculture => 3,
+            Self::Macro => 4,
+        }
+    }
+
+    const fn from_persisted(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Calendar),
+            1 => Some(Self::Energy),
+            2 => Some(Self::Commitments),
+            3 => Some(Self::Agriculture),
+            4 => Some(Self::Macro),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -797,6 +874,7 @@ impl Default for TradingPnlState {
             fills: Vec::new(),
             positions: Vec::new(),
             risk_meters: Vec::new(),
+            risk_profiles: Vec::new(),
             risk_locks: Vec::new(),
             session_plans: Vec::new(),
             session_reviews: Vec::new(),
@@ -1053,6 +1131,7 @@ struct WorkspaceScrollHandles {
     indicator: ScrollHandle,
     instrument: ScrollHandle,
     time_sales: ScrollHandle,
+    context: ScrollHandle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2207,16 +2286,30 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                 app.chart_persistence_dirty = true;
                 cx.notify();
             }
-            let (activate, request, study_settings_request, study_remove_request, intents) = chart
-                .update(cx, |chart, _| {
-                    (
-                        chart.take_activate_request(),
-                        chart.take_context_menu_request(),
-                        chart.take_study_settings_request(),
-                        chart.take_study_remove_request(),
-                        chart.take_trading_intents(),
-                    )
-                });
+            let (
+                activate,
+                request,
+                study_settings_request,
+                study_remove_request,
+                intents,
+                sync_events,
+            ) = chart.update(cx, |chart, _| {
+                (
+                    chart.take_activate_request(),
+                    chart.take_context_menu_request(),
+                    chart.take_study_settings_request(),
+                    chart.take_study_remove_request(),
+                    chart.take_trading_intents(),
+                    chart.take_sync_events(),
+                )
+            });
+            let had_sync_events = !sync_events.is_empty();
+            for event in sync_events {
+                if app.pending_chart_sync_events.len() == CHART_SYNC_EVENTS_PER_SURFACE {
+                    app.pending_chart_sync_events.pop_front();
+                }
+                app.pending_chart_sync_events.push_back(event);
+            }
             for intent in intents {
                 dispatch_chart_trading_intent(chart.clone(), &intent, app, cx);
             }
@@ -2248,6 +2341,7 @@ fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<Work
                 || had_alert_request
                 || had_study_settings_request
                 || had_study_remove_request
+                || had_sync_events
             {
                 cx.notify();
             }
@@ -2352,6 +2446,8 @@ struct HeaderState {
     controls: HeaderControls,
     order_book_visible: bool,
     watchlist_visible: bool,
+    context_visible: bool,
+    chart_link_group: u8,
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
     instrument_scroll: ScrollHandle,
@@ -2448,20 +2544,6 @@ impl SidePanel {
         match self {
             Self::OrderBook => "Order Book",
             Self::Watchlist => "Watchlist",
-        }
-    }
-
-    const fn toggle_label(self) -> &'static str {
-        match self {
-            Self::OrderBook => "Order Book",
-            Self::Watchlist => "Watchlist",
-        }
-    }
-
-    const fn toggle_tooltip(self) -> &'static str {
-        match self {
-            Self::OrderBook => "Toggle read-only order book",
-            Self::Watchlist => "Toggle watchlist",
         }
     }
 }
@@ -3137,6 +3219,7 @@ fn run_desktop_readiness_command(
         }
         let market = aeris_market_runtime::MarketService::start()?;
         let trading = start_trading_service()?;
+        let context = start_context_service()?;
         let status = market.status()?;
         if status.providers.is_empty() {
             return Err("candidate market service did not reach readiness".to_string());
@@ -3147,7 +3230,7 @@ fn run_desktop_readiness_command(
             return Err("candidate trading service did not reach readiness".to_string());
         }
         let report = LifecycleReadinessReport {
-            schema_version: 3,
+            schema_version: 4,
             release_identity: release.release_identity,
             install_generation: release.install_generation,
             desktop_process_id: std::process::id(),
@@ -3155,11 +3238,13 @@ fn run_desktop_readiness_command(
             provider_count: status.providers.len(),
             workspace_restored: true,
             services: LifecycleServiceReadiness {
-                market: true,
-                account: true,
-                trading: true,
+                market: ServiceReady(true),
+                account: ServiceReady(true),
+                trading: ServiceReady(true),
+                context: ServiceReady(true),
             },
         };
+        context.shutdown(std::time::Duration::from_secs(2))?;
         market.shutdown(std::time::Duration::from_secs(2))?;
         trading.shutdown(std::time::Duration::from_secs(2))?;
         let mut encoded = serde_json::to_vec(&report)
@@ -3191,10 +3276,15 @@ struct LifecycleReadinessReport {
 
 #[derive(serde::Serialize)]
 struct LifecycleServiceReadiness {
-    market: bool,
-    account: bool,
-    trading: bool,
+    market: ServiceReady,
+    account: ServiceReady,
+    trading: ServiceReady,
+    context: ServiceReady,
 }
+
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+struct ServiceReady(bool);
 
 fn start_trading_service() -> Result<aeris_trading_runtime::TradingService, String> {
     let database_path = aeris_platform_runtime::native_data_root()
@@ -3205,6 +3295,12 @@ fn start_trading_service() -> Result<aeris_trading_runtime::TradingService, Stri
         database_path,
         retention: aeris_trading_runtime::TradingRetention::default(),
     })
+}
+
+fn start_context_service() -> Result<aeris_context_runtime::ContextService, String> {
+    aeris_context_runtime::ContextService::start(
+        aeris_context_runtime::ContextServiceConfig::default(),
+    )
 }
 
 #[cfg(feature = "diagnostics")]
@@ -3855,6 +3951,13 @@ struct TerminalApp {
     account_menu_anchor: Option<gpui::Point<Pixels>>,
     profile_refresh_on_activation: bool,
     about_dialog_open: bool,
+    command_palette_input: Entity<InputState>,
+    command_palette_open: bool,
+    command_palette_selection: usize,
+    command_palette_message: Option<String>,
+    linked_sync_revisions: BTreeMap<String, u64>,
+    event_risk_dispatches: BTreeMap<String, i64>,
+    next_event_risk_check: Instant,
     updater: Option<DesktopUpdater>,
     update_restart_persistence_pending: bool,
     chart_chrome: chart_chrome::ChartChromePreferences,
@@ -4272,6 +4375,14 @@ pub(super) fn run() {
             exit_after_account_refresh_quiesce(1);
         }
     };
+    let context = match start_context_service() {
+        Ok(context) => context,
+        Err(error) => {
+            eprintln!("Aeris context owner could not start: {error}");
+            let _ = trading.shutdown(Duration::from_secs(2));
+            exit_after_account_refresh_quiesce(1);
+        }
+    };
     if let Err(error) = aeris_desktop::trading::install(trading.clone()) {
         eprintln!("Aeris trading owner could not be installed: {error}");
         let _ = trading.shutdown(Duration::from_secs(2));
@@ -4280,16 +4391,18 @@ pub(super) fn run() {
     let configured = match configured_market_workers() {
         Ok(Some(configured)) => configured,
         Ok(None) => {
+            let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
             exit_after_account_refresh_quiesce(0);
         }
         Err(error) => {
             eprintln!("Aeris market worker could not start: {error}");
+            let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
             exit_after_account_refresh_quiesce(1);
         }
     };
-    let lifecycle = DesktopLifecycle::new(trading);
+    let lifecycle = DesktopLifecycle::new(trading, context);
     run_desktop(configured, lifecycle);
 }
 
@@ -4452,26 +4565,74 @@ fn validate_trading_keymap() -> Result<(), String> {
 }
 
 fn bind_desktop_keys(cx: &mut App) {
+    use aeris_desktop::command_registry::{CommandId, command};
     cx.bind_keys([
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("alt-f9", MinimizeWindow, None),
         KeyBinding::new("alt-f10", ZoomWindow, None),
         KeyBinding::new("alt-f4", CloseWindow, None),
-        KeyBinding::new("ctrl-t", NewWorkspace, None),
+        KeyBinding::new(
+            command(CommandId::NewWorkspace).chord.unwrap_or("ctrl-t"),
+            NewWorkspace,
+            None,
+        ),
         KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
         KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
         KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
         KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
         KeyBinding::new("ctrl-w", CloseWorkspace, None),
-        KeyBinding::new("ctrl-alt-h", SplitPaneHorizontal, None),
-        KeyBinding::new("ctrl-alt-v", SplitPaneVertical, None),
+        KeyBinding::new(
+            command(CommandId::SplitHorizontal)
+                .chord
+                .unwrap_or("ctrl-alt-h"),
+            SplitPaneHorizontal,
+            None,
+        ),
+        KeyBinding::new(
+            command(CommandId::SplitVertical)
+                .chord
+                .unwrap_or("ctrl-alt-v"),
+            SplitPaneVertical,
+            None,
+        ),
         KeyBinding::new("ctrl-shift-w", ClosePane, None),
-        KeyBinding::new("ctrl-b", TradingBuyMarket, None),
-        KeyBinding::new("ctrl-s", TradingSellMarket, None),
-        KeyBinding::new("ctrl-shift-x", TradingCancelAll, None),
-        KeyBinding::new("ctrl-shift-f", TradingFlattenAccount, None),
-        KeyBinding::new("ctrl-shift-k", TradingKillSwitch, None),
+        KeyBinding::new(
+            command(CommandId::BuyMarket).chord.unwrap_or("ctrl-b"),
+            TradingBuyMarket,
+            None,
+        ),
+        KeyBinding::new(
+            command(CommandId::SellMarket).chord.unwrap_or("ctrl-s"),
+            TradingSellMarket,
+            None,
+        ),
+        KeyBinding::new(
+            command(CommandId::CancelAll)
+                .chord
+                .unwrap_or("ctrl-shift-x"),
+            TradingCancelAll,
+            None,
+        ),
+        KeyBinding::new(
+            command(CommandId::FlattenAccount)
+                .chord
+                .unwrap_or("ctrl-shift-f"),
+            TradingFlattenAccount,
+            None,
+        ),
+        KeyBinding::new(
+            command(CommandId::KillSwitch)
+                .chord
+                .unwrap_or("ctrl-shift-k"),
+            TradingKillSwitch,
+            None,
+        ),
+        KeyBinding::new(
+            command(CommandId::OpenPalette).chord.unwrap_or("ctrl-k"),
+            OpenCommandPalette,
+            None,
+        ),
     ]);
 }
 #[cfg(test)]

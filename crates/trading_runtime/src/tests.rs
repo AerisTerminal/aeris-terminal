@@ -306,6 +306,7 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
             max_contracts: FixedPoint::try_new(5, 0).expect("contracts"),
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
+            economic_event_rule: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -368,6 +369,7 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
             max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: None,
+            economic_event_rule: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -432,6 +434,7 @@ fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
         max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
         consistency_max_single_trade_percent: None,
         restricted_until_unix_nanos: None,
+        economic_event_rule: None,
         enabled: true,
     };
     service
@@ -490,6 +493,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
             max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
             consistency_max_single_trade_percent: Some(50),
             restricted_until_unix_nanos: None,
+            economic_event_rule: None,
             enabled: true,
         })
         .expect("profile registers");
@@ -934,6 +938,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
             max_contracts: FixedPoint::try_new(1, 0).expect("contracts"),
             consistency_max_single_trade_percent: Some(50),
             restricted_until_unix_nanos: None,
+            economic_event_rule: None,
             enabled: true,
         })
         .expect("risk profile stores");
@@ -1033,6 +1038,7 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
             max_contracts: FixedPoint::try_new(2, 0).expect("contracts"),
             consistency_max_single_trade_percent: None,
             restricted_until_unix_nanos: Some(5_000),
+            economic_event_rule: None,
             enabled: true,
         })
         .expect("restricted profile stores");
@@ -1096,6 +1102,94 @@ fn flatten_closes_positions_and_survives_a_restart() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("restarted service stops");
+}
+
+#[test]
+fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
+    let directory = TestDirectory::new("economic-event-lock");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: account_id.clone(),
+            profile_id: "high-impact-lock".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily loss"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::Intraday,
+            max_contracts: FixedPoint::try_new(5, 0).expect("contracts"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            economic_event_rule: Some(EconomicEventRiskRule {
+                action: EconomicEventRiskAction::Lock,
+                minimum_importance: EconomicEventRiskImportance::High,
+                lead_seconds: 300,
+            }),
+            enabled: true,
+        })
+        .expect("profile registers");
+    let scheduled = 1_000_000_000_000;
+    let observed = scheduled - 60_000_000_000;
+    let event = EconomicEventRiskTrigger {
+        event_id: "bls-employment-2026-10".to_string(),
+        title: "Employment Situation".to_string(),
+        source: "BLS".to_string(),
+        importance: EconomicEventRiskImportance::High,
+        scheduled_unix_nanos: scheduled,
+        source_release_unix_nanos: observed - 1,
+        observed_unix_nanos: observed,
+    };
+    let first = service
+        .apply_economic_event_risk(event.clone(), None)
+        .expect("event rule applies");
+    assert_eq!(first.locked_accounts, 1);
+    assert_eq!(
+        service
+            .apply_economic_event_risk(event, None)
+            .expect("duplicate is fenced")
+            .locked_accounts,
+        0
+    );
+    for index in 0..5 {
+        service
+            .apply_economic_event_risk(
+                EconomicEventRiskTrigger {
+                    event_id: format!("retention-event-{index}"),
+                    title: "Scheduled release".to_string(),
+                    source: "Official fixture".to_string(),
+                    importance: EconomicEventRiskImportance::High,
+                    scheduled_unix_nanos: scheduled,
+                    source_release_unix_nanos: observed - 1,
+                    observed_unix_nanos: observed + index,
+                },
+                None,
+            )
+            .expect("distinct event applies");
+    }
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let database = rusqlite::Connection::open(&config(&directory).database_path)
+        .expect("database reopens for retention assertion");
+    let retained_actions = database
+        .query_row(
+            "SELECT COUNT(*) FROM economic_event_risk_actions",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("retained event action count");
+    assert_eq!(retained_actions, 4);
+    drop(database);
+    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    assert_eq!(
+        restarted.snapshot().expect("snapshot").risk_locks[0].account_id,
+        account_id
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
 }
 
 #[test]

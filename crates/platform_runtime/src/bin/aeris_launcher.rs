@@ -2072,10 +2072,15 @@ struct DesktopReadinessReport {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesktopServiceReadiness {
-    market: bool,
-    account: bool,
-    trading: bool,
+    market: ServiceReady,
+    account: ServiceReady,
+    trading: ServiceReady,
+    context: ServiceReady,
 }
+
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+struct ServiceReady(bool);
 
 impl NativeHooks {
     fn desktop(&self, release: &ActiveRelease) -> PathBuf {
@@ -2152,15 +2157,16 @@ impl LifecycleHooks for NativeHooks {
                 .map_err(redacted)?;
             Self::wait_for_child(child)?;
             let readiness: DesktopReadinessReport = read_bounded_json(&report)?;
-            if readiness.schema_version != 3
+            if readiness.schema_version != 4
                 || readiness.release_identity != candidate.release_identity
                 || readiness.install_generation != candidate.install_generation
                 || readiness.desktop_process_id == 0
                 || readiness.provider_count == 0
                 || !readiness.workspace_restored
-                || !readiness.services.market
-                || !readiness.services.account
-                || !readiness.services.trading
+                || !readiness.services.market.0
+                || !readiness.services.account.0
+                || !readiness.services.trading.0
+                || !readiness.services.context.0
             {
                 return Err("candidate desktop readiness report is invalid".to_string());
             }

@@ -2,6 +2,145 @@
 
 use super::*;
 
+fn restored_context_and_link_state(
+    restored: Option<&WorkspaceChartState>,
+) -> (bool, ContextPanelTab, u8, u8) {
+    let context_visible = restored.is_some_and(|state| state.context_panel_visible);
+    let context_tab = restored
+        .and_then(|state| ContextPanelTab::from_persisted(state.context_panel_tab))
+        .unwrap_or_default();
+    let link_group = restored
+        .and_then(|state| u8::try_from(state.chart_link_group).ok())
+        .filter(|group| *group <= 4)
+        .unwrap_or(0);
+    let link_flags = restored
+        .and_then(|state| u8::try_from(state.chart_link_flags).ok())
+        .map_or(0b11, |flags| flags & 0b11);
+    (context_visible, context_tab, link_group, link_flags)
+}
+
+struct WorkspaceSurfaceInitialization {
+    startup: TerminalStartupState,
+    market_worker: MarketDataWorker,
+    lifecycle: DesktopLifecycle,
+    symbol_input: Option<Entity<InputState>>,
+    indicator_input: Entity<InputState>,
+    timeframe_input: Entity<InputState>,
+    chart_chrome: chart_chrome::ChartChromePreferences,
+    restored_chart_state: Option<WorkspaceChartState>,
+    restored_rithmic: Option<(ChartInterval, Option<(i64, i64)>)>,
+    interval: ChartInterval,
+    symbol_browser: rithmic_shell::RithmicSymbolBrowser,
+    studies: RuntimeStudiesState,
+    price_alerts: Vec<WorkspacePriceAlertState>,
+    price_alert_message: Option<String>,
+    bridge_label: String,
+    order_book: Entity<ReadOnlyOrderBookView>,
+    context_view: Option<ContextView>,
+    context_snapshot: Arc<ContextSnapshot>,
+    context_panel_visible: bool,
+    context_panel_tab: ContextPanelTab,
+    chart_link_group: u8,
+    chart_link_flags: u8,
+    chrome_focus: FocusHandle,
+    theme: AerisTheme,
+}
+
+fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
+    let startup = init.startup;
+    WorkspaceSurface {
+        chart: startup.chart,
+        order_book: init.order_book,
+        trade_tape: None,
+        trade_sweeps: Arc::from([]),
+        time_sales_filter: TimeSalesFilter::default(),
+        context_view: init.context_view,
+        context_snapshot: init.context_snapshot,
+        context_panel_visible: init.context_panel_visible,
+        context_panel_tab: init.context_panel_tab,
+        context_credential_dialog: None,
+        context_credential_message: None,
+        economic_event_risk_message: None,
+        chart_link_group: init.chart_link_group,
+        chart_link_flags: init.chart_link_flags,
+        pending_chart_sync_events: VecDeque::new(),
+        pending_linked_instrument: None,
+        side_panels: SidePanelVisibility::default(),
+        side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
+        side_panel_split_basis_points: 5_000,
+        menu_state: WorkspaceMenuState::default(),
+        scrolls: WorkspaceScrollHandles::default(),
+        chart_state: startup.chart_state,
+        chart_state_message: startup.chart_state_message,
+        theme: init.theme,
+        replay_label: startup.replay_label,
+        worker_label: startup.worker_label,
+        subscription_id: startup.subscription_id,
+        bridge_label: init.bridge_label,
+        market_worker: init.market_worker,
+        lifecycle: init.lifecycle,
+        pending_ui_diagnostics: None,
+        connection_state: startup.connection_state,
+        connection_message: startup.connection_message,
+        provider_transport_rtt_nanos: None,
+        trading_pnl: TradingPnlState::default(),
+        symbol_browser: init.symbol_browser,
+        symbol_message: initial_symbol_message(startup.provider),
+        market_state: WorkspaceMarketState::default(),
+        symbol_selection_target: SymbolSelectionTarget::Chart,
+        pending_symbol_selection_target: None,
+        pending_watchlist_instrument: None,
+        pending_mnemonic_symbol: None,
+        series_message: "Select a symbol before choosing a series".to_string(),
+        symbol_input: init.symbol_input,
+        indicator_input: init.indicator_input,
+        timeframe_input: init.timeframe_input,
+        indicator_message: None,
+        studies: init.studies,
+        study_settings_dialog: None,
+        chrome_overlay: None,
+        chrome_overlay_phase: ChromeOverlayPhase::Opening,
+        chrome_overlay_generation: 0,
+        chrome_overlay_trigger_position: None,
+        timeframe_menu_flyout: None,
+        timeframe_flyout_close_token: 0,
+        timeframe_hover_regions: 0,
+        timeframe_trigger_bounds: None,
+        chart_type_trigger_bounds: None,
+        chrome_selection: 0,
+        chrome_focus: init.chrome_focus,
+        provider: startup.provider,
+        product: startup.product,
+        rithmic_switch: RithmicSwitchState::Idle,
+        interval: init.interval,
+        rithmic_pending_interval: None,
+        rithmic_pending_product: None,
+        rithmic_pending_sequence: None,
+        rithmic_previous_selection: None,
+        restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
+        last_persisted_viewport: None,
+        pending_chart_context_menu: None,
+        pending_pane_activate: PaneActivationRequest::None,
+        pending_study_settings_request: None,
+        pending_study_remove_request: None,
+        resource_class: ConsumerResourceClass::Foreground,
+        chart_chrome: init.chart_chrome,
+        retained_chart_presentation: RetainedChartPresentation::default(),
+        restored_chart_state: init.restored_chart_state,
+        chart_persistence_dirty: false,
+        last_chart_user_state_revision: 0,
+        price_alerts: init.price_alerts,
+        price_alert_dialog: None,
+        price_alert_message: init.price_alert_message,
+        #[cfg(feature = "diagnostics")]
+        foreground_interactions: ForegroundInteractionDiagnostics::default(),
+        #[cfg(feature = "diagnostics")]
+        live_evidence_enabled: std::env::var_os("AERIS_LIVE_EVIDENCE").is_some(),
+        #[cfg(feature = "diagnostics")]
+        live_evidence_publications: 0,
+    }
+}
+
 fn restore_price_alerts(
     restored_chart_state: Option<&WorkspaceChartState>,
     market_worker: &MarketDataWorker,
@@ -1109,6 +1248,10 @@ impl WorkspaceSurface {
             studies,
             appearance: Some(persisted_chart_appearance(&chart.appearance_settings())),
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
+            context_panel_visible: self.context_panel_visible,
+            context_panel_tab: self.context_panel_tab.persisted(),
+            chart_link_group: u32::from(self.chart_link_group),
+            chart_link_flags: u32::from(self.chart_link_flags),
         })
     }
 
@@ -1208,85 +1351,39 @@ impl WorkspaceSurface {
         );
         let bridge_label = chart_bridge_label(startup_state.chart.as_ref(), cx);
         let order_book = cx.new(move |_| ReadOnlyOrderBookView::new(theme));
-        Self {
-            chart: startup_state.chart,
-            order_book,
-            trade_tape: None,
-            trade_sweeps: Arc::from([]),
-            time_sales_filter: TimeSalesFilter::default(),
-            side_panels: SidePanelVisibility::default(),
-            side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
-            side_panel_split_basis_points: 5_000,
-            menu_state: WorkspaceMenuState::default(),
-            scrolls: WorkspaceScrollHandles::default(),
-            chart_state: startup_state.chart_state,
-            chart_state_message: startup_state.chart_state_message,
-            theme,
-            replay_label: startup_state.replay_label,
-            worker_label: startup_state.worker_label,
-            subscription_id: startup_state.subscription_id,
-            bridge_label,
+        let context_view = lifecycle.context_view();
+        let context_snapshot = context_view.as_ref().map_or_else(
+            || Arc::new(ContextSnapshot::empty(1)),
+            ContextView::snapshot,
+        );
+        let (context_panel_visible, context_panel_tab, chart_link_group, chart_link_flags) =
+            restored_context_and_link_state(restored_chart_state.as_ref());
+        workspace_surface_from_initialization(WorkspaceSurfaceInitialization {
+            startup: startup_state,
             market_worker,
             lifecycle,
-            pending_ui_diagnostics: None,
-            connection_state: startup_state.connection_state,
-            connection_message: startup_state.connection_message,
-            provider_transport_rtt_nanos: None,
-            trading_pnl: TradingPnlState::default(),
-            symbol_browser,
-            symbol_message: initial_symbol_message(startup_state.provider),
-            market_state: WorkspaceMarketState::default(),
-            symbol_selection_target: SymbolSelectionTarget::Chart,
-            pending_symbol_selection_target: None,
-            pending_watchlist_instrument: None,
-            series_message: "Select a symbol before choosing a series".to_string(),
             symbol_input,
             indicator_input,
             timeframe_input,
-            indicator_message: None,
-            studies,
-            study_settings_dialog: None,
-            chrome_overlay: None,
-            chrome_overlay_phase: ChromeOverlayPhase::Opening,
-            chrome_overlay_generation: 0,
-            chrome_overlay_trigger_position: None,
-            timeframe_menu_flyout: None,
-            timeframe_flyout_close_token: 0,
-            timeframe_hover_regions: 0,
-            timeframe_trigger_bounds: None,
-            chart_type_trigger_bounds: None,
-            chrome_selection: 0,
-            chrome_focus: cx.focus_handle().tab_stop(true),
-            provider: startup_state.provider,
-            product: startup_state.product,
-            rithmic_switch: RithmicSwitchState::Idle,
-            interval,
-            rithmic_pending_interval: None,
-            rithmic_pending_product: None,
-            rithmic_pending_sequence: None,
-            rithmic_previous_selection: None,
-            restored_viewport: restored_rithmic.and_then(|restored| restored.1),
-            last_persisted_viewport: None,
-            pending_chart_context_menu: None,
-            pending_pane_activate: PaneActivationRequest::None,
-            pending_study_settings_request: None,
-            pending_study_remove_request: None,
-            resource_class: ConsumerResourceClass::Foreground,
             chart_chrome,
-            retained_chart_presentation: RetainedChartPresentation::default(),
             restored_chart_state,
-            chart_persistence_dirty: false,
-            last_chart_user_state_revision: 0,
+            restored_rithmic,
+            interval,
+            symbol_browser,
+            studies,
             price_alerts,
-            price_alert_dialog: None,
             price_alert_message,
-            #[cfg(feature = "diagnostics")]
-            foreground_interactions: ForegroundInteractionDiagnostics::default(),
-            #[cfg(feature = "diagnostics")]
-            live_evidence_enabled: std::env::var_os("AERIS_LIVE_EVIDENCE").is_some(),
-            #[cfg(feature = "diagnostics")]
-            live_evidence_publications: 0,
-        }
+            bridge_label,
+            order_book,
+            context_view,
+            context_snapshot,
+            context_panel_visible,
+            context_panel_tab,
+            chart_link_group,
+            chart_link_flags,
+            chrome_focus: cx.focus_handle().tab_stop(true),
+            theme,
+        })
     }
 
     pub(super) fn retire_market_worker(&mut self, cx: &App) {
@@ -1561,6 +1658,7 @@ impl WorkspaceSurface {
             return false;
         };
         self.rithmic_pending_product = Some(instrument.clone());
+        self.pending_linked_instrument = Some(instrument.clone());
         self.rithmic_pending_interval = Some(interval);
         self.rithmic_pending_sequence = Some(sequence);
         self.rithmic_switch = RithmicSwitchState::Pending;
@@ -3028,6 +3126,17 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn poll_market_worker(&mut self, cx: &mut Context<Self>) -> usize {
+        let context_changed = self.context_view.as_ref().is_some_and(|view| {
+            let snapshot = view.snapshot();
+            if snapshot.revision == self.context_snapshot.revision {
+                return false;
+            }
+            self.context_snapshot = snapshot;
+            true
+        });
+        if context_changed {
+            cx.notify();
+        }
         let chart_was_missing = self.chart.is_none();
         let (messages, disconnected) = self
             .market_worker
@@ -3102,7 +3211,7 @@ impl WorkspaceSurface {
                 chart.update(cx, |_, chart_cx| chart_cx.notify());
             }
         }
-        applied + usize::from(disconnected)
+        applied + usize::from(disconnected) + usize::from(context_changed)
     }
 
     fn apply_connection_state(
@@ -3623,6 +3732,29 @@ impl WorkspaceSurface {
         self.search_symbol_query(&query, cx)
     }
 
+    pub(super) fn search_mnemonic_symbol(
+        &mut self,
+        symbol: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(input) = self.symbol_input.clone() else {
+            self.symbol_message = "Symbol search is unavailable".to_string();
+            cx.notify();
+            return false;
+        };
+        input.update(cx, |input, input_cx| {
+            input.set_value(&symbol, window, input_cx);
+        });
+        self.pending_mnemonic_symbol = Some(symbol);
+        if self.search_symbol_input(cx) {
+            true
+        } else {
+            self.pending_mnemonic_symbol = None;
+            false
+        }
+    }
+
     pub(super) fn submit_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.instrument_entries(cx);
         match symbol_submit_decision(self.provider, entries.len(), self.chrome_selection) {
@@ -3719,6 +3851,7 @@ impl WorkspaceSurface {
                     self.symbol_message = format!("{display} market history could not start");
                     return;
                 };
+                self.pending_linked_instrument = Some(instrument.clone());
                 self.rithmic_pending_product = Some(instrument);
                 self.rithmic_pending_interval = Some(interval);
                 self.rithmic_pending_sequence = Some(sequence);
@@ -3755,6 +3888,27 @@ impl WorkspaceSurface {
             self.dispatch_retained_symbol_search(cx);
             cx.notify();
             return;
+        }
+        if let Some(symbol) = self.pending_mnemonic_symbol.take() {
+            let index = self.symbol_browser.results().iter().position(|instrument| {
+                instrument.symbol.eq_ignore_ascii_case(&symbol)
+                    || instrument.display_symbol.eq_ignore_ascii_case(&symbol)
+            });
+            if let Some(index) = index {
+                self.chrome_selection = index;
+                self.select_instrument(
+                    match self.provider {
+                        TerminalProvider::Rithmic => InstrumentMenuSelection::Rithmic(index),
+                        TerminalProvider::Hyperliquid => {
+                            InstrumentMenuSelection::Hyperliquid(index)
+                        }
+                    },
+                    SymbolSelectionTarget::Chart,
+                    cx,
+                );
+                return;
+            }
+            self.symbol_message = format!("No exact market matched {symbol}");
         }
         if self.provider == TerminalProvider::Rithmic
             && self.market_state.rithmic_autoload_started
@@ -3842,6 +3996,155 @@ impl WorkspaceSurface {
         self.side_panels.set(SidePanel::Watchlist, visible);
         self.chart_persistence_dirty = true;
         cx.notify();
+    }
+
+    pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<Self>) {
+        self.set_context_panel_visible(!self.context_panel_visible, cx);
+    }
+
+    pub(super) fn set_context_panel_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.context_panel_visible == visible {
+            return;
+        }
+        self.context_panel_visible = visible;
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
+    pub(super) fn set_context_panel_tab(&mut self, tab: ContextPanelTab, cx: &mut Context<Self>) {
+        if self.context_panel_tab == tab {
+            return;
+        }
+        self.context_panel_tab = tab;
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
+    pub(super) fn toggle_context_credential_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.context_credential_dialog.take().is_none() {
+            let inputs = [
+                ContextSource::Eia,
+                ContextSource::Usda,
+                ContextSource::UsdaFas,
+                ContextSource::Fred,
+            ]
+            .into_iter()
+            .map(|source| {
+                let input = cx.new(|input_cx| {
+                    InputState::new(window, input_cx)
+                        .placeholder("Enter a new key")
+                        .masked(true)
+                });
+                (source, input)
+            })
+            .collect();
+            self.context_credential_dialog = Some(ContextCredentialDialogState { inputs });
+            self.context_credential_message = None;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn save_context_api_keys(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.context_credential_dialog.take() else {
+            return;
+        };
+        let entries = dialog
+            .inputs
+            .into_iter()
+            .filter_map(|(source, input)| {
+                let value = input.read(cx).value().to_string();
+                (!value.trim().is_empty()).then_some((source, value))
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            self.context_credential_message =
+                Some("No keys were entered; existing keys are unchanged.".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(service) = self.lifecycle.context_service() else {
+            self.context_credential_message = Some("Context runtime is unavailable.".to_string());
+            cx.notify();
+            return;
+        };
+        self.context_credential_message =
+            Some("Saving keys to the native credential vault…".to_string());
+        let save = cx.background_executor().spawn(async move {
+            for (source, value) in entries {
+                service.store_api_key(source, value)?;
+            }
+            Ok::<_, String>(())
+        });
+        cx.spawn(async move |surface, cx| {
+            let result = save.await;
+            let _ = surface.update(cx, |surface, surface_cx| {
+                surface.context_credential_message = Some(match result {
+                    Ok(()) => "Keys saved; source refreshes were scheduled.".to_string(),
+                    Err(error) => format!("Keys could not be saved: {error}"),
+                });
+                surface_cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn cycle_chart_link_group(&mut self, cx: &mut Context<Self>) {
+        self.chart_link_group = (self.chart_link_group + 1) % 5;
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
+    pub(super) fn take_chart_sync_events(
+        &mut self,
+    ) -> Vec<aeris_chart_integration::ChartSyncEvent> {
+        self.pending_chart_sync_events.drain(..).collect()
+    }
+
+    pub(super) fn take_linked_instrument(&mut self) -> Option<InstallProviderInstrument> {
+        self.pending_linked_instrument.take()
+    }
+
+    pub(super) fn apply_linked_instrument(
+        &mut self,
+        instrument: &InstallProviderInstrument,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let selected = self.select_installed_instrument(instrument, cx);
+        // A coordinator-applied selection must never bounce back through the group.
+        self.pending_linked_instrument = None;
+        selected
+    }
+
+    pub(super) fn apply_linked_chart_event(
+        &mut self,
+        kind: &aeris_chart_integration::ChartSyncEventKind,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(chart) = self.chart.as_ref() else {
+            return false;
+        };
+        let allowed = match kind {
+            aeris_chart_integration::ChartSyncEventKind::Crosshair { .. }
+            | aeris_chart_integration::ChartSyncEventKind::ClearCrosshair => {
+                self.chart_link_flags & 0b01 != 0
+            }
+            aeris_chart_integration::ChartSyncEventKind::VisibleTimeRange { .. } => {
+                self.chart_link_flags & 0b10 != 0
+            }
+        };
+        if !allowed {
+            return false;
+        }
+        let changed = chart.update(cx, |chart, _| chart.apply_external_sync_event(kind));
+        if changed {
+            cx.notify();
+        }
+        changed
     }
 
     pub(super) fn open_watchlist_symbol_menu_at(

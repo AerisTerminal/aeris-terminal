@@ -32,7 +32,7 @@ Updated 2026-09-27. Baseline source-confirmed 2026-09-27.
 | T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Complete** |
 | T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | None for basic chart trading (existing Aeris Charts trading layer); B1 (PD11) for multi-account and trailing stops on charts, (PD1) for chart warnings, (PD3) for plan levels | None | **Complete** |
 | T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | **Complete** |
-| T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | Open |
+| T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | **Complete** |
 | T5 | Rithmic live trading: PF1, PF2, PF4, M1.6, live qualification of T2 | B1 (PD1); B6 (PD8) for chart markers of M1.6 | Rithmic onboarding, conformance, live accounts, D4 | Blocked (onboarding) |
 | T6 | Record, replay and review: D2, PF8, M4.1–M4.4 | B1 (PD4, PD6), B5 (PD2, F1) | D2 decision; data licensing checklist | Open |
 | T7 | Institutional depth: M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | B4 (OF9), B5, B6, B7 | Data licensing checklist | Open |
@@ -194,21 +194,42 @@ public Hyperliquid desktop/runtime path passed before the batch was committed.
 ### T4 — Context and workspace
 
 **Scope:** D6, M5.1–M5.5, M7.1, M7.4. **Needs:** Aeris Charts B1 (PD3, PD5, PD7).
-**Status:** open.
+**Status:** complete.
 
-- [ ] **D6** Calendar distribution decided.
-- [ ] One bounded background owner for public data fetching, caching and scheduling.
-- [ ] **M5.1** Economic event calendar with countdowns and rule-driven flatten or lock.
-- [ ] **M5.2** Energy dashboard (EIA, NOAA).
-- [ ] **M5.3** Commitments of Traders beside price.
-- [ ] **M5.4** Grains and agriculture (USDA).
-- [ ] **M5.5** Macro panel (FRED).
-- [ ] **M7.1** Command palette with a shared command registry.
-- [ ] **M7.4** Linked symbol groups with synchronized crosshair and time range.
-- [ ] Broad gate green; committed and pushed.
+- [x] **D6** Calendar distribution decided.
+- [x] One bounded background owner for public data fetching, caching and scheduling.
+- [x] **M5.1** Economic event calendar with countdowns and rule-driven flatten or lock.
+- [x] **M5.2** Energy dashboard (EIA, NOAA).
+- [x] **M5.3** Commitments of Traders beside price.
+- [x] **M5.4** Grains and agriculture (USDA).
+- [x] **M5.5** Macro panel (FRED).
+- [x] **M7.1** Command palette with a shared command registry.
+- [x] **M7.4** Linked symbol groups with synchronized crosshair and time range.
+- [x] Broad gate green; committed and pushed.
 
 **Acceptance:** every value carries its source and release time, charts show no look-ahead, and
 missing keys or outages degrade to a clear unavailable state.
+
+**Delivered:** `context_runtime` is the one in-process owner of a 64-command queue, staggered
+refresh schedule, 4 MiB response cap and immutable 4,096-item-per-collection view. D6 uses direct
+official-source retrieval because release publication remains disabled: BLS, BEA, Federal Reserve
+and EIA schedules are fetched at runtime, while EIA, NOAA CPC, CFTC, USDA NASS/WASDE/FAS and FRED
+adapters publish fixed-point values with source and release timestamps. EIA, NASS, FAS/api.data.gov
+and FRED keys are entered through masked write-only fields and retained only by the native credential
+vault; missing keys and source failures remain explicit status values with no synthetic fallback.
+
+Event rules are enabled only by an account's durable risk profile, are fenced by event and profile
+version, and retain a bounded action history. Linked groups propagate installed instruments,
+crosshairs and visible time ranges without coordinator echo. The command palette, product menus and
+actual key bindings consume the same complete command registry; mnemonic symbol resolution selects
+only an exact provider-catalog match.
+
+Verification evidence (2026-09-27): formatting, workspace Clippy with all targets and features,
+and the full workspace test suite passed. Deterministic context fixtures cover every adapter,
+keyed sources fail explicitly when their native-vault credential is absent, and an ignored live
+shape test was run explicitly against the current public BEA, Federal Reserve, NOAA CPC, CFTC and
+USDA WASDE endpoints. The keyed EIA, NASS, FAS and FRED production paths were not live-qualified
+because no maintainer API keys were present.
 
 ### T5 — Rithmic live trading
 
@@ -337,7 +358,7 @@ These decisions block specific items. Each is listed with the recommendation fro
 | D3 | Local storage engine for user-owned records (journal, executions, rule profiles, plans) | PF7 | T1 | **Decided: SQLite via the pinned bundled `rusqlite` dependency.** The release measurement above is the recorded bounded-workload evidence; do not introduce another store |
 | D4 | Order-level data leaving the Rithmic adapter | PF4, M1.6 | T5 | Publish a bounded canonical order-level view through `domain/market_data` with provider identity, local order and sequence evidence kept separate, as `AGENTS.md` requires |
 | D5 | First additional provider (CQG or dxFeed) | PF10 | T8 | Defer until Rithmic trading is qualified; prioritize by user demand |
-| D6 | Calendar distribution without a backend | M5.1 | T4 | Ship the curated event calendar as signed data with application releases, or fetch it from a public repository file; decide once a release path exists |
+| D6 | Calendar distribution without a backend | M5.1 | T4 | **Decided:** fetch official BLS, BEA, Federal Reserve and EIA schedules directly through the bounded in-process context owner. Release publication is disabled, so a signed release-bundled feed is not currently viable; native-vault credentials, exact provenance and explicit unavailable states preserve the local-first boundary |
 
 ## Current baseline
 
@@ -359,9 +380,9 @@ Source-confirmed on 2026-09-27. This records the implemented baseline, not a cla
 | Alerts | Price alerts and completed-bar delta-divergence alerts evaluated in `market_runtime`, generation-fenced and delivered through bounded latest-only publications with OS notifications | `PriceAlertRegistry`, `order_flow_alerts.rs`, `platform_runtime/user_notifications.rs` |
 | Persistence | Workspace layouts, chart preferences, studies, alerts, watchlist and the credential vault; trading records now use a separate bounded SQLite store. Market-history persistence remains deliberately banned | `workspace_persistence.rs`, `crates/trading_runtime`, `tools/naming_check` |
 | Recording, replay, journal, simulator | Session recording/replay remains absent; T1 now provides durable journal/user records and a local simulated venue, while "replay" in market code still means bar snapshot contracts and Rithmic history requests | `crates/trading_runtime`, `application/src/replay_snapshot.rs` |
-| Risk controls | Durable simulated-venue profiles, locks, pre-trade checks, rule meters, discipline rules, session plans and per-account or global kill switches | `crates/trading_runtime`, `apps/desktop/src/keymap.rs` |
-| Context data | **Absent** except a CME Globex session-day helper for week and month history buckets | `rithmic_protocol/src/calendar.rs` |
-| Workspace UX | Tabs, split panes and their shortcuts, themes, feed diagnostics and focus-safe trading hotkeys; no command palette, multi-window workspace or linked symbol groups | `apps/desktop`, `crates/observability` |
+| Risk controls | Durable simulated-venue profiles, locks, pre-trade checks, rule meters, discipline rules, session plans, economic-event lock/flatten actions and per-account or global kill switches | `crates/trading_runtime`, `apps/desktop/src/keymap.rs` |
+| Context data | One bounded runtime owner for official economic schedules, EIA/NOAA energy and weather, CFTC positioning, USDA agriculture and FRED macro observations; user keys remain in the native vault | `crates/context_runtime`, `apps/desktop/src/components/context_panel.rs` |
+| Workspace UX | Tabs, split panes and their shortcuts, themes, feed diagnostics, focus-safe trading hotkeys, one shared command registry and palette, and bounded chart link groups; multi-window workspaces remain absent | `apps/desktop`, `crates/observability` |
 | Distribution | Launcher, signed release identity and lifecycle code; automatic updates and publication disabled until a release backend exists | `platform_runtime`, `apps/desktop/src/update.rs` |
 
 ## Foundations
@@ -507,11 +528,11 @@ derived results as the live session did; journal statistics are reproducible fro
 
 | ID | Feature | Status | Data source | Aeris Charts | Batch |
 | --- | --- | --- | --- | --- | --- |
-| M5.1 | Economic event calendar with countdowns, importance, and automatic flatten or lock before events when a rule profile requires it | Absent | Official release schedules (BLS, BEA, Federal Reserve, EIA), distributed per D6 | PD3 | T4 |
-| M5.2 | Energy dashboard: weekly petroleum inventories and natural gas storage with surprise versus the five-year range; heating and cooling degree days | Absent | EIA open data API (user key); NOAA Climate Prediction Center | PD7 | T4 |
-| M5.3 | Commitments of Traders positioning by trader category beside price | Absent | CFTC public reporting data | PD7 | T4 |
-| M5.4 | Grains and agriculture: crop progress, WASDE supply and demand, export sales | Absent | USDA (NASS Quick Stats with a user key; WASDE and export-sales publications) | PD7 | T4 |
-| M5.5 | Macro panel: Treasury yields, dollar index, inflation and employment series | Absent | FRED API (user key); respect per-series copyright terms | PD7 | T4 |
+| M5.1 | Economic event calendar with countdowns, importance, and automatic flatten or lock before events when a rule profile requires it | Present | Official release schedules (BLS, BEA, Federal Reserve, EIA), distributed per D6 | PD3 | T4 |
+| M5.2 | Energy dashboard: weekly petroleum inventories and natural gas storage with surprise versus the five-year range; heating and cooling degree days | Present | EIA open data API (user key); NOAA Climate Prediction Center | PD7 | T4 |
+| M5.3 | Commitments of Traders positioning by trader category beside price | Present | CFTC public reporting data | PD7 | T4 |
+| M5.4 | Grains and agriculture: crop progress, WASDE supply and demand, export sales | Present | USDA (NASS Quick Stats with a user key; WASDE and export-sales publications) | PD7 | T4 |
+| M5.5 | Macro panel: Treasury yields, dollar index, inflation and employment series | Present | FRED API (user key); respect per-series copyright terms | PD7 | T4 |
 | M5.6 | Contract roll and expiry calendar: front month, days to roll, volume migration, first notice and last trade dates | Partial (expiry strings from Rithmic reference data) | PF6 plus provider volume | PD3 | T7 |
 | M5.7 | Session and trading-hours display: RTH and ETH boundaries, holiday closures | Partial (session-day bucketing helper only) | PF6 and published exchange calendars | PD3 | T7 |
 
@@ -533,10 +554,10 @@ missing keys or source outages degrade to a clear "unavailable" state, never inv
 
 | ID | Feature | Status | Platform work | Aeris Charts | Batch |
 | --- | --- | --- | --- | --- | --- |
-| M7.1 | Command palette with searchable actions and Bloomberg-style mnemonics, for example `ES footprint 5m` | Absent | Command registry shared by menus, palette and hotkeys | — | T4 |
+| M7.1 | Command palette with searchable actions and Bloomberg-style mnemonics, for example `ES footprint 5m` | Present | Command registry shared by menus, palette and hotkeys | — | T4 |
 | M7.2 | Configurable keymap with conflict detection | Partial (window and split shortcuts) | Single keymap owner; trading hotkeys (M2.5) register here | — | T2 |
 | M7.3 | Multi-window and multi-monitor workspaces | Partial | Detachable windows with persisted placement per display | — | T8 |
-| M7.4 | Linked symbol groups and synchronized crosshair and time range | Absent | Link-group coordinator in the desktop | PD5 | T4 |
+| M7.4 | Linked symbol groups and synchronized crosshair and time range | Present | Link-group coordinator in the desktop | PD5 | T4 |
 | M7.5 | Performance mode and diagnostics overlay: per-panel render and memory cost, feed latency, dropped frames; the promise that the app never freezes during news | Partial (feed diagnostics) | User-facing overlay over `observability` and chart telemetry | Telemetry exists | T8 |
 | M7.6 | Themes and accessibility: dark, light and colorblind-safe palettes, font scaling | Partial | Design-system tokens only, per the coordination rules in `AGENTS.md` | — | T8 |
 | M7.7 | Layout and settings sync through a user-controlled folder | Absent | Export and import of workspace state with conflict handling; no Aeris service | — | T8 |

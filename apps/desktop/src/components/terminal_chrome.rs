@@ -426,20 +426,8 @@ pub(super) fn header_controls(
     // Give the global controls an explicit, non-shrinking track. GPUI cannot
     // infer a stable intrinsic width for this mixed Button/avatar group, which
     // previously let the flex item collapse to zero even on wide windows.
-    let order_book_toggle = side_panel_toggle(
-        app.clone(),
-        &state.theme,
-        SidePanel::OrderBook,
-        state.controls.enabled(HeaderControls::ORDER_BOOK),
-        state.order_book_visible,
-    );
-    let watchlist_toggle = side_panel_toggle(
-        app.clone(),
-        &state.theme,
-        SidePanel::Watchlist,
-        true,
-        state.watchlist_visible,
-    );
+    let (order_book_toggle, watchlist_toggle, context_toggle, link_toggle) =
+        header_panel_toggles(app, &state);
     let connection = connection_presentation(
         state.provider,
         state.connection_state,
@@ -509,7 +497,9 @@ pub(super) fn header_controls(
             &state.theme,
         ))
         .child(order_book_toggle)
-        .child(watchlist_toggle);
+        .child(watchlist_toggle)
+        .child(context_toggle)
+        .child(link_toggle);
     let global_controls = header_global_controls(terminal, &state.theme);
 
     div()
@@ -521,6 +511,65 @@ pub(super) fn header_controls(
         .items_center()
         .child(market_controls)
         .child(global_controls)
+}
+
+fn header_panel_toggles(
+    app: &Entity<WorkspaceSurface>,
+    state: &HeaderState,
+) -> (AnyElement, AnyElement, AnyElement, AnyElement) {
+    let order_book = side_panel_toggle(
+        app.clone(),
+        &state.theme,
+        SidePanel::OrderBook,
+        state.controls.enabled(HeaderControls::ORDER_BOOK),
+        state.order_book_visible,
+    );
+    let watchlist = side_panel_toggle(
+        app.clone(),
+        &state.theme,
+        SidePanel::Watchlist,
+        true,
+        state.watchlist_visible,
+    );
+    let context_command = aeris_desktop::command_registry::command(
+        aeris_desktop::command_registry::CommandId::ToggleContext,
+    );
+    let context = panel_toggle(
+        PanelToggleState {
+            id: "context_panel_toggle",
+            label: context_command.title,
+            icon: HugeIcon::Info,
+            enabled: true,
+            selected: state.context_visible,
+            tooltip: context_command.title,
+            toggle: WorkspaceSurface::toggle_context_panel,
+        },
+        &state.theme,
+        app.clone(),
+    )
+    .into_any_element();
+    let link_label = match state.chart_link_group {
+        1 => "Link A",
+        2 => "Link B",
+        3 => "Link C",
+        4 => "Link D",
+        _ => "Link",
+    };
+    let link = panel_toggle(
+        PanelToggleState {
+            id: "chart_link_group_toggle",
+            label: link_label,
+            icon: HugeIcon::SplitSideBySide,
+            enabled: true,
+            selected: state.chart_link_group != 0,
+            tooltip: "Cycle linked chart group",
+            toggle: WorkspaceSurface::cycle_chart_link_group,
+        },
+        &state.theme,
+        app.clone(),
+    )
+    .into_any_element();
+    (order_book, watchlist, context, link)
 }
 
 fn header_global_controls(
@@ -546,28 +595,31 @@ pub(super) fn side_panel_toggle(
     enabled: bool,
     selected: bool,
 ) -> AnyElement {
-    let (id, icon, toggle) = match panel {
+    let (id, icon, toggle, command_id) = match panel {
         SidePanel::OrderBook => (
             "order_book_toggle",
             HugeIcon::SidebarRight,
             WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+            aeris_desktop::command_registry::CommandId::ToggleOrderBook,
         ),
         SidePanel::Watchlist => (
             "watchlist_toggle",
             HugeIcon::SidebarRight,
             WorkspaceSurface::toggle_watchlist
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+            aeris_desktop::command_registry::CommandId::ToggleWatchlist,
         ),
     };
+    let command = aeris_desktop::command_registry::command(command_id);
     panel_toggle(
         PanelToggleState {
             id,
-            label: panel.toggle_label(),
+            label: command.title,
             icon,
             enabled,
             selected,
-            tooltip: panel.toggle_tooltip(),
+            tooltip: command.title,
             toggle,
         },
         theme,

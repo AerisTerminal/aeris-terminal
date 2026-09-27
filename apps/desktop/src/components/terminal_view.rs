@@ -1,4 +1,6 @@
 use super::*;
+use aeris_desktop::command_registry::{self, CommandId};
+use gpui::Focusable;
 
 fn active_header_state(
     workspace: &WorkspaceSurface,
@@ -30,6 +32,8 @@ fn active_header_state(
         .with_chart_controls(chart_has_market_data),
         order_book_visible: workspace.side_panels.contains(SidePanel::OrderBook),
         watchlist_visible: workspace.side_panels.contains(SidePanel::Watchlist),
+        context_visible: workspace.context_panel_visible,
+        chart_link_group: workspace.chart_link_group,
         connection_state: workspace
             .connection_state
             .unwrap_or(FeedConnectionState::Disconnected),
@@ -38,13 +42,315 @@ fn active_header_state(
     }
 }
 
+fn due_economic_event_triggers(
+    snapshot: &ContextSnapshot,
+    maximum_lead_seconds: u32,
+    observed_unix_nanos: i64,
+    prior_dispatches: &BTreeMap<String, i64>,
+    redispatch_interval_nanos: i64,
+    event_grace_nanos: i64,
+    limit: usize,
+) -> Vec<(String, aeris_trading_runtime::EconomicEventRiskTrigger)> {
+    let lead_nanos = i64::from(maximum_lead_seconds).saturating_mul(1_000_000_000);
+    snapshot
+        .economic_events
+        .iter()
+        .take(128)
+        .filter_map(|event| {
+            let scheduled = event.scheduled_unix_seconds.checked_mul(1_000_000_000)?;
+            if observed_unix_nanos < scheduled.saturating_sub(lead_nanos)
+                || observed_unix_nanos > scheduled.saturating_add(event_grace_nanos)
+            {
+                return None;
+            }
+            let key = format!("{}:{scheduled}", event.id);
+            if prior_dispatches.get(&key).is_some_and(|last| {
+                observed_unix_nanos.saturating_sub(*last) < redispatch_interval_nanos
+            }) {
+                return None;
+            }
+            let importance = match event.importance {
+                aeris_context_runtime::EventImportance::Low => {
+                    aeris_trading_runtime::EconomicEventRiskImportance::Low
+                }
+                aeris_context_runtime::EventImportance::Medium => {
+                    aeris_trading_runtime::EconomicEventRiskImportance::Medium
+                }
+                aeris_context_runtime::EventImportance::High => {
+                    aeris_trading_runtime::EconomicEventRiskImportance::High
+                }
+            };
+            let source_release_unix_nanos = event
+                .provenance
+                .release_unix_seconds
+                .checked_mul(1_000_000_000)?;
+            Some((
+                key,
+                aeris_trading_runtime::EconomicEventRiskTrigger {
+                    event_id: event.id.clone(),
+                    title: event.title.clone(),
+                    source: event.provenance.source.label().to_string(),
+                    importance,
+                    scheduled_unix_nanos: scheduled,
+                    source_release_unix_nanos,
+                    observed_unix_nanos,
+                },
+            ))
+        })
+        .take(limit)
+        .collect()
+}
+
 impl TerminalApp {
+    fn open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_palette_input.update(cx, |input, input_cx| {
+            input.set_value("", window, input_cx);
+            input.focus_handle(input_cx).focus(window, input_cx);
+        });
+        self.command_palette_open = true;
+        self.command_palette_selection = 0;
+        self.command_palette_message = None;
+        cx.notify();
+    }
+
+    pub(super) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
+        self.command_palette_message = None;
+        self.chrome_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn execute_registered_command(
+        &mut self,
+        command: CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let surface = self.active_surface();
+        match command {
+            CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
+            CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
+            CommandId::ToggleOrderBook => surface.update(cx, WorkspaceSurface::toggle_order_book),
+            CommandId::ToggleWatchlist => surface.update(cx, WorkspaceSurface::toggle_watchlist),
+            CommandId::ChartCandles
+            | CommandId::ChartBars
+            | CommandId::ChartLine
+            | CommandId::ChartArea
+            | CommandId::ChartBaseline
+            | CommandId::ChartFootprint => {
+                let chart_type = match command {
+                    CommandId::ChartCandles => ChartType::Candles,
+                    CommandId::ChartBars => ChartType::Bars,
+                    CommandId::ChartLine => ChartType::Line,
+                    CommandId::ChartArea => ChartType::Area,
+                    CommandId::ChartBaseline => ChartType::Baseline,
+                    CommandId::ChartFootprint => ChartType::Footprint,
+                    _ => unreachable!(),
+                };
+                surface.update(cx, |surface, surface_cx| {
+                    surface.set_chart_type(chart_type, surface_cx);
+                });
+            }
+            CommandId::Interval1Minute
+            | CommandId::Interval5Minutes
+            | CommandId::Interval15Minutes
+            | CommandId::Interval1Hour
+            | CommandId::Interval1Day => {
+                let interval = match command {
+                    CommandId::Interval1Minute => ChartInterval::Minute1,
+                    CommandId::Interval5Minutes => ChartInterval::Minute5,
+                    CommandId::Interval15Minutes => ChartInterval::Minute15,
+                    CommandId::Interval1Hour => ChartInterval::Hour1,
+                    CommandId::Interval1Day => ChartInterval::Day1,
+                    _ => unreachable!(),
+                };
+                surface.update(cx, |surface, surface_cx| {
+                    surface.select_interval(interval, surface_cx);
+                });
+            }
+            CommandId::NewWorkspace => self.new_workspace(&NewWorkspace, window, cx),
+            CommandId::SplitHorizontal => {
+                self.split_pane_horizontal(&SplitPaneHorizontal, window, cx);
+            }
+            CommandId::SplitVertical => self.split_pane_vertical(&SplitPaneVertical, window, cx),
+            CommandId::BuyMarket => {
+                self.chrome_focus.focus(window, cx);
+                self.trading_buy_market(&TradingBuyMarket, window, cx);
+            }
+            CommandId::SellMarket => {
+                self.chrome_focus.focus(window, cx);
+                self.trading_sell_market(&TradingSellMarket, window, cx);
+            }
+            CommandId::CancelAll => {
+                self.chrome_focus.focus(window, cx);
+                self.trading_cancel_all(&TradingCancelAll, window, cx);
+            }
+            CommandId::FlattenAccount => {
+                self.chrome_focus.focus(window, cx);
+                self.trading_flatten_account(&TradingFlattenAccount, window, cx);
+            }
+            CommandId::KillSwitch => {
+                self.chrome_focus.focus(window, cx);
+                self.trading_kill_switch(&TradingKillSwitch, window, cx);
+            }
+        }
+    }
+
+    pub(super) fn execute_command_palette_query(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = self.command_palette_input.read(cx).value().to_string();
+        if let Some(mnemonic) = command_registry::parse_mnemonic(&query) {
+            if let Some(chart) = mnemonic.chart {
+                self.execute_registered_command(chart, window, cx);
+            }
+            if let Some(interval) = mnemonic.interval {
+                self.execute_registered_command(interval, window, cx);
+            }
+            if let Some(symbol) = mnemonic.symbol {
+                let dispatched = self.active_surface().update(cx, |surface, surface_cx| {
+                    surface.search_mnemonic_symbol(symbol, window, surface_cx)
+                });
+                if !dispatched {
+                    self.command_palette_message =
+                        Some("Symbol search could not start".to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+            self.close_command_palette(window, cx);
+            return;
+        }
+        let results = command_registry::search(&query, 8);
+        let Some(command) = results
+            .get(self.command_palette_selection)
+            .map(|spec| spec.id)
+        else {
+            self.command_palette_message = Some("No matching command".to_string());
+            cx.notify();
+            return;
+        };
+        self.execute_registered_command(command, window, cx);
+        self.close_command_palette(window, cx);
+    }
+
+    fn dispatch_due_economic_event_rules(&mut self, cx: &mut Context<Self>) {
+        const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+        const REDISPATCH_INTERVAL_NANOS: i64 = 15_000_000_000;
+        const EVENT_GRACE_NANOS: i64 = 15 * 60 * 1_000_000_000;
+        const MAXIMUM_EVENTS_PER_CHECK: usize = 16;
+        let now_instant = Instant::now();
+        if now_instant < self.next_event_risk_check {
+            return;
+        }
+        self.next_event_risk_check = now_instant + CHECK_INTERVAL;
+        let surface = self.active_surface();
+        let (snapshot, maximum_lead_seconds, observation) = {
+            let surface = surface.read(cx);
+            let maximum_lead_seconds = surface
+                .trading_pnl
+                .risk_profiles
+                .iter()
+                .filter(|profile| profile.enabled)
+                .filter_map(|profile| profile.economic_event_rule)
+                .map(|rule| rule.lead_seconds)
+                .max()
+                .unwrap_or(0);
+            let observation = surface
+                .order_book
+                .read(cx)
+                .frame()
+                .and_then(aeris_desktop::trading::prepare_flatten)
+                .map(|(_, observation)| observation);
+            (
+                Arc::clone(&surface.context_snapshot),
+                maximum_lead_seconds,
+                observation,
+            )
+        };
+        if maximum_lead_seconds == 0 {
+            return;
+        }
+        let observed_unix_nanos = aeris_desktop::trading::now();
+        self.event_risk_dispatches.retain(|_, scheduled| {
+            scheduled
+                .checked_add(EVENT_GRACE_NANOS)
+                .is_some_and(|expires| expires >= observed_unix_nanos)
+        });
+        let due = due_economic_event_triggers(
+            &snapshot,
+            maximum_lead_seconds,
+            observed_unix_nanos,
+            &self.event_risk_dispatches,
+            REDISPATCH_INTERVAL_NANOS,
+            EVENT_GRACE_NANOS,
+            MAXIMUM_EVENTS_PER_CHECK,
+        );
+        let Some(service) = aeris_desktop::trading::handle() else {
+            return;
+        };
+        for (key, _) in &due {
+            self.event_risk_dispatches
+                .insert(key.clone(), observed_unix_nanos);
+        }
+        if due.is_empty() {
+            return;
+        }
+        let dispatch = cx.background_executor().spawn(async move {
+            for (_, event) in due {
+                service.apply_economic_event_risk(event, observation.clone())?;
+            }
+            Ok::<_, String>(())
+        });
+        cx.spawn(async move |_, cx| {
+            let result = dispatch.await;
+            surface.update(cx, |surface, surface_cx| {
+                surface.economic_event_risk_message = result
+                    .err()
+                    .map(|error| format!("Economic-event risk action unavailable: {error}"));
+                surface_cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn absorb_render_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.absorb_pane_activate_requests(cx);
         self.absorb_watchlist_requests(cx);
         self.absorb_chart_context_menu_requests(cx);
         self.absorb_study_settings_requests(window, cx);
         self.absorb_study_remove_requests(cx);
+    }
+
+    fn prepare_terminal_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_market_wake_listener(window, cx);
+        self.schedule_market_frame(window, cx);
+        self.reconcile_active_drags(cx);
+        self.track_window_activation(window, cx);
+        self.absorb_render_requests(window, cx);
+        self.synchronize_linked_charts(cx);
+        self.dispatch_due_economic_event_rules(cx);
+        self.sync_market_summaries(cx);
+    }
+
+    fn rendered_command_palette(&self, terminal: &Entity<Self>, cx: &App) -> Option<AnyElement> {
+        self.command_palette_open.then(|| {
+            command_palette_layer(
+                terminal,
+                &self.command_palette_input,
+                self.command_palette_selection,
+                self.command_palette_message.clone(),
+                &self.theme,
+                cx,
+            )
+        })
     }
 
     fn rendered_title_bar(
@@ -98,12 +404,7 @@ impl TerminalApp {
 
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.start_market_wake_listener(window, cx);
-        self.schedule_market_frame(window, cx);
-        self.reconcile_active_drags(cx);
-        self.track_window_activation(window, cx);
-        self.absorb_render_requests(window, cx);
-        self.sync_market_summaries(cx);
+        self.prepare_terminal_frame(window, cx);
         let terminal = cx.entity();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
@@ -135,6 +436,7 @@ impl Render for TerminalApp {
         );
         let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
         let about_dialog = self.rendered_about_dialog(&terminal);
+        let command_palette = self.rendered_command_palette(&terminal, cx);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
         let header = self.rendered_header(&terminal, &active, cx);
         let watchlist = self.watchlist_panel_state(cx);
@@ -178,6 +480,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::trading_cancel_all))
             .on_action(cx.listener(Self::trading_flatten_account))
             .on_action(cx.listener(Self::trading_kill_switch))
+            .on_action(cx.listener(Self::open_command_palette))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
             .font_family(aeris_design_system::platform_font_family())
@@ -196,6 +499,7 @@ impl Render for TerminalApp {
             .children(settings_menu)
             .children(account_menu)
             .children(about_dialog)
+            .children(command_palette)
     }
 }
 
@@ -872,7 +1176,27 @@ fn terminal_shell_root(
     cx: &mut App,
 ) -> Entity<TerminalApp> {
     let terminal_lifecycle = lifecycle.clone();
-    let terminal = cx.new(move |cx| TerminalApp::new(init, terminal_lifecycle, cx));
+    let command_palette_input = cx.new(|input_cx| {
+        InputState::new(window, input_cx).placeholder("Search commands or type ES footprint 5m")
+    });
+    let terminal_input = command_palette_input.clone();
+    let terminal = cx.new(move |cx| TerminalApp::new(init, terminal_lifecycle, terminal_input, cx));
+    let palette_terminal = terminal.clone();
+    window
+        .subscribe(
+            &command_palette_input,
+            cx,
+            move |_, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    palette_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.command_palette_selection = 0;
+                        terminal.command_palette_message = None;
+                        terminal_cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
     let closing_terminal = terminal.clone();
     window.on_window_should_close(cx, move |_, cx| {
         closing_terminal.update(cx, |terminal, cx| {

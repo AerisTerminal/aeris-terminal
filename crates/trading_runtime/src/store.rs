@@ -1,5 +1,6 @@
 use super::{
-    BracketStrategyTemplate, BracketTarget, BreakEvenRule, DisciplineState, ManagedBracket,
+    BracketStrategyTemplate, BracketTarget, BreakEvenRule, DisciplineState,
+    EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskRule, ManagedBracket,
     ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, RiskLock, RiskProfile,
     RiskRuleState, RiskTradeCycleState, SessionBias, SessionChecklistItem, SessionPlan,
     SessionPlanLevel, TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
@@ -24,7 +25,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 13;
+pub(super) const SCHEMA_VERSION: u32 = 14;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -156,6 +157,15 @@ const MIGRATION_V13: &str = "ALTER TABLE risk_trade_cycles
      post_loss_quantity_units INTEGER, post_loss_quantity_scale INTEGER,
      last_stop_fill_unix_nanos INTEGER, cooldown_until_unix_nanos INTEGER
  ) STRICT;";
+const MIGRATION_V14: &str = "ALTER TABLE risk_profiles ADD COLUMN event_action TEXT;
+ ALTER TABLE risk_profiles ADD COLUMN event_minimum_importance INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN event_lead_seconds INTEGER;
+ CREATE TABLE economic_event_risk_actions (
+     account_id TEXT NOT NULL REFERENCES accounts(id), event_id TEXT NOT NULL,
+     profile_version INTEGER NOT NULL, action TEXT NOT NULL,
+     applied_unix_nanos INTEGER NOT NULL,
+     PRIMARY KEY(account_id, event_id, profile_version)
+ ) STRICT;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -181,6 +191,81 @@ pub(super) struct StoredState {
 pub(super) struct TradingStore {
     connection: Connection,
     retention: TradingRetention,
+}
+
+struct StoredRiskProfile {
+    account: String,
+    profile_id: String,
+    version: u32,
+    daily_loss_units: i64,
+    daily_loss_scale: u8,
+    trailing_units: Option<i64>,
+    trailing_scale: Option<u8>,
+    trailing_mode: String,
+    max_contracts_units: i64,
+    max_contracts_scale: u8,
+    consistency_percent: Option<u8>,
+    restricted_until_unix_nanos: Option<i64>,
+    enabled: i64,
+    session_start_unix_nanos: i64,
+    session_start_realized_units: i64,
+    session_start_realized_scale: u8,
+    event_action: Option<String>,
+    event_minimum_importance: Option<i64>,
+    event_lead_seconds: Option<u32>,
+}
+
+fn decode_risk_profile(
+    stored: StoredRiskProfile,
+) -> Result<(TradingAccountId, RiskProfile), String> {
+    let account_id =
+        TradingAccountId::try_new(stored.account).map_err(|error| error.to_string())?;
+    let daily_loss_limit = FixedPoint::try_new(stored.daily_loss_units, stored.daily_loss_scale)
+        .map_err(|error| error.to_string())?;
+    let trailing_drawdown = stored
+        .trailing_units
+        .zip(stored.trailing_scale)
+        .map(|(units, scale)| FixedPoint::try_new(units, scale))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let max_contracts = FixedPoint::try_new(stored.max_contracts_units, stored.max_contracts_scale)
+        .map_err(|error| error.to_string())?;
+    let session_start_realized_pnl = FixedPoint::try_new(
+        stored.session_start_realized_units,
+        stored.session_start_realized_scale,
+    )
+    .map_err(|error| error.to_string())?;
+    let economic_event_rule = stored
+        .event_action
+        .zip(stored.event_minimum_importance)
+        .zip(stored.event_lead_seconds)
+        .map(
+            |((action, importance), lead_seconds)| -> Result<_, String> {
+                Ok(EconomicEventRiskRule {
+                    action: EconomicEventRiskAction::parse(&action)?,
+                    minimum_importance: EconomicEventRiskImportance::from_i64(importance)?,
+                    lead_seconds,
+                })
+            },
+        )
+        .transpose()?;
+    let profile = RiskProfile {
+        account_id: account_id.clone(),
+        profile_id: stored.profile_id,
+        version: stored.version,
+        daily_loss_limit,
+        trailing_drawdown,
+        trailing_mode: TrailingDrawdownMode::parse(&stored.trailing_mode)?,
+        max_contracts,
+        consistency_max_single_trade_percent: stored.consistency_percent,
+        restricted_until_unix_nanos: stored.restricted_until_unix_nanos,
+        economic_event_rule,
+        enabled: stored.enabled != 0,
+        session_start_unix_nanos: stored.session_start_unix_nanos,
+        session_start_realized_pnl,
+    };
+    profile.validate()?;
+    Ok((account_id, profile))
 }
 
 #[derive(Clone, Copy)]
@@ -290,7 +375,11 @@ impl TradingStore {
             version = 12;
         }
         if version == 12 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V13)?;
+            self.apply_migration(13, MIGRATION_V13)?;
+            version = 13;
+        }
+        if version == 13 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V14)?;
         }
         Ok(())
     }
@@ -535,8 +624,9 @@ impl TradingStore {
                     daily_loss_scale, trailing_units, trailing_scale, trailing_mode,
                     max_contracts_units, max_contracts_scale, consistency_percent,
                     restricted_until_unix_nanos, enabled, session_start_unix_nanos,
-                    session_start_realized_units, session_start_realized_scale)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    session_start_realized_units, session_start_realized_scale, event_action,
+                    event_minimum_importance, event_lead_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                  ON CONFLICT(account_id) DO UPDATE SET profile_id=excluded.profile_id,
                     version=excluded.version, daily_loss_units=excluded.daily_loss_units,
                     daily_loss_scale=excluded.daily_loss_scale, trailing_units=excluded.trailing_units,
@@ -548,7 +638,10 @@ impl TradingStore {
                     enabled=excluded.enabled,
                     session_start_unix_nanos=excluded.session_start_unix_nanos,
                     session_start_realized_units=excluded.session_start_realized_units,
-                    session_start_realized_scale=excluded.session_start_realized_scale",
+                    session_start_realized_scale=excluded.session_start_realized_scale,
+                    event_action=excluded.event_action,
+                    event_minimum_importance=excluded.event_minimum_importance,
+                    event_lead_seconds=excluded.event_lead_seconds",
                 params![
                     profile.account_id.as_str(),
                     profile.profile_id,
@@ -566,6 +659,11 @@ impl TradingStore {
                     profile.session_start_unix_nanos,
                     profile.session_start_realized_pnl.units(),
                     profile.session_start_realized_pnl.scale(),
+                    profile.economic_event_rule.map(|rule| rule.action.as_str()),
+                    profile
+                        .economic_event_rule
+                        .map(|rule| rule.minimum_importance.as_i64()),
+                    profile.economic_event_rule.map(|rule| rule.lead_seconds),
                 ],
             )
             .map_err(database_error)?;
@@ -718,6 +816,56 @@ impl TradingStore {
         Ok(())
     }
 
+    pub(super) fn economic_event_action_exists(
+        &self,
+        account_id: &TradingAccountId,
+        event_id: &str,
+        profile_version: u32,
+    ) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM economic_event_risk_actions
+                 WHERE account_id = ?1 AND event_id = ?2 AND profile_version = ?3)",
+                params![account_id.as_str(), event_id, profile_version],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(database_error)
+    }
+
+    pub(super) fn put_economic_event_action(
+        &mut self,
+        account_id: &TradingAccountId,
+        event_id: &str,
+        profile_version: u32,
+        action: EconomicEventRiskAction,
+        applied_unix_nanos: i64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO economic_event_risk_actions(account_id, event_id, profile_version,
+                    action, applied_unix_nanos) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    account_id.as_str(),
+                    event_id,
+                    profile_version,
+                    action.as_str(),
+                    applied_unix_nanos,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM economic_event_risk_actions WHERE rowid IN (
+                    SELECT rowid FROM economic_event_risk_actions
+                    ORDER BY applied_unix_nanos DESC LIMIT -1 OFFSET ?1
+                 )",
+                [usize_to_i64(self.retention.maximum_user_records_per_kind)?],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)
+    }
+
     pub(super) fn delete_risk_lock(&self, account_id: &TradingAccountId) -> Result<(), String> {
         self.connection
             .execute(
@@ -745,80 +893,38 @@ impl TradingStore {
                     trailing_units, trailing_scale, trailing_mode, max_contracts_units,
                     max_contracts_scale, consistency_percent, restricted_until_unix_nanos, enabled,
                     session_start_unix_nanos, session_start_realized_units,
-                    session_start_realized_scale
+                    session_start_realized_scale, event_action, event_minimum_importance,
+                    event_lead_seconds
                  FROM risk_profiles ORDER BY account_id",
             )
             .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, u32>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, u8>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, Option<u8>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, u8>(9)?,
-                    row.get::<_, Option<u8>>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, i64>(13)?,
-                    row.get::<_, i64>(14)?,
-                    row.get::<_, u8>(15)?,
-                ))
+                Ok(StoredRiskProfile {
+                    account: row.get(0)?,
+                    profile_id: row.get(1)?,
+                    version: row.get(2)?,
+                    daily_loss_units: row.get(3)?,
+                    daily_loss_scale: row.get(4)?,
+                    trailing_units: row.get(5)?,
+                    trailing_scale: row.get(6)?,
+                    trailing_mode: row.get(7)?,
+                    max_contracts_units: row.get(8)?,
+                    max_contracts_scale: row.get(9)?,
+                    consistency_percent: row.get(10)?,
+                    restricted_until_unix_nanos: row.get(11)?,
+                    enabled: row.get(12)?,
+                    session_start_unix_nanos: row.get(13)?,
+                    session_start_realized_units: row.get(14)?,
+                    session_start_realized_scale: row.get(15)?,
+                    event_action: row.get(16)?,
+                    event_minimum_importance: row.get(17)?,
+                    event_lead_seconds: row.get(18)?,
+                })
             })
             .map_err(database_error)?;
         for row in rows {
-            let (
-                account,
-                profile_id,
-                version,
-                daily_loss_units,
-                daily_loss_scale,
-                trailing_units,
-                trailing_scale,
-                trailing_mode,
-                max_contracts_units,
-                max_contracts_scale,
-                consistency_percent,
-                restricted_until_unix_nanos,
-                enabled,
-                session_start_unix_nanos,
-                session_start_realized_units,
-                session_start_realized_scale,
-            ) = row.map_err(database_error)?;
-            let account_id =
-                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
-            let daily_loss_limit = FixedPoint::try_new(daily_loss_units, daily_loss_scale)
-                .map_err(|error| error.to_string())?;
-            let trailing_drawdown = trailing_units
-                .zip(trailing_scale)
-                .map(|(units, scale)| FixedPoint::try_new(units, scale))
-                .transpose()
-                .map_err(|error| error.to_string())?;
-            let max_contracts = FixedPoint::try_new(max_contracts_units, max_contracts_scale)
-                .map_err(|error| error.to_string())?;
-            let session_start_realized_pnl =
-                FixedPoint::try_new(session_start_realized_units, session_start_realized_scale)
-                    .map_err(|error| error.to_string())?;
-            let profile = RiskProfile {
-                account_id: account_id.clone(),
-                profile_id,
-                version,
-                daily_loss_limit,
-                trailing_drawdown,
-                trailing_mode: TrailingDrawdownMode::parse(&trailing_mode)?,
-                max_contracts,
-                consistency_max_single_trade_percent: consistency_percent,
-                restricted_until_unix_nanos,
-                enabled: enabled != 0,
-                session_start_unix_nanos,
-                session_start_realized_pnl,
-            };
-            profile.validate()?;
+            let (account_id, profile) = decode_risk_profile(row.map_err(database_error)?)?;
             result.insert(account_id, profile);
         }
         Ok(result)
@@ -1510,6 +1616,15 @@ impl TradingStore {
                 )
                 .map_err(database_error)?;
         }
+        transaction
+            .execute(
+                "DELETE FROM economic_event_risk_actions WHERE rowid IN (
+                    SELECT rowid FROM economic_event_risk_actions
+                    ORDER BY applied_unix_nanos DESC LIMIT -1 OFFSET ?1
+                 )",
+                [usize_to_i64(self.retention.maximum_user_records_per_kind)?],
+            )
+            .map_err(database_error)?;
         let working_orders = transaction
             .query_row(
                 "SELECT COUNT(*) FROM orders WHERE status IN

@@ -27,7 +27,9 @@ pub use plan::{
 };
 use risk::RiskTradeCycleState;
 pub use risk::{
-    RiskEvaluation, RiskLock, RiskMeter, RiskProfile, RiskRuleState, TrailingDrawdownMode,
+    EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskOutcome,
+    EconomicEventRiskRule, EconomicEventRiskTrigger, RiskEvaluation, RiskLock, RiskMeter,
+    RiskProfile, RiskRuleState, TrailingDrawdownMode,
 };
 use std::{
     collections::BTreeMap,
@@ -306,6 +308,11 @@ enum Command {
         Reply<Vec<Fill>>,
     ),
     FlattenAll(SimulatedMarketObservation, Reply<Vec<Fill>>),
+    ApplyEconomicEventRisk(
+        EconomicEventRiskTrigger,
+        Option<SimulatedMarketObservation>,
+        Reply<EconomicEventRiskOutcome>,
+    ),
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
@@ -568,6 +575,20 @@ impl TradingService {
         self.request(|reply| Command::FlattenAll(observation, reply))
     }
 
+    /// Applies every enabled account event rule once, durably fenced by event/profile identity.
+    /// A flatten rule remains pending until the caller supplies a valid market observation.
+    ///
+    /// # Errors
+    /// Returns an error when the trigger or observation is invalid, a complete flatten cannot be
+    /// priced, the runtime is overloaded, or durable rule state cannot be written.
+    pub fn apply_economic_event_risk(
+        &self,
+        event: EconomicEventRiskTrigger,
+        observation: Option<SimulatedMarketObservation>,
+    ) -> Result<EconomicEventRiskOutcome, String> {
+        self.request(|reply| Command::ApplyEconomicEventRisk(event, observation, reply))
+    }
+
     /// Applies one market observation and returns fills produced by the simulated venue.
     ///
     /// # Errors
@@ -735,6 +756,10 @@ impl Coordinator {
                 }
                 Command::FlattenAll(observation, reply) => {
                     let _ = reply.send(self.flatten_all(&observation));
+                }
+                Command::ApplyEconomicEventRisk(event, observation, reply) => {
+                    let _ =
+                        reply.send(self.apply_economic_event_risk(&event, observation.as_ref()));
                 }
                 Command::Observe(observation, reply) => {
                     let _ = reply.send(self.observe_market(&observation));
@@ -2825,6 +2850,96 @@ impl Coordinator {
         self.enforce_memory_retention();
         self.bump_revision()?;
         Ok(fills)
+    }
+
+    fn apply_economic_event_risk(
+        &mut self,
+        event: &EconomicEventRiskTrigger,
+        observation: Option<&SimulatedMarketObservation>,
+    ) -> Result<EconomicEventRiskOutcome, String> {
+        const EVENT_GRACE_NANOS: i64 = 15 * 60 * 1_000_000_000;
+        event.validate()?;
+        let profiles = self
+            .state
+            .risk_profiles
+            .values()
+            .filter_map(|profile| {
+                profile
+                    .enabled
+                    .then_some(profile.economic_event_rule)
+                    .flatten()
+                    .map(|rule| (profile.clone(), rule))
+            })
+            .collect::<Vec<_>>();
+        let mut outcome = EconomicEventRiskOutcome::default();
+        for (profile, rule) in profiles {
+            if event.importance < rule.minimum_importance {
+                continue;
+            }
+            let lead_nanos = i64::from(rule.lead_seconds)
+                .checked_mul(1_000_000_000)
+                .ok_or_else(|| "economic event lead time overflowed".to_string())?;
+            let window_start = event
+                .scheduled_unix_nanos
+                .checked_sub(lead_nanos)
+                .ok_or_else(|| "economic event lead window overflowed".to_string())?;
+            let window_end = event
+                .scheduled_unix_nanos
+                .checked_add(EVENT_GRACE_NANOS)
+                .ok_or_else(|| "economic event grace window overflowed".to_string())?;
+            if !(window_start..=window_end).contains(&event.observed_unix_nanos)
+                || self.store.economic_event_action_exists(
+                    &profile.account_id,
+                    &event.event_id,
+                    profile.version,
+                )?
+            {
+                continue;
+            }
+            match rule.action {
+                EconomicEventRiskAction::Lock => {
+                    let reason = format!("Economic event lock: {} ({})", event.title, event.source);
+                    self.kill_switch(
+                        Some(&profile.account_id),
+                        &reason,
+                        event.observed_unix_nanos,
+                    )?;
+                    outcome.locked_accounts += 1;
+                }
+                EconomicEventRiskAction::Flatten => {
+                    let observation = observation.ok_or_else(|| {
+                        "economic event flatten requires a current market observation".to_string()
+                    })?;
+                    if self
+                        .state
+                        .positions
+                        .iter()
+                        .any(|((account_id, instrument_id), position)| {
+                            account_id == &profile.account_id
+                                && position.net_quantity.units() != 0
+                                && instrument_id != &observation.instrument_id
+                        })
+                    {
+                        return Err(
+                            "economic event flatten requires current observations for every open instrument"
+                                .to_string(),
+                        );
+                    }
+                    outcome
+                        .fills
+                        .extend(self.flatten_account(&profile.account_id, observation)?);
+                    outcome.flattened_accounts += 1;
+                }
+            }
+            self.store.put_economic_event_action(
+                &profile.account_id,
+                &event.event_id,
+                profile.version,
+                rule.action,
+                event.observed_unix_nanos,
+            )?;
+        }
+        Ok(outcome)
     }
 
     fn flatten_all(

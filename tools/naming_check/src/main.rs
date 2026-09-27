@@ -817,6 +817,8 @@ mod tests {
             }
         }
         let expected = BTreeSet::from([
+            "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
+            "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
             "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),
@@ -2074,6 +2076,64 @@ mod tests {
             manifest("AGENTS.md")
                 .contains("`trading_runtime` is the single in-process owner of broker accounts")
         );
+    }
+    #[test]
+    fn context_data_remains_one_bounded_runtime_owned_boundary() {
+        assert!(manifest("Cargo.toml").contains("crates/context_runtime"));
+        let runtime_manifest = manifest("crates/context_runtime/Cargo.toml");
+        for required in [
+            "aeris_platform_runtime",
+            "ureq.workspace",
+            "zeroize.workspace",
+        ] {
+            assert!(
+                runtime_manifest.contains(required),
+                "context owner lost {required}"
+            );
+        }
+        for forbidden in [
+            "aeris_market_runtime",
+            "aeris_trading_runtime",
+            "aeris_account_runtime",
+            "gpui",
+        ] {
+            assert!(
+                !runtime_manifest.contains(forbidden),
+                "context owner depends in the wrong direction on {forbidden}"
+            );
+        }
+        let runtime = manifest("crates/context_runtime/src/lib.rs");
+        for contract in [
+            "pub struct ContextService",
+            "mpsc::sync_channel(COMMAND_CAPACITY)",
+            "aeris-context-runtime",
+            "MAXIMUM_CONTEXT_ITEMS",
+            "NativeContextCredentialStore",
+            "Zeroizing",
+        ] {
+            assert!(runtime.contains(contract), "context owner lost {contract}");
+        }
+        let desktop_manifest = manifest("apps/desktop/Cargo.toml");
+        assert!(desktop_manifest.contains("aeris_context_runtime"));
+        assert!(!desktop_manifest.contains("ureq"));
+        assert!(
+            manifest("apps/desktop/src/desktop/lifecycle.rs")
+                .contains("context.shutdown(Duration::from_secs(2))")
+        );
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        for endpoint in [
+            "api.eia.gov",
+            "api.stlouisfed.org",
+            "api.weather.gov",
+            "publicreporting.cftc.gov",
+            "api.nass.usda.gov",
+            "api.fas.usda.gov",
+        ] {
+            assert!(
+                !desktop.contains(endpoint),
+                "desktop bypasses context ownership through {endpoint}"
+            );
+        }
     }
     #[test]
     fn account_contracts_remain_plain_bounded_values() {

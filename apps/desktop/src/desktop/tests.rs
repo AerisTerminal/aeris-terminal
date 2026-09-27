@@ -1827,15 +1827,22 @@ fn price_axis_menu_compacts_labels_and_lines_into_flyouts() {
 
 #[test]
 fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
-    assert_eq!(SidePanel::OrderBook.toggle_label(), "Order Book");
     assert_eq!(SidePanel::OrderBook.title(), "Order Book");
     assert_eq!(
-        SidePanel::OrderBook.toggle_tooltip(),
-        "Toggle read-only order book"
+        aeris_desktop::command_registry::command(
+            aeris_desktop::command_registry::CommandId::ToggleOrderBook
+        )
+        .title,
+        "Toggle order book"
     );
-    assert_eq!(SidePanel::Watchlist.toggle_label(), "Watchlist");
     assert_eq!(SidePanel::Watchlist.title(), "Watchlist");
-    assert_eq!(SidePanel::Watchlist.toggle_tooltip(), "Toggle watchlist");
+    assert_eq!(
+        aeris_desktop::command_registry::command(
+            aeris_desktop::command_registry::CommandId::ToggleWatchlist
+        )
+        .title,
+        "Toggle watchlist"
+    );
 }
 
 #[test]

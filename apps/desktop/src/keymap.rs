@@ -1,27 +1,5 @@
+pub use crate::command_registry::CommandId as KeymapAction;
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Product actions registered by the one desktop keymap owner.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum KeymapAction {
-    BuyMarket,
-    SellMarket,
-    CancelAll,
-    FlattenAccount,
-    KillSwitch,
-}
-
-impl KeymapAction {
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::BuyMarket => "buy_market",
-            Self::SellMarket => "sell_market",
-            Self::CancelAll => "cancel_all",
-            Self::FlattenAccount => "flatten_account",
-            Self::KillSwitch => "kill_switch",
-        }
-    }
-}
 
 /// Normalized keyboard chord used for conflict detection before GPUI binding.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -80,14 +58,19 @@ impl KeymapOwner {
     /// Returns an error if a default binding is malformed, duplicated, or reserved.
     pub fn defaults() -> Result<Self, String> {
         let mut owner = Self::default();
-        for (chord, action) in [
-            ("ctrl-b", KeymapAction::BuyMarket),
-            ("ctrl-s", KeymapAction::SellMarket),
-            ("ctrl-shift-x", KeymapAction::CancelAll),
-            ("ctrl-shift-f", KeymapAction::FlattenAccount),
-            ("ctrl-shift-k", KeymapAction::KillSwitch),
-        ] {
-            owner.bind(chord, action)?;
+        for spec in crate::command_registry::COMMANDS {
+            if let Some(chord) = spec.chord
+                && matches!(
+                    spec.id,
+                    KeymapAction::BuyMarket
+                        | KeymapAction::SellMarket
+                        | KeymapAction::CancelAll
+                        | KeymapAction::FlattenAccount
+                        | KeymapAction::KillSwitch
+                )
+            {
+                owner.bind(chord, spec.id)?;
+            }
         }
         owner.validate_against_reserved(&[
             "f11",

@@ -20,17 +20,22 @@ pub(super) struct DesktopLifecycle {
     terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
     shutdown_started: Rc<Cell<bool>>,
     trading: aeris_trading_runtime::TradingService,
+    context: Option<aeris_context_runtime::ContextService>,
 }
 
 impl DesktopLifecycle {
     #[must_use]
-    pub(super) fn new(trading: aeris_trading_runtime::TradingService) -> Self {
+    pub(super) fn new(
+        trading: aeris_trading_runtime::TradingService,
+        context: aeris_context_runtime::ContextService,
+    ) -> Self {
         Self {
             retirements: Rc::new(RefCell::new(Vec::new())),
             workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
             trading,
+            context: Some(context),
         }
     }
 
@@ -42,6 +47,23 @@ impl DesktopLifecycle {
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
             trading: super::tests::test_trading_service(),
+            context: None,
+        }
+    }
+
+    pub(super) fn context_view(&self) -> Option<aeris_context_runtime::ContextView> {
+        self.context
+            .as_ref()
+            .map(aeris_context_runtime::ContextService::view)
+    }
+
+    pub(super) fn context_service(&self) -> Option<aeris_context_runtime::ContextService> {
+        self.context.clone()
+    }
+
+    pub(super) fn set_context_publication_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(context) = &self.context {
+            context.set_publication_wake(wake);
         }
     }
 
@@ -84,6 +106,7 @@ impl DesktopLifecycle {
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
         let trading = self.trading.clone();
+        let context = self.context.clone();
         Some(cx.background_executor().spawn(async move {
             let mut account_failure = None;
             let mut failure = None;
@@ -118,6 +141,11 @@ impl DesktopLifecycle {
                 }
             }
             if let Err(error) = trading.shutdown(Duration::from_secs(2)) {
+                failure = Some(error);
+            }
+            if let Some(context) = context
+                && let Err(error) = context.shutdown(Duration::from_secs(2))
+            {
                 failure = Some(error);
             }
             if let Some(detail) = account_failure {

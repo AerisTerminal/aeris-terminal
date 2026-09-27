@@ -193,6 +193,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aeris_context_runtime"
+version = "0.2.3"
+dependencies = [
+ "aeris_platform_runtime",
+ "chrono",
+ "serde",
+ "serde_json",
+ "ureq",
+ "zeroize",
+]
+
+[[package]]
 name = "aeris_contracts"
 version = "0.2.3"
 dependencies = [
@@ -210,6 +222,7 @@ dependencies = [
  "aeris_account_runtime",
  "aeris_application",
  "aeris_chart_integration",
+ "aeris_context_runtime",
  "aeris_contracts",
  "aeris_design_system",
  "aeris_instruments",
@@ -221,6 +234,7 @@ dependencies = [
  "aeris_terminal_ui",
  "aeris_trading",
  "aeris_trading_runtime",
+ "chrono",
  "embed-resource",
  "getrandom 0.4.3",
  "gpui",

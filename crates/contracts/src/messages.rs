@@ -297,6 +297,18 @@ pub struct WorkspaceChartState {
     /// tape itself remains runtime-owned and is never persisted here.
     #[prost(message, optional, tag = "10")]
     pub order_flow: Option<WorkspaceOrderFlowSettingsState>,
+    /// Host-owned bottom context-panel visibility.
+    #[prost(bool, tag = "11")]
+    pub context_panel_visible: bool,
+    /// Stable host-owned context-panel tab identifier.
+    #[prost(uint32, tag = "12")]
+    pub context_panel_tab: u32,
+    /// Zero disables linking; 1-4 identify bounded desktop link groups A-D.
+    #[prost(uint32, tag = "13")]
+    pub chart_link_group: u32,
+    /// Bit 0 synchronizes crosshairs and bit 1 synchronizes visible time ranges.
+    #[prost(uint32, tag = "14")]
+    pub chart_link_flags: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]

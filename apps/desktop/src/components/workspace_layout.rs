@@ -318,21 +318,31 @@ pub(super) fn workspace_market_area(
             theme,
         })
     });
+    let context = workspace_context_panel(surface, active_surface, theme);
     let grid = div()
-        .h_full()
         .flex_1()
         .min_w_0()
+        .min_h_0()
         .when(!drawing_toolbar_collapsed, |grid| {
             grid.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
         })
         .child(grid);
+    let center = div()
+        .h_full()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .child(grid)
+        .children(context);
     div()
         .relative()
         .flex()
         .size_full()
         .overflow_hidden()
         .track_focus(&chrome_focus)
-        .child(grid)
+        .child(center)
         .children(side_panel)
         .when(drawing_toolbar_collapsed, |market| {
             market.child(drawing_toolbar_expander(
@@ -351,6 +361,26 @@ pub(super) fn workspace_market_area(
             ))
         })
         .children(price_alert_dialog)
+}
+
+fn workspace_context_panel(
+    surface: &WorkspaceSurface,
+    entity: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    surface.context_panel_visible.then(|| {
+        context_panel(ContextPanelState {
+            app: entity.clone(),
+            snapshot: &surface.context_snapshot,
+            tab: surface.context_panel_tab,
+            scroll: surface.scrolls.context.clone(),
+            credential_dialog: surface.context_credential_dialog.as_ref(),
+            credential_message: surface.context_credential_message.as_deref(),
+            risk_message: surface.economic_event_risk_message.as_deref(),
+            theme,
+        })
+        .into_any_element()
+    })
 }
 
 fn project_working_order_markers(
@@ -467,6 +497,7 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
                 state.trading_pnl.fills = snapshot.fills;
                 state.trading_pnl.positions = snapshot.position_pnl;
                 state.trading_pnl.risk_meters = snapshot.risk_meters;
+                state.trading_pnl.risk_profiles = snapshot.risk_profiles;
                 state.trading_pnl.risk_locks = snapshot.risk_locks;
                 state.trading_pnl.session_plans = snapshot.session_plans;
                 state.trading_pnl.session_reviews = snapshot.session_adherence_reviews;

@@ -8,6 +8,111 @@ pub enum TrailingDrawdownMode {
     EndOfDay,
 }
 
+/// Rule action applied by the trading owner before an official economic event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EconomicEventRiskAction {
+    Lock,
+    Flatten,
+}
+
+impl EconomicEventRiskAction {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::Flatten => "flatten",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "lock" => Ok(Self::Lock),
+            "flatten" => Ok(Self::Flatten),
+            _ => Err("economic event risk action is invalid".to_string()),
+        }
+    }
+}
+
+/// Minimum released-event importance understood by the provider-neutral trading owner.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EconomicEventRiskImportance {
+    Low,
+    Medium,
+    High,
+}
+
+impl EconomicEventRiskImportance {
+    pub(super) const fn as_i64(self) -> i64 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+
+    pub(super) fn from_i64(value: i64) -> Result<Self, String> {
+        match value {
+            0 => Ok(Self::Low),
+            1 => Ok(Self::Medium),
+            2 => Ok(Self::High),
+            _ => Err("economic event importance is invalid".to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EconomicEventRiskRule {
+    pub action: EconomicEventRiskAction,
+    pub minimum_importance: EconomicEventRiskImportance,
+    pub lead_seconds: u32,
+}
+
+impl EconomicEventRiskRule {
+    fn validate(self) -> Result<(), String> {
+        if !(30..=86_400).contains(&self.lead_seconds) {
+            return Err("economic event risk lead time must be 30..=86400 seconds".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Released context event presented to the trading owner for deterministic rule evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EconomicEventRiskTrigger {
+    pub event_id: String,
+    pub title: String,
+    pub source: String,
+    pub importance: EconomicEventRiskImportance,
+    pub scheduled_unix_nanos: i64,
+    pub source_release_unix_nanos: i64,
+    pub observed_unix_nanos: i64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EconomicEventRiskOutcome {
+    pub locked_accounts: usize,
+    pub flattened_accounts: usize,
+    pub fills: Vec<aeris_trading::Fill>,
+}
+
+impl EconomicEventRiskTrigger {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.event_id.trim().is_empty()
+            || self.event_id.len() > 256
+            || self.title.trim().is_empty()
+            || self.title.len() > 256
+            || self.source.trim().is_empty()
+            || self.source.len() > 64
+            || self.scheduled_unix_nanos <= 0
+            || self.source_release_unix_nanos <= 0
+            || self.source_release_unix_nanos > self.observed_unix_nanos
+            || self.observed_unix_nanos <= 0
+        {
+            return Err("economic event risk trigger is invalid".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl TrailingDrawdownMode {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
@@ -40,6 +145,7 @@ pub struct RiskProfile {
     pub max_contracts: FixedPoint,
     pub consistency_max_single_trade_percent: Option<u8>,
     pub restricted_until_unix_nanos: Option<i64>,
+    pub economic_event_rule: Option<EconomicEventRiskRule>,
     pub enabled: bool,
 }
 
@@ -81,6 +187,9 @@ impl RiskProfile {
             .is_some_and(|timestamp| timestamp <= 0)
         {
             return Err("risk profile restriction timestamp must be positive".to_string());
+        }
+        if let Some(rule) = self.economic_event_rule {
+            rule.validate()?;
         }
         Ok(())
     }

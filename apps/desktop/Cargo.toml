@@ -17,6 +17,7 @@ aeris_design_system = { path = "../../crates/ui/design_system" }
 aeris_instruments = { path = "../../crates/domain/instruments" }
 aeris_market_data = { path = "../../crates/domain/market_data" }
 aeris_market_runtime = { path = "../../crates/market_runtime" }
+aeris_context_runtime = { path = "../../crates/context_runtime" }
 aeris_trading = { path = "../../crates/domain/trading" }
 aeris_trading_runtime = { path = "../../crates/trading_runtime" }
 aeris_study_sdk = { path = "../../crates/study_sdk" }
@@ -29,6 +30,7 @@ serde_json.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 aeris_terminal_ui = { path = "../../crates/ui/terminal_ui" }
+chrono.workspace = true
 gpui.workspace = true
 gpui-base.workspace = true
 gpui_platform.workspace = true

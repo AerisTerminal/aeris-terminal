@@ -1184,6 +1184,38 @@ pub struct NucleusChartView {
 }
 
 impl NucleusChartView {
+    /// Drains bounded, user-originated crosshair/time-range events for a host link coordinator.
+    pub fn take_sync_events(&mut self) -> Vec<aeris_charts_engine::ChartSyncEvent> {
+        self.engine.take_sync_events()
+    }
+
+    /// Applies a coordinator-originated event without echoing it back to the coordinator.
+    pub fn apply_external_sync_event(
+        &mut self,
+        kind: &aeris_charts_engine::ChartSyncEventKind,
+    ) -> bool {
+        let changed = match kind {
+            aeris_charts_engine::ChartSyncEventKind::Crosshair { position } => {
+                self.engine.apply_external_crosshair(Some(*position))
+            }
+            aeris_charts_engine::ChartSyncEventKind::ClearCrosshair => {
+                self.engine.apply_external_crosshair(None)
+            }
+            aeris_charts_engine::ChartSyncEventKind::VisibleTimeRange { range } => {
+                let before = self.engine.visible_time_range();
+                self.engine.set_visible_time_range(range.from, range.to);
+                // The engine deliberately publishes local range changes. A host-applied
+                // change is fenced here so it cannot bounce around a link group.
+                let _ = self.engine.take_sync_events();
+                before != self.engine.visible_time_range()
+            }
+        };
+        if changed {
+            self.layout_dirty = true;
+        }
+        changed
+    }
+
     /// Creates an empty Nucleus-owned surface without inventing market data.
     #[must_use]
     pub fn empty() -> Self {

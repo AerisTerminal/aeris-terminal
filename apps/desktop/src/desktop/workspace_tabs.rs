@@ -99,10 +99,12 @@ impl TerminalApp {
     pub(super) fn new(
         init: TerminalShellInit,
         lifecycle: DesktopLifecycle,
+        command_palette_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut workspaces = init.workspaces;
         let market_frame_wake = UiWake::default();
+        lifecycle.set_context_publication_wake(market_frame_wake.callback());
         for workspace in &mut workspaces {
             workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
         }
@@ -186,6 +188,13 @@ impl TerminalApp {
             account_menu_anchor: None,
             profile_refresh_on_activation: false,
             about_dialog_open: false,
+            command_palette_input,
+            command_palette_open: false,
+            command_palette_selection: 0,
+            command_palette_message: None,
+            linked_sync_revisions: BTreeMap::new(),
+            event_risk_dispatches: BTreeMap::new(),
+            next_event_risk_check: Instant::now(),
             updater: DesktopUpdater::new().ok(),
             update_restart_persistence_pending: false,
             chart_chrome: init.chart_chrome,
@@ -197,6 +206,77 @@ impl TerminalApp {
     pub(super) fn active_surface(&self) -> Entity<WorkspaceSurface> {
         let workspace = &self.workspaces[self.active];
         workspace.panes[workspace.active_pane].surface.clone()
+    }
+
+    pub(super) fn synchronize_linked_charts(&mut self, cx: &mut Context<Self>) {
+        const MAXIMUM_SYNC_SOURCES: usize = 64;
+        let mut pending = Vec::new();
+        let mut pending_instruments = Vec::new();
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                let (group, events, instrument) = pane.surface.update(cx, |surface, _| {
+                    (
+                        surface.chart_link_group,
+                        surface.take_chart_sync_events(),
+                        surface.take_linked_instrument(),
+                    )
+                });
+                if group == 0 {
+                    continue;
+                }
+                if let Some(instrument) = instrument {
+                    pending_instruments.push((workspace.id, pane.id, group, instrument));
+                }
+                pending.extend(
+                    events
+                        .into_iter()
+                        .map(|event| (workspace.id, pane.id, group, event)),
+                );
+            }
+        }
+        for (source_workspace, source_pane, group, instrument) in pending_instruments {
+            for workspace in &self.workspaces {
+                for pane in &workspace.panes {
+                    if (workspace.id, pane.id) == (source_workspace, source_pane) {
+                        continue;
+                    }
+                    pane.surface.update(cx, |surface, surface_cx| {
+                        if surface.chart_link_group == group {
+                            surface.apply_linked_instrument(&instrument, surface_cx);
+                        }
+                    });
+                }
+            }
+        }
+        for (source_workspace, source_pane, group, event) in pending {
+            if self
+                .linked_sync_revisions
+                .get(&event.source)
+                .is_some_and(|revision| *revision >= event.revision)
+            {
+                continue;
+            }
+            if !self.linked_sync_revisions.contains_key(&event.source)
+                && self.linked_sync_revisions.len() == MAXIMUM_SYNC_SOURCES
+                && let Some(oldest) = self.linked_sync_revisions.keys().next().cloned()
+            {
+                self.linked_sync_revisions.remove(&oldest);
+            }
+            self.linked_sync_revisions
+                .insert(event.source.clone(), event.revision);
+            for workspace in &self.workspaces {
+                for pane in &workspace.panes {
+                    if (workspace.id, pane.id) == (source_workspace, source_pane) {
+                        continue;
+                    }
+                    pane.surface.update(cx, |surface, surface_cx| {
+                        if surface.chart_link_group == group {
+                            surface.apply_linked_chart_event(&event.kind, surface_cx);
+                        }
+                    });
+                }
+            }
+        }
     }
 
     fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
@@ -2273,6 +2353,28 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.command_palette_open {
+            match event.keystroke.key.as_str() {
+                "escape" => self.close_command_palette(window, cx),
+                "up" => {
+                    self.command_palette_selection =
+                        self.command_palette_selection.saturating_sub(1);
+                    cx.notify();
+                }
+                "down" => {
+                    let query = self.command_palette_input.read(cx).value();
+                    let count = aeris_desktop::command_registry::search(&query, 8).len();
+                    self.command_palette_selection =
+                        (self.command_palette_selection + 1).min(count.saturating_sub(1));
+                    cx.notify();
+                }
+                "enter" => self.execute_command_palette_query(window, cx),
+                _ => return,
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key.eq_ignore_ascii_case("escape") && self.about_dialog_open {
             self.close_about_dialog(cx);
             cx.stop_propagation();

@@ -7,6 +7,7 @@ members = [
     "crates/account_runtime",
     "crates/market_engine",
     "crates/market_runtime",
+    "crates/context_runtime",
     "crates/trading_runtime",
     "crates/study_sdk",
     "crates/domain/account",
@@ -34,6 +35,7 @@ version = "0.2.3"
 
 [workspace.dependencies]
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 display-info = "=0.5.9"
 embed-resource = "=3.0.11"
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
