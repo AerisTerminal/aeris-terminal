@@ -32,7 +32,8 @@ pub(super) struct Snapshot {
     pub(super) bars: Vec<aeris_market_data::MarketBar>,
     /// The period that was still open when the page was served.
     pub(super) forming: Option<FormingBar>,
-    pub(super) handoff_boundary_unix_nanos: i64,
+    /// Absent only for a confirmed-empty older-history range.
+    pub(super) handoff_boundary_unix_nanos: Option<i64>,
 }
 
 /// Fetches one bounded candle page for a demanded Hyperliquid series.
@@ -45,7 +46,7 @@ pub(super) struct Snapshot {
 /// # Errors
 ///
 /// Returns an error for inconsistent identity, unsupported intervals,
-/// transport or decode failure, empty pages, or cancellation.
+/// transport or decode failure, an empty initial page, or cancellation.
 pub(super) fn fetch(
     client: &mut aeris_hyperliquid_market_adapter::HyperliquidHttpClient,
     series: &BarSeriesKey,
@@ -81,6 +82,7 @@ pub(super) fn fetch(
         .as_millis();
     let now_millis =
         i64::try_from(now_millis).map_err(|_| "system clock is invalid".to_string())?;
+    let ranged = window.range.is_some();
     let (start_millis, end_millis) = match window.range {
         Some(range) => history_window_for_range(series.period, maximum_bars, range, now_millis)?,
         None => history_window(series.period, maximum_bars, now_millis)?,
@@ -101,7 +103,31 @@ pub(super) fn fetch(
     if stop.load(Ordering::Acquire) {
         return Err("Hyperliquid history request was cancelled".to_string());
     }
+    snapshot_from_page(page, ranged)
+}
+
+/// Converts one decoded candle page into a canonical history snapshot.
+fn snapshot_from_page(
+    page: aeris_hyperliquid_market_adapter::HyperliquidCandlePage,
+    ranged: bool,
+) -> Result<Snapshot, String> {
+    let price_scale = u8::try_from(NORMALIZED_PRICE_SCALE)
+        .map_err(|_| "Hyperliquid price scale is invalid".to_string())?;
+    let quantity_scale = u8::try_from(NORMALIZED_QUANTITY_SCALE)
+        .map_err(|_| "Hyperliquid quantity scale is invalid".to_string())?;
     if page.bars.is_empty() && page.forming.is_none() {
+        // An older range with no candles is before the listing or beyond the
+        // provider's most-recent-candle limit. Neither changes on retry, so it
+        // is a confirmed-empty range; only an empty initial page is a failure.
+        if ranged {
+            return Ok(Snapshot {
+                price_scale,
+                quantity_scale,
+                bars: Vec::new(),
+                forming: None,
+                handoff_boundary_unix_nanos: None,
+            });
+        }
         return Err("Hyperliquid returned no historical bars".to_string());
     }
     let handoff_boundary_unix_nanos = page
@@ -109,13 +135,11 @@ pub(super) fn fetch(
         .and_then(|millis| millis.checked_mul(NANOS_PER_MILLI))
         .ok_or_else(|| "Hyperliquid history handoff is missing".to_string())?;
     Ok(Snapshot {
-        price_scale: u8::try_from(NORMALIZED_PRICE_SCALE)
-            .map_err(|_| "Hyperliquid price scale is invalid".to_string())?,
-        quantity_scale: u8::try_from(NORMALIZED_QUANTITY_SCALE)
-            .map_err(|_| "Hyperliquid quantity scale is invalid".to_string())?,
+        price_scale,
+        quantity_scale,
         bars: page.bars,
         forming: page.forming.map(|bar| FormingBar { bar, trades: None }),
-        handoff_boundary_unix_nanos,
+        handoff_boundary_unix_nanos: Some(handoff_boundary_unix_nanos),
     })
 }
 
@@ -184,6 +208,22 @@ fn history_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_older_range_is_confirmed_empty_but_empty_initial_page_fails() {
+        let empty = || aeris_hyperliquid_market_adapter::HyperliquidCandlePage {
+            bars: Vec::new(),
+            forming: None,
+            handoff_close_millis: None,
+        };
+        let confirmed = snapshot_from_page(empty(), true)
+            .expect("an older range before the available history is confirmed empty");
+        assert!(confirmed.bars.is_empty());
+        assert!(confirmed.forming.is_none());
+        assert_eq!(confirmed.handoff_boundary_unix_nanos, None);
+
+        assert!(snapshot_from_page(empty(), false).is_err());
+    }
 
     #[test]
     fn history_window_accounts_for_inclusive_endpoints() {

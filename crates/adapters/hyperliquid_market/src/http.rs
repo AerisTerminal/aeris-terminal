@@ -2,7 +2,8 @@
 //!
 //! All calls are unauthenticated `POST /info` requests with explicit byte
 //! and time bounds. The engine runs them on bounded background workers with
-//! cancellation; this module only builds and executes one request at a time.
+//! cancellation. Only the catalog bundle fans out, over a fixed number of
+//! scoped threads, because its independent metadata calls dominate startup.
 
 use std::io::Read;
 use std::sync::OnceLock;
@@ -145,32 +146,35 @@ fn dex_name(entry: &serde_json::Value) -> Result<Option<String>, String> {
 /// Returns an error when metadata is unavailable or the catalog is
 /// malformed or empty.
 pub fn fetch_meta_bundle(config: HyperliquidHttpConfig) -> Result<HyperliquidCatalog, String> {
-    let core = parse_info_bytes(&post_info(
-        &serde_json::json!({"type": "metaAndAssetCtxs"}),
+    let mut roots = fetch_info_concurrently(
+        &[
+            serde_json::json!({"type": "metaAndAssetCtxs"}),
+            serde_json::json!({"type": "spotMetaAndAssetCtxs"}),
+            serde_json::json!({"type": "perpDexs"}),
+        ],
         config,
-    )?)?;
-    let spot = parse_info_bytes(&post_info(
-        &serde_json::json!({"type": "spotMetaAndAssetCtxs"}),
-        config,
-    )?)?;
-    let dexs = parse_info_bytes(&post_info(
-        &serde_json::json!({"type": "perpDexs"}),
-        config,
-    )?)?;
-    let mut builder_metas = Vec::new();
+    )?
+    .into_iter();
+    let (Some(core), Some(spot), Some(dexs)) = (roots.next(), roots.next(), roots.next()) else {
+        return Err("hyperliquid metadata bundle is incomplete".to_string());
+    };
     let entries = dexs
         .as_array()
         .ok_or_else(|| "hyperliquid perp dexes are malformed".to_string())?;
-    for entry in entries.iter().take(32) {
-        let Some(dex) = dex_name(entry)? else {
-            continue;
-        };
-        let meta = parse_info_bytes(&post_info(
-            &serde_json::json!({"type": "metaAndAssetCtxs", "dex": dex}),
-            config,
-        )?)?;
-        builder_metas.push((dex, meta));
+    let mut dex_names = Vec::new();
+    for entry in entries.iter().take(MAXIMUM_BUILDER_DEXES) {
+        if let Some(dex) = dex_name(entry)? {
+            dex_names.push(dex);
+        }
     }
+    let builder_requests = dex_names
+        .iter()
+        .map(|dex| serde_json::json!({"type": "metaAndAssetCtxs", "dex": dex}))
+        .collect::<Vec<_>>();
+    let builder_metas = dex_names
+        .into_iter()
+        .zip(fetch_info_concurrently(&builder_requests, config)?)
+        .collect::<Vec<_>>();
     let core_meta = combined_meta(&core)?;
     let spot_meta = combined_meta(&spot)?;
     let builder_meta_only = builder_metas
@@ -189,6 +193,41 @@ pub fn fetch_meta_bundle(config: HyperliquidHttpConfig) -> Result<HyperliquidCat
         apply_asset_contexts(&mut catalog, combined)?;
     }
     Ok(catalog)
+}
+
+/// Builder perp dexes included in one catalog bundle.
+const MAXIMUM_BUILDER_DEXES: usize = 32;
+/// Concurrent metadata requests; a bundle is at most two dependent rounds of these.
+const MAXIMUM_CONCURRENT_INFO_REQUESTS: usize = 8;
+
+/// Executes independent info requests on bounded scoped threads, preserving order.
+///
+/// The first failure fails the whole batch, matching the all-or-nothing bundle.
+fn fetch_info_concurrently(
+    bodies: &[serde_json::Value],
+    config: HyperliquidHttpConfig,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut responses = Vec::with_capacity(bodies.len());
+    for chunk in bodies.chunks(MAXIMUM_CONCURRENT_INFO_REQUESTS) {
+        let results = std::thread::scope(|scope| {
+            let workers = chunk
+                .iter()
+                .map(|body| scope.spawn(move || parse_info_bytes(&post_info(body, config)?)))
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|_| Err("hyperliquid info worker panicked".to_string()))
+                })
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            responses.push(result?);
+        }
+    }
+    Ok(responses)
 }
 
 fn combined_meta(response: &serde_json::Value) -> Result<serde_json::Value, String> {

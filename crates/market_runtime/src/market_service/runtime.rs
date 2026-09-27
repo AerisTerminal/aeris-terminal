@@ -77,7 +77,7 @@ impl HistorySource for LiveHyperliquidHistory {
             quantity_scale: snapshot.quantity_scale,
             bars: snapshot.bars,
             forming: snapshot.forming,
-            handoff_boundary_unix_nanos: Some(snapshot.handoff_boundary_unix_nanos),
+            handoff_boundary_unix_nanos: snapshot.handoff_boundary_unix_nanos,
         })
     }
 }
