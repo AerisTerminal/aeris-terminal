@@ -699,6 +699,8 @@ use runtime::{retire_endpoint, run_workers};
 
 #[path = "engine_market_worker/selection_commands.rs"]
 mod selection_commands;
+#[cfg(test)]
+use selection_commands::retain_depth_visibility;
 use selection_commands::{
     handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
     process_command, set_resource_class,
@@ -735,6 +737,29 @@ mod tests {
         assert!(streams.contains(MarketStream::Depth));
         assert!(streams.contains(MarketStream::Trades));
         assert!(chart_streams(false).contains(MarketStream::Trades));
+    }
+
+    #[test]
+    fn depth_visibility_during_startup_resolution_is_retained_for_the_resolved_demand() {
+        let product = default_hyperliquid_product();
+        let (_pane, mut record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 5);
+        record.startup_resolution = Some(StartupResolution::Searching(product));
+
+        // The order book opens while the restored instrument is still being
+        // re-resolved: no demand exists yet, so nothing is pushed to the runtime,
+        // but the intent must survive until `begin_endpoint_demand` installs it.
+        assert_eq!(
+            retain_depth_visibility(&mut record.endpoint, true, true),
+            None
+        );
+        assert!(record.endpoint.depth_visible);
+        assert!(chart_streams(record.endpoint.depth_visible).contains(MarketStream::Depth));
+
+        let streams = retain_depth_visibility(&mut record.endpoint, false, false)
+            .expect("installed demand receives the new streams");
+        assert!(!streams.contains(MarketStream::Depth));
+        assert!(!record.endpoint.depth_visible);
     }
 
     fn handle_rithmic_catalog_event(

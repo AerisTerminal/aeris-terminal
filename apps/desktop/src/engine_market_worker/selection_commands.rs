@@ -5,9 +5,9 @@ use super::{
     InstallProviderInstrument, MarketPriceAlert, MarketRuntimeEvent, MarketService,
     MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
     RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, STARTUP_CATALOG_COMMAND_GENERATION,
-    SearchProviderInstruments, SelectProviderInstrument, StartupResolution, WorkerEndpoint,
-    cancel_pending_recovery, chart_streams, provider_display_name, retire_endpoint, send_recovery,
-    series_key,
+    SearchProviderInstruments, SelectProviderInstrument, StartupResolution, StreamRequirements,
+    WorkerEndpoint, cancel_pending_recovery, chart_streams, provider_display_name, retire_endpoint,
+    send_recovery, series_key,
 };
 
 pub(super) fn fence_recovery_command(
@@ -263,6 +263,39 @@ fn is_retired_startup_catalog_event(event: &MarketRuntimeEvent) -> bool {
         _ => false,
     }
 }
+/// Records the desired order-book depth visibility and applies it to installed demand.
+///
+/// Visibility is endpoint intent, so it is retained even when no series demand
+/// exists yet: while the startup instrument is still resolving against the live
+/// catalog, `begin_endpoint_demand` installs demand with the retained streams.
+pub(super) fn set_depth_visible(
+    market: &MarketService,
+    client_id: u64,
+    endpoint: &mut WorkerEndpoint,
+    startup_resolving: bool,
+    visible: bool,
+) -> Result<(), String> {
+    let Some(streams) = retain_depth_visibility(endpoint, startup_resolving, visible) else {
+        return Ok(());
+    };
+    market.set_streams(
+        client_id,
+        endpoint.consumer_id,
+        endpoint.active_generation,
+        streams,
+    )
+}
+
+/// Retains the visibility and returns the streams to apply when demand is installed.
+pub(super) fn retain_depth_visibility(
+    endpoint: &mut WorkerEndpoint,
+    startup_resolving: bool,
+    visible: bool,
+) -> Option<StreamRequirements> {
+    endpoint.depth_visible = visible;
+    (endpoint.active_generation != 0 && !startup_resolving).then(|| chart_streams(visible))
+}
+
 pub(super) fn process_command(
     market: &MarketService,
     client_id: u64,
@@ -322,18 +355,13 @@ pub(super) fn process_command(
             }
             Ok(())
         }
-        MarketWorkerCommand::DepthVisible(visible) => {
-            endpoint.depth_visible = visible;
-            if endpoint.active_generation == 0 {
-                return Ok(());
-            }
-            market.set_streams(
-                client_id,
-                endpoint.consumer_id,
-                endpoint.active_generation,
-                chart_streams(visible),
-            )
-        }
+        MarketWorkerCommand::DepthVisible(visible) => set_depth_visible(
+            market,
+            client_id,
+            endpoint,
+            startup_resolution.is_some(),
+            visible,
+        ),
         MarketWorkerCommand::ResourceClass(resource_class) => {
             set_resource_class(market, client_id, endpoint, resource_class)
         }

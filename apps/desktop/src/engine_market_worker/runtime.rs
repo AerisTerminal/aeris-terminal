@@ -72,7 +72,7 @@ fn run_attached_workers(
         for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
             process_pending_foreground_selection(market, client_id, record);
             process_pending_resource_class(market, client_id, &mut record.endpoint);
-            process_pending_depth_visibility(market, client_id, &mut record.endpoint);
+            process_pending_depth_visibility(market, client_id, record);
             process_pending_price_alerts(market, client_id, record);
             match record.endpoint.commands.try_recv() {
                 Ok(command) => {
@@ -298,31 +298,26 @@ fn process_pending_resource_class(
 fn process_pending_depth_visibility(
     market: &MarketService,
     client_id: u64,
-    endpoint: &mut WorkerEndpoint,
+    record: &mut EndpointRecord,
 ) {
-    let pending = endpoint
+    let pending = record
+        .endpoint
         .pending_depth_visible
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     let Some(visible) = pending else { return };
-    if endpoint.active_generation == 0 {
-        endpoint.depth_visible = visible;
-        return;
-    }
-    match market.set_streams(
+    if let Err(error) = super::selection_commands::set_depth_visible(
+        market,
         client_id,
-        endpoint.consumer_id,
-        endpoint.active_generation,
-        super::chart_streams(visible),
+        &mut record.endpoint,
+        record.startup_resolution.is_some(),
+        visible,
     ) {
-        Ok(()) => endpoint.depth_visible = visible,
-        Err(error) => {
-            let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message: error,
-            });
-        }
+        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Error,
+            message: error,
+        });
     }
 }
 
