@@ -1,4 +1,4 @@
-# Aeris Trading Platform Feature Roadmap
+# Aeris Trading Roadmap
 
 This roadmap defines the trading features that turn Aeris Terminal from a market-data and charting
 terminal into a complete local-first futures trading platform. Its product goal is:
