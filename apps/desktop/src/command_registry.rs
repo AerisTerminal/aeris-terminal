@@ -73,20 +73,20 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: CommandId::ToggleContext,
-        title: "Toggle market context",
-        keywords: "calendar macro energy cot agriculture fundamentals",
+        title: "Market context",
+        keywords: "toggle show hide calendar macro energy cot agriculture fundamentals",
         chord: None,
     },
     CommandSpec {
         id: CommandId::ToggleOrderBook,
-        title: "Toggle order book",
-        keywords: "dom depth",
+        title: "Order book",
+        keywords: "toggle show hide dom depth",
         chord: None,
     },
     CommandSpec {
         id: CommandId::ToggleWatchlist,
-        title: "Toggle watchlist",
-        keywords: "symbols",
+        title: "Watchlist",
+        keywords: "toggle show hide symbols",
         chord: None,
     },
     CommandSpec {
@@ -302,10 +302,7 @@ mod tests {
         assert!(COMMANDS.iter().all(|spec| ids.insert(spec.id)));
         assert_eq!(ids, CommandId::ALL.into_iter().collect());
         assert_eq!(search("chart", 3).len(), 3);
-        assert_eq!(
-            command(CommandId::ToggleContext).title,
-            "Toggle market context"
-        );
+        assert_eq!(command(CommandId::ToggleContext).title, "Market context");
     }
 
     #[test]

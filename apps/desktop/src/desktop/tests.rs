@@ -1827,7 +1827,7 @@ fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
             aeris_desktop::command_registry::CommandId::ToggleOrderBook
         )
         .title,
-        "Toggle order book"
+        "Order book"
     );
     assert_eq!(SidePanel::Watchlist.title(), "Watchlist");
     assert_eq!(
@@ -1835,7 +1835,7 @@ fn side_panel_controls_keep_stable_labels_and_explicit_destinations() {
             aeris_desktop::command_registry::CommandId::ToggleWatchlist
         )
         .title,
-        "Toggle watchlist"
+        "Watchlist"
     );
 }
 
