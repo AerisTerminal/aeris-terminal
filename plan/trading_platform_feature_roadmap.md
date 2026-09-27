@@ -186,7 +186,14 @@ provider identity separately from local ingestion order. Footprint display mode 
 overlays persist with the workspace; time and sales applies bounded size, side and price filters;
 and completed fixed-time bars drive a generation-fenced bullish or bearish delta-divergence alert.
 
-The Aeris Charts B3 revision is pinned at `dcb86c8`. A release workload applied 65,536 trades in
+Correction (2026-09-27): the B3 revision `dcb86c8` drew large-trade bubbles as arrows beside the
+bar, and Hyperliquid instruments carried no price increment, so footprint rows fell back to a
+`1e-8` step that never reached cell-text resolution and printed eight-decimal footprint prices.
+Aeris Charts `5d9bd60` draws price-centred, volume-scaled bubbles and retains the newest prints;
+the Hyperliquid adapter now publishes the documented significant-figure increment near the catalog
+mark price. The terminal pins `5d9bd60`.
+
+The Aeris Charts B3 revision was originally pinned at `dcb86c8`. A release workload applied 65,536 trades in
 512 bursts through the order-flow projection and chart frame builder in 467.5322 ms total; the
 largest measured frame was 2.2571 ms against the 16 ms budget. The workspace broad gate and the
 public Hyperliquid desktop/runtime path passed before the batch was committed.
