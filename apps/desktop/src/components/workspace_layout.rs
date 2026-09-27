@@ -319,23 +319,7 @@ pub(super) fn workspace_market_area(
         })
     });
     let context = workspace_context_panel(surface, active_surface, theme);
-    let grid = div()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .when(!drawing_toolbar_collapsed, |grid| {
-            grid.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
-        })
-        .child(grid);
-    let center = div()
-        .h_full()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .child(grid)
-        .children(context);
+    let center = workspace_center_column(grid, context, drawing_toolbar_collapsed, active_surface);
     div()
         .relative()
         .flex()
@@ -363,6 +347,40 @@ pub(super) fn workspace_market_area(
         .children(price_alert_dialog)
 }
 
+/// Chart grid plus the bottom context panel, inset past the drawing toolbar.
+fn workspace_center_column(
+    grid: impl IntoElement,
+    context: Option<AnyElement>,
+    drawing_toolbar_collapsed: bool,
+    active_surface: &Entity<WorkspaceSurface>,
+) -> Div {
+    let grid = div().flex_1().min_w_0().min_h_0().child(grid);
+    let context_drag_app = active_surface.clone();
+    // The drawing toolbar overlays the left edge of the whole center column, so
+    // the chart grid and the context panel beneath it share one inset.
+    div()
+        .h_full()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .when(!drawing_toolbar_collapsed, |center| {
+            center.ml(px(chart_chrome::CHART_CHROME_HEIGHT))
+        })
+        .child(grid)
+        .children(context)
+        .on_drag_move::<ContextPanelHeightDrag>(move |event, _, cx| {
+            let bottom = f32::from(event.bounds.bottom());
+            let available =
+                f32::from(event.bounds.size.height) - CONTEXT_PANEL_MINIMUM_CHART_HEIGHT;
+            let height = (bottom - f32::from(event.event.position.y)).min(available);
+            context_drag_app.update(cx, |surface, surface_cx| {
+                surface.set_context_panel_height(height, surface_cx);
+            });
+        })
+}
+
 fn workspace_context_panel(
     surface: &WorkspaceSurface,
     entity: &Entity<WorkspaceSurface>,
@@ -371,6 +389,7 @@ fn workspace_context_panel(
     surface.context_panel_visible.then(|| {
         context_panel(ContextPanelState {
             app: entity.clone(),
+            height: surface.context_panel_height,
             snapshot: &surface.context_snapshot,
             tab: surface.context_panel_tab,
             scroll: surface.scrolls.context.clone(),

@@ -19,6 +19,14 @@ fn restored_context_and_link_state(
     (context_visible, context_tab, link_group, link_flags)
 }
 
+pub(super) fn restored_context_panel_height(restored: Option<&WorkspaceChartState>) -> f32 {
+    restored
+        .map(|state| state.context_panel_height)
+        .filter(|height| *height != 0)
+        .and_then(|height| height.to_f32())
+        .map_or(CONTEXT_PANEL_INITIAL_HEIGHT, clamped_context_panel_height)
+}
+
 struct WorkspaceSurfaceInitialization {
     startup: TerminalStartupState,
     market_worker: MarketDataWorker,
@@ -40,6 +48,7 @@ struct WorkspaceSurfaceInitialization {
     context_snapshot: Arc<ContextSnapshot>,
     context_panel_visible: bool,
     context_panel_tab: ContextPanelTab,
+    context_panel_height: f32,
     chart_link_group: u8,
     chart_link_flags: u8,
     chrome_focus: FocusHandle,
@@ -58,6 +67,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         context_snapshot: init.context_snapshot,
         context_panel_visible: init.context_panel_visible,
         context_panel_tab: init.context_panel_tab,
+        context_panel_height: init.context_panel_height,
         context_credential_dialog: None,
         context_credential_message: None,
         economic_event_risk_message: None,
@@ -1280,6 +1290,7 @@ impl WorkspaceSurface {
             order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
             context_panel_visible: self.context_panel_visible,
             context_panel_tab: self.context_panel_tab.persisted(),
+            context_panel_height: self.context_panel_height.round().to_u32().unwrap_or(0),
             chart_link_group: u32::from(self.chart_link_group),
             chart_link_flags: u32::from(self.chart_link_flags),
         })
@@ -1388,6 +1399,7 @@ impl WorkspaceSurface {
         );
         let (context_panel_visible, context_panel_tab, chart_link_group, chart_link_flags) =
             restored_context_and_link_state(restored_chart_state.as_ref());
+        let context_panel_height = restored_context_panel_height(restored_chart_state.as_ref());
         workspace_surface_from_initialization(WorkspaceSurfaceInitialization {
             startup: startup_state,
             market_worker,
@@ -1409,6 +1421,7 @@ impl WorkspaceSurface {
             context_snapshot,
             context_panel_visible,
             context_panel_tab,
+            context_panel_height,
             chart_link_group,
             chart_link_flags,
             chrome_focus: cx.focus_handle().tab_stop(true),
@@ -4074,6 +4087,15 @@ impl WorkspaceSurface {
         self.context_panel_visible = visible;
         self.chart_persistence_dirty = true;
         cx.notify();
+    }
+
+    pub(super) fn set_context_panel_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        let height = clamped_context_panel_height(height);
+        if (height - self.context_panel_height).abs() > f32::EPSILON {
+            self.context_panel_height = height;
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
     }
 
     pub(super) fn set_context_panel_tab(&mut self, tab: ContextPanelTab, cx: &mut Context<Self>) {

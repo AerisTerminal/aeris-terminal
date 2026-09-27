@@ -1,7 +1,8 @@
 use super::{
-    AerisTheme, AnyElement, ContextCredentialDialogState, ContextPanelTab, ContextSnapshot, Entity,
-    InteractiveElement, IntoElement, ParentElement, Role, ScrollHandle, StatefulInteractiveElement,
-    Styled, WorkspaceSurface, div, gpui_color, platform_tabular_numerals, px,
+    AerisTheme, AnyElement, Context, ContextCredentialDialogState, ContextPanelTab,
+    ContextSnapshot, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    ScrollHandle, StatefulInteractiveElement, Styled, Window, WorkspaceSurface,
+    chrome_close_button, chrome_tooltip, div, gpui_color, platform_tabular_numerals, px,
 };
 use crate::desktop::native_ui::input::Input;
 use aeris_context_runtime::{
@@ -9,13 +10,25 @@ use aeris_context_runtime::{
     SourceAvailability,
 };
 use chrono::{TimeZone, Utc};
-use gpui::{Div, prelude::FluentBuilder as _};
+use gpui::{AppContext as _, Div, prelude::FluentBuilder as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CONTEXT_PANEL_HEIGHT: f32 = 248.0;
+const CONTEXT_PANEL_HEADER_HEIGHT: f32 = 30.0;
+const CONTEXT_PANEL_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
+
+/// Drag payload for resizing the bottom context panel from its top edge.
+#[derive(Clone)]
+pub(super) struct ContextPanelHeightDrag;
+
+impl Render for ContextPanelHeightDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
 
 pub(super) struct ContextPanelState<'a> {
     pub(super) app: Entity<WorkspaceSurface>,
+    pub(super) height: f32,
     pub(super) snapshot: &'a ContextSnapshot,
     pub(super) tab: ContextPanelTab,
     pub(super) scroll: ScrollHandle,
@@ -28,6 +41,7 @@ pub(super) struct ContextPanelState<'a> {
 pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + use<> {
     let ContextPanelState {
         app,
+        height,
         snapshot,
         tab,
         scroll,
@@ -45,7 +59,8 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
         .map(|(index, candidate)| context_tab(app.clone(), index, candidate, tab, theme));
     div()
         .id("context_panel")
-        .h(px(CONTEXT_PANEL_HEIGHT))
+        .relative()
+        .h(px(height))
         .flex_none()
         .flex()
         .flex_col()
@@ -55,7 +70,7 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
         .bg(gpui_color(theme.colors.surface))
         .child(
             div()
-                .h(px(32.0))
+                .h(px(CONTEXT_PANEL_HEADER_HEIGHT))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -85,26 +100,16 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                         })
                         .child("API keys"),
                 )
-                .child(
-                    div()
-                        .id("close_context_panel")
-                        .px_2()
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(4.0))
-                        .text_xs()
-                        .text_color(gpui_color(theme.colors.text_muted))
-                        .cursor_pointer()
-                        .role(Role::Button)
-                        .aria_label("Close fundamentals and context panel")
-                        .on_click(move |_, _, cx| {
-                            close_app.update(cx, |surface, surface_cx| {
-                                surface.set_context_panel_visible(false, surface_cx);
-                            });
-                        })
-                        .child("Close"),
-                ),
+                .child(chrome_tooltip(
+                    "close_context_panel",
+                    "Close market context",
+                    chrome_close_button("close_context_panel", theme, move |_, cx| {
+                        close_app.update(cx, |surface, surface_cx| {
+                            surface.set_context_panel_visible(false, surface_cx);
+                        });
+                    }),
+                    theme,
+                )),
         )
         .child(match credential_dialog {
             Some(dialog) => credential_editor(app, dialog, credential_message, theme),
@@ -126,6 +131,23 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 .child(message.to_string())
         }))
         .child(source_status_bar(snapshot, theme))
+        .child(context_panel_resize_handle())
+}
+
+/// Top-edge handle; the center column owns the drag and converts it to a height.
+fn context_panel_resize_handle() -> impl IntoElement {
+    div()
+        .id("context_panel_resize")
+        .absolute()
+        .occlude()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h(px(CONTEXT_PANEL_RESIZE_HANDLE_HEIGHT))
+        .cursor_row_resize()
+        .on_drag(ContextPanelHeightDrag, |drag, _, _, cx| {
+            cx.new(|_| drag.clone())
+        })
 }
 
 fn credential_editor(

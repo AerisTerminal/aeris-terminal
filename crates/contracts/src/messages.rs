@@ -309,6 +309,10 @@ pub struct WorkspaceChartState {
     /// Bit 0 synchronizes crosshairs and bit 1 synchronizes visible time ranges.
     #[prost(uint32, tag = "14")]
     pub chart_link_flags: u32,
+    /// Logical-pixel height of the bottom context panel; zero (and absent in
+    /// older workspaces) uses the default height.
+    #[prost(uint32, tag = "15")]
+    pub context_panel_height: u32,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]

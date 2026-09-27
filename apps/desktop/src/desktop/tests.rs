@@ -726,6 +726,27 @@ fn side_panel_width_clamps_to_renderable_watchlist_bounds() {
 }
 
 #[test]
+fn context_panel_height_restores_default_and_clamps_to_resizable_bounds() {
+    use super::{
+        CONTEXT_PANEL_INITIAL_HEIGHT, CONTEXT_PANEL_MAXIMUM_HEIGHT, CONTEXT_PANEL_MINIMUM_HEIGHT,
+        WorkspaceChartState, clamped_context_panel_height, workspace_surface,
+    };
+    let restored = |height| WorkspaceChartState {
+        context_panel_height: height,
+        ..WorkspaceChartState::default()
+    };
+    let height = workspace_surface::restored_context_panel_height;
+    assert!((height(None) - CONTEXT_PANEL_INITIAL_HEIGHT).abs() < f32::EPSILON);
+    // Workspaces saved before the panel was resizable persist zero.
+    assert!((height(Some(&restored(0))) - CONTEXT_PANEL_INITIAL_HEIGHT).abs() < f32::EPSILON);
+    assert!((height(Some(&restored(320))) - 320.0).abs() < f32::EPSILON);
+    assert!((height(Some(&restored(9_000))) - CONTEXT_PANEL_MAXIMUM_HEIGHT).abs() < f32::EPSILON);
+    assert!(
+        (clamped_context_panel_height(10.0) - CONTEXT_PANEL_MINIMUM_HEIGHT).abs() < f32::EPSILON
+    );
+}
+
+#[test]
 fn window_close_retirement_is_claimed_exactly_once() {
     let mut closing = false;
     assert!(claim_once(&mut closing));

@@ -402,6 +402,9 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         if chart.context_panel_tab > 4 {
             chart.context_panel_tab = 0;
         }
+        if chart.context_panel_height != 0 {
+            chart.context_panel_height = chart.context_panel_height.clamp(140, 640);
+        }
         if chart.chart_link_group > 4 {
             chart.chart_link_group = 0;
         }
@@ -814,6 +817,7 @@ mod tests {
             context_panel_tab: 2,
             chart_link_group: 2,
             chart_link_flags: 3,
+            context_panel_height: 320,
         }
     }
 

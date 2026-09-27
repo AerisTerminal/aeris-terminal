@@ -140,7 +140,7 @@ use chrome_menu::{
     ChromeIconButtonTone, chrome_close_button, chrome_icon_button, chrome_menu_extent,
 };
 use command_palette::command_palette_layer;
-use context_panel::{ContextPanelState, context_panel};
+use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
@@ -360,6 +360,11 @@ const SIDE_PANEL_INITIAL_WIDTH: f32 = 400.0;
 const SIDE_PANEL_MINIMUM_WIDTH: f32 = 360.0;
 const SIDE_PANEL_MAXIMUM_WIDTH: f32 = 480.0;
 const SIDE_PANEL_RESIZE_HANDLE_WIDTH: f32 = 8.0;
+const CONTEXT_PANEL_INITIAL_HEIGHT: f32 = 248.0;
+const CONTEXT_PANEL_MINIMUM_HEIGHT: f32 = 140.0;
+const CONTEXT_PANEL_MAXIMUM_HEIGHT: f32 = 640.0;
+/// Chart area always left above the context panel while resizing.
+const CONTEXT_PANEL_MINIMUM_CHART_HEIGHT: f32 = 160.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
 const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
@@ -661,6 +666,7 @@ struct WorkspaceSurface {
     context_snapshot: Arc<ContextSnapshot>,
     context_panel_visible: bool,
     context_panel_tab: ContextPanelTab,
+    context_panel_height: f32,
     context_credential_dialog: Option<ContextCredentialDialogState>,
     context_credential_message: Option<String>,
     economic_event_risk_message: Option<String>,
@@ -2528,6 +2534,10 @@ const fn symbol_menu_closes_after_selection(target: SymbolSelectionTarget) -> bo
 
 fn clamped_side_panel_width(width: f32) -> f32 {
     width.clamp(SIDE_PANEL_MINIMUM_WIDTH, SIDE_PANEL_MAXIMUM_WIDTH)
+}
+
+fn clamped_context_panel_height(height: f32) -> f32 {
+    height.clamp(CONTEXT_PANEL_MINIMUM_HEIGHT, CONTEXT_PANEL_MAXIMUM_HEIGHT)
 }
 
 #[cfg(test)]
