@@ -163,7 +163,7 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
     [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
-            icon: HugeIcon::Refresh,
+            icon: HugeIcon::RefreshV2,
             label: "Reset view",
             enabled: state.enabled(ChartContextMenuState::READY),
             action: ChartContextAction::Reset,

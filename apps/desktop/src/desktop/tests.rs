@@ -1599,7 +1599,7 @@ fn chart_context_remove_actions_use_destructive_color() {
         pane_count: 1,
         flags: 0,
     });
-    assert_eq!(items[0].icon, super::HugeIcon::Refresh);
+    assert_eq!(items[0].icon, super::HugeIcon::RefreshV2);
     assert_eq!(items[1].icon, super::HugeIcon::Copy);
     assert_eq!(items[1].label, "Copy price");
     assert!(!items[1].enabled);

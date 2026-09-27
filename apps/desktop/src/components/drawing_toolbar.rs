@@ -235,7 +235,7 @@ fn drawing_toolbar_actions(
             DrawingActionSpec::new(
                 "drawing_lock_selected",
                 "Lock or unlock selected drawing",
-                HugeIcon::LockKeyholeIcon,
+                HugeIcon::Lock,
                 20.0,
                 state.selected_locked,
                 state.selection == DrawingToolbarSelection::Drawing,
