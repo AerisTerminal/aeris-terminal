@@ -364,14 +364,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_wire_and_nucleus_boundaries_remain_isolated() {
+    fn provider_wire_and_aeris_charts_boundaries_remain_isolated() {
         let rithmic_adapter = manifest("crates/adapters/rithmic_protocol/src/lib.rs");
         assert!(rithmic_adapter.contains("mod generated {"));
         assert!(!rithmic_adapter.contains("pub mod generated"));
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "c9c2a97";
+        let expected_revision = "d4f7948";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",

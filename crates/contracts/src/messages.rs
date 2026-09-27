@@ -265,31 +265,31 @@ pub struct WorkspaceChartState {
     /// Stable `Aeris` chart-type identifier.
     #[prost(string, tag = "1")]
     pub chart_type: String,
-    /// Bounded Nucleus semantic drawing document. It contains committed
+    /// Bounded Aeris Charts semantic drawing document. It contains committed
     /// drawings only, never market history, series, indicator definitions, or
     /// renderer/runtime caches.
     #[prost(string, tag = "2")]
-    pub nucleus_state_json: String,
+    pub chart_state_json: String,
     /// Host-owned native indicators in stable creation order.
     #[prost(message, repeated, tag = "3")]
     pub indicators: Vec<WorkspaceChartIndicatorState>,
     /// Stable product price-axis customization.
     #[prost(message, optional, tag = "4")]
     pub price_axis: Option<WorkspacePriceAxisState>,
-    /// Drawing locks are host interaction state keyed by Nucleus drawing id.
+    /// Drawing locks are host interaction state keyed by Aeris Charts drawing id.
     #[prost(uint32, repeated, tag = "5")]
     pub locked_drawing_ids: Vec<u32>,
-    /// Stable Nucleus crosshair mode (normal, magnet, hidden, or OHLC magnet).
+    /// Stable Aeris Charts crosshair mode (normal, magnet, hidden, or OHLC magnet).
     #[prost(uint32, tag = "6")]
     pub crosshair_mode: u32,
-    /// Bounded host-owned price alerts. Nucleus renders these values but does
+    /// Bounded host-owned price alerts. Aeris Charts renders these values but does
     /// not evaluate them or deliver operating-system notifications.
     #[prost(message, repeated, tag = "7")]
     pub price_alerts: Vec<WorkspacePriceAlertState>,
     /// Host-owned native study graph in stable creation/dependency order.
     #[prost(message, repeated, tag = "8")]
     pub studies: Vec<WorkspaceChartStudyState>,
-    /// Host-owned durable chart appearance. Nucleus remains the renderer/state
+    /// Host-owned durable chart appearance. Aeris Charts remains the renderer/state
     /// executor; this stores only product-authored presentation preferences.
     #[prost(message, optional, tag = "9")]
     pub appearance: Option<WorkspaceChartAppearanceState>,
@@ -335,7 +335,7 @@ pub struct WorkspaceOrderFlowSettingsState {
 
 /// Durable chart presentation preferences that are independent of market data.
 ///
-/// Colors are stored as bounded CSS strings understood by Nucleus. Numeric line
+/// Colors are stored as bounded CSS strings understood by Aeris Charts. Numeric line
 /// widths/styles use integers because current product controls expose discrete
 /// professional chart choices rather than arbitrary floating-point values.
 #[derive(Clone, PartialEq, Eq, prost::Message)]

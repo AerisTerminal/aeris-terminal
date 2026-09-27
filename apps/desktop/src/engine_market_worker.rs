@@ -717,7 +717,7 @@ use publications::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeris_chart_integration::{NucleusChartTheme, NucleusChartView};
+    use aeris_chart_integration::{AerisChartTheme, AerisChartView};
     use aeris_contracts::{
         ProviderInstrumentSearchResult, ProviderInstrumentSummary, SelectProviderInstrument,
     };
@@ -1675,9 +1675,7 @@ mod tests {
     /// what it was handed before painting, so the drain is replayed the same way
     /// here: the bridge queue is bounded, and a host that never applies would
     /// fill it.
-    fn replay_into_a_chart(
-        messages: &[MarketWorkerMessage],
-    ) -> (Option<NucleusChartView>, Vec<u64>) {
+    fn replay_into_a_chart(messages: &[MarketWorkerMessage]) -> (Option<AerisChartView>, Vec<u64>) {
         const MARKET_MESSAGES_PER_FRAME: usize = 64;
         let mut chart = None;
         let mut delivered = Vec::new();
@@ -1694,9 +1692,9 @@ mod tests {
                                 .iter()
                                 .map(|bar| bar.value().source_sequence),
                         );
-                        chart = Some(NucleusChartView::with_replay_and_theme(
+                        chart = Some(AerisChartView::with_replay_and_theme(
                             snapshot,
-                            NucleusChartTheme::Dark,
+                            AerisChartTheme::Dark,
                         ));
                     }
                     update => {

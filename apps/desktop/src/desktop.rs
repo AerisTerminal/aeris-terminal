@@ -55,21 +55,21 @@ mod workspace_layout;
 use about_dialog::about_dialog_layer;
 use aeris_application::ReplayStreamUpdate;
 use aeris_chart_integration::{
-    ChartAggressorSide, ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency,
-    ChartAlertId, ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
-    ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
-    ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
-    ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole,
-    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSplitDirection,
-    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
-    ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
-    ChartStudyThresholdRegion, ChartTradingAnnotation, ChartTradingAnnotationTone,
-    ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
-    ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
-    ChartWorkingOrder, ChartWorkspaceLayout, FootprintDisplayMode, NucleusChartTheme,
-    NucleusChartView, NucleusWorkspace, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
-    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
+    AerisChartTheme, AerisChartView, AerisChartWorkspace, ChartAggressorSide, ChartAlertCondition,
+    ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
+    ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceSettings,
+    ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartExecutionId,
+    ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot,
+    ChartHostTimeWindow, ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata,
+    ChartOrderId, ChartOrderKind, ChartOrderRole, ChartOrderSide, ChartOrderStatus,
+    ChartPositionId, ChartPositionSide, ChartSplitDirection, ChartStudyInputRequirements,
+    ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind,
+    ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartTradingAnnotation,
+    ChartTradingAnnotationTone, ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent,
+    ChartTradingIntentAction, ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot,
+    ChartType, ChartWorkingOrder, ChartWorkspaceLayout, FootprintDisplayMode, OrderFlowAggregation,
+    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
+    classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -200,9 +200,9 @@ use terminal_chrome::{
     connection_presentation,
 };
 use terminal_chrome::{
-    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, button_activation,
-    button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
-    fullscreen_escape_command, header_icon, nucleus_chart_theme, series_glyph, terminal_header,
+    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
+    button_activation, button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
+    fullscreen_escape_command, header_icon, series_glyph, terminal_header,
     window_move_gesture_transition, workspace_title_bar, workspace_title_bar_visible,
 };
 use terminal_view::{
@@ -652,7 +652,7 @@ fn elapsed_nanos(started: Instant) -> u64 {
 }
 
 struct WorkspaceSurface {
-    chart: Option<Entity<NucleusChartView>>,
+    chart: Option<Entity<AerisChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
     trade_tape: Option<aeris_market_runtime::MarketTradeTapeSnapshot>,
     trade_sweeps: Arc<[OrderFlowSweep]>,
@@ -1830,7 +1830,7 @@ fn chart_order_from_intent(
 }
 
 fn resolve_chart_intent(
-    chart: &Entity<NucleusChartView>,
+    chart: &Entity<AerisChartView>,
     sequence: u32,
     accepted: bool,
     cx: &mut Context<WorkspaceSurface>,
@@ -1841,7 +1841,7 @@ fn resolve_chart_intent(
 }
 
 fn dispatch_chart_cancel(
-    chart: Entity<NucleusChartView>,
+    chart: Entity<AerisChartView>,
     sequence: u32,
     client_order_id: aeris_trading::ClientOrderId,
     service: aeris_trading_runtime::TradingService,
@@ -1875,7 +1875,7 @@ fn chart_tick_offset(
 }
 
 fn dispatch_chart_place_bracket(
-    chart: Entity<NucleusChartView>,
+    chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &mut Context<WorkspaceSurface>,
@@ -1966,7 +1966,7 @@ fn dispatch_chart_place_bracket(
 }
 
 fn dispatch_chart_create_protection(
-    chart: Entity<NucleusChartView>,
+    chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &mut Context<WorkspaceSurface>,
@@ -2032,7 +2032,7 @@ fn dispatch_chart_create_protection(
 }
 
 fn dispatch_chart_modify(
-    chart: Entity<NucleusChartView>,
+    chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
     order: &aeris_trading::Order,
     app: &WorkspaceSurface,
@@ -2105,7 +2105,7 @@ fn dispatch_chart_modify(
 }
 
 fn dispatch_chart_close_position(
-    chart: Entity<NucleusChartView>,
+    chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &mut Context<WorkspaceSurface>,
@@ -2160,7 +2160,7 @@ fn dispatch_chart_close_position(
 }
 
 fn dispatch_chart_trading_intent(
-    chart: Entity<NucleusChartView>,
+    chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &mut Context<WorkspaceSurface>,
@@ -2277,7 +2277,7 @@ fn chart_intent_has_confirmation_evidence(intent: &ChartTradingIntent) -> bool {
     }
 }
 
-fn observe_chart(chart: Option<&Entity<NucleusChartView>>, cx: &mut Context<WorkspaceSurface>) {
+fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
         cx.observe(chart, |app, chart, cx| {
             let user_state_revision = chart.read(cx).user_state_revision();
@@ -2893,7 +2893,7 @@ impl HeaderControls {
 }
 
 struct TerminalStartupState {
-    chart: Option<Entity<NucleusChartView>>,
+    chart: Option<Entity<AerisChartView>>,
     chart_state: ChartState,
     chart_state_message: String,
     replay_label: String,
@@ -2917,7 +2917,7 @@ fn terminal_startup_state(
             let connection = shell.connection();
             let message = shell.message().to_string();
             TerminalStartupState {
-                chart: Some(cx.new(move |_| NucleusChartView::empty())),
+                chart: Some(cx.new(move |_| AerisChartView::empty())),
                 chart_state: ChartState::Loading,
                 chart_state_message: message.clone(),
                 replay_label: profile.clone(),
@@ -2961,7 +2961,7 @@ fn initial_symbol_message(provider: TerminalProvider) -> String {
 }
 
 fn initialize_chart_chrome(
-    chart: Option<&Entity<NucleusChartView>>,
+    chart: Option<&Entity<AerisChartView>>,
     preferences: chart_chrome::ChartChromePreferences,
     cx: &mut Context<WorkspaceSurface>,
 ) {
@@ -3709,7 +3709,7 @@ struct WorkspaceTab {
     label: String,
     panes: Vec<WorkspacePane>,
     active_pane: usize,
-    layout: NucleusWorkspace,
+    layout: AerisChartWorkspace,
     generation: u64,
     focus: FocusHandle,
 }

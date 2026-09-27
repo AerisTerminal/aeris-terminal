@@ -16,7 +16,7 @@ adding its `TrustedStudyPackage` descriptor to the bounded product allowlist in
 This is not a sandbox. Approved native Rust executes in-process and can use whatever operating
 system capabilities its reviewed dependency graph exposes. The Study SDK deliberately does not
 hand study calculations provider/account credentials, provider-session handles, `MarketEngine`,
-GPUI objects, Nucleus engine/render handles, or GPU state, which prevents accidental ownership
+GPUI objects, Aeris Charts engine/render handles, or GPU state, which prevents accidental ownership
 leakage through the supported API. Untrusted or user-installable executable code would require a
 separate sandbox/process/WASM design and is outside this native package model.
 
@@ -94,7 +94,7 @@ of this contract until a concrete product study requires them.
 
 For recursive studies, keep live append/current-tail work bounded. Do not convert or rescan the
 entire canonical history on every live update merely to fit a formula API. Use an existing
-Nucleus-owned indexed primitive when the shared formula exists; otherwise retain bounded state and
+Aeris Charts-owned indexed primitive when the shared formula exists; otherwise retain bounded state and
 checkpoint historical repair deliberately. Hard gaps must remain explicit rather than being
 interpolated silently.
 
@@ -115,9 +115,9 @@ cargo check -p aeris_study_sdk --examples --locked
 ```
 
 The built-in studies in `src/lib.rs` are production examples of settings metadata, recursive
-Nucleus state, hard-gap handling, rich scalar presentation, and durable revision restoration. The
+Aeris Charts state, hard-gap handling, rich scalar presentation, and durable revision restoration. The
 SDK surface tests in `tests/native_sdk_surface.rs` additionally prove stateful, study-on-study, and
-quote/trade/depth contracts without importing desktop, provider, GPUI, or Nucleus render owners.
+quote/trade/depth contracts without importing desktop, provider, GPUI, or Aeris Charts render owners.
 
 ## Qualification expectations
 

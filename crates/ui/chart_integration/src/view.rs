@@ -1,7 +1,7 @@
-//! GPUI entity hosting one authoritative Nucleus chart engine and renderer.
+//! GPUI entity hosting one authoritative Aeris Charts chart engine and renderer.
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
-use crate::nucleus_bridge::{
+use crate::engine_bridge::{
     ProductPriceBars, apply_merged_chart_data, chart_data_queue_capacity,
     install_product_price_series, install_replay, install_volume_series, price_display_precision,
     replay_display_precision, replay_legend_title, replay_price_divisor, replay_quantity_divisor,
@@ -61,18 +61,18 @@ fn platform_theme(theme: ChartTheme) -> AerisTheme {
 }
 
 #[derive(Clone, Debug)]
-struct NucleusThemeAppearanceDefaults {
+struct AerisThemeAppearanceDefaults {
     grid: String,
     crosshair: String,
     bullish: String,
     bearish: String,
 }
 
-fn nucleus_theme_appearance_defaults(theme: ChartTheme) -> NucleusThemeAppearanceDefaults {
+fn aeris_theme_appearance_defaults(theme: ChartTheme) -> AerisThemeAppearanceDefaults {
     let mut engine = ChartEngine::new(1.0, 1.0, 1.0);
     engine.set_theme(theme);
     let options = engine.options.get();
-    NucleusThemeAppearanceDefaults {
+    AerisThemeAppearanceDefaults {
         grid: options.grid.vert_lines.color.clone(),
         crosshair: options.crosshair.vert_line.color.clone(),
         bullish: options.layout.bullish_color.clone(),
@@ -81,8 +81,8 @@ fn nucleus_theme_appearance_defaults(theme: ChartTheme) -> NucleusThemeAppearanc
 }
 
 #[cfg(test)]
-fn nucleus_grid_color(theme: ChartTheme) -> String {
-    nucleus_theme_appearance_defaults(theme).grid
+fn aeris_charts_grid_color(theme: ChartTheme) -> String {
+    aeris_theme_appearance_defaults(theme).grid
 }
 
 fn same_css_color(left: &str, right: &str) -> bool {
@@ -92,20 +92,20 @@ fn same_css_color(left: &str, right: &str) -> bool {
     }
 }
 
-fn matches_nucleus_theme_color(color: &str, light: &str, dark: &str) -> bool {
+fn matches_aeris_theme_color(color: &str, light: &str, dark: &str) -> bool {
     same_css_color(color, light) || same_css_color(color, dark)
 }
 
-fn is_nucleus_grid_default(color: &str) -> bool {
-    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
-    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
-    matches_nucleus_theme_color(color, &light.grid, &dark.grid)
+fn is_aeris_grid_default(color: &str) -> bool {
+    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
+    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
+    matches_aeris_theme_color(color, &light.grid, &dark.grid)
 }
 
-fn is_nucleus_crosshair_default(color: &str) -> bool {
-    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
-    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
-    matches_nucleus_theme_color(color, &light.crosshair, &dark.crosshair)
+fn is_aeris_crosshair_default(color: &str) -> bool {
+    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
+    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
+    matches_aeris_theme_color(color, &light.crosshair, &dark.crosshair)
 }
 
 fn gpui_theme_color(color: ThemeColor) -> Rgba {
@@ -389,7 +389,7 @@ impl ChartIndicator {
         }
     }
 
-    fn from_nucleus_kind(kind: &str) -> Option<Self> {
+    fn from_engine_kind(kind: &str) -> Option<Self> {
         Some(match kind {
             "vwap" => Self::Vwap,
             "sma" => Self::Sma,
@@ -422,7 +422,7 @@ impl fmt::Display for ChartIndicatorError {
             Self::CreationRejected(indicator) => {
                 write!(
                     formatter,
-                    "Nucleus rejected the {} indicator",
+                    "Aeris Charts rejected the {} indicator",
                     indicator.label()
                 )
             }
@@ -432,7 +432,7 @@ impl fmt::Display for ChartIndicatorError {
 
 impl std::error::Error for ChartIndicatorError {}
 
-/// Failure to project one runtime-owned scalar study output into Nucleus.
+/// Failure to project one runtime-owned scalar study output into Aeris Charts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartStudyOutputError {
     LengthMismatch,
@@ -448,19 +448,19 @@ impl fmt::Display for ChartStudyOutputError {
         formatter.write_str(match self {
             Self::LengthMismatch => "study timestamps and values must have the same length",
             Self::UnsupportedTimestampPrecision => {
-                "Nucleus scalar series currently require whole-second study timestamps"
+                "Aeris Charts scalar series currently require whole-second study timestamps"
             }
             Self::NonIncreasingTimestamp => "study output timestamps must strictly increase",
-            Self::InvalidValue => "study output contains a value Nucleus cannot render",
+            Self::InvalidValue => "study output contains a value Aeris Charts cannot render",
             Self::InvalidPresentation => "study output presentation metadata is invalid",
-            Self::InstallationRejected => "Nucleus rejected the study output series",
+            Self::InstallationRejected => "Aeris Charts rejected the study output series",
         })
     }
 }
 
 impl std::error::Error for ChartStudyOutputError {}
 
-/// Product-owned price-series presentation forwarded to Nucleus `SeriesKind`.
+/// Product-owned price-series presentation forwarded to Aeris Charts `SeriesKind`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ChartType {
     #[default]
@@ -543,7 +543,7 @@ pub struct OrderFlowSweep {
 
 /// Durable product-owned presentation preferences for the primary market series
 /// and chart canvas. The values are intentionally renderer-neutral primitives;
-/// Nucleus remains the owner that interprets and paints them.
+/// Aeris Charts remains the owner that interprets and paints them.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // Independent product styling toggles, not state-machine flags.
 pub struct ChartAppearanceSettings {
@@ -573,20 +573,20 @@ pub struct ChartAppearanceSettings {
 
 impl Default for ChartAppearanceSettings {
     fn default() -> Self {
-        let nucleus = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+        let defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
         Self {
             grid_visible: true,
-            grid_color: nucleus.grid,
+            grid_color: defaults.grid,
             grid_style: 2,
-            crosshair_color: nucleus.crosshair,
+            crosshair_color: defaults.crosshair,
             crosshair_width: 1,
             crosshair_style: 2,
-            up_color: nucleus.bullish.clone(),
-            down_color: nucleus.bearish.clone(),
-            wick_up_color: nucleus.bullish.clone(),
-            wick_down_color: nucleus.bearish.clone(),
-            border_up_color: nucleus.bullish,
-            border_down_color: nucleus.bearish,
+            up_color: defaults.bullish.clone(),
+            down_color: defaults.bearish.clone(),
+            wick_up_color: defaults.bullish.clone(),
+            wick_down_color: defaults.bearish.clone(),
+            border_up_color: defaults.bullish,
+            border_down_color: defaults.bearish,
             wick_visible: true,
             border_visible: true,
             open_visible: true,
@@ -609,20 +609,20 @@ const TRACK_BORDER_UP: usize = 4;
 const TRACK_BORDER_DOWN: usize = 5;
 
 fn normalize_theme_color(color: &mut String, active: &str, light: &str, dark: &str) -> bool {
-    let tracks_nucleus = matches_nucleus_theme_color(color, light, dark);
-    if tracks_nucleus {
+    let tracks_aeris = matches_aeris_theme_color(color, light, dark);
+    if tracks_aeris {
         color.clear();
         color.push_str(active);
     }
-    tracks_nucleus
+    tracks_aeris
 }
 
-fn normalize_nucleus_appearance(
+fn normalize_aeris_appearance(
     theme: ChartTheme,
     appearance: &ChartAppearanceSettings,
 ) -> (ChartAppearanceSettings, [bool; 6]) {
-    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
-    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
+    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
     let active = match theme {
         ChartTheme::Light => &light,
         ChartTheme::Dark => &dark,
@@ -704,7 +704,7 @@ impl ChartType {
         matches!(self, Self::Candles | Self::Footprint | Self::Bars)
     }
 
-    /// Built-in OHLC chart types Nucleus can render from the product price series.
+    /// Built-in OHLC chart types Aeris Charts can render from the product price series.
     pub const ALL: [Self; 7] = [
         Self::Candles,
         Self::Footprint,
@@ -788,11 +788,11 @@ pub enum ChartContextKind {
 pub struct ChartContextRequest {
     pub position: Point<Pixels>,
     pub kind: ChartContextKind,
-    /// Nucleus-formatted price at the right-click, when the click was on the pane.
+    /// Aeris Charts-formatted price at the right-click, when the click was on the pane.
     pub copy_price: Option<SharedString>,
 }
 
-/// Nucleus-owned price-axis chrome the Y-axis menu presents.
+/// Aeris Charts-owned price-axis chrome the Y-axis menu presents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PriceAxisMenuState {
     pub flags: u16,
@@ -1124,8 +1124,8 @@ const fn should_stop_mouse_up_propagation(outside_chart: bool) -> bool {
     !outside_chart
 }
 
-/// A GPUI entity hosting one authoritative Nucleus chart engine and renderer.
-pub struct NucleusChartView {
+/// A GPUI entity hosting one authoritative Aeris Charts chart engine and renderer.
+pub struct AerisChartView {
     engine: ChartEngine,
     theme: ChartTheme,
     renderer: GpuiChartRenderer,
@@ -1172,7 +1172,7 @@ pub struct NucleusChartView {
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
     /// Transient host-projected plan levels. These are deliberately separate
-    /// from Nucleus-owned user drawings and are reinstalled with price series.
+    /// from Aeris Charts-owned user drawings and are reinstalled with price series.
     session_plan_levels: Vec<(f64, String)>,
     session_plan_price_line_ids: Vec<u32>,
     /// Monotonic revision of stable user-authored chart presentation state.
@@ -1190,7 +1190,7 @@ pub struct NucleusChartView {
     live_evidence_mouse_downs: u8,
 }
 
-impl NucleusChartView {
+impl AerisChartView {
     /// Drains bounded, user-originated crosshair/time-range events for a host link coordinator.
     pub fn take_sync_events(&mut self) -> Vec<aeris_charts_engine::ChartSyncEvent> {
         self.engine.take_sync_events()
@@ -1223,13 +1223,13 @@ impl NucleusChartView {
         changed
     }
 
-    /// Creates an empty Nucleus-owned surface without inventing market data.
+    /// Creates an empty Aeris Charts-owned surface without inventing market data.
     #[must_use]
     pub fn empty() -> Self {
         Self::empty_with_theme(ChartTheme::Dark)
     }
 
-    /// Creates an empty chart using Nucleus's canonical theme tokens.
+    /// Creates an empty chart using Aeris Charts' canonical theme tokens.
     ///
     /// # Panics
     ///
@@ -1300,7 +1300,7 @@ impl NucleusChartView {
         }
     }
 
-    /// Creates a chart from the bounded embedded replay using Nucleus's own styling.
+    /// Creates a chart from the bounded embedded replay using Aeris Charts' own styling.
     ///
     /// # Panics
     ///
@@ -1323,7 +1323,7 @@ impl NucleusChartView {
         Self::with_replay_and_theme(replay, ChartTheme::Dark)
     }
 
-    /// Creates a replay-backed chart using Nucleus's canonical theme tokens.
+    /// Creates a replay-backed chart using Aeris Charts' canonical theme tokens.
     ///
     /// # Panics
     ///
@@ -1406,7 +1406,7 @@ impl NucleusChartView {
         chart
     }
 
-    /// Replaces Nucleus's authoritative series data with one validated snapshot.
+    /// Replaces Aeris Charts' authoritative series data with one validated snapshot.
     ///
     /// # Errors
     ///
@@ -1449,7 +1449,7 @@ impl NucleusChartView {
         Ok(())
     }
 
-    /// Restores Nucleus's native default time scale and automatic price scales.
+    /// Restores Aeris Charts' native default time scale and automatic price scales.
     pub fn reset_view(&mut self) {
         self.engine.reset_view();
         self.invalidate_series_layout();
@@ -1461,7 +1461,7 @@ impl NucleusChartView {
         self.pending_context_menu.take()
     }
 
-    /// Nucleus-formatted price at pane coordinates, using the engine's secondary-click context.
+    /// Aeris Charts-formatted price at pane coordinates, using the engine's secondary-click context.
     fn formatted_copy_price(&self, pane_x: f64, y: f64) -> Option<SharedString> {
         let context = self.engine.chart_context_at(pane_x, y)?;
         let series = context.series.unwrap_or(0);
@@ -1512,7 +1512,7 @@ impl NucleusChartView {
         self.pending_study_remove.take()
     }
 
-    /// Reads Nucleus-owned Y-axis chrome for the hit-tested price scale.
+    /// Reads Aeris Charts-owned Y-axis chrome for the hit-tested price scale.
     #[must_use]
     pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
         let target = price_axis_target(left);
@@ -1569,7 +1569,7 @@ impl NucleusChartView {
         self.price_precision_override
     }
 
-    /// Applies one Y-axis menu command through Nucleus's scale and series APIs.
+    /// Applies one Y-axis menu command through Aeris Charts' scale and series APIs.
     pub fn apply_price_axis_menu_action(
         &mut self,
         pane: usize,
@@ -1629,7 +1629,7 @@ impl NucleusChartView {
     }
 
     /// Restores a previously captured stable price-axis state by replaying the
-    /// same public actions used by the menu, so Nucleus remains authoritative.
+    /// same public actions used by the menu, so Aeris Charts remains authoritative.
     pub fn restore_price_axis_menu_state(&mut self, desired: PriceAxisMenuState) -> bool {
         let mut current = self
             .price_axis_menu_state(0, false)
@@ -1714,7 +1714,7 @@ impl NucleusChartView {
         true
     }
 
-    /// Selects a Nucleus-owned theme without changing chart data or viewport.
+    /// Selects a Aeris Charts-owned theme without changing chart data or viewport.
     ///
     /// # Panics
     ///
@@ -1722,14 +1722,14 @@ impl NucleusChartView {
     /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
         let current_grid_color = self.engine.options.get().grid.vert_lines.color.clone();
-        let grid_tracks_nucleus_theme = is_nucleus_grid_default(&current_grid_color);
+        let grid_tracks_aeris_theme = is_aeris_grid_default(&current_grid_color);
         let current_crosshair_color = self.engine.options.get().crosshair.vert_line.color.clone();
-        let crosshair_tracks_nucleus_theme = is_nucleus_crosshair_default(&current_crosshair_color);
+        let crosshair_tracks_aeris_theme = is_aeris_crosshair_default(&current_crosshair_color);
         let time_visible = self.engine.time_visible;
         self.theme = theme;
         self.engine.set_theme(theme);
         apply_platform_chrome_contract(&mut self.engine, time_visible);
-        if !grid_tracks_nucleus_theme {
+        if !grid_tracks_aeris_theme {
             let patch = serde_json::json!({
                 "grid": {
                     "vertLines": { "color": current_grid_color },
@@ -1739,7 +1739,7 @@ impl NucleusChartView {
             .to_string();
             let _ = self.engine.apply_options(&patch);
         }
-        if !crosshair_tracks_nucleus_theme {
+        if !crosshair_tracks_aeris_theme {
             let patch = serde_json::json!({
                 "crosshair": {
                     "vertLine": { "color": current_crosshair_color },
@@ -1809,7 +1809,7 @@ impl NucleusChartView {
                 .is_some_and(|series| series != 0)
     }
 
-    /// Removes the selected drawing or native Nucleus indicator/volume series.
+    /// Removes the selected drawing or native Aeris Charts indicator/volume series.
     ///
     /// The price series is product-owned and cannot be deleted. Volume is hidden rather than
     /// tombstoned so selecting it again from the indicator catalog can reuse its live data.
@@ -2003,7 +2003,7 @@ impl NucleusChartView {
         }
     }
 
-    /// Returns canonical evidence for the latest value installed into Nucleus.
+    /// Returns canonical evidence for the latest value installed into Aeris Charts.
     #[must_use]
     pub fn latest_market_provenance(&self) -> Option<&MarketEventProvenance> {
         self.displayed_provenance.latest()
@@ -2212,13 +2212,13 @@ impl NucleusChartView {
             .any(|series| series.id == 0 && !series.removed && series.price_line_visible)
     }
 
-    /// Host-owned price-series chart type forwarded to Nucleus.
+    /// Host-owned price-series chart type forwarded to Aeris Charts.
     #[must_use]
     pub const fn chart_type(&self) -> ChartType {
         self.chart_type
     }
 
-    /// Returns the current durable chart appearance without exposing Nucleus
+    /// Returns the current durable chart appearance without exposing Aeris Charts
     /// series/options internals to the desktop shell.
     #[must_use]
     pub fn appearance_settings(&self) -> ChartAppearanceSettings {
@@ -2336,7 +2336,7 @@ impl NucleusChartView {
         &mut self,
         appearance: &ChartAppearanceSettings,
     ) -> Result<bool, ()> {
-        let (appearance, _) = normalize_nucleus_appearance(self.theme, appearance);
+        let (appearance, _) = normalize_aeris_appearance(self.theme, appearance);
         let current = self.appearance_settings();
         if current.grid_visible == appearance.grid_visible
             && current.grid_color == appearance.grid_color
@@ -2385,7 +2385,7 @@ impl NucleusChartView {
         &mut self,
         appearance: &ChartAppearanceSettings,
     ) -> Result<bool, ()> {
-        let (appearance, tracking) = normalize_nucleus_appearance(self.theme, appearance);
+        let (appearance, tracking) = normalize_aeris_appearance(self.theme, appearance);
         let current = self.appearance_settings();
         let primary_series_requires_unpin =
             primary_series_requires_theme_unpin(&self.engine, tracking);
@@ -2435,16 +2435,16 @@ impl NucleusChartView {
         Ok(true)
     }
 
-    /// Restores Nucleus-owned styling through the chart engine's canonical reset API.
+    /// Restores Aeris Charts-owned styling through the chart engine's canonical reset API.
     /// Market data, viewport state, drawings, indicators, and other semantic state
-    /// remain owned and preserved by Nucleus.
+    /// remain owned and preserved by Aeris Charts.
     pub fn reset_appearance_settings(&mut self) {
         self.engine.reset_style_to_defaults();
         self.invalidate_series_layout();
         self.mark_user_state_changed();
     }
 
-    /// Applies a built-in Nucleus price-series kind without changing market data.
+    /// Applies a built-in Aeris Charts price-series kind without changing market data.
     pub fn set_chart_type(&mut self, chart_type: ChartType) {
         if self.chart_type == chart_type {
             return;
@@ -2469,7 +2469,7 @@ impl NucleusChartView {
         self.engine.time_axis_height().to_f32().unwrap_or(0.0)
     }
 
-    /// Drains host-facing alert-create requests produced by Nucleus's
+    /// Drains host-facing alert-create requests produced by Aeris Charts'
     /// crosshair action chip.
     pub fn take_alert_create_requests(&mut self) -> Vec<AlertCreateRequest> {
         self.engine.take_alert_create_requests()
@@ -2510,7 +2510,7 @@ impl NucleusChartView {
 
     /// Replaces transient host-owned session-plan price levels.
     ///
-    /// Plan levels do not enter Nucleus drawing persistence and are restored
+    /// Plan levels do not enter Aeris Charts drawing persistence and are restored
     /// automatically whenever the host replaces the primary price series.
     ///
     /// # Errors
@@ -2570,7 +2570,7 @@ impl NucleusChartView {
     /// Replaces the chart-local alert indicators from host-authoritative state.
     ///
     /// # Errors
-    /// Returns an error when Nucleus rejects invalid or over-capacity lines.
+    /// Returns an error when Aeris Charts rejects invalid or over-capacity lines.
     pub fn replace_price_alert_lines(&mut self, snapshot: AlertSnapshot) -> Result<(), String> {
         self.engine
             .set_alert_snapshot(snapshot)
@@ -2579,7 +2579,7 @@ impl NucleusChartView {
         Ok(())
     }
 
-    /// Applies one stable Nucleus crosshair mode.
+    /// Applies one stable Aeris Charts crosshair mode.
     pub fn set_crosshair_mode(&mut self, mode: u8) -> bool {
         if mode > 3 || self.crosshair_mode() == mode {
             return false;
@@ -2602,14 +2602,14 @@ impl NucleusChartView {
         self.user_state_revision = self.user_state_revision.saturating_add(1);
     }
 
-    /// Exports Nucleus-owned committed drawing semantics in z-order. Each anchor
+    /// Exports Aeris Charts-owned committed drawing semantics in z-order. Each anchor
     /// also carries its exchange time so a replacement bar series can restore
     /// the same position after a timeframe switch. Market data,
     /// indicator definitions and renderer/runtime state are intentionally absent.
     ///
     /// # Errors
     ///
-    /// Returns an error if Nucleus cannot serialize its bounded drawing state.
+    /// Returns an error if Aeris Charts cannot serialize its bounded drawing state.
     pub fn export_semantic_state_json(&self) -> Result<String, String> {
         let mut items =
             serde_json::from_str::<Vec<serde_json::Value>>(&self.engine.drawings_json())
@@ -2642,13 +2642,13 @@ impl NucleusChartView {
     /// Restores committed drawings after indicator panes have been recreated.
     /// Older saved drawings without exchange-time anchors retain their original
     /// logical coordinates until they can be exported against loaded history.
-    /// Lock ids are remapped because Nucleus deliberately allocates fresh local
+    /// Lock ids are remapped because Aeris Charts deliberately allocates fresh local
     /// drawing handles instead of accepting persisted runtime handles.
     ///
     /// # Errors
     ///
     /// Returns an error when the persisted JSON is malformed, exceeds the
-    /// drawing bound, references an invalid pane/kind, or Nucleus rejects it.
+    /// drawing bound, references an invalid pane/kind, or Aeris Charts rejects it.
     pub fn import_semantic_state_json(
         &mut self,
         json: &str,
@@ -3072,7 +3072,7 @@ impl NucleusChartView {
             self.renderer
                 .paint_frame(&prepared, viewport, window.scale_factor(), window, cx)
         {
-            eprintln!("nucleus frame skipped: {error}");
+            eprintln!("Aeris Charts frame skipped: {error}");
         }
         #[cfg(feature = "diagnostics")]
         {
@@ -3084,7 +3084,7 @@ impl NucleusChartView {
     }
 }
 
-impl Default for NucleusChartView {
+impl Default for AerisChartView {
     fn default() -> Self {
         Self::new()
     }
@@ -3133,7 +3133,7 @@ fn text_caret_geometry(
 }
 
 fn chart_legend_layers(
-    chart: &Entity<NucleusChartView>,
+    chart: &Entity<AerisChartView>,
     rows: &[LegendRow],
     panes: &[LegendPaneLayout],
     theme: ChartTheme,
@@ -3174,7 +3174,7 @@ fn chart_legend_layers(
 }
 
 fn chart_legend_row(
-    chart: &Entity<NucleusChartView>,
+    chart: &Entity<AerisChartView>,
     row: &LegendRow,
     palette: LegendPalette,
     loading: bool,
@@ -3310,7 +3310,7 @@ enum LegendControl {
 }
 
 fn legend_control(
-    chart: &Entity<NucleusChartView>,
+    chart: &Entity<AerisChartView>,
     item: LegendItem,
     control: LegendControl,
     palette: LegendPalette,
@@ -3377,7 +3377,7 @@ fn legend_control_element_id(item: LegendItem, control: LegendControl) -> (&'sta
     (namespace, item.key())
 }
 
-impl Render for NucleusChartView {
+impl Render for AerisChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_clock_tick(cx);
         let mutation = self.apply_pending_data();
@@ -3401,7 +3401,7 @@ impl Render for NucleusChartView {
         let text_caret = self.text_caret_overlay(window);
 
         div()
-            .id(("nucleus_chart_surface", cx.entity_id()))
+            .id(("aeris_chart_surface", cx.entity_id()))
             .relative()
             .size_full()
             .font_family(platform_font_family())
@@ -3410,10 +3410,10 @@ impl Render for NucleusChartView {
             )))
             .cursor(self.cursor_style)
             .track_focus(&focus_handle)
-            .key_context("NucleusChart")
+            .key_context("AerisChart")
             .on_hover(move |hovered, _, cx| {
                 if !*hovered {
-                    hover_entity.update(cx, NucleusChartView::clear_pointer);
+                    hover_entity.update(cx, AerisChartView::clear_pointer);
                 }
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))

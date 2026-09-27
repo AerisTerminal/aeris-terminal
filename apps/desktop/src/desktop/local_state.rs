@@ -347,7 +347,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     workspace
         .chart_settings_templates
         .truncate(MAXIMUM_CHART_SETTINGS_TEMPLATES);
-    // Nucleus owns the canonical style defaults. Retire the legacy host-side
+    // Aeris Charts owns the canonical style defaults. Retire the legacy host-side
     // default template so reset cannot be overwritten after the engine API runs.
     workspace.default_chart_settings = None;
     sanitize_watchlist(&mut workspace);
@@ -759,7 +759,7 @@ mod tests {
     fn round_trip_chart_state() -> WorkspaceChartState {
         WorkspaceChartState {
             chart_type: "bars".to_string(),
-            nucleus_state_json: r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":0.0,"price":42000.0}]}]"#.to_string(),
+            chart_state_json: r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":0.0,"price":42000.0}]}]"#.to_string(),
             indicators: vec![WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: true,

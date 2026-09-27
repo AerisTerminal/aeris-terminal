@@ -2,12 +2,12 @@
 
 use super::*;
 
-impl NucleusChartView {
+impl AerisChartView {
     /// Adds an indicator with the defaults shown by the legacy native catalog.
     ///
     /// # Errors
     ///
-    /// Returns an error when no market snapshot has populated the primary series or Nucleus
+    /// Returns an error when no market snapshot has populated the primary series or Aeris Charts
     /// cannot create every output required by the selected indicator.
     pub fn add_indicator(
         &mut self,
@@ -86,7 +86,7 @@ impl NucleusChartView {
             if !bindings.insert(info.binding_id) {
                 continue;
             }
-            let Some(indicator) = ChartIndicator::from_nucleus_kind(info.kind) else {
+            let Some(indicator) = ChartIndicator::from_engine_kind(info.kind) else {
                 continue;
             };
             let visible = entries.iter().any(|series| {

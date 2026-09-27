@@ -2039,7 +2039,7 @@ impl TerminalApp {
                 focus: cx.focus_handle(),
             }],
             active_pane: 0,
-            layout: NucleusWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE),
+            layout: AerisChartWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE),
             generation: 1,
             focus: cx.focus_handle(),
         });

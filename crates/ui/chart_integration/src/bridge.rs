@@ -1,4 +1,4 @@
-//! Bounded replay-to-Nucleus data bridge with correlated recovery commands.
+//! Bounded replay-to-Aeris Charts data bridge with correlated recovery commands.
 
 use aeris_application::{
     ProvenancedMarketBar, ReplayRecoveryCommand, ReplaySession, ReplaySnapshot, ReplayStreamUpdate,
@@ -47,7 +47,7 @@ impl ChartSeriesIdentity {
     }
 }
 
-/// One queue drain collapsed into at most one authoritative Nucleus mutation.
+/// One queue drain collapsed into at most one authoritative Aeris Charts mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MergedChartData {
     snapshot: Option<ReplaySnapshot>,

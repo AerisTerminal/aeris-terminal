@@ -1000,7 +1000,7 @@ pub enum StudyPlotKind {
 }
 
 /// Semantic pane placement. Outputs using the same dedicated group share one
-/// chart pane; actual Nucleus pane identities remain presentation-owned.
+/// chart pane; actual Aeris Charts pane identities remain presentation-owned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StudyPaneTarget {
     Price,
@@ -1549,7 +1549,7 @@ impl StudyOutputBuffer {
 ///
 /// Inputs are immutable snapshots. Outputs are bounded buffers owned by the
 /// runtime. Studies receive timestamps rather than pixel coordinates and cannot
-/// reach provider sessions, `MarketEngine`, Nucleus, GPUI, or GPU state.
+/// reach provider sessions, `MarketEngine`, Aeris Charts, GPUI, or GPU state.
 pub struct StudyExecutionContext<'a> {
     settings: &'a StudySettings,
     inputs: &'a [ResolvedStudyInput],

@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl NucleusChartView {
+impl AerisChartView {
     /// Returns the drawing tool currently armed on the chart surface.
     #[must_use]
     pub const fn drawing_tool(&self) -> ChartDrawingTool {
@@ -32,7 +32,7 @@ impl NucleusChartView {
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }
-    /// Whether the host is editing a Nucleus text drawing.
+    /// Whether the host is editing a Aeris Charts text drawing.
     #[must_use]
     pub fn is_editing_text(&self) -> bool {
         self.engine.editing_drawing().is_some()

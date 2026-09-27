@@ -26,7 +26,7 @@ pub(super) enum DrawingToolbarSelection {
 }
 
 impl DrawingToolbarState {
-    pub(super) fn from_chart(chart: &NucleusChartView) -> Self {
+    pub(super) fn from_chart(chart: &AerisChartView) -> Self {
         let selection = if chart.selected_drawing_id().is_some() {
             DrawingToolbarSelection::Drawing
         } else if chart.has_deletable_selection() {
@@ -262,7 +262,7 @@ fn drawing_toolbar_actions(
 const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
 
 fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
-    // Nucleus reserves the complete time strip inside the chart. The desktop pane then
+    // Aeris Charts reserves the complete time strip inside the chart. The desktop pane then
     // adds its bottom layout inset outside that canvas, so the adjacent control must span
     // both regions to match the visible X-axis row from top border to workspace edge.
     time_axis_height + WORKSPACE_PANE_BOTTOM_INSET

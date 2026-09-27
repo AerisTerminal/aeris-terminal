@@ -12,7 +12,7 @@ use super::{
     TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
     WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
     WindowMoveGestureTransition, WorkspaceDragState, active_workspace_after_close,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    aeris_chart_theme, bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
     catalog_rejection_message, chart_position_id, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
@@ -20,10 +20,10 @@ use super::{
     connection_presentation, connectivity_chart_state, current_instrument_menu_index,
     default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
     gpui_color, instrument_listing_refresh_needed, instrument_row_highlighted,
-    instrument_selector_label, instrument_target_after_close, nucleus_chart_theme,
-    price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
-    series_selector_label, should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
+    instrument_selector_label, instrument_target_after_close, price_axis_flyout_rows,
+    price_axis_root_rows, publication_chart_state, ready_state_can_complete_switch,
+    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
+    should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
     stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
     switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
@@ -35,7 +35,7 @@ use super::{
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
-use aeris_chart_integration::{ChartSplitDirection, NucleusChartTheme, PriceAxisMenuState};
+use aeris_chart_integration::{AerisChartTheme, ChartSplitDirection, PriceAxisMenuState};
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
     SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
@@ -1046,15 +1046,9 @@ fn chrome_controls_use_icon_and_disabled_hierarchy() {
 }
 
 #[test]
-fn shell_theme_maps_only_to_nucleus_theme_selection() {
-    assert_eq!(
-        nucleus_chart_theme(ThemeMode::Light),
-        NucleusChartTheme::Light
-    );
-    assert_eq!(
-        nucleus_chart_theme(ThemeMode::Dark),
-        NucleusChartTheme::Dark
-    );
+fn shell_theme_maps_only_to_aeris_charts_theme_selection() {
+    assert_eq!(aeris_chart_theme(ThemeMode::Light), AerisChartTheme::Light);
+    assert_eq!(aeris_chart_theme(ThemeMode::Dark), AerisChartTheme::Dark);
 }
 
 #[test]

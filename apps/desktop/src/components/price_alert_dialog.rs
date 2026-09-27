@@ -22,7 +22,7 @@ fn runtime_price_alert(alert: &WorkspacePriceAlertState) -> Option<MarketPriceAl
 }
 
 pub(super) fn replace_chart_price_alert_lines(
-    chart: Option<&Entity<NucleusChartView>>,
+    chart: Option<&Entity<AerisChartView>>,
     alerts: &[WorkspacePriceAlertState],
     selected_instrument: Option<&InstallProviderInstrument>,
     cx: &mut Context<WorkspaceSurface>,

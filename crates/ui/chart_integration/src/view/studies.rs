@@ -1,12 +1,12 @@
-//! Runtime-owned study output projection into Nucleus chart series.
+//! Runtime-owned study output projection into Aeris Charts chart series.
 
 use super::*;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const STUDY_PANE_STRETCH: f64 = 0.3;
-// Mirrors the pinned Nucleus scalar validation ceiling. The explicit host-side
+// Mirrors the pinned Aeris Charts scalar validation ceiling. The explicit host-side
 // check keeps an invalid live study publication from partially replacing the
-// last valid chart image before Nucleus reports dropped rows.
+// last valid chart image before Aeris Charts reports dropped rows.
 const NUCLEUS_MAX_SAFE_SCALAR: f64 = 9_007_199_254_740_991.0 / 100.0;
 
 struct PreparedStudyColumns {
@@ -14,7 +14,7 @@ struct PreparedStudyColumns {
     scalar: Vec<f64>,
 }
 
-impl NucleusChartView {
+impl AerisChartView {
     /// Returns the runtime-owned stream requirements retained for one output.
     #[must_use]
     pub fn study_output_input_requirements(
@@ -150,14 +150,14 @@ impl NucleusChartView {
     ///
     /// `None` values remain explicit whitespace rows, so warm-up gaps preserve
     /// the primary study timeline. Sub-second timestamps are rejected instead of
-    /// silently truncated because the pinned Nucleus scalar-series contract is
+    /// silently truncated because the pinned Aeris Charts scalar-series contract is
     /// whole UTC seconds.
     ///
     /// Returns `Ok(false)` for a duplicate/stale output generation.
     ///
     /// # Errors
     /// Returns a typed validation error before mutating an existing study series,
-    /// or [`ChartStudyOutputError::InstallationRejected`] when Nucleus rejects
+    /// or [`ChartStudyOutputError::InstallationRejected`] when Aeris Charts rejects
     /// otherwise valid columns.
     pub fn install_study_output(
         &mut self,
@@ -238,7 +238,6 @@ impl NucleusChartView {
         {
             series.title = descriptor.title.to_string();
             series.title_visible = true;
-            series.countdown_visible = false;
             series.line_width = Some(2.0);
             if let Some((kind, precision, min_move)) = source_price_format {
                 series.price_format.kind = kind;

@@ -19,9 +19,9 @@ The intended ownership split is:
 - `study_sdk` owns the stable author-facing Rust study semantics and built-in native study registrations; a future sandbox adapter must preserve those semantics without exposing process-native Rust types as its ABI.
 - The Study Editor owns Rust source authoring, diagnostics, formatting, tests, package metadata, and controlled build/reload UX; it does not execute calculations or own market state.
 - A versioned sandbox boundary owns admission and isolation of user-authored executable studies. User code receives only explicit Study SDK capabilities and bounded inputs; it is never loaded as an arbitrary native library.
-- `chart_integration` projects serial/semantic study outputs and future scene deltas into Nucleus; studies never receive render handles or Nucleus engine ownership.
+- `chart_integration` projects serial/semantic study outputs and future scene deltas into Aeris Charts; studies never receive render handles or Aeris Charts engine ownership.
 - Desktop owns durable workspace configuration, product UX, restore/reinitialize/remove commands, and visibility.
-- Nucleus Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that Aeris intentionally consumes.
+- Aeris Charts Charts owns pane/scale/layout/geometry/rendering and the shared low-level TA formulas that Aeris intentionally consumes.
 
 ## Product direction: Rust is the language; Aeris supplies the Pine-class host contract
 
@@ -50,14 +50,14 @@ Study Runtime
 MarketEngine + chart integration
     |  canonical market demand/state + semantic projection
     v
-Nucleus Charts
+Aeris Charts Charts
 ```
 
 The Study Editor and safe user-code execution are foundational product requirements. A future simplified Aeris scripting language is optional. If product demand justifies one, it should compile or lower into the **same Study SDK/runtime model**. It must not create a second calculation engine, second persistence model, second provider-demand path, or second rendering architecture. Rust remains the full-power reference surface; a future DSL would only provide easier syntax over the same semantics.
 
 ## Definition of Pine-class indicator maturity
 
-The goal is not syntax compatibility with Pine. The goal is capability compatibility at the host boundary. Aeris reaches Pine-class maturity when representative advanced TradingView indicators can be translated to Rust using only generic Study SDK primitives, with no indicator-specific edits to `market_runtime`, desktop, chart integration, or Nucleus ownership code.
+The goal is not syntax compatibility with Pine. The goal is capability compatibility at the host boundary. Aeris reaches Pine-class maturity when representative advanced TradingView indicators can be translated to Rust using only generic Study SDK primitives, with no indicator-specific edits to `market_runtime`, desktop, chart integration, or Aeris Charts ownership code.
 
 The target capability families are:
 
@@ -122,7 +122,7 @@ Every new Pine-class capability must fit one ownership-correct lifecycle. The in
 8. **Execution:** `StudyRuntime` schedules the study in dependency order and supplies immutable/bounded market views, upstream study outputs, settings, execution/chart context, and a transactional candidate state/output/scene. Sandboxed studies cross a versioned transport-safe boundary rather than borrowing native Rust process memory.
 9. **Commit/rollback:** calculation success plus resource validation atomically commits candidate state, scalar outputs, semantic scene, and other study-owned result state. Error, trap, panic, cancellation, timeout, or memory overflow discards the candidate and preserves the last committed result.
 10. **Publication:** runtime emits bounded semantic changes: scalar output generations plus future scene/style/table/alert deltas. Slow or unavailable consumers must not create unbounded queues.
-11. **Projection:** `chart_integration` maps semantic output/scene contracts into Nucleus-owned series/drawings/layout without giving study code renderer handles or geometry ownership.
+11. **Projection:** `chart_integration` maps semantic output/scene contracts into Aeris Charts-owned series/drawings/layout without giving study code renderer handles or geometry ownership.
 12. **Live change/recovery:** bar revisions/appends, quote/trade/depth changes, viewport/context changes, provider reconnects, history repairs, and setting rebinds invalidate only the required study ranges/subtrees and remain generation-fenced.
 13. **Removal:** runtime study removal is authoritative; durable descendant cleanup follows runtime acknowledgement, while canceled pending registrations remain hidden/non-durable and are cleaned up with bounded retry semantics.
 
@@ -196,7 +196,7 @@ Final integrated qualification closed the residual correctness gaps found by rea
 
 - Workspace state persists durable study identity, implementation revision, typed settings, dependencies, visibility, and stable output identifiers.
 - Current-chart, explicit-market-series, and prior-study-output dependencies are persisted without runtime IDs becoming durable identifiers.
-- Legacy WMA/Bollinger/SMA persistence migrates to the runtime-managed durable study model without duplicate Nucleus execution.
+- Legacy WMA/Bollinger/SMA persistence migrates to the runtime-managed durable study model without duplicate Aeris Charts execution.
 - Desktop registers, reinitializes, removes, restores, and generation-fences runtime study work through the existing market worker command lane.
 - Changing the chart's selected series reinitializes current-chart study dependencies instead of registering a parallel study.
 - Study-legend removal is a host request. Queueing a manual `RemoveStudy` does not remove durable workspace state; the root and its durable descendants remain persisted until authoritative `StudyRemoved` arrives.
@@ -207,9 +207,9 @@ Final integrated qualification closed the residual correctness gaps found by rea
 ### Completed: rendering boundary
 
 - Runtime study outputs are serial scalar series with explicit plot, pane, and scale metadata.
-- Line, histogram, and area outputs project into Nucleus-owned chart series.
+- Line, histogram, and area outputs project into Aeris Charts-owned chart series.
 - Hard gaps remain `None` rather than being silently bridged.
-- Sub-second timestamps are rejected at the current Nucleus scalar boundary rather than truncated.
+- Sub-second timestamps are rejected at the current Aeris Charts scalar boundary rather than truncated.
 - Multi-output study visibility is owned at the study level, so Bollinger-style outputs hide/show together.
 
 ### Completed: initial shared TA proof
@@ -239,13 +239,13 @@ Completed additions:
 
 ### Completed — recursive EMA without O(history) conversion
 
-The recursive EMA implementation is complete across the local sibling Nucleus and Aeris trees. Nucleus now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Aeris wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
+The recursive EMA implementation is complete across the local sibling Aeris Charts and Aeris trees. Aeris Charts now owns a host-neutral indexed optional-sample EMA state that reuses its existing private recurrence and sparse checkpoints. Aeris wraps that state in `NativeStudyState`, converts only visited fixed-point market rows, reads output-backed `Option<f64>` samples directly, and routes the desktop EMA picker through the same durable Study SDK/runtime path as the other migrated built-ins.
 
-The production dependency is pinned to Nucleus `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Aeris.
+The production dependency is pinned to Aeris Charts `e9ab7bc12a14d0e0dbcb0c149f6df3797dc8d35a`, which contains the reviewed indexed EMA/ATR/VWAP/RSI/MACD/Stochastic states, copy-on-write sparse checkpoints, and the renderer-neutral oscillator presentation primitives used by Aeris.
 
-Do **not** copy Nucleus private EMA recurrence/checkpoint logic into Aeris.
+Do **not** copy Aeris Charts private EMA recurrence/checkpoint logic into Aeris.
 
-The preferred narrow Nucleus addition is an indexed optional-sample API roughly shaped as:
+The preferred narrow Aeris Charts addition is an indexed optional-sample API roughly shaped as:
 
 ```rust
 pub struct IncrementalEmaState { /* private */ }
@@ -273,14 +273,14 @@ Expected semantics:
 
 - `Some(value)` participates in normal SMA-seeded EMA.
 - `None` is a hard gap: output `None`, reset the recursive accumulator, and require a fresh seed run.
-- Sparse recursive checkpoints remain Nucleus-owned.
+- Sparse recursive checkpoints remain Aeris Charts-owned.
 - Same-tail revision and live append remain bounded incremental work.
 - Historical repair replays from the nearest checkpoint rather than rescanning full history.
 - Market-backed input converts only visited fixed-point rows; output-backed input reads `Option<f64>` directly.
 
 ### Product-driven built-ins through shared primitives
 
-Every shipping picker study that belongs in the Study Runtime has been migrated through the SDK/runtime path. Additional built-ins should be added only for concrete product use, and shared Nucleus primitives remain the required formula source when they exist.
+Every shipping picker study that belongs in the Study Runtime has been migrated through the SDK/runtime path. Additional built-ins should be added only for concrete product use, and shared Aeris Charts primitives remain the required formula source when they exist.
 
 - Completed shipping/runtime-managed families: SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic.
 - Deferred until concrete demand: RMA/SMMA if a shared primitive and product requirement exist.
@@ -316,7 +316,7 @@ Current outputs cover scalar line/histogram/area series plus fixed oscillator th
 - Bounded table/dashboard objects and cells.
 - Text/value formatting metadata and semantic positioning.
 
-These must remain serial/semantic product-owned output contracts. A study must never receive direct Nucleus/GPUI render handles. Mutable-looking author semantics must be implemented as runtime-owned transactional scene state with bounded create/update/delete deltas to the chart host.
+These must remain serial/semantic product-owned output contracts. A study must never receive direct Aeris Charts/GPUI render handles. Mutable-looking author semantics must be implemented as runtime-owned transactional scene state with bounded create/update/delete deltas to the chart host.
 
 The representative acceptance case is the supplied **Kristjan Suite R6 (KSR6)** style of study. A correct generic SDK should be able to express its four moving-average overlays, pivot/HH-HL state machine, support/resistance line lifecycle and styles, trend candle coloring, same-symbol daily ADR context, cross-symbol relative-strength context, market-timer MTF context, projected relative volume, semantic Color/Symbol/Timeframe settings, and bottom-right table without KSR6-specific product code.
 
@@ -382,7 +382,7 @@ The approved static-native product surface now defines:
 
 ### Completed — performance and soak coverage
 
-- Real Nucleus-backed EMA tail work is measured under an explicit optimized release soak.
+- Real Aeris Charts-backed EMA tail work is measured under an explicit optimized release soak.
 - Runtime-level large-history qualification proves append/revision preparation work stays proportional to dirty rows and output count while prior immutable output snapshots remain stable.
 - A 16,384-row indicator-on-indicator/MTF regression proves output-primary incremental mapping does not materialize the producer's retained-history timestamp vector and prepares only the changed tail row.
 - Sixteen concurrent stateful studies run under sustained revisions while holding one shared `MarketEngine` lease.
@@ -403,7 +403,7 @@ The final combined tree was qualified with the repository-pinned toolchain and l
 - `aeris_study_sdk` — 21 unit tests plus 3 SDK-facade integration tests passed; its explicit release soak remains ignored in the normal suite.
 - Explicit optimized release soaks pass for 10,000,000 one-row EMA revisions, 16 concurrent stateful studies over one shared engine lease, 2,000 reinitialize/historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events.
 
-The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `aeris_chart_integration` theme assertions outside this roadmap: `nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
+The repository-wide `cargo test --workspace --all-features --locked --no-fail-fast` run has no Study Runtime/SDK failure. It still reports two `aeris_chart_integration` theme assertions outside this roadmap: `aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators` and `platform_default_grid_color_tracks_theme_but_custom_grid_color_does_not`, both observing `#262626` where those tests expect `#f1f1f1`. The Study Runtime changes do not modify the theme path, so those failures are tracked separately rather than weakening or misrepresenting this roadmap's qualification.
 
 This qualification is source/runtime qualification, not a production deployment claim. No release was published or installed as part of this roadmap completion, and no credentialed Rithmic live session was used as evidence for these Study Runtime/SDK completion claims. Provider recovery and generation statements above are backed by deterministic owner-boundary/runtime tests unless a separate live-market gate is explicitly cited.
 
@@ -423,8 +423,8 @@ This qualification is source/runtime qualification, not a production deployment 
 
 ### Phase B — recursive indicator proof
 
-- [x] Land/review the narrow indexed optional-sample EMA API in Nucleus.
-- [x] Wrap Nucleus incremental EMA state in Aeris-owned `NativeStudyState`.
+- [x] Land/review the narrow indexed optional-sample EMA API in Aeris Charts.
+- [x] Wrap Aeris Charts incremental EMA state in Aeris-owned `NativeStudyState`.
 - [x] Prove market-backed fixed-point EMA without O(history) conversion.
 - [x] Prove output-backed EMA with `Option<f64>` hard gaps.
 - [x] Add live append, same-tail revision, historical repair, rollback, and memory-bound tests.
@@ -435,10 +435,10 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Prioritize indicators by product use rather than breadth alone.
   - First production slice: EMA Ribbon, ATR, and session VWAP because the existing scalar output contract preserves their shipping presentation without introducing a second formula path.
   - RSI/Stochastic/MACD follow only with their existing threshold-band / histogram semantics preserved through product-owned richer output metadata.
-- [x] Reuse Nucleus/shared primitives for every migrated formula that already exists.
-  - [x] EMA Ribbon uses five Nucleus `IncrementalEmaState` instances.
-  - [x] ATR and session VWAP use Nucleus-owned indexed sparse-checkpoint states; Aeris lazily converts only replayed fixed-point rows.
-  - [x] RSI/MACD/Stochastic use owner-correct indexed Nucleus states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into Aeris.
+- [x] Reuse Aeris Charts/shared primitives for every migrated formula that already exists.
+  - [x] EMA Ribbon uses five Aeris Charts `IncrementalEmaState` instances.
+  - [x] ATR and session VWAP use Aeris Charts-owned indexed sparse-checkpoint states; Aeris lazily converts only replayed fixed-point rows.
+  - [x] RSI/MACD/Stochastic use owner-correct indexed Aeris Charts states with hard-gap reset, bounded tail work, and checkpointed historical repair; recurrence logic is not copied into Aeris.
 - [x] Add durable implementation revisions and migration tests per migrated built-in.
   - [x] SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, and VWAP have exact revision binding plus legacy-picker migration coverage.
   - [x] RSI/MACD/Stochastic have the same exact revision binding, durable restore, unsupported-revision rejection, and legacy-picker migration contract.
@@ -452,7 +452,7 @@ This qualification is source/runtime qualification, not a production deployment 
 - [x] Expose current canonical non-bar state as borrowed execution views.
 - [x] Recalculate bar-aligned studies from intrabar non-bar events with exact containing-row semantics, fixed-time internal-gap rejection, provider/session/series recovery fencing, and transitive market-readiness through prior-study output ancestry.
 - [ ] Add bounded pure non-bar timelines for concrete order-flow/microstructure studies.
-- [x] Add richer scalar presentation only behind concrete product requirements: fixed oscillator threshold regions and momentum-histogram state/color semantics are serial host contracts rendered by Nucleus.
+- [x] Add richer scalar presentation only behind concrete product requirements: fixed oscillator threshold regions and momentum-histogram state/color semantics are serial host contracts rendered by Aeris Charts.
 - [ ] Superseded by Phases F-G: generalize presentation and semantic scene outputs rather than adding indicator-specific rendering exceptions.
 
 ### Phase E — SDK productization
@@ -467,7 +467,7 @@ This qualification is source/runtime qualification, not a production deployment 
   - The Study SDK README documents trust, versioning, revision, failure-isolation, bounded-resource, and approval rules.
   - Compiling examples cover stateless, stateful, multi-output, multi-timeframe, and market-microstructure studies using only the SDK facade.
 - [x] Add sustained performance/soak qualification.
-  - Explicit release-only soaks pass on the final combined tree: the real Nucleus-backed EMA adapter across 10,000,000 one-row tail revisions, 16 concurrent stateful studies over one real shared `MarketEngine` lease across 20,000 tail revisions, 2,000 reinitialize + historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events while asserting bounded output/state accounting and demand.
+  - Explicit release-only soaks pass on the final combined tree: the real Aeris Charts-backed EMA adapter across 10,000,000 one-row tail revisions, 16 concurrent stateful studies over one real shared `MarketEngine` lease across 20,000 tail revisions, 2,000 reinitialize + historical-repair cycles, and 50,000 bar-aligned quote/trade/depth events while asserting bounded output/state accounting and demand.
 - [x] Add composed workspace restore/rebind and provider-reconnect qualification for representative native studies.
   - Workspace-file round trips preserve unavailable external package state; product-registry restore and current-series rebind preserve durable identity/output contracts; a missing package cannot starve unrelated study restore.
   - Shipping provider capabilities expose the already-implemented quote/BBO paths alongside bars/trades/depth. A newer provider session preserves registered bar-only and quote/trade/depth native studies, their exact stream demand, and a single shared engine lease without duplicate demand. Per-series recovery and transitive producer ancestry fence non-bar study execution until every required canonical bar dependency is `Ready`. These persistence, resolver, and runtime recovery tests deliberately cover their owning boundaries rather than pretending one desktop test owns provider recovery.
@@ -475,7 +475,7 @@ This qualification is source/runtime qualification, not a production deployment 
 ### Phase F — generalized visual series and style channels
 
 - [ ] Replace narrow indicator-specific point-style modes with generic bounded per-point style/color metadata.
-- [ ] Add semantic plot variants needed by representative Pine indicators: step/discontinuous lines, columns, circles/crosses and other low-cost series forms where Nucleus can own rendering cleanly.
+- [ ] Add semantic plot variants needed by representative Pine indicators: step/discontinuous lines, columns, circles/crosses and other low-cost series forms where Aeris Charts can own rendering cleanly.
 - [ ] Add generic semantic levels and fill-between-series contracts.
 - [ ] Add dynamic background styling and per-bar candle/bar style override series.
 - [ ] Preserve hard gaps, pane/scale ownership, visibility, value-label behavior, timestamp validation, and bounded point accounting across every new output family.
@@ -483,14 +483,14 @@ This qualification is source/runtime qualification, not a production deployment 
 
 ### Phase G — transactional semantic drawing scene
 
-- [ ] Add bounded study-local semantic object identities independent of Nucleus object IDs.
+- [ ] Add bounded study-local semantic object identities independent of Aeris Charts object IDs.
 - [ ] Add line/ray objects with endpoints, extension, style, width, color, visibility, and create/update/delete semantics.
 - [ ] Add boxes, polylines, line fills, labels/text/markers, and semantic positioning.
 - [ ] Add bounded table/dashboard objects with cells, formatting, text/background colors, alignment, borders, and product-owned positions.
 - [ ] Make scene mutation transactional with study state/output: failed/panicking calculation cannot partially mutate committed drawings/tables.
 - [ ] Publish compact bounded object deltas (`Create`/`Update`/`Delete`) rather than full-scene copies on every live update.
 - [ ] Define per-study and global object/table/cell/text-memory limits plus deterministic overflow behavior.
-- [ ] Project scene objects through `chart_integration` without exposing Nucleus/GPUI handles to studies.
+- [ ] Project scene objects through `chart_integration` without exposing Aeris Charts/GPUI handles to studies.
 
 ### Phase H — semantic settings and transactional dependency rebinding
 
@@ -535,7 +535,7 @@ Do not claim a percentage such as “95% Pine compatible” from API counting al
 - [ ] Label/marker-heavy event study exercising bounded object churn and scene delta efficiency.
 - [ ] Order-flow/footprint study when canonical provider data exists, proving advanced market-data extensibility without provider leakage.
 
-For every corpus port, the acceptance rule is strict: if the indicator requires an indicator-specific change in desktop, `chart_integration`, `market_runtime`, or Nucleus ownership code, first identify and implement the missing **generic primitive**, then port the indicator through that primitive. Compatibility code must not accrete as named-study exceptions.
+For every corpus port, the acceptance rule is strict: if the indicator requires an indicator-specific change in desktop, `chart_integration`, `market_runtime`, or Aeris Charts ownership code, first identify and implement the missing **generic primitive**, then port the indicator through that primitive. Compatibility code must not accrete as named-study exceptions.
 
 Qualification must include:
 
@@ -617,16 +617,16 @@ Rust remains the primary and maximum-capability authoring path. A future simplif
 - `MarketEngine` remains the single market-demand owner.
 - Studies do not open provider sessions or own canonical market/account state.
 - The desktop does not become an alternate calculation runtime.
-- Nucleus owns rendering/layout/geometry; Aeris owns study orchestration and durable product semantics.
+- Aeris Charts owns rendering/layout/geometry; Aeris owns study orchestration and durable product semantics.
 - New Pine-class capabilities are added as generic semantic SDK/runtime primitives, never as named-indicator special cases.
-- Semantic scene objects use study-local identities; studies never receive Nucleus/GPUI object IDs or mutable render handles.
+- Semantic scene objects use study-local identities; studies never receive Aeris Charts/GPUI object IDs or mutable render handles.
 - Resource settings and request contexts reconcile through `MarketEngine`; dynamic authoring power must not create a second demand registry.
 - The Study Editor owns source and authoring UX only. It does not calculate studies, retain canonical market state, open provider sessions, or mutate GPUI state from background workers.
 - User-authored executable studies run only through the versioned sandbox boundary. They are never loaded as arbitrary native libraries and receive no ambient operating-system authority.
 - Compiler/analysis/test work stays cancellable, bounded, and off the UI thread; compiler workers are tooling, not a second market process or calculation owner.
 - State, scalar outputs, scene objects, tables/cells/text, request contexts, alerts, queues, retries, and publication all remain explicitly bounded.
 - Rust SDK and any future simplified syntax share one runtime/persistence/request/output model. A future syntax must not introduce a parallel engine.
-- Built-ins and SDK studies use one formula source when a shared Nucleus primitive exists.
+- Built-ins and SDK studies use one formula source when a shared Aeris Charts primitive exists.
 - Runtime state/checkpoints are transient; durable settings/dependencies/implementation revision are the reconstruction source.
 - Panics/errors/reinitialization failures cannot partially commit study state or output.
 - Panics/errors/reinitialization failures also cannot partially commit future semantic scene objects, dependency rebinds, or alerts.
@@ -639,7 +639,7 @@ Rust remains the primary and maximum-capability authoring path. A future simplif
 
 ## Current checkpoint
 
-The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Nucleus retains formula/checkpoint and render ownership; Aeris retains durable/runtime orchestration and lazily converts only rows Nucleus actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
+The runtime foundation, generic settings declaration/editor contract, recursive-state bridge, and Phase C migration of every shipping picker study that belongs to the Study Runtime are implemented and verified across both repositories. SMA, EMA, EMA Ribbon, WMA, Bollinger, ATR, session VWAP, RSI, MACD, and Stochastic now use the same durable Study SDK/runtime path; Volume remains a native market-volume presentation rather than a formula study. Aeris Charts retains formula/checkpoint and render ownership; Aeris retains durable/runtime orchestration and lazily converts only rows Aeris Charts actually replays. RSI/Stochastic threshold channels and MACD momentum-histogram styling are now expressed as serial study presentation semantics instead of legacy indicator-specific desktop paths.
 
 Phase E is implemented and qualified for the approved static-native model. External native studies restore through one immutable product-owned package registry; durable dependencies/settings remain authoritative; missing packages preserve workspace state and do not block unrelated studies; author examples compile only against the SDK facade; transactional state candidates require mutation-isolated cloning; runtime tail output preparation structurally shares unchanged history; output-primary incremental mapping remains bounded without retained-history timestamp materialization; actual provider-returned ranged repairs reuse dirty-range execution; and independent calculation failures remain isolated.
 

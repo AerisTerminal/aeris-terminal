@@ -1,7 +1,7 @@
 use super::{
-    AerisTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
-    Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
-    IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
+    AerisChartView, AerisTheme, ChartNoticePlacement, ChartNoticeTone, ChartState,
+    ChartSurfaceNotice, Context, Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument,
+    InteractiveElement, IntoElement, Loader, MenuRow, MouseButton, OrderBookColumn,
     OrderBookColumnVisibility, OrderFlowSweep, ParentElement, PopupAnimationOrigin, RadiusToken,
     ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH,
     SIDE_PANEL_RESIZE_HANDLE_WIDTH, ScrollHandle, SharedString, SidePanel, SidePanelVisibility,
@@ -26,7 +26,7 @@ const WATCHLIST_VOLUME_WIDTH: f32 = 60.0;
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
-    pub(super) chart: Option<&'a Entity<NucleusChartView>>,
+    pub(super) chart: Option<&'a Entity<AerisChartView>>,
     pub(super) chart_has_market_data: bool,
     pub(super) chart_is_superseded: bool,
     pub(super) chart_state: ChartState,
@@ -2094,7 +2094,7 @@ fn workspace_order_book_panel(
     })
 }
 
-pub(super) fn chart_pane_host(chart: Option<&Entity<NucleusChartView>>) -> Div {
+pub(super) fn chart_pane_host(chart: Option<&Entity<AerisChartView>>) -> Div {
     div()
         .relative()
         .flex()

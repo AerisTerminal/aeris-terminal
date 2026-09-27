@@ -159,7 +159,7 @@ fn restore_price_alerts(
     (alerts, message)
 }
 
-fn chart_bridge_label(chart: Option<&Entity<NucleusChartView>>, cx: &App) -> String {
+fn chart_bridge_label(chart: Option<&Entity<AerisChartView>>, cx: &App) -> String {
     chart.map_or_else(
         || "bridge awaiting snapshot".to_string(),
         |chart| bridge_status(chart.read(cx).replay_bridge_metrics()),
@@ -1226,7 +1226,7 @@ fn restored_workspace_records(
 }
 
 fn initialize_restored_chart(
-    chart: Option<&Entity<NucleusChartView>>,
+    chart: Option<&Entity<AerisChartView>>,
     chart_chrome: chart_chrome::ChartChromePreferences,
     cx: &mut Context<WorkspaceSurface>,
 ) {
@@ -1247,7 +1247,7 @@ impl WorkspaceSurface {
         if !chart.has_market_data() {
             return self.restored_chart_state.clone();
         }
-        let nucleus_state_json = match chart.export_semantic_state_json() {
+        let chart_state_json = match chart.export_semantic_state_json() {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("Aeris drawings could not be serialized: {error}");
@@ -1269,7 +1269,7 @@ impl WorkspaceSurface {
         });
         Some(WorkspaceChartState {
             chart_type: chart.chart_type().identifier().to_string(),
-            nucleus_state_json,
+            chart_state_json,
             indicators,
             price_axis,
             locked_drawing_ids: chart.locked_drawing_ids(),
@@ -1286,7 +1286,7 @@ impl WorkspaceSurface {
     }
 
     fn apply_restored_chart_state(
-        chart: &Entity<NucleusChartView>,
+        chart: &Entity<AerisChartView>,
         state: &WorkspaceChartState,
         restore_drawings: bool,
         cx: &mut Context<Self>,
@@ -1312,7 +1312,7 @@ impl WorkspaceSurface {
                 precision: axis.precision.and_then(|value| u8::try_from(value).ok()),
             })
         });
-        let drawing_json = state.nucleus_state_json.clone();
+        let drawing_json = state.chart_state_json.clone();
         let locked = state.locked_drawing_ids.clone();
         let crosshair_mode = u8::try_from(state.crosshair_mode)
             .ok()
@@ -2231,9 +2231,9 @@ impl WorkspaceSurface {
             (existing, aeris_application::ReplayStreamUpdate::Snapshot(snapshot))
                 if existing.is_none() || swapping =>
             {
-                let chart_theme = nucleus_chart_theme(self.theme.mode);
-                let chart = cx
-                    .new(move |_| NucleusChartView::with_replay_and_theme(&snapshot, chart_theme));
+                let chart_theme = aeris_chart_theme(self.theme.mode);
+                let chart =
+                    cx.new(move |_| AerisChartView::with_replay_and_theme(&snapshot, chart_theme));
                 self.apply_chart_chrome_to_chart(&chart, cx);
                 if let Some(restored) = self.restored_chart_state.take() {
                     Self::apply_restored_chart_state(&chart, &restored, true, cx);
@@ -3319,7 +3319,7 @@ impl WorkspaceSurface {
         });
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                chart.set_theme(nucleus_chart_theme(theme.mode));
+                chart.set_theme(aeris_chart_theme(theme.mode));
                 chart_cx.notify();
             });
         }
@@ -3345,11 +3345,7 @@ impl WorkspaceSurface {
         }
     }
 
-    fn apply_chart_chrome_to_chart(
-        &self,
-        chart: &Entity<NucleusChartView>,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_chart_chrome_to_chart(&self, chart: &Entity<AerisChartView>, cx: &mut Context<Self>) {
         chart.update(cx, |chart, _| {
             chart.apply_indicator_chrome_preferences(
                 self.chart_chrome.indicator_name_labels_visible,
@@ -3387,7 +3383,7 @@ impl WorkspaceSurface {
 
     fn apply_retained_chart_state_to_chart(
         &self,
-        chart: &Entity<NucleusChartView>,
+        chart: &Entity<AerisChartView>,
         cx: &mut Context<Self>,
     ) {
         if let Some(state) = &self.retained_chart_presentation.chart_state {
@@ -3404,7 +3400,7 @@ impl WorkspaceSurface {
 
     fn apply_retained_indicators_to_chart(
         &self,
-        chart: &Entity<NucleusChartView>,
+        chart: &Entity<AerisChartView>,
         cx: &mut Context<Self>,
     ) {
         if self.retained_chart_presentation.indicators.is_empty() {
@@ -5094,7 +5090,7 @@ mod tests {
     }
 
     fn install_dependent_output(
-        chart: &mut NucleusChartView,
+        chart: &mut AerisChartView,
         study_id: StudyInstanceId,
         generation: u64,
         value: f64,
@@ -5115,7 +5111,7 @@ mod tests {
     fn dependency_chain_reinitialization_keeps_downstream_presentation_suppressed_until_own_invalidation()
      {
         let (mut studies, root_id, downstream_id, new_series) = reinitializing_dependency_chain();
-        let mut chart = NucleusChartView::empty();
+        let mut chart = AerisChartView::empty();
         install_dependent_output(&mut chart, downstream_id, 1, 1.0);
         assert_eq!(chart.study_visible(downstream_id.get()), Some(true));
 

@@ -558,7 +558,7 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
 }
 
 fn refresh_chart_trading_projection(
-    chart: &Entity<NucleusChartView>,
+    chart: &Entity<AerisChartView>,
     trading: Option<ChartTradingSnapshot>,
     host_overlay: ChartHostOverlaySnapshot,
     session_plan_levels: Vec<(f64, String)>,

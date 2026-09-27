@@ -1,17 +1,17 @@
 //! `Aeris` host integration for Aeris Charts' existing GPUI backend.
 //!
-//! Nucleus owns chart state, layout, scales, interactions, frames, and rendering.
+//! Aeris Charts owns chart state, layout, scales, interactions, frames, and rendering.
 //! This crate only negotiates GPUI window geometry and submits the resulting
 //! immutable chart frame to `aeris_charts_render_gpui`.
 
 mod bridge;
-mod nucleus_bridge;
+mod engine_bridge;
 mod provenance;
 mod view;
 mod workspace;
 
 pub use aeris_application::ReplayRecoveryCommand;
-pub use aeris_charts_engine::ChartTheme as NucleusChartTheme;
+pub use aeris_charts_engine::ChartTheme as AerisChartTheme;
 pub use aeris_charts_engine::{
     AggressorSide as ChartAggressorSide, AlertCondition as ChartAlertCondition,
     AlertCreateRequest as ChartAlertCreateRequest, AlertFrequency as ChartAlertFrequency,
@@ -32,12 +32,12 @@ pub use aeris_charts_engine::{
 };
 pub use bridge::ChartBridgeMetrics;
 pub use view::{
-    ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingTool,
-    ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyInputRequirements,
-    ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget,
-    ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion,
-    ChartType, DrawingsLockSummary, FootprintDisplayMode, NucleusChartView, OrderFlowAggregation,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    classify_order_flow_sweeps,
+    AerisChartView, ChartAppearanceSettings, ChartContextKind, ChartContextRequest,
+    ChartDrawingTool, ChartIndicator, ChartIndicatorError, ChartIndicatorState,
+    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
+    ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, DrawingsLockSummary,
+    FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade,
+    PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
 };
-pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};
+pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

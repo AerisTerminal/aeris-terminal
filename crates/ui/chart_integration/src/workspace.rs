@@ -1,17 +1,17 @@
-//! `Aeris`'s stable-pane adapter around Nucleus's authoritative split workspace.
+//! `Aeris`'s stable-pane adapter around Aeris Charts' authoritative split workspace.
 
 use aeris_charts_engine::{SplitDirection, Workspace, WorkspaceError, WorkspaceLayout};
 use num_traits::ToPrimitive;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Host-facing split direction without leaking Nucleus types into the desktop crate.
+/// Host-facing split direction without leaking Aeris Charts types into the desktop crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartSplitDirection {
     Horizontal,
     Vertical,
 }
 
-/// Stable-pane projection of Nucleus's native split tree.
+/// Stable-pane projection of Aeris Charts' native split tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChartWorkspaceLayout {
     Pane {
@@ -26,7 +26,7 @@ pub enum ChartWorkspaceLayout {
 }
 
 impl ChartWorkspaceLayout {
-    /// Returns pane identities in Nucleus's visual traversal order.
+    /// Returns pane identities in Aeris Charts' visual traversal order.
     #[must_use]
     pub fn pane_ids(&self) -> Vec<u64> {
         let mut pane_ids = Vec::new();
@@ -115,15 +115,15 @@ impl ChartWorkspaceLayout {
     }
 }
 
-/// Nucleus-owned workspace model with stable `Aeris` pane identity mapping.
-pub struct NucleusWorkspace {
+/// Aeris Charts-owned workspace model with stable `Aeris` pane identity mapping.
+pub struct AerisChartWorkspace {
     workspace: Workspace,
     pane_by_cell: BTreeMap<u64, u64>,
     maximum_panes: usize,
 }
 
-impl NucleusWorkspace {
-    /// Creates one native Nucleus workspace rooted at `pane_id`.
+impl AerisChartWorkspace {
+    /// Creates one native Aeris Charts workspace rooted at `pane_id`.
     #[must_use]
     pub fn new(pane_id: u64, maximum_panes: usize) -> Self {
         Self {
@@ -133,7 +133,7 @@ impl NucleusWorkspace {
         }
     }
 
-    /// Replays a persisted stable-pane tree through Nucleus's native split API.
+    /// Replays a persisted stable-pane tree through Aeris Charts' native split API.
     ///
     /// # Errors
     /// Returns an error for invalid identities, ratios, capacity, or native replay failure.
@@ -147,7 +147,7 @@ impl NucleusWorkspace {
             || pane_ids.contains(&0)
             || pane_ids.iter().copied().collect::<BTreeSet<_>>().len() != pane_ids.len()
         {
-            return Err("Nucleus workspace layout has invalid pane identities");
+            return Err("Aeris Charts workspace layout has invalid pane identities");
         }
         let mut restored = Self {
             workspace: Workspace::new(),
@@ -175,11 +175,11 @@ impl NucleusWorkspace {
                 second,
             } => {
                 if !ratio.is_finite() || !(0.05..=0.95).contains(ratio) {
-                    return Err("Nucleus workspace split ratio is invalid");
+                    return Err("Aeris Charts workspace split ratio is invalid");
                 }
                 let second_cell = self
                     .workspace
-                    .split(cell_id, nucleus_direction(*direction))
+                    .split(cell_id, chart_direction(*direction))
                     .map_err(workspace_error)?;
                 let first_edge = self.replay_layout(cell_id, first)?;
                 let second_edge = self.replay_layout(second_cell, second)?;
@@ -191,7 +191,7 @@ impl NucleusWorkspace {
         }
     }
 
-    /// Splits a stable pane through Nucleus and maps the new native cell to `new_pane_id`.
+    /// Splits a stable pane through Aeris Charts and maps the new native cell to `new_pane_id`.
     ///
     /// # Errors
     /// Returns an error for duplicate identities, capacity, or an unknown source pane.
@@ -207,21 +207,21 @@ impl NucleusWorkspace {
                 .values()
                 .any(|current| *current == new_pane_id)
         {
-            return Err("Nucleus workspace received a duplicate pane identity");
+            return Err("Aeris Charts workspace received a duplicate pane identity");
         }
         if self.pane_by_cell.len() >= self.maximum_panes {
-            return Err("Nucleus workspace is at pane capacity");
+            return Err("Aeris Charts workspace is at pane capacity");
         }
         let cell_id = self.cell_for_pane(pane_id)?;
         let new_cell = self
             .workspace
-            .split(cell_id, nucleus_direction(direction))
+            .split(cell_id, chart_direction(direction))
             .map_err(workspace_error)?;
         self.pane_by_cell.insert(new_cell, new_pane_id);
         Ok(())
     }
 
-    /// Removes a stable pane and lets Nucleus collapse its split parent.
+    /// Removes a stable pane and lets Aeris Charts collapse its split parent.
     ///
     /// # Errors
     /// Returns an error when the pane is unknown or is the workspace's final pane.
@@ -243,12 +243,12 @@ impl NucleusWorkspace {
         ratio: f64,
     ) -> Result<(), &'static str> {
         if !ratio.is_finite() {
-            return Err("Nucleus workspace split ratio is invalid");
+            return Err("Aeris Charts workspace split ratio is invalid");
         }
         let layout = self.layout();
         let current = layout
             .boundary_ratio_for_panes(left_pane_id, right_pane_id)
-            .ok_or("Nucleus workspace divider was not found")?;
+            .ok_or("Aeris Charts workspace divider was not found")?;
         let left_cell = self.cell_for_pane(left_pane_id)?;
         let right_cell = self.cell_for_pane(right_pane_id)?;
         self.workspace
@@ -256,7 +256,7 @@ impl NucleusWorkspace {
             .map_err(workspace_error)
     }
 
-    /// Returns the stable-pane projection of Nucleus's current native layout.
+    /// Returns the stable-pane projection of Aeris Charts' current native layout.
     #[must_use]
     pub fn layout(&self) -> ChartWorkspaceLayout {
         project_layout(&self.workspace.layout(), &self.pane_by_cell)
@@ -266,11 +266,11 @@ impl NucleusWorkspace {
         self.pane_by_cell
             .iter()
             .find_map(|(cell_id, current)| (*current == pane_id).then_some(*cell_id))
-            .ok_or("Nucleus workspace pane was not found")
+            .ok_or("Aeris Charts workspace pane was not found")
     }
 }
 
-fn nucleus_direction(direction: ChartSplitDirection) -> SplitDirection {
+fn chart_direction(direction: ChartSplitDirection) -> SplitDirection {
     match direction {
         ChartSplitDirection::Horizontal => SplitDirection::Horizontal,
         ChartSplitDirection::Vertical => SplitDirection::Vertical,
@@ -279,9 +279,9 @@ fn nucleus_direction(direction: ChartSplitDirection) -> SplitDirection {
 
 fn workspace_error(error: WorkspaceError) -> &'static str {
     match error {
-        WorkspaceError::NotFound => "Nucleus workspace pane was not found",
-        WorkspaceError::LastCell => "Nucleus workspace cannot remove its final pane",
-        WorkspaceError::InvalidLayout => "Nucleus workspace layout is invalid",
+        WorkspaceError::NotFound => "Aeris Charts workspace pane was not found",
+        WorkspaceError::LastCell => "Aeris Charts workspace cannot remove its final pane",
+        WorkspaceError::InvalidLayout => "Aeris Charts workspace layout is invalid",
     }
 }
 
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn native_workspace_preserves_stable_panes_and_nested_direction() {
-        let mut workspace = NucleusWorkspace::new(41, 4);
+        let mut workspace = AerisChartWorkspace::new(41, 4);
         workspace
             .split(41, ChartSplitDirection::Horizontal, 42)
             .unwrap();
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_tree_restores_through_native_nucleus_operations() {
+    fn persisted_tree_restores_through_native_aeris_charts_operations() {
         let layout = ChartWorkspaceLayout::Split {
             direction: ChartSplitDirection::Horizontal,
             ratio: 0.4,
@@ -350,7 +350,7 @@ mod tests {
                 second: Box::new(ChartWorkspaceLayout::Pane { pane_id: 11 }),
             }),
         };
-        let restored = NucleusWorkspace::restore(&layout, 4).unwrap();
+        let restored = AerisChartWorkspace::restore(&layout, 4).unwrap();
         assert_eq!(restored.layout(), layout);
         assert_eq!(
             restored.layout().pane_basis_points(),
@@ -359,8 +359,8 @@ mod tests {
     }
 
     #[test]
-    fn remove_and_resize_delegate_to_nucleus_tree() {
-        let mut workspace = NucleusWorkspace::new(1, 4);
+    fn remove_and_resize_delegate_to_aeris_charts_tree() {
+        let mut workspace = AerisChartWorkspace::new(1, 4);
         workspace
             .split(1, ChartSplitDirection::Horizontal, 2)
             .unwrap();
@@ -378,13 +378,13 @@ mod tests {
 
     #[test]
     fn host_preserves_the_product_pane_capacity() {
-        let mut workspace = NucleusWorkspace::new(1, 2);
+        let mut workspace = AerisChartWorkspace::new(1, 2);
         workspace
             .split(1, ChartSplitDirection::Horizontal, 2)
             .unwrap();
         assert_eq!(
             workspace.split(2, ChartSplitDirection::Vertical, 3),
-            Err("Nucleus workspace is at pane capacity")
+            Err("Aeris Charts workspace is at pane capacity")
         );
         assert_eq!(workspace.layout().pane_ids(), [1, 2]);
     }

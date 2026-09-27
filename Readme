@@ -20,7 +20,7 @@ cargo run --release -p aeris_desktop -- --workspace-tabs
 - `crates/adapters`: market-data providers
 - `tools`: development and verification utilities
 
-Nucleus Charts is a pinned Git dependency and is fetched by Cargo.
+Aeris Charts is a pinned Git dependency and is fetched by Cargo.
 
 ## Checks
 

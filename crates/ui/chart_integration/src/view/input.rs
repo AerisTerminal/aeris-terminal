@@ -1,14 +1,14 @@
 //! Input.
 
 use super::{
-    ActivationRequest, ChartDrag, ChartDrawingTool, ChartType, Context, CursorStyle,
-    DrawingModifiers, KEYBOARD_PAGE_FRACTION, KeyDownEvent, ModifiersChangedEvent, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, NucleusChartView, PANE_SEPARATOR_HIT, PointerInteractionState,
+    ActivationRequest, AerisChartView, ChartDrag, ChartDrawingTool, ChartType, Context,
+    CursorStyle, DrawingModifiers, KEYBOARD_PAGE_FRACTION, KeyDownEvent, ModifiersChangedEvent,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PANE_SEPARATOR_HIT, PointerInteractionState,
     PriceScaleTarget, ScrollWheelEvent, WHEEL_LINE_HEIGHT, Window, px,
     should_stop_mouse_up_propagation,
 };
 
-impl NucleusChartView {
+impl AerisChartView {
     /// Cancels transient pointer state before a host-owned modal occludes the chart.
     pub fn suspend_pointer_interaction(&mut self) {
         self.pointer_interaction = PointerInteractionState::Suspended;

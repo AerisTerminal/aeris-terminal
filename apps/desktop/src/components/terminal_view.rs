@@ -1138,7 +1138,7 @@ pub(super) fn terminal_root(
                     focus: cx.focus_handle(),
                 }],
                 active_pane: 0,
-                layout: NucleusWorkspace::new(1, MAXIMUM_PANES_PER_WORKSPACE),
+                layout: AerisChartWorkspace::new(1, MAXIMUM_PANES_PER_WORKSPACE),
                 generation: 1,
                 focus: cx.focus_handle(),
             }],
@@ -1290,7 +1290,7 @@ pub(super) fn workspace_tabs_root(
             .iter()
             .position(|pane| pane.id == tab.active_pane_id)
             .unwrap_or(0);
-        let Ok(layout) = NucleusWorkspace::restore(&layout, MAXIMUM_PANES_PER_WORKSPACE) else {
+        let Ok(layout) = AerisChartWorkspace::restore(&layout, MAXIMUM_PANES_PER_WORKSPACE) else {
             continue;
         };
         workspaces.push(WorkspaceTab {

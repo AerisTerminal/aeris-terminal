@@ -312,9 +312,9 @@ pub struct ThemeColors {
     pub success: ThemeColor,
     pub button_fill: ThemeColor,
     pub ring: ThemeColor,
-    /// Portable chart bullish token. Nucleus remains authoritative for chart rendering.
+    /// Portable chart bullish token. Aeris Charts remains authoritative for chart rendering.
     pub bullish: ThemeColor,
-    /// Portable chart bearish token. Nucleus remains authoritative for chart rendering.
+    /// Portable chart bearish token. Aeris Charts remains authoritative for chart rendering.
     pub bearish: ThemeColor,
     /// Native market gain text. This is presentation state, not a chart palette token.
     pub market_up: ThemeColor,

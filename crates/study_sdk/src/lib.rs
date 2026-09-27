@@ -1,7 +1,7 @@
 //! `Aeris` native Study SDK.
 //!
 //! This crate is the stable Axius-owned surface above the in-process Study
-//! Runtime. Technical-analysis math delegates to the exact pinned Nucleus pure
+//! Runtime. Technical-analysis math delegates to the exact pinned Aeris Charts pure
 //! indicator crate so built-ins and SDK studies do not fork formula behavior.
 
 pub use aeris_market_data::{AggressorSide, BarPeriod, BarSeriesKey, DepthLevel, OrderBookState};
@@ -244,7 +244,7 @@ impl From<StudyRuntimeError> for StudySdkError {
 /// Restore callback exported by one statically linked trusted-native study package.
 ///
 /// The callback receives only durable study configuration. Provider/account credentials,
-/// `MarketEngine`, GPUI, Nucleus render owners, and desktop state are intentionally absent.
+/// `MarketEngine`, GPUI, Aeris Charts render owners, and desktop state are intentionally absent.
 pub type TrustedStudyRestore = fn(
     implementation_revision: u32,
     dependencies: Vec<StudyDependency>,
@@ -1633,7 +1633,7 @@ pub mod builtins {
     }
 
     fn transactional_clone<T: Clone>(state: &T) -> T {
-        // The pinned Nucleus incremental states used below provide mutation-isolated
+        // The pinned Aeris Charts incremental states used below provide mutation-isolated
         // clone/COW semantics for their private checkpoint storage.
         state.clone()
     }
@@ -2267,7 +2267,7 @@ pub mod builtins {
         use super::*;
 
         #[test]
-        fn bounded_window_adapters_match_nucleus_formulas() {
+        fn bounded_window_adapters_match_aeris_charts_formulas() {
             let dense = vec![10.0, 11.0, 9.0, 13.0, 12.0, 15.0];
             let source = dense.iter().copied().map(Some).collect::<Vec<_>>();
 

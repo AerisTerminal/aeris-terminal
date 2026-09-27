@@ -1,5 +1,5 @@
 use super::{
-    FootprintDisplayMode, LegendItem, LegendRow, LegendValueTone, NucleusChartView,
+    AerisChartView, FootprintDisplayMode, LegendItem, LegendRow, LegendValueTone,
     OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, legend_series_values,
 };
 use num_traits::ToPrimitive;
@@ -58,7 +58,7 @@ impl OrderFlowChartState {
     }
 }
 
-impl NucleusChartView {
+impl AerisChartView {
     #[must_use]
     pub fn order_flow_settings(&self) -> OrderFlowSettings {
         self.order_flow_settings
@@ -237,7 +237,7 @@ impl NucleusChartView {
         // The product price series keeps the one last-price label and line.
         if !self.engine.series_apply_options_json(
             footprint_series,
-            r#"{"last_value_visible":false,"price_line_visible":false,"countdown_visible":false}"#,
+            r#"{"last_value_visible":false,"price_line_visible":false}"#,
         ) {
             return Err("footprint price chrome options were rejected".to_string());
         }

@@ -4,8 +4,8 @@ use super::*;
 use aeris_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
 use aeris_charts_engine::AxisTextMidpoint;
 
-fn interactive_chart() -> NucleusChartView {
-    let mut chart = NucleusChartView::new();
+fn interactive_chart() -> AerisChartView {
+    let mut chart = AerisChartView::new();
     chart
         .engine
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
@@ -33,7 +33,7 @@ fn order_flow_trade(ordinal: u64, timestamp_micros: i64, volume: f64) -> OrderFl
 }
 
 fn enable_cvd_and_delta(
-    chart: &mut NucleusChartView,
+    chart: &mut AerisChartView,
     aggregation: OrderFlowAggregation,
     trades: &[OrderFlowTrade],
 ) -> u32 {
@@ -55,7 +55,7 @@ fn enable_cvd_and_delta(
 
 #[test]
 fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_eviction() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let first = vec![
         order_flow_trade(1, 1_000_000, 2.0),
@@ -118,7 +118,7 @@ fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_evictio
 
 #[test]
 fn footprint_rebuilds_rows_when_refreshed_metadata_corrects_the_tick_size() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let mut trades = vec![
         order_flow_trade(1, 1_000_000, 2.0),
@@ -178,7 +178,7 @@ fn measured_order_flow_burst_frame_work_stays_inside_one_frame() {
     const BURST_FRAMES: u64 = 512;
     const TRADES_PER_FRAME: u64 = 128;
     const FRAME_BUDGET_NANOS: u128 = 16_000_000;
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let mut trades = Vec::with_capacity(
         usize::try_from(BURST_FRAMES * TRADES_PER_FRAME).expect("bounded burst"),
@@ -223,7 +223,7 @@ fn measured_order_flow_burst_frame_work_stays_inside_one_frame() {
     assert!(maximum_frame_nanos <= FRAME_BUDGET_NANOS);
 }
 
-fn series_entry(chart: &NucleusChartView, id: u32) -> &aeris_charts_engine::SeriesEntry {
+fn series_entry(chart: &AerisChartView, id: u32) -> &aeris_charts_engine::SeriesEntry {
     chart
         .engine
         .series_entries()
@@ -240,7 +240,7 @@ fn legend_text(row: &LegendRow) -> String {
         .join(" ")
 }
 
-fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
+fn assert_aeris_charts_theme(chart: &AerisChartView, theme: ChartTheme) {
     let mut reference = ChartEngine::new(1.0, 1.0, 1.0);
     reference.set_theme(theme);
     let expected = reference.options.get();
@@ -286,7 +286,7 @@ fn assert_nucleus_theme(chart: &NucleusChartView, theme: ChartTheme) {
     assert_eq!(options.layout.bearish_color, expected.layout.bearish_color);
 }
 
-fn visible_series_point(chart: &NucleusChartView, id: u32) -> (f64, f64) {
+fn visible_series_point(chart: &AerisChartView, id: u32) -> (f64, f64) {
     chart
         .engine
         .series_data(id)
@@ -302,7 +302,7 @@ fn visible_series_point(chart: &NucleusChartView, id: u32) -> (f64, f64) {
 }
 
 #[test]
-fn crosshair_alert_action_reaches_the_host_with_nucleus_price_context() {
+fn crosshair_alert_action_reaches_the_host_with_aeris_charts_price_context() {
     let mut chart = interactive_chart();
     let price = chart
         .engine
@@ -333,7 +333,7 @@ fn crosshair_alert_action_reaches_the_host_with_nucleus_price_context() {
 
 #[test]
 fn empty_chart_surface_accepts_its_first_real_snapshot() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert!(!chart.has_market_data());
     assert_eq!(chart.queued_replay_update_count(), 0);
     assert_eq!(chart.expected_replay_sequence(), None);
@@ -359,8 +359,8 @@ fn externally_applied_time_range_is_not_echoed_to_the_link_coordinator() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut source = NucleusChartView::with_replay(&replay);
-    let mut target = NucleusChartView::with_replay(&replay);
+    let mut source = AerisChartView::with_replay(&replay);
+    let mut target = AerisChartView::with_replay(&replay);
     for chart in [&mut source, &mut target] {
         chart
             .engine
@@ -395,11 +395,11 @@ fn externally_applied_time_range_is_not_echoed_to_the_link_coordinator() {
 }
 
 #[test]
-fn covering_forming_snapshot_recovers_the_nucleus_view_without_a_new_candle() {
+fn covering_forming_snapshot_recovers_the_aeris_charts_view_without_a_new_candle() {
     let baseline = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
         .expect("replay");
-    let mut chart = NucleusChartView::with_replay(&baseline);
+    let mut chart = AerisChartView::with_replay(&baseline);
     chart.mark_replay_stream_invalid();
     let mut request_id = 0;
     assert!(
@@ -433,7 +433,7 @@ fn host_chart_type_survives_snapshot_install() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert_eq!(chart.chart_type(), ChartType::Candles);
     chart.set_chart_type(ChartType::Line);
     assert_eq!(chart.chart_type(), ChartType::Line);
@@ -459,7 +459,7 @@ fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_serie
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::with_replay(&replay);
+    let mut chart = AerisChartView::with_replay(&replay);
     let levels = vec![
         (10_250.25, "opening range".to_string()),
         (10_200.0, "invalidation".to_string()),
@@ -491,7 +491,7 @@ fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_serie
 
 #[test]
 fn invalid_session_plan_level_projection_preserves_the_current_lines() {
-    let mut chart = NucleusChartView::new();
+    let mut chart = AerisChartView::new();
     let levels = vec![(100.0, "planned entry".to_string())];
     chart
         .replace_session_plan_levels(levels.clone())
@@ -511,7 +511,7 @@ fn selected_price_precision_survives_snapshot_install_and_restores_a_replacement
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert!(chart.apply_price_axis_menu_action(
         0,
         false,
@@ -525,7 +525,7 @@ fn selected_price_precision_survives_snapshot_install_and_restores_a_replacement
     assert_eq!(series_entry(&chart, 0).price_format.precision, 0);
 
     let retained_precision = chart.selected_price_precision();
-    let mut replacement = NucleusChartView::with_replay(&replay);
+    let mut replacement = AerisChartView::with_replay(&replay);
     assert!(replacement.apply_price_axis_menu_action(
         0,
         false,
@@ -540,7 +540,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::with_replay(&replay);
+    let mut chart = AerisChartView::with_replay(&replay);
     let original = chart.engine.series_data(0);
     assert!(!original.is_empty());
     let original_high = original[0].high;
@@ -552,7 +552,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
         aeris_charts_engine::SeriesKind::Area
     );
     assert_eq!(chart.engine.feature_series_kind(0), None);
-    let nucleus_line_width = serde_json::from_str::<serde_json::Value>(
+    let aeris_line_width = serde_json::from_str::<serde_json::Value>(
         &chart
             .engine
             .series_options_json(0)
@@ -560,7 +560,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     )
     .expect("brushable options are JSON")["line_width"]
         .as_f64()
-        .expect("Nucleus supplies a brushable line width");
+        .expect("Aeris Charts supplies a brushable line width");
     chart
         .engine
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
@@ -585,7 +585,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
         )
         .expect("area options are JSON")["line_width"]
             .as_f64(),
-        Some(nucleus_line_width)
+        Some(aeris_line_width)
     );
 
     chart.set_chart_type(ChartType::Candles);
@@ -600,7 +600,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
 }
 
 #[test]
-fn calendar_month_snapshot_reaches_nucleus_with_variable_month_spacing() {
+fn calendar_month_snapshot_reaches_aeris_charts_with_variable_month_spacing() {
     let baseline = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 3 })
         .expect("fixture snapshot");
@@ -629,7 +629,7 @@ fn calendar_month_snapshot_reaches_nucleus_with_variable_month_spacing() {
     )
     .expect("calendar snapshot validates");
 
-    let chart = NucleusChartView::with_replay(&replay);
+    let chart = AerisChartView::with_replay(&replay);
     assert_eq!(series_entry(&chart, 0).title, "AXF");
     assert_eq!(chart.legend_rows()[0].title, "AXF · 1M · XNAS");
     let installed_times = chart
@@ -649,7 +649,7 @@ fn calendar_month_snapshot_reaches_nucleus_with_variable_month_spacing() {
 
 #[test]
 fn series_updates_dirty_layout_without_discarding_viewport_dimensions() {
-    let mut chart = NucleusChartView::new();
+    let mut chart = AerisChartView::new();
     chart.built_for = (1280.0, 720.0, 1.25);
     chart.layout_dirty = false;
 
@@ -685,7 +685,7 @@ fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::with_replay(&replay);
+    let mut chart = AerisChartView::with_replay(&replay);
     let initial_expected = chart
         .expected_replay_sequence()
         .expect("snapshot establishes sequence");
@@ -748,7 +748,7 @@ fn snapshot_installation_records_queued_and_direct_foreground_durations() {
         .expect("replacement fixture validates")
         .try_with_publication_generation(replay.evidence().publication_generation.saturating_add(1))
         .expect("replacement generation validates");
-    let mut chart = NucleusChartView::with_replay(&replay);
+    let mut chart = AerisChartView::with_replay(&replay);
 
     assert!(
         chart
@@ -797,7 +797,7 @@ fn visible_time_range_extrapolates_past_loaded_history_for_backfill() {
     let clamped_start = chart
         .engine
         .visible_time_range()
-        .expect("clamped Nucleus viewport")
+        .expect("clamped Aeris Charts viewport")
         .0;
     assert!((clamped_start - first_seconds).abs() < f64::EPSILON);
     let (start, _) = chart
@@ -814,10 +814,10 @@ fn chart_series_retention_is_owned_by_market_runtime() {
 }
 
 #[test]
-fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
-    let chart = NucleusChartView::empty();
+fn aeris_charts_theme_owns_chart_cosmetics_and_series_defaults() {
+    let chart = AerisChartView::empty();
     let series = &chart.engine.series[0];
-    assert_nucleus_theme(&chart, ChartTheme::Dark);
+    assert_aeris_charts_theme(&chart, ChartTheme::Dark);
     assert!(series.line_color.is_none());
     assert!(series.up_color.is_none());
     assert!(series.down_color.is_none());
@@ -828,7 +828,7 @@ fn nucleus_theme_owns_chart_cosmetics_and_series_defaults() {
 }
 
 #[test]
-fn chart_legend_text_colors_project_platform_chrome_and_nucleus_market_colors() {
+fn chart_legend_text_colors_project_platform_chrome_and_aeris_charts_market_colors() {
     for (theme, platform) in [
         (ChartTheme::Light, AerisTheme::light()),
         (ChartTheme::Dark, AerisTheme::dark()),
@@ -893,7 +893,7 @@ fn last_value_cluster_uses_instrument_title_and_host_clock() {
 
 #[test]
 fn the_symbol_legend_reports_a_load_only_when_it_turns_over() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert!(!chart.asset_loading.is_present());
     assert!(chart.set_asset_loading(true));
     assert!(chart.asset_loading.is_present());
@@ -922,7 +922,7 @@ fn indicator_clusters_never_carry_the_candle_close_countdown() {
 }
 
 #[test]
-fn price_axis_menu_controls_nucleus_series_chrome_and_scale() {
+fn price_axis_menu_controls_aeris_charts_series_chrome_and_scale() {
     let mut chart = interactive_chart();
     let sma = chart
         .add_indicator(ChartIndicator::Sma)
@@ -1163,7 +1163,7 @@ fn indicator_price_line_preference_applies_to_every_plot() {
 }
 
 #[test]
-fn nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
+fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
     let mut chart = interactive_chart();
     let volume = chart
         .add_indicator(ChartIndicator::Volume)
@@ -1204,9 +1204,9 @@ fn nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
     let series_count = chart.engine.series.len();
 
     chart.set_theme(ChartTheme::Light);
-    assert_nucleus_theme(&chart, ChartTheme::Light);
+    assert_aeris_charts_theme(&chart, ChartTheme::Light);
     chart.set_theme(ChartTheme::Dark);
-    assert_nucleus_theme(&chart, ChartTheme::Dark);
+    assert_aeris_charts_theme(&chart, ChartTheme::Dark);
     assert_eq!(
         chart
             .engine
@@ -1237,7 +1237,7 @@ fn nucleus_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators() {
 }
 
 #[test]
-fn wheel_zoom_and_horizontal_scroll_mutate_nucleus_without_refitting() {
+fn wheel_zoom_and_horizontal_scroll_mutate_aeris_charts_without_refitting() {
     let mut chart = interactive_chart();
     let spacing = chart.engine.bar_spacing();
     chart.apply_wheel(400.0, 200.0, 0.0, 1.0);
@@ -1264,13 +1264,13 @@ fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
 }
 
 #[test]
-fn pane_copy_price_uses_nucleus_chart_context() {
+fn pane_copy_price_uses_aeris_chart_context() {
     let chart = interactive_chart();
     let (x, y) = visible_series_point(&chart, 0);
     let context = chart
         .engine
         .chart_context_at(x, y)
-        .expect("pane click has Nucleus context");
+        .expect("pane click has Aeris Charts context");
     let expected = chart
         .engine
         .series_format_price(0, context.price)
@@ -1302,12 +1302,12 @@ fn price_axis_context_menu_does_not_copy_price() {
 
 #[test]
 fn empty_chart_has_no_copy_price() {
-    let chart = NucleusChartView::empty();
+    let chart = AerisChartView::empty();
     assert!(chart.formatted_copy_price(100.0, 200.0).is_none());
 }
 
 #[test]
-fn axes_drag_and_double_click_reset_through_nucleus() {
+fn axes_drag_and_double_click_reset_through_aeris_charts() {
     let mut chart = interactive_chart();
     chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
     assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
@@ -1431,7 +1431,7 @@ fn scroll_to_latest_preserves_zoom_and_returns_to_real_time_edge() {
 }
 
 #[test]
-fn indicator_catalog_maps_to_nucleus_with_legacy_defaults() {
+fn indicator_catalog_maps_to_aeris_charts_with_legacy_defaults() {
     let cases = [
         (ChartIndicator::Sma, 1, "sma", "SMA 20"),
         (ChartIndicator::Ema, 1, "ema", "EMA 20"),
@@ -1475,7 +1475,7 @@ fn legend_pane_layout_tracks_the_plot_width_so_legends_stay_off_the_price_axis()
     let mut chart = interactive_chart();
     chart
         .add_indicator(ChartIndicator::Macd)
-        .expect("MACD binds to nucleus");
+        .expect("MACD binds to Aeris Charts");
     for width in [1280.0_f32, 420.0] {
         chart.engine.css_width = f64::from(width);
         chart.engine.css_height = 720.0;
@@ -1550,7 +1550,7 @@ fn chart_legends_group_outputs_and_follow_native_indicator_panes() {
 #[test]
 fn asset_legend_shows_ohlc_only_on_candles_and_bars() {
     let mut chart = interactive_chart();
-    let asset_values = |chart: &NucleusChartView| {
+    let asset_values = |chart: &AerisChartView| {
         let row = chart
             .legend_rows()
             .into_iter()
@@ -1699,17 +1699,17 @@ fn series_appearance_updates_do_not_rewrite_canvas_options() {
 }
 
 #[test]
-fn nucleus_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
+fn aeris_charts_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
     let mut chart = interactive_chart();
     assert_eq!(
         chart.engine.options.get().grid.vert_lines.color,
-        nucleus_grid_color(ChartTheme::Dark)
+        aeris_charts_grid_color(ChartTheme::Dark)
     );
 
     chart.set_theme(ChartTheme::Light);
     assert_eq!(
         chart.engine.options.get().grid.vert_lines.color,
-        nucleus_grid_color(ChartTheme::Light)
+        aeris_charts_grid_color(ChartTheme::Light)
     );
 
     let mut custom = chart.appearance_settings();
@@ -1719,23 +1719,23 @@ fn nucleus_default_grid_color_tracks_theme_but_custom_grid_color_does_not() {
     assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#334155");
 
     let mut persisted_light_default = chart.appearance_settings();
-    persisted_light_default.grid_color = nucleus_grid_color(ChartTheme::Light);
+    persisted_light_default.grid_color = aeris_charts_grid_color(ChartTheme::Light);
     assert!(chart.set_appearance_settings(&persisted_light_default));
     assert_eq!(
         chart.engine.options.get().grid.vert_lines.color,
-        nucleus_grid_color(ChartTheme::Dark)
+        aeris_charts_grid_color(ChartTheme::Dark)
     );
 }
 
 #[test]
-fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
-    let light = NucleusChartView::empty_with_theme(ChartTheme::Light);
+fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() {
+    let light = AerisChartView::empty_with_theme(ChartTheme::Light);
     let persisted = light.appearance_settings();
-    let light_defaults = nucleus_theme_appearance_defaults(ChartTheme::Light);
+    let light_defaults = aeris_theme_appearance_defaults(ChartTheme::Light);
     assert_eq!(persisted.up_color, light_defaults.bullish);
     assert_eq!(persisted.down_color, light_defaults.bearish);
 
-    let mut dark = NucleusChartView::empty_with_theme(ChartTheme::Dark);
+    let mut dark = AerisChartView::empty_with_theme(ChartTheme::Dark);
     let _ = dark.set_appearance_settings(&persisted);
 
     let series = series_entry(&dark, 0);
@@ -1746,7 +1746,7 @@ fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
     assert!(series.border_up_color.is_none());
     assert!(series.border_down_color.is_none());
 
-    let dark_defaults = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    let dark_defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
     assert_eq!(dark_defaults.bullish, "#7c8db0");
     let effective = dark.appearance_settings();
     assert_eq!(effective.up_color, dark_defaults.bullish);
@@ -1761,7 +1761,7 @@ fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
         palette.bullish,
         rgba(
             Color::parse_css(&dark_defaults.bullish)
-                .expect("Nucleus bullish color is valid CSS")
+                .expect("Aeris Charts bullish color is valid CSS")
                 .0
         )
     );
@@ -1769,7 +1769,7 @@ fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
         palette.bearish,
         rgba(
             Color::parse_css(&dark_defaults.bearish)
-                .expect("Nucleus bearish color is valid CSS")
+                .expect("Aeris Charts bearish color is valid CSS")
                 .0
         )
     );
@@ -1777,9 +1777,9 @@ fn persisted_light_nucleus_market_defaults_stay_unpinned_on_a_dark_chart() {
 
 #[test]
 fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
-    let mut chart = NucleusChartView::empty_with_theme(ChartTheme::Dark);
-    let nucleus_defaults = chart.appearance_settings();
-    let mut custom = nucleus_defaults.clone();
+    let mut chart = AerisChartView::empty_with_theme(ChartTheme::Dark);
+    let aeris_defaults = chart.appearance_settings();
+    let mut custom = aeris_defaults.clone();
     custom.up_color = "#112233".to_string();
     custom.down_color = "#445566".to_string();
     custom.wick_up_color = "#778899".to_string();
@@ -1820,8 +1820,8 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     assert!(series.wick_down_color.is_none());
     assert!(series.border_up_color.is_none());
     assert!(series.border_down_color.is_none());
-    assert_eq!(chart.appearance_settings(), nucleus_defaults);
-    let defaults = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    assert_eq!(chart.appearance_settings(), aeris_defaults);
+    let defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
     let effective = chart.appearance_settings();
     assert_eq!(effective.up_color, defaults.bullish);
     assert_eq!(effective.down_color, defaults.bearish);
@@ -1829,16 +1829,16 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
 }
 
 #[test]
-fn canonical_crosshair_color_tracks_nucleus_theme() {
-    let mut chart = NucleusChartView::empty_with_theme(ChartTheme::Light);
-    let light = nucleus_theme_appearance_defaults(ChartTheme::Light);
+fn canonical_crosshair_color_tracks_aeris_theme() {
+    let mut chart = AerisChartView::empty_with_theme(ChartTheme::Light);
+    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
     assert_eq!(
         chart.engine.options.get().crosshair.vert_line.color,
         light.crosshair
     );
 
     chart.set_theme(ChartTheme::Dark);
-    let dark = nucleus_theme_appearance_defaults(ChartTheme::Dark);
+    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
     assert_eq!(
         chart.engine.options.get().crosshair.vert_line.color,
         dark.crosshair
@@ -1949,7 +1949,7 @@ fn hidden_volume_keeps_its_legend_until_removed() {
 }
 
 #[test]
-fn native_indicator_hover_selection_and_delete_reach_nucleus() {
+fn native_indicator_hover_selection_and_delete_reach_aeris_charts() {
     let mut chart = interactive_chart();
     let indicator = chart
         .add_indicator(ChartIndicator::Sma)
@@ -2061,7 +2061,7 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::with_replay(&replay);
+    let mut chart = AerisChartView::with_replay(&replay);
     let (_, volume_columns) = chart
         .engine
         .data_layer()
@@ -2112,7 +2112,7 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
 
 #[test]
 fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let initial_series = chart.engine.series.len();
 
     for indicator in ChartIndicator::ALL {
@@ -2127,7 +2127,7 @@ fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
 
 #[test]
 fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let timestamps = [
         60_i64 * 1_000_000_000,
         120_i64 * 1_000_000_000,
@@ -2229,7 +2229,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
 
 #[test]
 fn study_output_projection_retains_typed_input_requirements() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let descriptor = ChartStudyOutputDescriptor {
         title: "Trade depth study",
         legend_label: None,
@@ -2257,7 +2257,7 @@ fn study_output_projection_retains_typed_input_requirements() {
 
 #[test]
 fn study_output_projection_inherits_native_series_defaults() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert!(
         chart.engine.series_apply_price_format_json(
             0,
@@ -2293,7 +2293,7 @@ fn study_output_projection_inherits_native_series_defaults() {
 
 #[test]
 fn study_output_projection_rejects_invalid_presentation_before_creating_series() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let initial_series = chart.engine.series.len();
     let descriptor = ChartStudyOutputDescriptor {
         title: "Invalid Threshold Histogram",
@@ -2347,7 +2347,7 @@ fn study_legend_control_ids_do_not_overflow_or_alias_control_kinds() {
 
 #[test]
 fn study_settings_requests_are_bounded_to_one_latest_study_identity() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert_eq!(chart.take_study_settings_request(), None);
     chart.pending_study_settings = Some(7);
     chart.pending_study_settings = Some(9);
@@ -2357,7 +2357,7 @@ fn study_settings_requests_are_bounded_to_one_latest_study_identity() {
 
 #[test]
 fn study_remove_request_targets_one_runtime_study() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     assert_eq!(chart.take_study_remove_request(), None);
     chart.pending_study_remove = Some(7);
     assert_eq!(chart.take_study_remove_request(), Some(7));
@@ -2366,7 +2366,7 @@ fn study_remove_request_targets_one_runtime_study() {
 
 #[test]
 fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_line() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000];
     let values = [Some(20.0)];
     let descriptor = ChartStudyOutputDescriptor {
@@ -2461,7 +2461,7 @@ fn selecting_one_runtime_study_output_selects_the_complete_indicator() {
 
 #[test]
 fn multi_output_study_legend_visibility_toggles_the_whole_study() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000];
     let values = [Some(20.0)];
     let upper = ChartStudyOutputDescriptor {
@@ -2536,7 +2536,7 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
 
 #[test]
 fn study_outputs_inherit_indicator_chrome_and_live_updates_do_not_dirty_layout() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     chart.apply_indicator_chrome_preferences(false, false, false);
     let timestamps = [60_i64 * 1_000_000_000];
     let descriptor = ChartStudyOutputDescriptor {
@@ -2560,6 +2560,13 @@ fn study_outputs_inherit_indicator_chrome_and_live_updates_do_not_dirty_layout()
     assert!(!series.title_visible);
     assert!(!series.last_value_visible);
     assert!(!series.price_line_visible);
+    assert!(!series.countdown_visible);
+
+    chart.reset_appearance_settings();
+    assert!(
+        !series_entry(&chart, series_id).countdown_visible,
+        "appearance reset must not give a derived study candle-close ownership"
+    );
 
     chart.layout_dirty = false;
     assert_eq!(
@@ -2571,7 +2578,7 @@ fn study_outputs_inherit_indicator_chrome_and_live_updates_do_not_dirty_layout()
 
 #[test]
 fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let initial_series = chart.engine.series.len();
 
     assert_eq!(
@@ -2601,7 +2608,7 @@ fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state()
 
 #[test]
 fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_kinds() {
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     let timestamps = [60_i64 * 1_000_000_000, 120_i64 * 1_000_000_000];
     let values = [Some(1.0), Some(2.0)];
 
@@ -2696,7 +2703,7 @@ fn indicator_metadata_matches_the_legacy_picker_copy() {
 }
 
 #[test]
-fn anchored_drawing_tools_commit_real_nucleus_drawings_and_return_to_cursor() {
+fn anchored_drawing_tools_commit_real_aeris_charts_drawings_and_return_to_cursor() {
     let mut chart = interactive_chart();
     let tools = [
         (ChartDrawingTool::TrendLine, 2, 160.0),
@@ -2777,7 +2784,7 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut source = NucleusChartView::with_replay(&replay);
+    let mut source = AerisChartView::with_replay(&replay);
     source
         .engine
         .add_drawing(
@@ -2812,7 +2819,7 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
         .time_at_logical(7.5)
         .expect("later anchor time");
     state[0]["points"][0]["aeris_anchor_time"] = serde_json::Value::from(later_time);
-    let mut restored = NucleusChartView::with_replay(&replay);
+    let mut restored = AerisChartView::with_replay(&replay);
     restored
         .import_semantic_state_json(&state.to_string(), &[])
         .expect("drawings restore");
@@ -2854,7 +2861,7 @@ fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
 }
 
 #[test]
-fn nucleus_upgrade_hides_crosshair_during_creation_and_restores_it_on_cancel() {
+fn aeris_charts_upgrade_hides_crosshair_during_creation_and_restores_it_on_cancel() {
     let mut chart = interactive_chart();
     let color = Color::parse_css(&chart.engine.options.get().crosshair.horz_line.color)
         .expect("crosshair color");
@@ -3244,7 +3251,7 @@ fn platform_crosshair_time_label_omits_midnight_for_weekly_bars() {
         bars,
     )
     .expect("weekly snapshot validates");
-    let mut chart = NucleusChartView::with_replay(&replay);
+    let mut chart = AerisChartView::with_replay(&replay);
     chart
         .engine
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
@@ -3363,7 +3370,7 @@ fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
-    let mut chart = NucleusChartView::empty();
+    let mut chart = AerisChartView::empty();
     chart.load_replay(&replay).expect("snapshot installs");
     chart.set_chart_type(ChartType::Footprint);
     let price = series_entry(&chart, 0);
