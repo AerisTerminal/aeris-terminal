@@ -25,13 +25,13 @@ here (PF, M, D) are stable; batches group them without renumbering.
 
 ## Status at a glance
 
-Updated 2026-09-26. Baseline source-confirmed 2026-09-24.
+Updated 2026-09-27. Baseline source-confirmed 2026-09-27.
 
 | Batch | Scope | Needs from Aeris Charts | External gate | Status |
 | --- | --- | --- | --- | --- |
 | T1 | Trading foundations: D1, D3, PF3, PF6, PF7, PF9 | None | None | **Complete** |
 | T2 | Trading, execution and risk on the simulated venue: M2.1–M2.8, M3.1–M3.4, M7.2 | None for basic chart trading (existing Aeris Charts trading layer); B1 (PD11) for multi-account and trailing stops on charts, (PD1) for chart warnings, (PD3) for plan levels | None | **Complete** |
-| T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | Open |
+| T3 | Order flow on Hyperliquid data: PF5, M1.2, M1.4, M1.5, M1.7 | B3 (F2, OF1, OF2, OF11, OF12, PD10) | None | **Complete** |
 | T4 | Context and workspace: D6, M5.1–M5.5, M7.1, M7.4 | B1 (PD3, PD5, PD7) | Free API keys per user | Open |
 | T5 | Rithmic live trading: PF1, PF2, PF4, M1.6, live qualification of T2 | B1 (PD1); B6 (PD8) for chart markers of M1.6 | Rithmic onboarding, conformance, live accounts, D4 | Blocked (onboarding) |
 | T6 | Record, replay and review: D2, PF8, M4.1–M4.4 | B1 (PD4, PD6), B5 (PD2, F1) | D2 decision; data licensing checklist | Open |
@@ -161,21 +161,35 @@ is reproducible from recorded fills.
 
 ### T3 — Order flow on Hyperliquid data
 
-**Scope:** PF5, M1.2, M1.4, M1.5, M1.7. **Needs:** Aeris Charts B3. **Status:** open.
+**Scope:** PF5, M1.2, M1.4, M1.5, M1.7. **Needs:** Aeris Charts B3. **Status:** complete.
 
 Hyperliquid public trades already carry aggressor sides, so order flow can be built before Rithmic
 onboarding.
 
-- [ ] **PF5** Bounded classified trade tape from `market_runtime`, coalesced for slow consumers
+- [x] **PF5** Bounded classified trade tape from `market_runtime`, coalesced for slow consumers
       and generation-fenced, feeding the chart's shared tape (F2).
-- [ ] **M1.2** Footprint charts wired to PF5, with settings UI and persisted configuration.
-- [ ] **M1.4** Cumulative delta; delta divergence alert rule.
-- [ ] **M1.5** Big trades and sweeps with adaptive per-contract thresholds.
-- [ ] **M1.7** Time and sales panel with size, side and price filters.
-- [ ] Burst workload measured in a release build; broad gate green; committed and pushed.
+- [x] **M1.2** Footprint charts wired to PF5, with settings UI and persisted configuration.
+- [x] **M1.4** Cumulative delta; delta divergence alert rule.
+- [x] **M1.5** Big trades and sweeps with adaptive per-contract thresholds.
+- [x] **M1.7** Time and sales panel with size, side and price filters.
+- [x] Burst workload measured in a release build; broad gate green; committed and pushed.
 
 **Acceptance:** every view renders from one shared canonical stream without duplicate provider
 demand, and frame work stays bounded during bursts.
+
+Implementation evidence (2026-09-27): `market_runtime` owns one generation-fenced classified tape
+per active market, bounded to 65,536 trades and eight minutes. Immutable publications are coalesced
+to the latest revision for slow consumers, while studies, footprint, cumulative delta, delta,
+large-trade bubbles, sweep classification and time and sales all project the same retained stream.
+The Hyperliquid decoder validates every documented required public-trade field and preserves
+provider identity separately from local ingestion order. Footprint display mode and order-flow
+overlays persist with the workspace; time and sales applies bounded size, side and price filters;
+and completed fixed-time bars drive a generation-fenced bullish or bearish delta-divergence alert.
+
+The Aeris Charts B3 revision is pinned at `dcb86c8`. A release workload applied 65,536 trades in
+512 bursts through the order-flow projection and chart frame builder in 467.5322 ms total; the
+largest measured frame was 2.2571 ms against the 16 ms budget. The workspace broad gate and the
+public Hyperliquid desktop/runtime path passed before the batch was committed.
 
 ### T4 — Context and workspace
 
@@ -327,7 +341,7 @@ These decisions block specific items. Each is listed with the recommendation fro
 
 ## Current baseline
 
-Source-confirmed on 2026-09-24. This is the starting point, not a claim of completeness.
+Source-confirmed on 2026-09-27. This records the implemented baseline, not a claim of completeness.
 
 | Area | Present today | Evidence |
 | --- | --- | --- |
@@ -336,18 +350,18 @@ Source-confirmed on 2026-09-24. This is the starting point, not a claim of compl
 | Rithmic trading | **Absent.** No Order plant, PnL plant, order routing, positions, fills or account risk information | `protocol.rs` allowlist |
 | Hyperliquid | Public candles, L2 snapshots, BBO, trades, catalog and asset context; explicitly no orders or paper trading | `crates/adapters/hyperliquid_market` |
 | CQG and dxFeed | **Absent** | — |
-| Market ownership | `MarketEngine` demand ownership; `market_runtime` merges history and live state and publishes series, order-book snapshots, study outputs and price-alert triggers; no separate trade-tape stream to the UI | `market_engine`, `market_runtime` |
+| Market ownership | `MarketEngine` demand ownership; `market_runtime` merges history and live state and publishes series, order-book snapshots, study outputs, alert triggers and one bounded, classified, generation-fenced trade tape | `market_engine`, `market_runtime` |
 | Instrument metadata | Provider price increment at install time plus canonical tick size, point value, currency, expiry, first-notice, last-trade and session-hours fields; current provider reference payloads may leave optional fields unavailable rather than guessing | `contracts/src/messages.rs`, rithmic `catalog.rs`, `domain/instruments` |
 | Account runtime | Aeris SaaS sign-in (OIDC, lease, vault); disabled in development builds; not a broker trading account | `crates/account_runtime`, `apps/desktop/src/account.rs` |
-| Order book panel | Read-only price ladder with aggressor volume columns; the P/L column is an empty placeholder | `crates/ui/terminal_ui`, `SidePanel::OrderBook` |
-| Charts in the desktop | Candles, bars, line, area, baseline; drawings; price-alert lines; split workspace; study-runtime indicators. Footprint, volume profile, heatmap and trading lines exist in Aeris Charts but are not wired into the desktop | `crates/ui/chart_integration` |
+| Order book panel | Trading ladder with one-click placement, exact-price modification, working orders, positions, currency P/L and recent aggressor volume; order-level queue intelligence still awaits T5 | `crates/ui/terminal_ui`, `SidePanel::OrderBook` |
+| Charts in the desktop | Candles, bars, line, area, baseline and footprint; drawings; trading and plan overlays; price and delta-divergence alerts; cumulative delta, delta and large-trade bubbles; split workspace; study-runtime indicators. Volume profile and heatmap remain unwired | `crates/ui/chart_integration` |
 | Studies | Study runtime and SDK Phases A–E complete; editor and sandbox pending | `plan/study_runtime_sdk_roadmap.md` |
-| Alerts | Price alerts evaluated in `market_runtime` on live trades (32 per consumer) with OS notifications | `PriceAlertRegistry`, `platform_runtime/user_notifications.rs` |
+| Alerts | Price alerts and completed-bar delta-divergence alerts evaluated in `market_runtime`, generation-fenced and delivered through bounded latest-only publications with OS notifications | `PriceAlertRegistry`, `order_flow_alerts.rs`, `platform_runtime/user_notifications.rs` |
 | Persistence | Workspace layouts, chart preferences, studies, alerts, watchlist and the credential vault; trading records now use a separate bounded SQLite store. Market-history persistence remains deliberately banned | `workspace_persistence.rs`, `crates/trading_runtime`, `tools/naming_check` |
 | Recording, replay, journal, simulator | Session recording/replay remains absent; T1 now provides durable journal/user records and a local simulated venue, while "replay" in market code still means bar snapshot contracts and Rithmic history requests | `crates/trading_runtime`, `application/src/replay_snapshot.rs` |
-| Risk controls | Durable simulated-venue profiles, locks, pre-trade checks and kill-switch foundation; full rule meters and UI remain T2 work | `crates/trading_runtime`, `apps/desktop/src/keymap.rs` |
+| Risk controls | Durable simulated-venue profiles, locks, pre-trade checks, rule meters, discipline rules, session plans and per-account or global kill switches | `crates/trading_runtime`, `apps/desktop/src/keymap.rs` |
 | Context data | **Absent** except a CME Globex session-day helper for week and month history buckets | `rithmic_protocol/src/calendar.rs` |
-| Workspace UX | Tabs, split panes and their shortcuts, themes, feed diagnostics; no command palette, trading hotkeys, multi-window workspace or linked symbol groups | `apps/desktop`, `crates/observability` |
+| Workspace UX | Tabs, split panes and their shortcuts, themes, feed diagnostics and focus-safe trading hotkeys; no command palette, multi-window workspace or linked symbol groups | `apps/desktop`, `crates/observability` |
 | Distribution | Launcher, signed release identity and lifecycle code; automatic updates and publication disabled until a release backend exists | `platform_runtime`, `apps/desktop/src/update.rs` |
 
 ## Foundations
@@ -437,12 +451,12 @@ prerequisites by their `Expansion.md` ID.
 | ID | Feature | Status | Platform work | Aeris Charts | Batch |
 | --- | --- | --- | --- | --- | --- |
 | M1.1 | Liquidity heatmap: resting depth over time with trades overlaid, color scaling, thresholds, minimum-size filter | Absent | Feed canonical depth publications and PF5 trades into the chart; heatmap settings UI | F3, OF15, PD8, PD9 | T7 |
-| M1.2 | Footprint charts: bid×ask, delta, total and imbalance views; POC; stacked imbalances | Absent in desktop (present in Aeris Charts) | Wire the footprint series to PF5; settings UI; persist footprint configuration | Existing footprint; F2, OF12, PD10 | T3 |
+| M1.2 | Footprint charts: bid×ask, delta, total and imbalance views; POC; stacked imbalances | Present | Footprint series consumes PF5; display mode and overlays are configurable and persisted | Existing footprint; F2, OF12, PD10 | T3 |
 | M1.3 | Volume profile, VWAP bands and TPO: session, composite, fixed-range and anchored | Absent in desktop (visible-range profile present in Aeris Charts) | Session definitions from PF6; profile settings; drawing tools in the toolbar | OF3–OF10, F6 | T7 |
-| M1.4 | Cumulative delta and delta divergence | Absent | Divergence alert rule over study outputs (M6.1) | F2, OF1, OF2 | T3 |
-| M1.5 | Big trades and sweeps: large prints and multi-level sweeps with adaptive per-contract thresholds | Absent | Sweep grouping by timestamp and aggressor from PF5; threshold settings | F2, OF11, PD8 | T3 |
+| M1.4 | Cumulative delta and delta divergence | Present | Shared-tape cumulative delta and completed-bar divergence alerts | F2, OF1, OF2 | T3 |
+| M1.5 | Big trades and sweeps: large prints and multi-level sweeps with adaptive per-contract thresholds | Present | Bounded sweep grouping by timestamp, aggressor and price continuation; adaptive or explicit threshold | F2, OF11, PD8 | T3 |
 | M1.6 | Order-level intelligence: own-order queue position and fill likelihood, iceberg refill detection, pulled-liquidity detection, order-size clustering | Absent | Deterministic, parameterized detectors over PF4 in the platform; labeled as estimates; never presented as certainty. The DOM shows queue position and detections in its own columns | PD8 and PD1 for the chart; none for the DOM | T5 |
-| M1.7 | Time and sales panel with size, side and price filters | Absent | Bounded filtered window over PF5; GPUI list panel owned by the platform | — | T3 |
+| M1.7 | Time and sales panel with size, side and price filters | Present | Bounded filtered window over PF5 in a platform-owned GPUI panel | — | T3 |
 | M1.8 | Tick, volume and range charts, with footprint on the same bars | Absent | Interval picker and persistence | F1, OF14, CT3 | T7 |
 
 Acceptance: every order-flow view renders from shared canonical streams without duplicate provider

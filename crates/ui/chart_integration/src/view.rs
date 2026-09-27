@@ -33,6 +33,7 @@ use gpui::{
     Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use num_traits::ToPrimitive;
+use order_flow::OrderFlowChartState;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -464,11 +465,76 @@ impl std::error::Error for ChartStudyOutputError {}
 pub enum ChartType {
     #[default]
     Candles,
+    Footprint,
     Bars,
     Line,
     Area,
     Baseline,
     BrushableArea,
+}
+
+/// Renderer-neutral footprint variants persisted by the host.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FootprintDisplayMode {
+    #[default]
+    BidAsk,
+    Total,
+    Delta,
+    ProfileInBar,
+    VolumeLadder,
+    HorizontalImbalance,
+    BidAskHistogram,
+}
+
+/// Durable order-flow presentation settings. Market data and aggregation remain runtime-owned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrderFlowSettings {
+    pub display_mode: FootprintDisplayMode,
+    pub show_cumulative_delta: bool,
+    pub show_delta_histogram: bool,
+    pub show_trade_bubbles: bool,
+    /// Zero selects an adaptive threshold from the current bounded tape.
+    pub trade_bubble_minimum_volume: f64,
+}
+
+impl Default for OrderFlowSettings {
+    fn default() -> Self {
+        Self {
+            display_mode: FootprintDisplayMode::BidAsk,
+            show_cumulative_delta: true,
+            show_delta_histogram: true,
+            show_trade_bubbles: true,
+            trade_bubble_minimum_volume: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OrderFlowAggregation {
+    TimeMicros(u64),
+    Trades(u32),
+    Volume(f64),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderFlowTrade {
+    pub ingestion_ordinal: u64,
+    pub timestamp_micros: i64,
+    pub price: f64,
+    pub volume: f64,
+    pub aggressor: aeris_charts_engine::AggressorSide,
+    pub session_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderFlowSweep {
+    pub first_ingestion_ordinal: u64,
+    pub last_ingestion_ordinal: u64,
+    pub timestamp_micros: i64,
+    pub terminal_price: f64,
+    pub total_volume: f64,
+    pub price_levels: u32,
+    pub aggressor: aeris_charts_engine::AggressorSide,
 }
 
 /// Durable product-owned presentation preferences for the primary market series
@@ -631,12 +697,13 @@ fn primary_series_requires_theme_unpin(engine: &ChartEngine, tracking: [bool; 6]
 
 impl ChartType {
     const fn shows_ohlc_legend(self) -> bool {
-        matches!(self, Self::Candles | Self::Bars)
+        matches!(self, Self::Candles | Self::Footprint | Self::Bars)
     }
 
     /// Built-in OHLC chart types Nucleus can render from the product price series.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Candles,
+        Self::Footprint,
         Self::Bars,
         Self::Line,
         Self::Area,
@@ -649,6 +716,7 @@ impl ChartType {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Candles => "Candles",
+            Self::Footprint => "Footprint",
             Self::Bars => "Bars",
             Self::Line => "Line",
             Self::Area => "Area",
@@ -662,6 +730,7 @@ impl ChartType {
     pub const fn identifier(self) -> &'static str {
         match self {
             Self::Candles => "candles",
+            Self::Footprint => "footprint",
             Self::Bars => "bars",
             Self::Line => "line",
             Self::Area => "area",
@@ -681,6 +750,7 @@ impl ChartType {
     pub(crate) const fn series_kind(self) -> aeris_charts_engine::SeriesKind {
         match self {
             Self::Candles => aeris_charts_engine::SeriesKind::Candlestick,
+            Self::Footprint => aeris_charts_engine::SeriesKind::Footprint,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line => aeris_charts_engine::SeriesKind::Line,
             Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,
@@ -1083,6 +1153,8 @@ pub struct NucleusChartView {
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
+    order_flow_settings: OrderFlowSettings,
+    order_flow_state: Option<OrderFlowChartState>,
     product_bars: ProductPriceBars,
     study_series: BTreeMap<(u64, usize), ChartStudySeriesState>,
     study_panes: BTreeMap<(u64, u8), PaneId>,
@@ -1163,6 +1235,8 @@ impl NucleusChartView {
             instrument_price_scale: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
+            order_flow_settings: OrderFlowSettings::default(),
+            order_flow_state: None,
             product_bars: ProductPriceBars::default(),
             study_series: BTreeMap::new(),
             study_panes: BTreeMap::new(),
@@ -1265,6 +1339,8 @@ impl NucleusChartView {
             instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
+            order_flow_settings: OrderFlowSettings::default(),
+            order_flow_state: None,
             product_bars,
             study_series: BTreeMap::new(),
             study_panes: BTreeMap::new(),
@@ -2326,7 +2402,13 @@ impl NucleusChartView {
         if self.chart_type == chart_type {
             return;
         }
+        if self.chart_type == ChartType::Footprint {
+            self.teardown_order_flow();
+        }
         self.chart_type = chart_type;
+        if chart_type == ChartType::Footprint {
+            self.engine.set_series_visible(0, false);
+        }
         self.apply_price_series_kind();
         self.mark_user_state_changed();
     }
@@ -3332,4 +3414,6 @@ mod tests;
 mod drawings;
 mod indicators;
 mod input;
+mod order_flow;
+pub use order_flow::classify_order_flow_sweeps;
 mod studies;

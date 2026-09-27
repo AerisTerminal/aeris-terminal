@@ -18,9 +18,9 @@ use aeris_market_data::ChartInterval;
 use aeris_market_data::OrderBookFrame;
 use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use aeris_market_runtime::{
-    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
-    MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
-    MarketStudyOutputsInvalidated, MarketStudyRemoved,
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketDeltaDivergenceTrigger,
+    MarketPriceAlert, MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
+    MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
 };
 use aeris_observability::FeedConnectionState;
 use aeris_observability::FeedDiagnosticsSnapshot;
@@ -272,6 +272,8 @@ pub enum MarketWorkerMessage {
     },
     ProviderCatalog(ProviderCatalogEvent),
     OrderBook(OrderBookFrame),
+    TradeTape(MarketTradeTapeSnapshot),
+    DeltaDivergenceTriggered(MarketDeltaDivergenceTrigger),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     PriceAlertSyncFailed(String),
     StudyRegistered {
@@ -427,6 +429,10 @@ impl MarketWorkerSender {
             queue[index] = message;
             return Ok(());
         }
+        if let Some(index) = coalesced_trade_tape_index(&queue, &message) {
+            queue[index] = message;
+            return Ok(());
+        }
         if matches!(message, MarketWorkerMessage::Diagnostics(_)) {
             if let Some(index) = queue
                 .iter()
@@ -490,12 +496,35 @@ fn order_book_frame_can_be_superseded(current: &OrderBookFrame, next: &OrderBook
                 && next.trade_source_watermark >= current.trade_source_watermark))
 }
 
+fn coalesced_trade_tape_index(
+    queue: &VecDeque<MarketWorkerMessage>,
+    message: &MarketWorkerMessage,
+) -> Option<usize> {
+    let MarketWorkerMessage::TradeTape(next) = message else {
+        return None;
+    };
+    queue.iter().position(|queued| {
+        matches!(
+            queued,
+            MarketWorkerMessage::TradeTape(current)
+                if current.consumer_id == next.consumer_id
+                    && current.generation == next.generation
+                    && current.provider_id == next.provider_id
+                    && current.instrument_id == next.instrument_id
+                    && current.entitlement_id == next.entitlement_id
+                    && current.provider_generation == next.provider_generation
+                    && next.revision >= current.revision
+        )
+    })
+}
+
 fn is_market_publication(message: &MarketWorkerMessage) -> bool {
     matches!(
         message,
         MarketWorkerMessage::Update(_)
             | MarketWorkerMessage::StudyOutput(_)
             | MarketWorkerMessage::OrderBook(_)
+            | MarketWorkerMessage::TradeTape(_)
     )
 }
 
@@ -1600,6 +1629,7 @@ mod tests {
         BarPeriod, BarSeriesKey, ChartInterval, OrderBookRecoveryReason, OrderBookState,
     };
     use aeris_market_runtime::study::StudyInstanceId;
+    use aeris_market_runtime::{MarketConsumerId, MarketGenerationId, MarketTradeTapeSnapshot};
     use aeris_observability::{FeedDiagnostics, FeedIdentity};
     use aeris_study_sdk::builtins;
     use std::num::{NonZeroU64, NonZeroUsize};
@@ -2951,6 +2981,37 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::OrderBook(frame)] if frame.revision == 3
+        ));
+    }
+
+    #[test]
+    fn trade_tape_mailbox_keeps_one_latest_image_per_runtime_generation() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(2).expect("capacity is nonzero"));
+        let snapshot = |revision| MarketTradeTapeSnapshot {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::MIN),
+            provider_id: "rithmic".to_string(),
+            instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+            entitlement_id: "test".to_string(),
+            provider_generation: 4,
+            revision,
+            source_watermark: revision,
+            price_scale: 2,
+            quantity_scale: 0,
+            trades: Arc::from([]),
+        };
+        sender
+            .send(MarketWorkerMessage::TradeTape(snapshot(2)))
+            .expect("first tape queues");
+        sender
+            .send(MarketWorkerMessage::TradeTape(snapshot(3)))
+            .expect("newer tape replaces it");
+
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::TradeTape(snapshot)] if snapshot.revision == 3
         ));
     }
 

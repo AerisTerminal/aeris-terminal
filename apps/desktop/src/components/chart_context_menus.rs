@@ -1146,6 +1146,9 @@ fn chart_series_settings(
         ChartType::Candles => {
             candle_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
         }
+        ChartType::Footprint => {
+            footprint_series_settings(terminal, menu, snapshot.order_flow, theme)
+        }
         ChartType::Bars => {
             bar_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
         }
@@ -1170,6 +1173,142 @@ fn chart_series_settings(
         theme,
     )
     .child(body)
+    .into_any_element()
+}
+
+fn footprint_series_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    settings: OrderFlowSettings,
+    theme: &AerisTheme,
+) -> AnyElement {
+    div()
+        .child(settings_group_heading(
+            "Numbers bars",
+            "Tick-derived cell presentation",
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Cells",
+            &[
+                (
+                    "Bid × Ask",
+                    settings.display_mode == FootprintDisplayMode::BidAsk,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::BidAsk),
+                ),
+                (
+                    "Total",
+                    settings.display_mode == FootprintDisplayMode::Total,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::Total),
+                ),
+                (
+                    "Delta",
+                    settings.display_mode == FootprintDisplayMode::Delta,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::Delta),
+                ),
+            ],
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Profile",
+            &[
+                (
+                    "Profile",
+                    settings.display_mode == FootprintDisplayMode::ProfileInBar,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::ProfileInBar),
+                ),
+                (
+                    "Ladder",
+                    settings.display_mode == FootprintDisplayMode::VolumeLadder,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::VolumeLadder),
+                ),
+                (
+                    "Imbalance",
+                    settings.display_mode == FootprintDisplayMode::HorizontalImbalance,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::HorizontalImbalance),
+                ),
+                (
+                    "Histogram",
+                    settings.display_mode == FootprintDisplayMode::BidAskHistogram,
+                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::BidAskHistogram),
+                ),
+            ],
+            theme,
+        ))
+        .child(settings_group_heading(
+            "Order-flow studies",
+            "One shared retained trade stream",
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Cumulative delta",
+            settings.show_cumulative_delta,
+            ChartSettingsAction::ToggleCumulativeDelta,
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Delta histogram",
+            settings.show_delta_histogram,
+            ChartSettingsAction::ToggleDeltaHistogram,
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Large trades and sweeps",
+            settings.show_trade_bubbles,
+            ChartSettingsAction::ToggleTradeBubbles,
+            theme,
+        ))
+        .child(footprint_threshold_settings(
+            terminal, menu, settings, theme,
+        ))
+        .into_any_element()
+}
+
+fn footprint_threshold_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    settings: OrderFlowSettings,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let selected = settings.trade_bubble_minimum_volume.to_bits();
+    settings_choice_row(
+        terminal,
+        menu,
+        "Large threshold",
+        &[
+            (
+                "Auto",
+                selected == 0.0_f64.to_bits(),
+                ChartSettingsAction::TradeBubbleMinimumVolumeBits(0.0_f64.to_bits()),
+            ),
+            (
+                "10",
+                selected == 10.0_f64.to_bits(),
+                ChartSettingsAction::TradeBubbleMinimumVolumeBits(10.0_f64.to_bits()),
+            ),
+            (
+                "50",
+                selected == 50.0_f64.to_bits(),
+                ChartSettingsAction::TradeBubbleMinimumVolumeBits(50.0_f64.to_bits()),
+            ),
+            (
+                "100",
+                selected == 100.0_f64.to_bits(),
+                ChartSettingsAction::TradeBubbleMinimumVolumeBits(100.0_f64.to_bits()),
+            ),
+        ],
+        theme,
+    )
     .into_any_element()
 }
 

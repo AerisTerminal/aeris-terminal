@@ -293,6 +293,25 @@ pub struct WorkspaceChartState {
     /// executor; this stores only product-authored presentation preferences.
     #[prost(message, optional, tag = "9")]
     pub appearance: Option<WorkspaceChartAppearanceState>,
+    /// Footprint/CVD/delta and trade-bubble presentation. The retained trade
+    /// tape itself remains runtime-owned and is never persisted here.
+    #[prost(message, optional, tag = "10")]
+    pub order_flow: Option<WorkspaceOrderFlowSettingsState>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceOrderFlowSettingsState {
+    #[prost(uint32, tag = "1")]
+    pub display_mode: u32,
+    #[prost(bool, tag = "2")]
+    pub show_cumulative_delta: bool,
+    #[prost(bool, tag = "3")]
+    pub show_delta_histogram: bool,
+    #[prost(bool, tag = "4")]
+    pub show_trade_bubbles: bool,
+    /// Exact IEEE-754 bits; zero retains the adaptive per-contract threshold.
+    #[prost(fixed64, tag = "5")]
+    pub trade_bubble_minimum_volume_bits: u64,
 }
 
 /// Durable chart presentation preferences that are independent of market data.

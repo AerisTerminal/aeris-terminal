@@ -86,6 +86,79 @@ fn order_book_slot_keeps_only_the_latest_complete_publication() {
 }
 
 #[test]
+fn trade_tape_slot_keeps_only_the_latest_complete_publication() {
+    let consumer_id = ConsumerId(NonZeroU64::MIN);
+    let generation = GenerationId(NonZeroU64::MIN);
+    let snapshot = |revision| crate::MarketTradeTapeSnapshot {
+        consumer_id,
+        generation,
+        provider_id: "rithmic".to_string(),
+        instrument_id: "instrument:rithmic:CME:MNQ".to_string(),
+        entitlement_id: "test".to_string(),
+        provider_generation: 7,
+        revision,
+        source_watermark: revision,
+        price_scale: 2,
+        quantity_scale: 0,
+        trades: Arc::from([]),
+    };
+    let mut events = ConsumerEvents {
+        trade_tape: Some(snapshot(1)),
+        ..ConsumerEvents::default()
+    };
+    events.trade_tape = Some(snapshot(2));
+
+    assert!(matches!(
+        events.pop(),
+        Some(MarketRuntimeEvent::TradeTapeSnapshot(snapshot)) if snapshot.revision == 2
+    ));
+    assert!(events.pop().is_none());
+}
+
+#[test]
+fn delta_divergence_slot_keeps_only_the_latest_completed_bar() {
+    let consumer_id = ConsumerId(NonZeroU64::MIN);
+    let generation = GenerationId(NonZeroU64::MIN);
+    let series = BarSeriesKey {
+        provider_id: "hyperliquid".to_string(),
+        instrument_id: "instrument:hyperliquid:BTC".to_string(),
+        entitlement_id: "hyperliquid-public".to_string(),
+        period: BarPeriod::time(60).expect("period"),
+        definition_version: 1,
+    };
+    let trigger = |completed_bar_source_sequence| {
+        MarketRuntimeEvent::DeltaDivergenceTriggered(crate::MarketDeltaDivergenceTrigger {
+            consumer_id,
+            generation,
+            series: series.clone(),
+            provider_generation: 7,
+            evidence: crate::DeltaDivergenceEvidence {
+                direction: crate::DeltaDivergenceDirection::Bearish,
+                previous_bar_source_sequence: completed_bar_source_sequence - 1,
+                completed_bar_source_sequence,
+                previous_close: 100,
+                completed_close: 101,
+                previous_cumulative_delta: 20,
+                completed_cumulative_delta: 10,
+                observed_unix_nanos: 1,
+            },
+        })
+    };
+    let mut events = ConsumerEvents {
+        delta_divergence: Some(trigger(2)),
+        ..ConsumerEvents::default()
+    };
+    events.delta_divergence = Some(trigger(3));
+
+    assert!(matches!(
+        events.pop(),
+        Some(MarketRuntimeEvent::DeltaDivergenceTriggered(trigger))
+            if trigger.evidence.completed_bar_source_sequence == 3
+    ));
+    assert!(events.pop().is_none());
+}
+
+#[test]
 fn covering_snapshot_is_popped_before_live_state() {
     let consumer_id = ConsumerId(NonZeroU64::MIN);
     let generation = GenerationId(NonZeroU64::MIN);

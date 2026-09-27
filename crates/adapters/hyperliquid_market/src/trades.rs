@@ -22,20 +22,14 @@ use crate::decimal::{NORMALIZED_PRICE_SCALE, NORMALIZED_QUANTITY_SCALE, parse_de
 
 #[derive(Debug, Deserialize)]
 struct WireTrade {
-    #[serde(default)]
     coin: String,
-    #[serde(default)]
     px: String,
-    #[serde(default)]
     sz: String,
-    #[serde(default)]
     side: String,
-    #[serde(default)]
     time: i64,
-    #[serde(default)]
-    tid: Option<u64>,
-    #[serde(default)]
-    hash: Option<String>,
+    tid: u64,
+    hash: String,
+    users: [String; 2],
 }
 
 /// One decoded batch of provider trades in wire order.
@@ -84,7 +78,10 @@ pub fn decode_trades_batch(
         if row.coin != wire_coin {
             return Err("hyperliquid trade coin does not match the subscription".to_string());
         }
-        if row.time < 0 {
+        if row.time <= 0
+            || row.hash.trim().is_empty()
+            || row.users.iter().any(|user| user.trim().is_empty())
+        {
             return Err("hyperliquid trade timestamp is invalid".to_string());
         }
         let price = parse_decimal_to_fixed(&row.px, NORMALIZED_PRICE_SCALE)?;
@@ -95,14 +92,10 @@ pub fn decode_trades_batch(
         let aggressor = match row.side.as_str() {
             "B" => AggressorSide::Buy,
             "A" => AggressorSide::Sell,
-            _ => AggressorSide::Unknown,
+            _ => return Err("hyperliquid trade aggressor side is invalid".to_string()),
         };
         // `tid` is a match hash, unique only with its block time and coin.
-        let trade_id = match (row.tid, row.hash.as_ref()) {
-            (Some(tid), _) => format!("hl:{}:{}:{tid}", row.coin, row.time),
-            (None, Some(hash)) if !hash.trim().is_empty() => format!("hl:{hash}"),
-            _ => format!("hl:{}:{}:{index}", row.coin, row.time),
-        };
+        let trade_id = format!("hl:{}:{}:{}", row.coin, row.time, row.tid);
         let sequence = first_sequence
             .checked_add(u64::try_from(index).map_err(|_| "sequence overflow".to_string())?)
             .ok_or_else(|| "hyperliquid trade sequence overflowed".to_string())?;
@@ -269,7 +262,8 @@ mod tests {
     #[test]
     fn malformed_trades_fail_without_fabrication() {
         let wrong_coin = json!([
-            {"coin": "ETH", "px": "1.0", "sz": "1.0", "side": "B", "time": 1},
+            {"coin": "ETH", "px": "1.0", "sz": "1.0", "side": "B", "time": 1,
+             "tid": 7, "hash": "0xabc", "users": ["0xbuyer", "0xseller"]},
         ]);
         assert!(
             decode_trades_batch(
@@ -283,12 +277,51 @@ mod tests {
             )
             .is_err()
         );
+        let bad_side = json!([{
+            "coin": "BTC",
+            "px": "1.0",
+            "sz": "1.0",
+            "side": "?",
+            "time": 1,
+            "tid": 7,
+            "hash": "0xabc",
+            "users": ["0xbuyer", "0xseller"]
+        }]);
+        assert!(
+            decode_trades_batch(
+                &raw(&bad_side),
+                "BTC",
+                "hyperliquid:perp:BTC",
+                "hyperliquid:public",
+                1,
+                2,
+                1
+            )
+            .is_err()
+        );
         let bad_price = json!([
-            {"coin": "BTC", "px": "abc", "sz": "1.0", "side": "B", "time": 1},
+            {"coin": "BTC", "px": "abc", "sz": "1.0", "side": "B", "time": 1,
+             "tid": 7, "hash": "0xabc", "users": ["0xbuyer", "0xseller"]},
         ]);
         assert!(
             decode_trades_batch(
                 &raw(&bad_price),
+                "BTC",
+                "hyperliquid:perp:BTC",
+                "hyperliquid:public",
+                1,
+                2,
+                1
+            )
+            .is_err()
+        );
+        let missing_required_identity = json!([{
+            "coin": "BTC", "px": "1.0", "sz": "1.0", "side": "B", "time": 1,
+            "tid": 7, "hash": "0xabc"
+        }]);
+        assert!(
+            decode_trades_batch(
+                &raw(&missing_required_identity),
                 "BTC",
                 "hyperliquid:perp:BTC",
                 "hyperliquid:public",

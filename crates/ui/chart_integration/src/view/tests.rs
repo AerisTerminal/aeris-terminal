@@ -17,6 +17,156 @@ fn interactive_chart() -> NucleusChartView {
     chart
 }
 
+fn order_flow_trade(ordinal: u64, timestamp_micros: i64, volume: f64) -> OrderFlowTrade {
+    OrderFlowTrade {
+        ingestion_ordinal: ordinal,
+        timestamp_micros,
+        price: 100.0 + ordinal.to_f64().expect("small ordinal") * 0.25,
+        volume,
+        aggressor: if ordinal.is_multiple_of(2) {
+            aeris_charts_engine::AggressorSide::Sell
+        } else {
+            aeris_charts_engine::AggressorSide::Buy
+        },
+        session_id: 7,
+    }
+}
+
+#[test]
+fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_eviction() {
+    let mut chart = NucleusChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let first = vec![
+        order_flow_trade(1, 1_000_000, 2.0),
+        order_flow_trade(2, 1_500_000, 3.0),
+    ];
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            OrderFlowAggregation::TimeMicros(60_000_000),
+            0.25,
+            &first,
+        )
+        .expect("initial covering tape");
+    let footprint_series = chart
+        .engine
+        .series
+        .iter()
+        .find(|series| series.kind == aeris_charts_engine::SeriesKind::Footprint && !series.removed)
+        .map(|series| series.id)
+        .expect("footprint series");
+    let after_covering = chart
+        .engine
+        .footprint_work_stats(footprint_series)
+        .expect("stats");
+
+    let third = order_flow_trade(3, 2_000_000, 5.0);
+    let mut appended = first.clone();
+    appended.push(third.clone());
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            OrderFlowAggregation::TimeMicros(60_000_000),
+            0.25,
+            &appended,
+        )
+        .expect("tip suffix");
+    let after_tip = chart
+        .engine
+        .footprint_work_stats(footprint_series)
+        .expect("stats");
+    assert!(after_tip.incremental_ticks > after_covering.incremental_ticks);
+
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            OrderFlowAggregation::TimeMicros(60_000_000),
+            0.25,
+            &[first[1].clone(), third],
+        )
+        .expect("covering replacement after prefix eviction");
+    let bars = chart
+        .engine
+        .footprint_bars(footprint_series)
+        .expect("footprint bars");
+    assert!((bars.iter().map(|bar| bar.total_volume).sum::<f64>() - 8.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn sweep_classifier_requires_same_side_time_proximity_and_multiple_levels() {
+    let mut trades = vec![
+        order_flow_trade(1, 1_000_000, 6.0),
+        order_flow_trade(3, 1_020_000, 7.0),
+        order_flow_trade(5, 1_040_000, 8.0),
+    ];
+    for (index, trade) in trades.iter_mut().enumerate() {
+        trade.ingestion_ordinal = u64::try_from(index + 1).expect("small index");
+        trade.aggressor = aeris_charts_engine::AggressorSide::Buy;
+        trade.price = 100.0 + index.to_f64().expect("small index") * 0.25;
+    }
+    let sweeps = classify_order_flow_sweeps(&trades, 10.0);
+    assert_eq!(sweeps.len(), 1);
+    assert_eq!(sweeps[0].price_levels, 3);
+    assert!((sweeps[0].total_volume - 21.0).abs() < f64::EPSILON);
+
+    trades[1].aggressor = aeris_charts_engine::AggressorSide::Sell;
+    assert!(classify_order_flow_sweeps(&trades, 10.0).is_empty());
+}
+
+#[test]
+#[ignore = "manual release-mode order-flow burst frame measurement"]
+fn measured_order_flow_burst_frame_work_stays_inside_one_frame() {
+    const BURST_FRAMES: u64 = 512;
+    const TRADES_PER_FRAME: u64 = 128;
+    const FRAME_BUDGET_NANOS: u128 = 16_000_000;
+    let mut chart = NucleusChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let mut trades = Vec::with_capacity(
+        usize::try_from(BURST_FRAMES * TRADES_PER_FRAME).expect("bounded burst"),
+    );
+    let burst_started = std::time::Instant::now();
+    let mut maximum_frame_nanos = 0_u128;
+    for frame in 0..BURST_FRAMES {
+        for offset in 0..TRADES_PER_FRAME {
+            let ordinal = frame * TRADES_PER_FRAME + offset + 1;
+            let mut trade = order_flow_trade(
+                ordinal,
+                i64::try_from(ordinal * 1_000).expect("bounded timestamp"),
+                1.0 + (ordinal % 20).to_f64().expect("small volume"),
+            );
+            trade.price = 100.0 + (ordinal % 64).to_f64().expect("small price") * 0.25;
+            trades.push(trade);
+        }
+        let frame_started = std::time::Instant::now();
+        chart
+            .apply_order_flow_trades(
+                "instrument:burst",
+                7,
+                OrderFlowAggregation::TimeMicros(60_000_000),
+                0.25,
+                &trades,
+            )
+            .expect("bounded tape applies");
+        std::hint::black_box(chart.engine.build_frame());
+        maximum_frame_nanos = maximum_frame_nanos.max(frame_started.elapsed().as_nanos());
+    }
+    let elapsed = burst_started.elapsed();
+    eprintln!(
+        "Order-flow burst: {} trades across {BURST_FRAMES} frames in {elapsed:?}; max frame={}ns",
+        trades.len(),
+        maximum_frame_nanos
+    );
+
+    assert_eq!(
+        trades.len(),
+        usize::try_from(BURST_FRAMES * TRADES_PER_FRAME).expect("bounded burst")
+    );
+    assert!(maximum_frame_nanos <= FRAME_BUDGET_NANOS);
+}
+
 fn series_entry(chart: &NucleusChartView, id: u32) -> &aeris_charts_engine::SeriesEntry {
     chart
         .engine

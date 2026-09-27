@@ -6,6 +6,7 @@
 //! `market_service`. The runtime produces deterministic recalculation plans and shared upstream
 //! stream requirements without creating provider work itself.
 
+use crate::RetainedMarketTrade;
 use aeris_market_data::{
     AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, TopOfBookQuote,
 };
@@ -122,7 +123,7 @@ pub struct StudyTradeSample {
 /// Borrowed bounded window over the runtime's retained recent trades.
 #[derive(Clone, Copy)]
 pub struct StudyTradeWindow<'a> {
-    trades: &'a VecDeque<StudyTradeSample>,
+    trades: &'a VecDeque<RetainedMarketTrade>,
     session_generation: u64,
     source_watermark: u64,
     price_scale: u8,
@@ -131,7 +132,7 @@ pub struct StudyTradeWindow<'a> {
 
 impl<'a> StudyTradeWindow<'a> {
     pub(crate) const fn new(
-        trades: &'a VecDeque<StudyTradeSample>,
+        trades: &'a VecDeque<RetainedMarketTrade>,
         session_generation: u64,
         source_watermark: u64,
         price_scale: u8,
@@ -185,13 +186,22 @@ impl<'a> StudyTradeWindow<'a> {
     /// Returns one retained trade sample without copying the retained window.
     #[must_use]
     pub fn get(self, index: usize) -> Option<StudyTradeSample> {
-        self.trades.get(index).copied()
+        self.trades.get(index).map(study_trade_sample)
     }
 
     /// Iterates retained trade samples from oldest to newest without allocating.
     #[must_use]
     pub fn iter(self) -> impl ExactSizeIterator<Item = StudyTradeSample> + 'a {
-        self.trades.iter().copied()
+        self.trades.iter().map(study_trade_sample)
+    }
+}
+
+fn study_trade_sample(trade: &RetainedMarketTrade) -> StudyTradeSample {
+    StudyTradeSample {
+        observed_unix_nanos: trade.observed_unix_nanos,
+        price: trade.trade.price,
+        quantity: trade.trade.quantity,
+        aggressor: trade.trade.aggressor,
     }
 }
 
@@ -5024,7 +5034,7 @@ mod tests {
 
     struct LiveMicrostructureFixture {
         book: OrderBook,
-        trades: VecDeque<StudyTradeSample>,
+        trades: VecDeque<crate::RetainedMarketTrade>,
         quote_one: TopOfBookQuote,
         quote_two: TopOfBookQuote,
     }
@@ -5045,11 +5055,17 @@ mod tests {
             }],
         })
         .expect("depth installs");
-        let trades = VecDeque::from([StudyTradeSample {
-            observed_unix_nanos: event_metadata(2, 90).timestamps.received_unix_nanos,
-            price: 105,
-            quantity: 3,
-            aggressor: AggressorSide::Buy,
+        let trade_metadata = event_metadata(2, 90);
+        let trades = VecDeque::from([crate::RetainedMarketTrade {
+            ingestion_ordinal: 1,
+            observed_unix_nanos: trade_metadata.timestamps.received_unix_nanos,
+            trade: std::sync::Arc::new(aeris_market_data::MarketTrade {
+                metadata: trade_metadata,
+                trade_id: "fixture-trade".to_string(),
+                price: 105,
+                quantity: 3,
+                aggressor: AggressorSide::Buy,
+            }),
         }]);
         let quote_one = TopOfBookQuote {
             metadata: event_metadata(3, 90),

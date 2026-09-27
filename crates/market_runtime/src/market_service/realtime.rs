@@ -4,11 +4,11 @@ use super::{
     HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle, HyperliquidLiveHandoff,
     HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
-    MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering,
-    ProviderGeneration, ProviderHealth, ProviderOrderBook, RithmicCalendarPeriod,
-    RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence, RithmicLiveHandoff,
-    RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent, SeriesLoadState,
-    StudyTradeSample, TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id,
+    MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
+    OrderBookApplyOutcome, Ordering, ProviderGeneration, ProviderHealth, ProviderOrderBook,
+    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence,
+    RithmicLiveHandoff, RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent,
+    SeriesLoadState, TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id,
     merge_live_candle, series_state_payload, series_update_message,
 };
 use crate::hyperliquid_display_depth::{
@@ -22,7 +22,6 @@ use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
-const MAXIMUM_RECENT_LADDER_TRADES: usize = 65_536;
 
 const fn rithmic_invalidation_detail(reason: Option<ProviderInvalidationReason>) -> &'static str {
     match reason {
@@ -103,6 +102,9 @@ impl ProviderOrderBook {
             traded_volumes: BTreeMap::new(),
             trade_session_generation,
             last_trade_source_sequence: 0,
+            next_trade_ingestion_ordinal: 1,
+            trade_tape_revision: 0,
+            trade_tape_dirty: true,
             retention_clock_unix_nanos: 0,
         }
     }
@@ -130,10 +132,14 @@ impl ProviderOrderBook {
         self.traded_volumes.clear();
         self.trade_session_generation = session_generation;
         self.last_trade_source_sequence = 0;
+        self.next_trade_ingestion_ordinal = 1;
+        self.trade_tape_revision = self.trade_tape_revision.saturating_add(1);
+        self.trade_tape_dirty = true;
         self.retention_clock_unix_nanos = 0;
     }
 
-    fn remove_recent_trade(&mut self, trade: StudyTradeSample) {
+    fn remove_recent_trade(&mut self, retained: crate::RetainedMarketTrade) {
+        let trade = retained.trade;
         let Some(volumes) = self.traded_volumes.get_mut(&trade.price) else {
             return;
         };
@@ -167,6 +173,10 @@ impl ProviderOrderBook {
             self.remove_recent_trade(expired);
             changed = true;
         }
+        if changed {
+            self.trade_tape_revision = self.trade_tape_revision.saturating_add(1);
+            self.trade_tape_dirty = true;
+        }
         changed
     }
 
@@ -191,24 +201,29 @@ impl ProviderOrderBook {
         let observed_unix_nanos = self
             .retention_clock_unix_nanos
             .max(trade.metadata.timestamps.received_unix_nanos);
-        let mut changed = self.prune_recent_trades(observed_unix_nanos);
-        let aggressor = trade.aggressor;
-        if aggressor == AggressorSide::Unknown {
-            return changed;
+        self.prune_recent_trades(observed_unix_nanos);
+        match trade.aggressor {
+            AggressorSide::Buy => {
+                let volumes = self.traded_volumes.entry(trade.price).or_default();
+                volumes.buy = volumes.buy.saturating_add(trade.quantity);
+            }
+            AggressorSide::Sell => {
+                let volumes = self.traded_volumes.entry(trade.price).or_default();
+                volumes.sell = volumes.sell.saturating_add(trade.quantity);
+            }
+            AggressorSide::Unknown => {}
         }
-        let volumes = self.traded_volumes.entry(trade.price).or_default();
-        match aggressor {
-            AggressorSide::Buy => volumes.buy = volumes.buy.saturating_add(trade.quantity),
-            AggressorSide::Sell => volumes.sell = volumes.sell.saturating_add(trade.quantity),
-            AggressorSide::Unknown => unreachable!(),
-        }
-        self.recent_trades.push_back(StudyTradeSample {
+        let ingestion_ordinal = self.next_trade_ingestion_ordinal;
+        self.next_trade_ingestion_ordinal = self.next_trade_ingestion_ordinal.saturating_add(1);
+        let retained = crate::RetainedMarketTrade {
+            ingestion_ordinal,
             observed_unix_nanos,
-            price: trade.price,
-            quantity: trade.quantity,
-            aggressor,
-        });
-        changed = true;
+            trade: std::sync::Arc::new(trade.clone()),
+        };
+        self.recent_trades.push_back(retained.clone());
+        self.trade_tape_revision = self.trade_tape_revision.saturating_add(1);
+        self.trade_tape_dirty = true;
+        let mut changed = true;
         if self.recent_trades.len() > MAXIMUM_RECENT_LADDER_TRADES {
             changed |= self.prune_recent_trades(observed_unix_nanos);
         }
@@ -2487,6 +2502,15 @@ mod tests {
         }
     }
 
+    fn assert_unknown_trade_is_exactly_retained(book: &ProviderOrderBook) {
+        assert_eq!(book.recent_trades.len(), 3);
+        let retained = book.recent_trades.back().expect("unknown trade retained");
+        assert_eq!(retained.ingestion_ordinal, 3);
+        assert_eq!(retained.trade.trade_id, "ladder-1-3");
+        assert_eq!(retained.trade.metadata.source_sequence, 3);
+        assert_eq!(retained.trade.aggressor, AggressorSide::Unknown);
+    }
+
     fn ladder_metadata(session_generation: u64, source_sequence: u64) -> EventMetadata {
         EventMetadata {
             provider_id: "rithmic".to_string(),
@@ -2632,7 +2656,6 @@ mod tests {
             book.traded_volumes.get(&20_000).copied(),
             Some(AggressorTradeVolumes { buy: 4, sell: 3 })
         );
-
         assert!(!book.accept_recent_trade(&ladder_trade(
             1,
             2,
@@ -2641,7 +2664,7 @@ mod tests {
             99,
             AggressorSide::Buy,
         )));
-        assert!(!book.accept_recent_trade(&ladder_trade(
+        assert!(book.accept_recent_trade(&ladder_trade(
             1,
             3,
             start + 3,
@@ -2661,6 +2684,7 @@ mod tests {
             book.traded_volumes.get(&20_000).copied(),
             Some(AggressorTradeVolumes { buy: 4, sell: 3 })
         );
+        assert_unknown_trade_is_exactly_retained(&book);
 
         assert!(
             book.prune_recent_trades(
@@ -2688,6 +2712,9 @@ mod tests {
         );
         assert_eq!(book.trade_session_generation, 2);
         assert_eq!(book.last_trade_source_sequence, 1);
+        assert_eq!(book.recent_trades.len(), 1);
+        assert_eq!(book.recent_trades[0].ingestion_ordinal, 1);
+        assert_eq!(book.recent_trades[0].trade.trade_id, "ladder-2-1");
         assert_eq!(book.traded_volumes.len(), 1);
         assert_eq!(
             book.traded_volumes.get(&20_025).copied(),
@@ -2705,6 +2732,40 @@ mod tests {
                 7,
                 AggressorSide::Buy,
             ))
+        );
+    }
+
+    #[test]
+    fn retained_trade_tape_enforces_its_hard_item_bound() {
+        let mut book = ProviderOrderBook::new(ladder_instrument(1));
+        for sequence in
+            1..=u64::try_from(MAXIMUM_RECENT_LADDER_TRADES + 2).expect("tape capacity fits u64")
+        {
+            assert!(book.accept_recent_trade(&ladder_trade(
+                1,
+                sequence,
+                1_000_000_000,
+                20_000,
+                1,
+                AggressorSide::Buy,
+            )));
+        }
+        assert_eq!(book.recent_trades.len(), MAXIMUM_RECENT_LADDER_TRADES);
+        assert_eq!(
+            book.recent_trades
+                .front()
+                .map(|trade| trade.ingestion_ordinal),
+            Some(3)
+        );
+        assert_eq!(
+            book.recent_trades
+                .back()
+                .map(|trade| trade.ingestion_ordinal),
+            Some(u64::try_from(MAXIMUM_RECENT_LADDER_TRADES + 2).expect("capacity fits u64"))
+        );
+        assert_eq!(
+            book.traded_volumes.get(&20_000).map(|volumes| volumes.buy),
+            Some(i64::try_from(MAXIMUM_RECENT_LADDER_TRADES).expect("capacity fits i64"))
         );
     }
 

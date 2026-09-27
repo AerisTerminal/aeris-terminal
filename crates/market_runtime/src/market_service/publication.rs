@@ -6,8 +6,9 @@ use super::{
 };
 use crate::{
     MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState,
-    MarketStudyOutputsInvalidated, MarketStudyRemoved,
+    MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
 };
+use std::sync::Arc;
 
 pub(super) fn fail_waiters(
     events: &mut BTreeMap<ConsumerId, ConsumerEvents>,
@@ -154,6 +155,27 @@ pub(super) fn order_book_snapshot(
     })
 }
 
+fn trade_tape_snapshot(
+    consumer_id: ConsumerId,
+    generation: GenerationId,
+    order_book: &ProviderOrderBook,
+    trades: Arc<[crate::RetainedMarketTrade]>,
+) -> Option<MarketTradeTapeSnapshot> {
+    Some(MarketTradeTapeSnapshot {
+        consumer_id,
+        generation,
+        provider_id: order_book.instrument.provider.clone(),
+        instrument_id: order_book.instrument.instrument_id.clone(),
+        entitlement_id: order_book.instrument.entitlement_id.clone(),
+        provider_generation: order_book.trade_session_generation,
+        revision: order_book.trade_tape_revision,
+        source_watermark: order_book.last_trade_source_sequence,
+        price_scale: u8::try_from(order_book.instrument.price_scale).ok()?,
+        quantity_scale: u8::try_from(order_book.instrument.quantity_scale).ok()?,
+        trades,
+    })
+}
+
 pub(super) fn series_state(
     consumer_id: ConsumerId,
     generation: GenerationId,
@@ -192,6 +214,12 @@ impl ConsumerEvents {
             .or_else(|| self.demand_error.take())
             .or_else(|| self.price_alerts.pop_front())
             .or_else(|| self.order_book.take())
+            .or_else(|| {
+                self.trade_tape
+                    .take()
+                    .map(MarketRuntimeEvent::TradeTapeSnapshot)
+            })
+            .or_else(|| self.delta_divergence.take())
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
     }
@@ -605,6 +633,123 @@ impl Coordinator<'_> {
             let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 events.order_book = Some(event);
+            }
+        }
+    }
+
+    pub(super) fn publish_trade_tape_to_consumer(&mut self, consumer_id: ConsumerId) {
+        let Some(demand) = self.engine.current_demand(consumer_id) else {
+            return;
+        };
+        if !demand.resource_class.publishes_ui()
+            || !demand
+                .streams
+                .is_some_and(|streams| streams.contains(crate::MarketStream::Trades))
+        {
+            return;
+        }
+        let (Some(series), Some(generation)) = (demand.series.as_ref(), demand.generation) else {
+            return;
+        };
+        let Some(order_book) = self
+            .order_books
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+        else {
+            return;
+        };
+        if order_book.instrument.entitlement_id != series.entitlement_id {
+            return;
+        }
+        let trades = order_book
+            .recent_trades
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let Some(snapshot) = trade_tape_snapshot(consumer_id, generation, order_book, trades)
+        else {
+            return;
+        };
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.trade_tape = Some(snapshot);
+        }
+    }
+
+    /// Publishes one coalesced tape image per coordinator drain. The image is
+    /// shared across consumers and slow consumers keep one latest bounded
+    /// replacement instead of accumulating an unbounded event queue.
+    pub(super) fn broadcast_dirty_trade_tapes(&mut self) {
+        let dirty = self
+            .order_books
+            .iter()
+            .filter(|(_, book)| book.trade_tape_dirty)
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        for (provider, instrument_id) in dirty {
+            self.broadcast_trade_tape(&provider, &instrument_id);
+        }
+    }
+
+    fn broadcast_trade_tape(&mut self, provider: &str, instrument_id: &str) {
+        let Some(order_book) = self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument_id.to_string()))
+        else {
+            return;
+        };
+        let consumers = self
+            .events
+            .keys()
+            .filter_map(|consumer_id| {
+                let demand = self.engine.current_demand(*consumer_id)?;
+                let series = demand.series.clone()?;
+                let streams = demand.streams?;
+                (demand.resource_class.publishes_ui()
+                    && streams.contains(crate::MarketStream::Trades)
+                    && series.provider_id == provider
+                    && series.instrument_id == instrument_id
+                    && series.entitlement_id == order_book.instrument.entitlement_id)
+                    .then_some((*consumer_id, demand.generation?, series))
+            })
+            .collect::<Vec<_>>();
+        let trades: Arc<[crate::RetainedMarketTrade]> = order_book
+            .recent_trades
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        order_book.trade_tape_dirty = false;
+        for (consumer_id, generation, series) in consumers {
+            let Some(snapshot) =
+                trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))
+            else {
+                continue;
+            };
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                events.trade_tape = Some(snapshot);
+            }
+            let Some(canonical) = self.engine.series_snapshot(&series) else {
+                continue;
+            };
+            let Some(evidence) = crate::detect_delta_divergence(&canonical, &trades) else {
+                continue;
+            };
+            let watermark = (generation, evidence.completed_bar_source_sequence);
+            if self.delta_divergence_watermarks.get(&consumer_id) == Some(&watermark) {
+                continue;
+            }
+            self.delta_divergence_watermarks
+                .insert(consumer_id, watermark);
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                events.delta_divergence = Some(MarketRuntimeEvent::DeltaDivergenceTriggered(
+                    crate::MarketDeltaDivergenceTrigger {
+                        consumer_id,
+                        generation,
+                        series,
+                        provider_generation: canonical.provider_generation.0.get(),
+                        evidence,
+                    },
+                ));
             }
         }
     }

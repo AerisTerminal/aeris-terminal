@@ -51,8 +51,8 @@ mod workspace_layout;
 use about_dialog::about_dialog_layer;
 use aeris_application::ReplayStreamUpdate;
 use aeris_chart_integration::{
-    ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId,
-    ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
+    ChartAggressorSide, ChartAlertCondition, ChartAlertCreateRequest, ChartAlertFrequency,
+    ChartAlertId, ChartAlertLine, ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
     ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
     ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
@@ -63,8 +63,9 @@ use aeris_chart_integration::{
     ChartStudyThresholdRegion, ChartTradingAnnotation, ChartTradingAnnotationTone,
     ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
     ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
-    ChartWorkingOrder, ChartWorkspaceLayout, NucleusChartTheme, NucleusChartView, NucleusWorkspace,
-    PriceAxisMenuAction, PriceAxisMenuState,
+    ChartWorkingOrder, ChartWorkspaceLayout, FootprintDisplayMode, NucleusChartTheme,
+    NucleusChartView, NucleusWorkspace, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
+    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
 };
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
@@ -72,11 +73,11 @@ use aeris_contracts::{
     ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
     SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState,
-    WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState,
-    WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-    WorkspaceStudySettingState, WorkspaceTabState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceLayoutState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
@@ -644,6 +645,9 @@ fn elapsed_nanos(started: Instant) -> u64 {
 struct WorkspaceSurface {
     chart: Option<Entity<NucleusChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
+    trade_tape: Option<aeris_market_runtime::MarketTradeTapeSnapshot>,
+    trade_sweeps: Arc<[OrderFlowSweep]>,
+    time_sales_filter: TimeSalesFilter,
     side_panels: SidePanelVisibility,
     side_panel_width: f32,
     side_panel_split_basis_points: u32,
@@ -739,6 +743,49 @@ struct TradingPnlState {
     order_entry: TradingOrderEntryState,
     refresh_pending: bool,
     next_refresh: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum TimeSalesSideFilter {
+    #[default]
+    All,
+    Buy,
+    Sell,
+}
+
+impl TimeSalesSideFilter {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All sides",
+            Self::Buy => "Buys",
+            Self::Sell => "Sells",
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Buy,
+            Self::Buy => Self::Sell,
+            Self::Sell => Self::All,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TimeSalesFilter {
+    side: TimeSalesSideFilter,
+    minimum_quantity: f64,
+    price_range_ticks: Option<u32>,
+}
+
+impl Default for TimeSalesFilter {
+    fn default() -> Self {
+        Self {
+            side: TimeSalesSideFilter::All,
+            minimum_quantity: 0.0,
+            price_range_ticks: None,
+        }
+    }
 }
 
 impl Default for TradingPnlState {
@@ -1005,6 +1052,7 @@ struct WorkspaceScrollHandles {
     drawing: ScrollHandle,
     indicator: ScrollHandle,
     instrument: ScrollHandle,
+    time_sales: ScrollHandle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3738,6 +3786,11 @@ enum ChartSettingsAction {
     ToggleThinBars,
     LineWidth(u8),
     LineStyle(u8),
+    FootprintMode(FootprintDisplayMode),
+    ToggleCumulativeDelta,
+    ToggleDeltaHistogram,
+    ToggleTradeBubbles,
+    TradeBubbleMinimumVolumeBits(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -3745,6 +3798,7 @@ struct ChartSettingsSnapshot {
     chart_type: ChartType,
     appearance: ChartAppearanceSettings,
     crosshair_mode: u8,
+    order_flow: OrderFlowSettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

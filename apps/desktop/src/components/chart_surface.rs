@@ -2,15 +2,15 @@ use super::{
     AerisTheme, ChartNoticePlacement, ChartNoticeTone, ChartState, ChartSurfaceNotice, Context,
     Div, Entity, FluentBuilder, HugeIcon, InstallProviderInstrument, InteractiveElement,
     IntoElement, Loader, MenuRow, MouseButton, NucleusChartView, OrderBookColumn,
-    OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin, RadiusToken,
+    OrderBookColumnVisibility, OrderFlowSweep, ParentElement, PopupAnimationOrigin, RadiusToken,
     ReadOnlyOrderBookView, Render, Role, SIDE_PANEL_MAXIMUM_WIDTH, SIDE_PANEL_MINIMUM_WIDTH,
     SIDE_PANEL_RESIZE_HANDLE_WIDTH, ScrollHandle, SharedString, SidePanel, SidePanelVisibility,
     StatefulInteractiveElement, Styled, TerminalApp, ToPrimitive, WORKSPACE_TAB_ICON_GLYPH,
     WORKSPACE_TAB_ICON_HIT, WatchlistDragState, WatchlistRow, Window, WorkspaceSurface,
     animate_popup_from_origin, chart_chrome, chart_surface_notice, chrome_close_button,
-    chrome_tooltip, div, exchange_mark, gpui_color, header_icon, market_summary_change,
-    market_summary_price, market_summary_values, platform_tabular_numerals, px,
-    watchlist_drag_translation,
+    chrome_tooltip, div, exchange_mark, gpui_color, header_icon, market_price_text,
+    market_summary_change, market_summary_price, market_summary_values, platform_tabular_numerals,
+    px, watchlist_drag_translation,
 };
 use gpui::{AppContext, Stateful};
 
@@ -68,6 +68,11 @@ pub(super) struct WorkspaceSidePanelState<'a> {
     pub(super) split_basis_points: u32,
     pub(super) order_book: &'a Entity<ReadOnlyOrderBookView>,
     pub(super) order_book_frame: Option<aeris_market_data::OrderBookFrame>,
+    pub(super) trade_tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
+    pub(super) trade_sweeps: &'a [OrderFlowSweep],
+    pub(super) product: Option<&'a InstallProviderInstrument>,
+    pub(super) time_sales_filter: super::TimeSalesFilter,
+    pub(super) time_sales_scroll: ScrollHandle,
     pub(super) trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     pub(super) trading_accounts: &'a [aeris_trading::TradingAccount],
     pub(super) trading_orders: &'a [aeris_trading::Order],
@@ -98,6 +103,11 @@ struct OrderBookPanelState<'a> {
     app: &'a Entity<WorkspaceSurface>,
     order_book: &'a Entity<ReadOnlyOrderBookView>,
     order_book_frame: Option<&'a aeris_market_data::OrderBookFrame>,
+    trade_tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
+    trade_sweeps: &'a [OrderFlowSweep],
+    product: Option<&'a InstallProviderInstrument>,
+    time_sales_filter: super::TimeSalesFilter,
+    time_sales_scroll: &'a ScrollHandle,
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     trading_accounts: &'a [aeris_trading::TradingAccount],
     trading_orders: &'a [aeris_trading::Order],
@@ -121,6 +131,11 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         app,
         order_book,
         order_book_frame,
+        trade_tape,
+        trade_sweeps,
+        product,
+        time_sales_filter,
+        time_sales_scroll,
         trading_pnl,
         trading_accounts,
         trading_orders,
@@ -171,15 +186,254 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         }))
         .child(
             div()
+                .id("order_book_rows")
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
                 .child(order_book.clone()),
         )
+        .child(time_sales_panel(
+            TimeSalesPanelState {
+                app: (*app).clone(),
+                tape: trade_tape,
+                sweeps: trade_sweeps,
+                product,
+                book: order_book_frame,
+                filter: time_sales_filter,
+                scroll: time_sales_scroll,
+            },
+            theme,
+        ))
         .children(
             column_menu_open
                 .then(|| order_book_column_menu_layer((*app).clone(), order_book, columns, theme)),
         )
+}
+
+struct TimeSalesPanelState<'a> {
+    app: Entity<WorkspaceSurface>,
+    tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
+    sweeps: &'a [OrderFlowSweep],
+    product: Option<&'a InstallProviderInstrument>,
+    book: Option<&'a aeris_market_data::OrderBookFrame>,
+    filter: super::TimeSalesFilter,
+    scroll: &'a ScrollHandle,
+}
+
+fn time_sales_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> Div {
+    let TimeSalesPanelState {
+        app,
+        tape,
+        sweeps,
+        product,
+        book,
+        filter,
+        scroll,
+    } = state;
+    let rows = filtered_time_sales_rows(tape, product, book, filter);
+    let side_filter_app = app.clone();
+    let volume_filter_app = app.clone();
+    let range_app = app;
+    let price_scale = tape.map_or(0, |snapshot| u32::from(snapshot.price_scale));
+    let quantity_scale = tape.map_or(0, |snapshot| u32::from(snapshot.quantity_scale));
+    let size_label = if filter.minimum_quantity == 0.0 {
+        "Any size".to_string()
+    } else {
+        format!(">= {}", filter.minimum_quantity)
+    };
+    let range_label = filter.price_range_ticks.map_or_else(
+        || "All prices".to_string(),
+        |ticks| format!("±{ticks} ticks"),
+    );
+
+    div()
+        .h(px(210.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_t_1()
+        .border_color(gpui_color(theme.colors.border_secondary))
+        .child(
+            div()
+                .h(px(28.0))
+                .px_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("TIME & SALES")
+                .child(product.map_or_else(String::new, |product| product.display_symbol.clone())),
+        )
+        .child(
+            div()
+                .px_1()
+                .pb_1()
+                .flex()
+                .gap_1()
+                .child(time_sales_filter_button(
+                    "time_sales_side",
+                    filter.side.label(),
+                    move |cx| {
+                        side_filter_app.update(cx, WorkspaceSurface::cycle_time_sales_side_filter);
+                    },
+                    theme,
+                ))
+                .child(time_sales_filter_button(
+                    "time_sales_size",
+                    size_label,
+                    move |cx| {
+                        volume_filter_app
+                            .update(cx, WorkspaceSurface::cycle_time_sales_size_filter);
+                    },
+                    theme,
+                ))
+                .child(time_sales_filter_button(
+                    "time_sales_range",
+                    range_label,
+                    move |cx| {
+                        range_app.update(cx, WorkspaceSurface::cycle_time_sales_price_filter);
+                    },
+                    theme,
+                )),
+        )
+        .child(
+            div()
+                .id("time_sales_rows")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .children(rows.into_iter().map(|retained| {
+                    time_sales_row(retained, sweeps, price_scale, quantity_scale, theme)
+                })),
+        )
+}
+
+fn filtered_time_sales_rows<'a>(
+    tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
+    product: Option<&InstallProviderInstrument>,
+    book: Option<&aeris_market_data::OrderBookFrame>,
+    filter: super::TimeSalesFilter,
+) -> Vec<&'a aeris_market_runtime::RetainedMarketTrade> {
+    const MAXIMUM_VISIBLE_TRADES: usize = 96;
+    let center = book
+        .and_then(|frame| frame.best_bid.as_ref().zip(frame.best_ask.as_ref()))
+        .map(|(bid, ask)| i128::from(bid.price) + i128::from(ask.price));
+    let increment = product.and_then(|product| product.price_increment);
+    tape.into_iter()
+        .flat_map(|snapshot| snapshot.trades.iter().rev())
+        .filter(|retained| match filter.side {
+            super::TimeSalesSideFilter::All => true,
+            super::TimeSalesSideFilter::Buy => {
+                retained.trade.aggressor == aeris_market_data::AggressorSide::Buy
+            }
+            super::TimeSalesSideFilter::Sell => {
+                retained.trade.aggressor == aeris_market_data::AggressorSide::Sell
+            }
+        })
+        .filter(|retained| {
+            tape.is_some_and(|snapshot| {
+                retained.trade.quantity.to_f64().is_some_and(|quantity| {
+                    quantity / 10_f64.powi(i32::from(snapshot.quantity_scale))
+                        >= filter.minimum_quantity
+                })
+            })
+        })
+        .filter(|retained| {
+            let Some((range, center, increment)) = filter
+                .price_range_ticks
+                .zip(center)
+                .zip(increment)
+                .map(|((range, center), increment)| (range, center, increment))
+            else {
+                return true;
+            };
+            let doubled_distance = (i128::from(retained.trade.price) * 2 - center).abs();
+            doubled_distance <= i128::from(range) * i128::from(increment) * 2
+        })
+        .take(MAXIMUM_VISIBLE_TRADES)
+        .collect()
+}
+
+fn time_sales_row(
+    retained: &aeris_market_runtime::RetainedMarketTrade,
+    sweeps: &[OrderFlowSweep],
+    price_scale: u32,
+    quantity_scale: u32,
+    theme: &AerisTheme,
+) -> Div {
+    let trade = retained.trade.as_ref();
+    let timestamp_nanos = trade
+        .metadata
+        .timestamps
+        .exchange_unix_nanos
+        .or(trade.metadata.timestamps.provider_unix_nanos)
+        .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
+    let seconds = timestamp_nanos.div_euclid(1_000_000_000).rem_euclid(86_400);
+    let time = format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60
+    );
+    let tone = match trade.aggressor {
+        aeris_market_data::AggressorSide::Buy => theme.colors.success,
+        aeris_market_data::AggressorSide::Sell => theme.colors.danger,
+        aeris_market_data::AggressorSide::Unknown => theme.colors.text_muted,
+    };
+    let time = if trade_ordinal_is_in_sweep(sweeps, retained.ingestion_ordinal) {
+        format!("{time} S")
+    } else {
+        time
+    };
+    div()
+        .h(px(22.0))
+        .px_2()
+        .flex()
+        .justify_between()
+        .items_center()
+        .font_features(platform_tabular_numerals())
+        .text_xs()
+        .text_color(gpui_color(tone))
+        .child(div().w(px(62.0)).child(time))
+        .child(
+            div()
+                .flex_1()
+                .text_right()
+                .child(market_price_text(trade.price, price_scale)),
+        )
+        .child(
+            div()
+                .text_right()
+                .child(market_price_text(trade.quantity, quantity_scale)),
+        )
+}
+
+fn trade_ordinal_is_in_sweep(sweeps: &[OrderFlowSweep], ordinal: u64) -> bool {
+    let index = sweeps.partition_point(|sweep| sweep.first_ingestion_ordinal <= ordinal);
+    index > 0 && ordinal <= sweeps[index - 1].last_ingestion_ordinal
+}
+
+fn time_sales_filter_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    on_click: impl Fn(&mut gpui::App) + 'static,
+    theme: &AerisTheme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(22.0))
+        .px_1()
+        .flex()
+        .items_center()
+        .rounded(px(3.0))
+        .bg(gpui_color(theme.colors.input_fill))
+        .text_color(gpui_color(theme.colors.text_secondary))
+        .text_xs()
+        .cursor_pointer()
+        .child(label.into())
+        .on_click(move |_, _, cx| on_click(cx))
 }
 
 #[derive(Clone, Copy)]
@@ -1804,6 +2058,11 @@ fn workspace_order_book_panel(
                 app: &state.app,
                 order_book: state.order_book,
                 order_book_frame: state.order_book_frame.as_ref(),
+                trade_tape: state.trade_tape,
+                trade_sweeps: state.trade_sweeps,
+                product: state.product,
+                time_sales_filter: state.time_sales_filter,
+                time_sales_scroll: &state.time_sales_scroll,
                 trading_pnl: state.trading_pnl,
                 trading_accounts: state.trading_accounts,
                 trading_orders: state.trading_orders,

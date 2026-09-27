@@ -5,9 +5,9 @@ use super::{
     AssertUnwindSafe, NativeStudyCalculate, NativeStudyCalculation, NativeStudyState, OrderBook,
     ResolvedStudyInput, StudyDepthView, StudyDirtyRange, StudyExecutionContext,
     StudyLiveMarketData, StudyOutputBuffer, StudyOutputTimeline, StudyQuoteView, StudySettings,
-    StudyTradeSample, StudyTradeWindow, TopOfBookQuote, VecDeque, bounded_execution_detail,
-    catch_unwind,
+    StudyTradeWindow, TopOfBookQuote, VecDeque, bounded_execution_detail, catch_unwind,
 };
+use crate::RetainedMarketTrade;
 use std::{
     cell::Cell,
     sync::{
@@ -23,7 +23,7 @@ type Output = Result<(Vec<StudyOutputBuffer>, Option<NativeStudyState>), String>
 
 struct LiveInput {
     quote: Option<(TopOfBookQuote, u8, u8)>,
-    trades: Option<(VecDeque<StudyTradeSample>, u64, u64, u8, u8)>,
+    trades: Option<(VecDeque<RetainedMarketTrade>, u64, u64, u8, u8)>,
     depth: Option<(OrderBook, u8, u8)>,
 }
 

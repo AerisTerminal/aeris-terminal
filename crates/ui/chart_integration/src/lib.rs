@@ -13,15 +13,16 @@ mod workspace;
 pub use aeris_application::ReplayRecoveryCommand;
 pub use aeris_charts_engine::ChartTheme as NucleusChartTheme;
 pub use aeris_charts_engine::{
-    AlertCondition as ChartAlertCondition, AlertCreateRequest as ChartAlertCreateRequest,
-    AlertFrequency as ChartAlertFrequency, AlertId as ChartAlertId, AlertLine as ChartAlertLine,
-    AlertLineStatus as ChartAlertLineStatus, AlertPriceScale as ChartAlertPriceScale,
-    AlertSnapshot as ChartAlertSnapshot, ExecutionId as ChartExecutionId,
-    ExecutionKind as ChartExecutionKind, ExecutionMarkerShape as ChartExecutionMarkerShape,
-    HostEventMarker as ChartHostEventMarker, HostOverlaySnapshot as ChartHostOverlaySnapshot,
-    HostTimeWindow as ChartHostTimeWindow, InstrumentMetadata as ChartInstrumentMetadata,
-    OrderId as ChartOrderId, OrderKind as ChartOrderKind, OrderRole as ChartOrderRole,
-    OrderSide as ChartOrderSide, OrderStatus as ChartOrderStatus, PositionId as ChartPositionId,
+    AggressorSide as ChartAggressorSide, AlertCondition as ChartAlertCondition,
+    AlertCreateRequest as ChartAlertCreateRequest, AlertFrequency as ChartAlertFrequency,
+    AlertId as ChartAlertId, AlertLine as ChartAlertLine, AlertLineStatus as ChartAlertLineStatus,
+    AlertPriceScale as ChartAlertPriceScale, AlertSnapshot as ChartAlertSnapshot,
+    ExecutionId as ChartExecutionId, ExecutionKind as ChartExecutionKind,
+    ExecutionMarkerShape as ChartExecutionMarkerShape, HostEventMarker as ChartHostEventMarker,
+    HostOverlaySnapshot as ChartHostOverlaySnapshot, HostTimeWindow as ChartHostTimeWindow,
+    InstrumentMetadata as ChartInstrumentMetadata, OrderId as ChartOrderId,
+    OrderKind as ChartOrderKind, OrderRole as ChartOrderRole, OrderSide as ChartOrderSide,
+    OrderStatus as ChartOrderStatus, PositionId as ChartPositionId,
     PositionSide as ChartPositionSide, TradingAnnotation as ChartTradingAnnotation,
     TradingAnnotationTone as ChartTradingAnnotationTone, TradingExecution as ChartTradingExecution,
     TradingGroupId as ChartTradingGroupId, TradingIntent as ChartTradingIntent,
@@ -35,6 +36,8 @@ pub use view::{
     ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartStudyInputRequirements,
     ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget,
     ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion,
-    ChartType, DrawingsLockSummary, NucleusChartView, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartType, DrawingsLockSummary, FootprintDisplayMode, NucleusChartView, OrderFlowAggregation,
+    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
+    classify_order_flow_sweeps,
 };
 pub use workspace::{ChartSplitDirection, ChartWorkspaceLayout, NucleusWorkspace};

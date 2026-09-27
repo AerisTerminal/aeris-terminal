@@ -17,7 +17,7 @@ use crate::{
     study::{
         MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE, MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE,
         NativeStudyRegistration, StudyInstanceId, StudyMarketLeaseChangeKind, StudyOutputId,
-        StudyRuntime, StudyRuntimeConfig, StudyTradeSample,
+        StudyRuntime, StudyRuntimeConfig,
     },
 };
 use aeris_contracts::{
@@ -104,6 +104,7 @@ const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
 const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
+const MAXIMUM_RECENT_LADDER_TRADES: usize = 65_536;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -417,6 +418,8 @@ struct ConsumerEvents {
     /// into one bounded event before reaching presentation.
     study_removed: Option<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
+    trade_tape: Option<crate::MarketTradeTapeSnapshot>,
+    delta_divergence: Option<MarketRuntimeEvent>,
     price_alerts: VecDeque<MarketRuntimeEvent>,
     catalog_search: Option<MarketRuntimeEvent>,
     catalog_selection: Option<MarketRuntimeEvent>,
@@ -426,10 +429,13 @@ struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
-    recent_trades: VecDeque<StudyTradeSample>,
+    recent_trades: VecDeque<crate::RetainedMarketTrade>,
     traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
     trade_session_generation: u64,
     last_trade_source_sequence: u64,
+    next_trade_ingestion_ordinal: u64,
+    trade_tape_revision: u64,
+    trade_tape_dirty: bool,
     retention_clock_unix_nanos: i64,
 }
 

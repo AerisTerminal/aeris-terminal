@@ -7,9 +7,14 @@ mod hyperliquid_display_depth;
 mod hyperliquid_history;
 mod hyperliquid_realtime;
 pub mod market_service;
+mod order_flow_alerts;
 mod rithmic_history;
 mod rithmic_realtime;
 pub mod study;
+
+pub use order_flow_alerts::{
+    DeltaDivergenceDirection, DeltaDivergenceEvidence, detect_delta_divergence,
+};
 
 /// Maximum durable alerts owned by one market consumer.
 pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
@@ -84,6 +89,49 @@ pub struct MarketOrderBookSnapshot {
     pub generation: aeris_market_engine::GenerationId,
     pub publication: aeris_market_data::OrderBookPublication,
     pub display_depth: Option<MarketDisplayDepth>,
+}
+
+/// One exact canonical trade retained by the market runtime's bounded tape.
+///
+/// Provider source ordering and the runtime's local ingestion ordering remain
+/// separate evidence. `observed_unix_nanos` is the monotonic retention clock;
+/// the provider and exchange timestamps remain unchanged in `trade.metadata`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedMarketTrade {
+    pub ingestion_ordinal: u64,
+    pub observed_unix_nanos: i64,
+    pub trade: std::sync::Arc<aeris_market_data::MarketTrade>,
+}
+
+/// Latest bounded immutable trade-tape image for one consumer generation.
+///
+/// A newer revision completely supersedes an older queued image. The shared
+/// `Arc` keeps chart, tape panel, and study projections from copying the same
+/// retained trade collection inside the desktop process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketTradeTapeSnapshot {
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: aeris_market_engine::GenerationId,
+    pub provider_id: String,
+    pub instrument_id: String,
+    pub entitlement_id: String,
+    pub provider_generation: u64,
+    pub revision: u64,
+    pub source_watermark: u64,
+    pub price_scale: u8,
+    pub quantity_scale: u8,
+    pub trades: std::sync::Arc<[RetainedMarketTrade]>,
+}
+
+/// One generation-fenced completed-bar delta divergence detected by the
+/// market runtime from canonical bars and the shared classified trade tape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketDeltaDivergenceTrigger {
+    pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: aeris_market_engine::GenerationId,
+    pub series: aeris_market_data::BarSeriesKey,
+    pub provider_generation: u64,
+    pub evidence: DeltaDivergenceEvidence,
 }
 
 /// Direct completed provider selection for one runtime consumer.
@@ -173,6 +221,8 @@ pub enum MarketRuntimeEvent {
     SeriesState(MarketSeriesState),
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
+    TradeTapeSnapshot(MarketTradeTapeSnapshot),
+    DeltaDivergenceTriggered(MarketDeltaDivergenceTrigger),
     StudyOutputSnapshot(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),

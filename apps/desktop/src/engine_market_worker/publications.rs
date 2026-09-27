@@ -133,6 +133,30 @@ pub(super) fn apply_pushed_event(
                 .map_err(|error| error.to_string())?;
             Ok(())
         }
+        MarketRuntimeEvent::TradeTapeSnapshot(snapshot) => {
+            if snapshot.consumer_id.0.get() != consumer_id {
+                return Err("engine trade-tape consumer mismatched".to_string());
+            }
+            if snapshot.generation.0.get() != active_generation {
+                return Ok(());
+            }
+            messages
+                .send(MarketWorkerMessage::TradeTape(snapshot))
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        MarketRuntimeEvent::DeltaDivergenceTriggered(trigger) => {
+            if trigger.consumer_id.0.get() != consumer_id {
+                return Err("engine delta-divergence consumer mismatched".to_string());
+            }
+            if trigger.generation.0.get() != active_generation {
+                return Ok(());
+            }
+            messages
+                .send(MarketWorkerMessage::DeltaDivergenceTriggered(trigger))
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
         MarketRuntimeEvent::StudyOutputSnapshot(snapshot) => {
             if snapshot.consumer_id.0.get() != consumer_id {
                 return Err("engine study-output consumer mismatched".to_string());

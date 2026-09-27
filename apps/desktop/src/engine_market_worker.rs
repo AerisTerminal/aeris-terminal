@@ -71,12 +71,11 @@ pub(crate) fn shared_market_runtime() -> Result<MarketService, String> {
 }
 
 pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
+    let streams = StreamRequirements::BARS.with(MarketStream::Trades);
     if depth_visible {
-        StreamRequirements::BARS
-            .with(MarketStream::Trades)
-            .with(MarketStream::Depth)
+        streams.with(MarketStream::Depth)
     } else {
-        StreamRequirements::BARS
+        streams
     }
 }
 
@@ -725,7 +724,7 @@ mod tests {
     use aeris_market_data::{DepthLevel, OrderBookPublication, OrderBookState};
     use aeris_market_runtime::{
         CanonicalMarketSeriesSnapshot, MarketConsumerId, MarketGenerationId,
-        MarketProviderGeneration, MarketProviderInstrumentSelection,
+        MarketProviderGeneration, MarketProviderInstrumentSelection, MarketTradeTapeSnapshot,
     };
     use std::collections::BTreeMap;
 
@@ -735,7 +734,7 @@ mod tests {
         assert!(streams.contains(MarketStream::Bars));
         assert!(streams.contains(MarketStream::Depth));
         assert!(streams.contains(MarketStream::Trades));
-        assert!(!chart_streams(false).contains(MarketStream::Trades));
+        assert!(chart_streams(false).contains(MarketStream::Trades));
     }
 
     fn handle_rithmic_catalog_event(
@@ -2254,6 +2253,56 @@ mod tests {
                 .map(|level| level.traded_volume_text.as_str()),
             Some("")
         );
+    }
+
+    #[test]
+    fn trade_tape_publication_is_consumer_and_generation_fenced() {
+        let product = default_product("MNQ");
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN));
+        let snapshot = |generation, revision| MarketTradeTapeSnapshot {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::new(generation).unwrap_or(NonZeroU64::MIN)),
+            provider_id: product.provider.clone(),
+            instrument_id: product.instrument_id.clone(),
+            entitlement_id: product.entitlement_id.clone(),
+            provider_generation: 3,
+            revision,
+            source_watermark: revision,
+            price_scale: 2,
+            quantity_scale: 0,
+            trades: Arc::from([]),
+        };
+        let context = PushedEventContext {
+            consumer_id: 1,
+            active_generation: 2,
+            realtime: true,
+            instrument: &product,
+        };
+        let mut live = false;
+        assert_eq!(
+            apply_pushed_event(
+                MarketRuntimeEvent::TradeTapeSnapshot(snapshot(1, 8)),
+                &context,
+                &mut live,
+                &sender,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            apply_pushed_event(
+                MarketRuntimeEvent::TradeTapeSnapshot(snapshot(2, 9)),
+                &context,
+                &mut live,
+                &sender,
+            ),
+            Ok(())
+        );
+        let (messages, _) = receiver.drain();
+        assert!(matches!(
+            messages.as_slice(),
+            [MarketWorkerMessage::TradeTape(snapshot)] if snapshot.revision == 9
+        ));
     }
 
     #[test]

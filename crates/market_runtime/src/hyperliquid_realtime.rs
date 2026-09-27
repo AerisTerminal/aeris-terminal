@@ -1363,7 +1363,7 @@ mod tests {
 
     fn one_trade(coin: &str, time: i64, tid: u64) -> String {
         format!(
-            r#"{{"channel":"trades","data":[{{"coin":"{coin}","px":"10","sz":"1","side":"B","time":{time},"tid":{tid}}}]}}"#
+            r#"{{"channel":"trades","data":[{{"coin":"{coin}","px":"10","sz":"1","side":"B","time":{time},"tid":{tid},"hash":"0xabc","users":["0xbuyer","0xseller"]}}]}}"#
         )
     }
 

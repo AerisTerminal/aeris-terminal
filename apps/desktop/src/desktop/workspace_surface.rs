@@ -27,6 +27,62 @@ fn chart_bridge_label(chart: Option<&Entity<NucleusChartView>>, cx: &App) -> Str
     )
 }
 
+fn order_flow_aggregation(interval: ChartInterval) -> OrderFlowAggregation {
+    match interval.aggregation() {
+        ChartAggregation::Trades(count) => OrderFlowAggregation::Trades(count.get()),
+        ChartAggregation::FixedSeconds(seconds) => {
+            OrderFlowAggregation::TimeMicros(u64::from(seconds.get()).saturating_mul(1_000_000))
+        }
+        // Aeris Charts B3 supports fixed-time, trade-count, and volume
+        // footprint bars. The platform month interval therefore uses the
+        // existing deterministic 30-day presentation bucket without changing
+        // provider history semantics.
+        ChartAggregation::CalendarMonth => OrderFlowAggregation::TimeMicros(
+            30_u64
+                .saturating_mul(24)
+                .saturating_mul(60)
+                .saturating_mul(60)
+                .saturating_mul(1_000_000),
+        ),
+    }
+}
+
+fn scaled_market_value(value: i64, scale: u8) -> Option<f64> {
+    let divisor = 10_f64.powi(i32::from(scale));
+    let converted = num_traits::ToPrimitive::to_f64(&value)? / divisor;
+    converted.is_finite().then_some(converted)
+}
+
+fn chart_order_flow_trades(
+    snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+) -> Option<Vec<OrderFlowTrade>> {
+    snapshot
+        .trades
+        .iter()
+        .map(|retained| {
+            let trade = retained.trade.as_ref();
+            let timestamp_nanos = trade
+                .metadata
+                .timestamps
+                .exchange_unix_nanos
+                .or(trade.metadata.timestamps.provider_unix_nanos)
+                .unwrap_or(trade.metadata.timestamps.received_unix_nanos);
+            Some(OrderFlowTrade {
+                ingestion_ordinal: retained.ingestion_ordinal,
+                timestamp_micros: timestamp_nanos.div_euclid(1_000),
+                price: scaled_market_value(trade.price, snapshot.price_scale)?,
+                volume: scaled_market_value(trade.quantity, snapshot.quantity_scale)?,
+                aggressor: match trade.aggressor {
+                    aeris_market_data::AggressorSide::Buy => ChartAggressorSide::Buy,
+                    aeris_market_data::AggressorSide::Sell => ChartAggressorSide::Sell,
+                    aeris_market_data::AggressorSide::Unknown => ChartAggressorSide::Unknown,
+                },
+                session_id: snapshot.provider_generation,
+            })
+        })
+        .collect()
+}
+
 fn initial_symbol_browser(startup: &MarketWorkerStartup) -> rithmic_shell::RithmicSymbolBrowser {
     match startup {
         MarketWorkerStartup::Rithmic => rithmic_shell::RithmicSymbolBrowser::default(),
@@ -114,6 +170,49 @@ pub(super) fn restored_chart_appearance(
         baseline_top_color: appearance.baseline_top_color.clone(),
         baseline_bottom_color: appearance.baseline_bottom_color.clone(),
     })
+}
+
+fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderFlowSettingsState {
+    WorkspaceOrderFlowSettingsState {
+        display_mode: match settings.display_mode {
+            FootprintDisplayMode::BidAsk => 0,
+            FootprintDisplayMode::Total => 1,
+            FootprintDisplayMode::Delta => 2,
+            FootprintDisplayMode::ProfileInBar => 3,
+            FootprintDisplayMode::VolumeLadder => 4,
+            FootprintDisplayMode::HorizontalImbalance => 5,
+            FootprintDisplayMode::BidAskHistogram => 6,
+        },
+        show_cumulative_delta: settings.show_cumulative_delta,
+        show_delta_histogram: settings.show_delta_histogram,
+        show_trade_bubbles: settings.show_trade_bubbles,
+        trade_bubble_minimum_volume_bits: settings.trade_bubble_minimum_volume.to_bits(),
+    }
+}
+
+fn restored_order_flow_settings(
+    settings: &WorkspaceOrderFlowSettingsState,
+) -> Option<OrderFlowSettings> {
+    let display_mode = match settings.display_mode {
+        0 => FootprintDisplayMode::BidAsk,
+        1 => FootprintDisplayMode::Total,
+        2 => FootprintDisplayMode::Delta,
+        3 => FootprintDisplayMode::ProfileInBar,
+        4 => FootprintDisplayMode::VolumeLadder,
+        5 => FootprintDisplayMode::HorizontalImbalance,
+        6 => FootprintDisplayMode::BidAskHistogram,
+        _ => return None,
+    };
+    let trade_bubble_minimum_volume = f64::from_bits(settings.trade_bubble_minimum_volume_bits);
+    trade_bubble_minimum_volume
+        .is_finite()
+        .then_some(OrderFlowSettings {
+            display_mode,
+            show_cumulative_delta: settings.show_cumulative_delta,
+            show_delta_histogram: settings.show_delta_histogram,
+            show_trade_bubbles: settings.show_trade_bubbles,
+            trade_bubble_minimum_volume,
+        })
 }
 
 const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
@@ -943,6 +1042,29 @@ fn restored_runtime_studies(
     }
 }
 
+fn restored_workspace_records(
+    restored_chart_state: Option<&WorkspaceChartState>,
+    market_worker: &MarketDataWorker,
+) -> (
+    RuntimeStudiesState,
+    Vec<WorkspacePriceAlertState>,
+    Option<String>,
+) {
+    let studies = restored_runtime_studies(restored_chart_state);
+    let (price_alerts, price_alert_message) =
+        restore_price_alerts(restored_chart_state, market_worker);
+    (studies, price_alerts, price_alert_message)
+}
+
+fn initialize_restored_chart(
+    chart: Option<&Entity<NucleusChartView>>,
+    chart_chrome: chart_chrome::ChartChromePreferences,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    initialize_chart_chrome(chart, chart_chrome, cx);
+    observe_chart(chart, cx);
+}
+
 impl WorkspaceSurface {
     pub(super) fn take_chart_persistence_dirty(&mut self) -> bool {
         std::mem::take(&mut self.chart_persistence_dirty)
@@ -986,6 +1108,7 @@ impl WorkspaceSurface {
             price_alerts: self.price_alerts.clone(),
             studies,
             appearance: Some(persisted_chart_appearance(&chart.appearance_settings())),
+            order_flow: Some(persisted_order_flow_settings(chart.order_flow_settings())),
         })
     }
 
@@ -1025,7 +1148,14 @@ impl WorkspaceSurface {
             .appearance
             .as_ref()
             .and_then(restored_chart_appearance);
+        let order_flow = state
+            .order_flow
+            .as_ref()
+            .and_then(restored_order_flow_settings);
         chart.update(cx, |chart, _| {
+            if let Some(order_flow) = order_flow {
+                let _ = chart.set_order_flow_settings(order_flow);
+            }
             if let Some(chart_type) = chart_type {
                 chart.set_chart_type(chart_type);
             }
@@ -1065,51 +1195,46 @@ impl WorkspaceSurface {
         let theme = AerisTheme::dark();
         let restored_rithmic = restored_market_selection(&startup);
         let symbol_browser = initial_symbol_browser(&startup);
-        let TerminalStartupState {
-            chart,
-            chart_state,
-            chart_state_message,
-            replay_label,
-            worker_label,
-            subscription_id,
-            connection_state,
-            connection_message,
-            provider,
-            product,
-        } = terminal_startup_state(startup, cx);
+        let startup_state = terminal_startup_state(startup, cx);
         let interval = restored_rithmic.map_or(ChartInterval::Minute1, |restored| restored.0);
-        let studies = restored_runtime_studies(restored_chart_state.as_ref());
-        let (price_alerts, price_alert_message) =
-            restore_price_alerts(restored_chart_state.as_ref(), &market_worker);
-        initialize_chart_chrome(chart.as_ref(), chart_chrome, cx);
-        replace_chart_price_alert_lines(chart.as_ref(), &price_alerts, product.as_ref(), cx);
-        let bridge_label = chart_bridge_label(chart.as_ref(), cx);
-        observe_chart(chart.as_ref(), cx);
+        let (studies, price_alerts, price_alert_message) =
+            restored_workspace_records(restored_chart_state.as_ref(), &market_worker);
+        initialize_restored_chart(startup_state.chart.as_ref(), chart_chrome, cx);
+        replace_chart_price_alert_lines(
+            startup_state.chart.as_ref(),
+            &price_alerts,
+            startup_state.product.as_ref(),
+            cx,
+        );
+        let bridge_label = chart_bridge_label(startup_state.chart.as_ref(), cx);
         let order_book = cx.new(move |_| ReadOnlyOrderBookView::new(theme));
         Self {
-            chart,
+            chart: startup_state.chart,
             order_book,
+            trade_tape: None,
+            trade_sweeps: Arc::from([]),
+            time_sales_filter: TimeSalesFilter::default(),
             side_panels: SidePanelVisibility::default(),
             side_panel_width: SIDE_PANEL_INITIAL_WIDTH,
             side_panel_split_basis_points: 5_000,
             menu_state: WorkspaceMenuState::default(),
             scrolls: WorkspaceScrollHandles::default(),
-            chart_state,
-            chart_state_message,
+            chart_state: startup_state.chart_state,
+            chart_state_message: startup_state.chart_state_message,
             theme,
-            replay_label,
-            worker_label,
-            subscription_id,
+            replay_label: startup_state.replay_label,
+            worker_label: startup_state.worker_label,
+            subscription_id: startup_state.subscription_id,
             bridge_label,
             market_worker,
             lifecycle,
             pending_ui_diagnostics: None,
-            connection_state,
-            connection_message,
+            connection_state: startup_state.connection_state,
+            connection_message: startup_state.connection_message,
             provider_transport_rtt_nanos: None,
             trading_pnl: TradingPnlState::default(),
             symbol_browser,
-            symbol_message: initial_symbol_message(provider),
+            symbol_message: initial_symbol_message(startup_state.provider),
             market_state: WorkspaceMarketState::default(),
             symbol_selection_target: SymbolSelectionTarget::Chart,
             pending_symbol_selection_target: None,
@@ -1132,8 +1257,8 @@ impl WorkspaceSurface {
             chart_type_trigger_bounds: None,
             chrome_selection: 0,
             chrome_focus: cx.focus_handle().tab_stop(true),
-            provider,
-            product,
+            provider: startup_state.provider,
+            product: startup_state.product,
             rithmic_switch: RithmicSwitchState::Idle,
             interval,
             rithmic_pending_interval: None,
@@ -2225,9 +2350,7 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         match message {
-            MarketWorkerMessage::Update(publication) => {
-                self.apply_publication(publication, cx);
-            }
+            MarketWorkerMessage::Update(publication) => self.apply_publication(publication, cx),
             MarketWorkerMessage::Diagnostics(snapshot) => {
                 #[cfg(feature = "diagnostics")]
                 eprintln!("desktop market diagnostics: {snapshot:?}");
@@ -2258,15 +2381,15 @@ impl WorkspaceSurface {
                     order_book.replace_frame(frame, order_book_cx)
                 });
             }
-            MarketWorkerMessage::StudyOutput(snapshot) => {
-                self.apply_study_output(&snapshot, cx);
+            MarketWorkerMessage::TradeTape(snapshot) => self.apply_trade_tape(snapshot, cx),
+            MarketWorkerMessage::DeltaDivergenceTriggered(trigger) => {
+                self.apply_delta_divergence_trigger(&trigger, cx);
             }
+            MarketWorkerMessage::StudyOutput(snapshot) => self.apply_study_output(&snapshot, cx),
             MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
                 self.apply_study_invalidated(&invalidated, cx);
             }
-            MarketWorkerMessage::StudyRemoved(removed) => {
-                self.apply_study_removed(&removed, cx);
-            }
+            MarketWorkerMessage::StudyRemoved(removed) => self.apply_study_removed(&removed, cx),
             MarketWorkerMessage::StudyRegistered {
                 request_sequence,
                 study_id,
@@ -2320,6 +2443,56 @@ impl WorkspaceSurface {
                 }
             }
         }
+    }
+
+    fn apply_trade_tape(
+        &mut self,
+        snapshot: aeris_market_runtime::MarketTradeTapeSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current = self.product.as_ref().is_none_or(|product| {
+            snapshot.provider_id == product.provider
+                && snapshot.instrument_id == product.instrument_id
+                && snapshot.entitlement_id == product.entitlement_id
+        });
+        if is_current
+            && self.trade_tape.as_ref().is_none_or(|current| {
+                current.generation != snapshot.generation
+                    || current.provider_generation != snapshot.provider_generation
+                    || snapshot.revision >= current.revision
+            })
+        {
+            self.apply_trade_tape_to_chart(&snapshot, cx);
+            self.trade_tape = Some(snapshot);
+            cx.notify();
+        }
+    }
+
+    fn apply_delta_divergence_trigger(
+        &mut self,
+        trigger: &aeris_market_runtime::MarketDeltaDivergenceTrigger,
+        cx: &mut Context<Self>,
+    ) {
+        let direction = match trigger.evidence.direction {
+            aeris_market_runtime::DeltaDivergenceDirection::Bullish => "bullish",
+            aeris_market_runtime::DeltaDivergenceDirection::Bearish => "bearish",
+        };
+        let symbol = self
+            .product
+            .as_ref()
+            .map_or("contract", |product| product.display_symbol.as_str());
+        let message = format!("{symbol} formed a {direction} price / cumulative-delta divergence");
+        self.indicator_message = Some(message.clone());
+        let notification = aeris_platform_runtime::NativeUserNotification::try_new(
+            "Aeris order-flow alert",
+            message,
+        );
+        if let Err(error) =
+            notification.and_then(aeris_platform_runtime::try_send_user_notification)
+        {
+            eprintln!("Aeris order-flow notification was not delivered: {error}");
+        }
+        cx.notify();
     }
 
     fn current_runtime_series(&self) -> Result<BarSeriesKey, String> {
@@ -2808,6 +2981,8 @@ impl WorkspaceSurface {
             self.order_book.update(cx, |order_book, order_book_cx| {
                 order_book.clear(order_book_cx);
             });
+            self.trade_tape = None;
+            self.trade_sweeps = Arc::from([]);
         }
         self.rithmic_pending_sequence = None;
         self.rithmic_switch = if self.chart.is_some() {
@@ -2839,6 +3014,8 @@ impl WorkspaceSurface {
         self.order_book.update(cx, |order_book, order_book_cx| {
             order_book.clear(order_book_cx);
         });
+        self.trade_tape = None;
+        self.trade_sweeps = Arc::from([]);
         let restored = product
             .and_then(|product| self.market_worker.try_select_engine(product, interval).ok());
         if let Some(sequence) = restored {
@@ -3121,6 +3298,63 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).crosshair_mode())
     }
 
+    pub(super) fn chart_order_flow_settings(&self, cx: &App) -> Option<OrderFlowSettings> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).order_flow_settings())
+    }
+
+    pub(super) fn set_chart_order_flow_settings(
+        &mut self,
+        settings: OrderFlowSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        match chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_order_flow_settings(settings)?;
+            if changed {
+                chart_cx.notify();
+            }
+            Ok::<_, String>(changed)
+        }) {
+            Ok(true) => {
+                self.chart_persistence_dirty = true;
+                if let Some(snapshot) = self.trade_tape.clone() {
+                    self.apply_trade_tape_to_chart(&snapshot, cx);
+                }
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => self.indicator_message = Some(error),
+        }
+    }
+
+    pub(super) fn cycle_time_sales_side_filter(&mut self, cx: &mut Context<Self>) {
+        self.time_sales_filter.side = self.time_sales_filter.side.next();
+        cx.notify();
+    }
+
+    pub(super) fn cycle_time_sales_size_filter(&mut self, cx: &mut Context<Self>) {
+        self.time_sales_filter.minimum_quantity = match self.time_sales_filter.minimum_quantity {
+            value if value < 1.0 => 1.0,
+            value if value < 10.0 => 10.0,
+            value if value < 100.0 => 100.0,
+            _ => 0.0,
+        };
+        cx.notify();
+    }
+
+    pub(super) fn cycle_time_sales_price_filter(&mut self, cx: &mut Context<Self>) {
+        self.time_sales_filter.price_range_ticks = match self.time_sales_filter.price_range_ticks {
+            None => Some(10),
+            Some(10) => Some(50),
+            Some(_) => None,
+        };
+        cx.notify();
+    }
+
     pub(super) fn suspend_chart_pointer(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, _| chart.suspend_pointer_interaction());
@@ -3221,6 +3455,56 @@ impl WorkspaceSurface {
         }
     }
 
+    fn apply_trade_tape_to_chart(
+        &mut self,
+        snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        const SWEEP_CLASSIFICATION_WINDOW: usize = 512;
+        let (Some(chart), Some(product), Some(trades)) = (
+            self.chart.as_ref(),
+            self.product.as_ref(),
+            chart_order_flow_trades(snapshot),
+        ) else {
+            return;
+        };
+        let threshold = chart
+            .read(cx)
+            .order_flow_settings()
+            .trade_bubble_minimum_volume;
+        let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
+        self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..], threshold).into();
+        let price_divisor = 10_f64.powi(i32::from(snapshot.price_scale));
+        let tick_size = product
+            .price_increment
+            .and_then(|increment| {
+                num_traits::ToPrimitive::to_f64(&increment)
+                    .map(|increment| increment / price_divisor)
+            })
+            .filter(|tick| tick.is_finite() && *tick > 0.0)
+            .unwrap_or(1.0 / price_divisor);
+        let identity = product.instrument_id.clone();
+        let aggregation = order_flow_aggregation(self.interval);
+        let result = chart.update(cx, |chart, chart_cx| {
+            let result = chart.apply_order_flow_trades(
+                &identity,
+                snapshot.provider_generation,
+                aggregation,
+                tick_size,
+                &trades,
+            );
+            if result.is_ok() {
+                chart_cx.notify();
+            }
+            result
+        });
+        if let Err(error) = result {
+            self.indicator_message = Some(format!(
+                "Order-flow chart could not apply the current trade tape: {error}"
+            ));
+        }
+    }
+
     pub(super) fn set_chart_type(&mut self, chart_type: ChartType, cx: &mut Context<Self>) {
         self.chart_chrome.chart_type = chart_type;
         if let Some(chart) = &self.chart {
@@ -3228,6 +3512,11 @@ impl WorkspaceSurface {
                 chart.set_chart_type(chart_type);
                 chart_cx.notify();
             });
+        }
+        if chart_type == ChartType::Footprint
+            && let Some(snapshot) = self.trade_tape.clone()
+        {
+            self.apply_trade_tape_to_chart(&snapshot, cx);
         }
         let preferences = self.chart_chrome;
         match chart_chrome::request_chart_chrome_preferences_save(preferences) {

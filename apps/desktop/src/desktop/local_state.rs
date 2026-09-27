@@ -651,9 +651,9 @@ mod tests {
     use super::*;
     use aeris_contracts::{
         WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
-        WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceStudyDecimalState,
-        WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-        WorkspaceStudySettingState, workspace_study_setting_state,
+        WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+        WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+        WorkspaceStudyMarketStream, WorkspaceStudySettingState, workspace_study_setting_state,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -793,6 +793,13 @@ mod tests {
                 area_top_color: "#2563eb".to_string(),
                 baseline_top_color: "#22c55e".to_string(),
                 baseline_bottom_color: "#ef4444".to_string(),
+            }),
+            order_flow: Some(WorkspaceOrderFlowSettingsState {
+                display_mode: 2,
+                show_cumulative_delta: true,
+                show_delta_histogram: true,
+                show_trade_bubbles: true,
+                trade_bubble_minimum_volume_bits: 25.0_f64.to_bits(),
             }),
         }
     }

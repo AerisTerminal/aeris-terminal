@@ -818,7 +818,7 @@ pub(super) fn header_icon(name: HugeIcon) -> Icon {
 
 pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
     match chart_type {
-        ChartType::Candles => assets::SeriesIcon::Candlestick,
+        ChartType::Candles | ChartType::Footprint => assets::SeriesIcon::Candlestick,
         ChartType::Bars => assets::SeriesIcon::OhlcBar,
         ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
         ChartType::Area => assets::SeriesIcon::Area,

@@ -90,6 +90,7 @@ fn run_coordinator(
         hyperliquid_display_depth: BTreeMap::new(),
         hyperliquid_display_generation: 0,
         price_alerts: PriceAlertRegistry::default(),
+        delta_divergence_watermarks: BTreeMap::new(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_searches: BTreeMap::new(),
@@ -110,6 +111,7 @@ fn run_coordinator(
         }
         coordinator.studies.begin_turn();
         let drained = drain_coordinator_events(&mut coordinator);
+        coordinator.broadcast_dirty_trade_tapes();
         coordinator.publish_rithmic_live();
         coordinator.publish_hyperliquid_live();
         coordinator.recover_overflowed_series_queues();
@@ -311,6 +313,9 @@ pub(super) struct Coordinator<'a> {
     /// Bounded alert definitions, baselines, and trigger evaluation. Provider
     /// workers remain shared with ordinary market demand.
     pub(super) price_alerts: PriceAlertRegistry,
+    /// Latest completed bar evaluated for each consumer's deterministic delta
+    /// divergence rule. A generation change makes the prior watermark stale.
+    pub(super) delta_divergence_watermarks: BTreeMap<ConsumerId, (GenerationId, u64)>,
     pub(super) catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     pub(super) catalog_sessions: BTreeMap<String, u64>,
     /// Latest accepted provider-catalog command generation per consumer/provider.
@@ -348,6 +353,7 @@ impl Coordinator<'_> {
             removed_consumer = true;
             removed_study |= !self.studies.remove_consumer(consumer_id).is_empty();
             self.price_alerts.remove_consumer(consumer_id);
+            self.delta_divergence_watermarks.remove(&consumer_id);
             self.events.remove(&consumer_id);
             self.consumer_clients.remove(&consumer_id);
             self.catalog_searches
@@ -577,6 +583,7 @@ impl Coordinator<'_> {
                 // through after the class change. Canonical depth remains
                 // runtime-owned and is republished on Foreground restore.
                 events.order_book = None;
+                events.trade_tape = None;
                 events.study_outputs.clear();
             }
             Ok(())
@@ -584,6 +591,7 @@ impl Coordinator<'_> {
         self.reconcile_order_books();
         if resource_class.publishes_ui() {
             self.publish_order_book_to_consumer(consumer_id);
+            self.publish_trade_tape_to_consumer(consumer_id);
             let studies = self.studies.owned_studies(consumer_id);
             self.publish_study_outputs(&studies);
         }
@@ -623,9 +631,17 @@ impl Coordinator<'_> {
             {
                 events.order_book = None;
             }
+            if !streams.contains(MarketStream::Trades)
+                && let Some(events) = self.events.get_mut(&consumer_id)
+            {
+                events.trade_tape = None;
+            }
             self.ensure_realtime(&series)?;
             if streams.contains(MarketStream::Depth) {
                 self.publish_order_book_to_consumer(consumer_id);
+            }
+            if streams.contains(MarketStream::Trades) {
+                self.publish_trade_tape_to_consumer(consumer_id);
             }
             Ok(())
         });
@@ -1399,6 +1415,7 @@ mod tests {
             hyperliquid_display_depth: BTreeMap::new(),
             hyperliquid_display_generation: 0,
             price_alerts: PriceAlertRegistry::default(),
+            delta_divergence_watermarks: BTreeMap::new(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             catalog_searches: BTreeMap::new(),
