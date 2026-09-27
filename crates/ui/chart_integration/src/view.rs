@@ -33,7 +33,7 @@ use gpui::{
     Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use num_traits::ToPrimitive;
-use order_flow::OrderFlowChartState;
+use order_flow::{OrderFlowChartState, OrderFlowStudy};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -495,16 +495,20 @@ pub struct OrderFlowSettings {
     pub show_trade_bubbles: bool,
     /// Zero selects an adaptive threshold from the current bounded tape.
     pub trade_bubble_minimum_volume: f64,
+    /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
+    /// ranges so cells stay legible on every timeframe.
+    pub ticks_per_row: u32,
 }
 
 impl Default for OrderFlowSettings {
     fn default() -> Self {
         Self {
             display_mode: FootprintDisplayMode::BidAsk,
-            show_cumulative_delta: true,
-            show_delta_histogram: true,
+            show_cumulative_delta: false,
+            show_delta_histogram: false,
             show_trade_bubbles: true,
             trade_bubble_minimum_volume: 0.0,
+            ticks_per_row: 0,
         }
     }
 }
@@ -749,8 +753,9 @@ impl ChartType {
 
     pub(crate) const fn series_kind(self) -> aeris_charts_engine::SeriesKind {
         match self {
-            Self::Candles => aeris_charts_engine::SeriesKind::Candlestick,
-            Self::Footprint => aeris_charts_engine::SeriesKind::Footprint,
+            // Footprint bars before the live trade tape have no clusters; the product
+            // price series draws them as candles and hands its tail to the footprint.
+            Self::Candles | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line => aeris_charts_engine::SeriesKind::Line,
             Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,
@@ -962,6 +967,7 @@ enum LegendItem {
     Volume,
     Indicator(u32),
     Study { study_id: u64, series_id: u32 },
+    OrderFlow(OrderFlowStudy),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -998,6 +1004,7 @@ impl LegendItem {
             Self::Volume => 1,
             Self::Indicator(binding) => u64::from(binding) + 2,
             Self::Study { series_id, .. } => (1_u64 << 63) | u64::from(series_id),
+            Self::OrderFlow(study) => (1_u64 << 62) | study as u64,
         }
     }
 }
@@ -1826,6 +1833,14 @@ impl NucleusChartView {
             self.engine.set_selected_series(None);
             return true;
         }
+        if self.footprint_series_id() == Some(series) {
+            // The footprint is the chart type's price presentation, not a removable study.
+            return false;
+        }
+        if let Some(study) = self.order_flow_study_for_series(series) {
+            self.engine.set_selected_series(None);
+            return self.remove_order_flow_study(study);
+        }
         if series == self.volume_series {
             self.engine.set_series_visible(series, false);
             self.volume_legend = LegendPresence::Absent;
@@ -2438,9 +2453,6 @@ impl NucleusChartView {
             self.teardown_order_flow();
         }
         self.chart_type = chart_type;
-        if chart_type == ChartType::Footprint {
-            self.engine.set_series_visible(0, false);
-        }
         self.apply_price_series_kind();
         self.mark_user_state_changed();
     }

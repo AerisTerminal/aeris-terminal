@@ -320,6 +320,40 @@ pub fn scale_for_market(_sz_decimals: u32) -> u32 {
     NORMALIZED_PRICE_SCALE
 }
 
+/// Returns the valid price increment near `reference_price`, in units of
+/// [`NORMALIZED_PRICE_SCALE`].
+///
+/// Hyperliquid has no fixed tick: prices carry at most 5 significant figures
+/// and at most `MAX_DECIMALS - szDecimals` decimal places (`MAX_DECIMALS` is 6
+/// for perps and 8 for spot), and integer prices are always valid. The
+/// increment is therefore exact only for prices with the same number of
+/// integer digits as the reference.
+///
+/// # Errors
+///
+/// Returns an error when the reference price is malformed, over-precise, or
+/// not positive.
+pub fn price_increment_near(
+    reference_price: &str,
+    sz_decimals: u32,
+    spot: bool,
+) -> Result<i64, String> {
+    const SIGNIFICANT_FIGURES: u32 = 5;
+    let price = parse_decimal_to_fixed(reference_price, NORMALIZED_PRICE_SCALE)?;
+    if price <= 0 {
+        return Err("hyperliquid reference price must be positive".to_string());
+    }
+    let digits = price.unsigned_abs().ilog10() + 1;
+    // Decimal places the significant-figure rule leaves after the leading
+    // digit; integer prices (5+ integer digits) collapse to zero places.
+    let significant_places = (NORMALIZED_PRICE_SCALE + SIGNIFICANT_FIGURES).saturating_sub(digits);
+    let maximum_places = if spot { 8_u32 } else { 6 }.saturating_sub(sz_decimals);
+    let places = significant_places
+        .min(maximum_places)
+        .min(NORMALIZED_PRICE_SCALE);
+    Ok(10_i64.pow(NORMALIZED_PRICE_SCALE - places))
+}
+
 /// Parses a size string at the normalized quantity scale.
 ///
 /// # Errors
@@ -351,6 +385,26 @@ mod tests {
         assert_eq!(parse_decimal_to_fixed("0.00000001", 8), Ok(1));
         assert_eq!(parse_decimal_to_fixed("-2.25", 2), Ok(-225));
         assert_eq!(parse_decimal_to_fixed("  10.00  ", 2), Ok(1000));
+    }
+
+    #[test]
+    fn price_increment_follows_the_documented_tick_rules() {
+        // Documented examples: perp `1234.5` valid, `1234.56` invalid.
+        assert_eq!(price_increment_near("1234.5", 0, false), Ok(10_000_000));
+        // Perp `0.001234` valid, `0.0012345` invalid (6-decimal cap).
+        assert_eq!(price_increment_near("0.001234", 0, false), Ok(100));
+        // Perp with szDecimals 1: `0.01234` valid, `0.012345` invalid.
+        assert_eq!(price_increment_near("0.01234", 1, false), Ok(1_000));
+        // Spot keeps 8 - szDecimals places: `0.0001234` valid at szDecimals 1.
+        assert_eq!(price_increment_near("0.0001234", 1, true), Ok(10));
+        // BTC perp (szDecimals 5) near 85k and above 100k: integer prices.
+        assert_eq!(price_increment_near("85031.0", 5, false), Ok(100_000_000));
+        assert_eq!(price_increment_near("123456", 5, false), Ok(100_000_000));
+        // ETH perp (szDecimals 4) near 3k: one decimal place.
+        assert_eq!(price_increment_near("3012.4", 4, false), Ok(10_000_000));
+        assert!(price_increment_near("0", 0, false).is_err());
+        assert!(price_increment_near("-1", 0, false).is_err());
+        assert!(price_increment_near("abc", 0, false).is_err());
     }
 
     #[test]

@@ -67,41 +67,28 @@ pub(super) fn initialize_endpoint(
         )?;
     }
 
-    match market.install_provider_instrument(&record.product) {
-        Ok(()) => begin_endpoint_demand(market, client_id, record),
-        Err(error) if refreshable_hyperliquid_startup_error(&record.product, &error) => {
-            let requested = record.product.clone();
-            record.startup_resolution = Some(StartupResolution::Searching(requested.clone()));
-            let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Loading,
-                message: "Refreshing Hyperliquid instrument metadata".to_string(),
-            });
-            market.search_provider_instruments(
-                client_id,
-                SearchProviderInstruments {
-                    consumer_id: record.endpoint.consumer_id,
-                    search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
-                    provider: requested.provider,
-                    query: requested.provider_symbol,
-                    maximum_results: 32,
-                },
-            )
-        }
-        Err(error) => Err(error),
+    // Restored Hyperliquid metadata (price increment, session) is never trusted:
+    // the live catalog re-resolves it before any market data reaches the chart.
+    if record.product.provider == "hyperliquid" {
+        let requested = record.product.clone();
+        record.startup_resolution = Some(StartupResolution::Searching(requested.clone()));
+        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+            state: ChartState::Loading,
+            message: "Refreshing Hyperliquid instrument metadata".to_string(),
+        });
+        return market.search_provider_instruments(
+            client_id,
+            SearchProviderInstruments {
+                consumer_id: record.endpoint.consumer_id,
+                search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
+                provider: requested.provider,
+                query: requested.provider_symbol,
+                maximum_results: 32,
+            },
+        );
     }
-}
-
-fn refreshable_hyperliquid_startup_error(
-    requested: &InstallProviderInstrument,
-    error: &str,
-) -> bool {
-    requested.provider == "hyperliquid"
-        && matches!(
-            error,
-            "provider instrument session is stale"
-                | "provider instrument selection is stale"
-                | "provider instrument selection conflicts"
-        )
+    market.install_provider_instrument(&record.product)?;
+    begin_endpoint_demand(market, client_id, record)
 }
 
 fn begin_endpoint_demand(
@@ -215,6 +202,14 @@ pub(super) fn handle_startup_catalog_event(
             aeris_desktop::trading::register_provider_instrument_if_running(instrument)?;
             record.product.clone_from(instrument);
             record.startup_resolution = None;
+            let _ = record
+                .endpoint
+                .messages
+                .send(MarketWorkerMessage::ProviderCatalog(
+                    aeris_desktop::market_worker::ProviderCatalogEvent::StartupInstrumentResolved(
+                        instrument.clone(),
+                    ),
+                ));
             begin_endpoint_demand(market, client_id, record)?;
             Ok(true)
         }

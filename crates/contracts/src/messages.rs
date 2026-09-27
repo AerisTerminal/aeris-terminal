@@ -324,6 +324,13 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// Exact IEEE-754 bits; zero retains the adaptive per-contract threshold.
     #[prost(fixed64, tag = "5")]
     pub trade_bubble_minimum_volume_bits: u64,
+    /// Instrument ticks per footprint row; zero (and absent in older workspaces) is automatic.
+    #[prost(uint32, tag = "6")]
+    pub ticks_per_row: u32,
+    /// Revision 1 records study visibility after CVD and Delta became opt-in indicators.
+    /// Older workspaces omit this field and are migrated away from the former default-on panes.
+    #[prost(uint32, tag = "7")]
+    pub study_visibility_revision: u32,
 }
 
 /// Durable chart presentation preferences that are independent of market data.

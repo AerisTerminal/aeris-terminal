@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop::workspace_surface::OrderFlowMenuStudy;
 
 use super::chrome_menu::{
     CHROME_MENU_SEARCH_HEIGHT, ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading,
@@ -105,14 +106,21 @@ pub(super) fn indicator_dialog_content(
         || format!("{} native", indicator_specs.len()),
         str::to_string,
     );
+    let query = state.input.read(cx).value().to_ascii_lowercase();
+    let order_flow_studies = order_flow_menu_studies(app, &query, cx);
     let mut list = chrome_menu_scroll_body();
-    if indicator_specs.is_empty() {
+    if !order_flow_studies.is_empty() {
+        list = list
+            .child(chrome_menu_group_heading("Order flow", &colors))
+            .children(order_flow_study_rows(app, &order_flow_studies, theme));
+    }
+    if indicator_specs.is_empty() && order_flow_studies.is_empty() {
         list = list.child(chrome_menu_empty(
             "No matching indicators",
             "Try “average”, “bands”, or a kind like SMA.",
             &colors,
         ));
-    } else {
+    } else if !indicator_specs.is_empty() {
         list = list
             .child(chrome_menu_group_heading("Indicators", &colors))
             .children(available_indicator_rows(
@@ -136,6 +144,64 @@ pub(super) fn indicator_dialog_content(
             colors.text_secondary,
             state.extent,
         ))
+}
+
+/// Footprint study panes that are currently hidden and match the search, shown only while the
+/// chart presents a footprint.
+fn order_flow_menu_studies(
+    app: &Entity<WorkspaceSurface>,
+    query: &str,
+    cx: &App,
+) -> Vec<OrderFlowMenuStudy> {
+    let surface = app.read(cx);
+    if surface.chart_type(cx) != ChartType::Footprint {
+        return Vec::new();
+    }
+    let Some(settings) = surface.chart_order_flow_settings(cx) else {
+        return Vec::new();
+    };
+    OrderFlowMenuStudy::ALL
+        .into_iter()
+        .filter(|study| !study.is_shown(settings))
+        .filter(|study| {
+            query.trim().is_empty() || study.label().to_ascii_lowercase().contains(query.trim())
+        })
+        .collect()
+}
+
+fn order_flow_study_rows(
+    app: &Entity<WorkspaceSurface>,
+    studies: &[OrderFlowMenuStudy],
+    theme: &AerisTheme,
+) -> Vec<AnyElement> {
+    studies
+        .iter()
+        .enumerate()
+        .map(|(index, &study)| {
+            let row_app = app.clone();
+            let add_app = app.clone();
+            MenuRow::search_result(("order_flow_study_row", index), study.label(), theme)
+                .on_click(move |_, window, cx| {
+                    if row_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
+                        row_app.update(cx, |app, app_cx| {
+                            app.close_chrome_overlay(window, app_cx);
+                        });
+                    }
+                })
+                .trailing(button_activation(
+                    compact_menu_add_button(("add_order_flow_study", index), theme),
+                    true,
+                    move |window, cx| {
+                        if add_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
+                            add_app.update(cx, |app, app_cx| {
+                                app.close_chrome_overlay(window, app_cx);
+                            });
+                        }
+                    },
+                ))
+                .into_any_element()
+        })
+        .collect()
 }
 
 pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {

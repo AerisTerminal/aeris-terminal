@@ -3064,7 +3064,8 @@ fn catalog_rejection_message(
 fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
     match event {
         ProviderCatalogEvent::SearchCompleted(result) => &result.provider,
-        ProviderCatalogEvent::SelectionInstalled { instrument, .. } => &instrument.provider,
+        ProviderCatalogEvent::SelectionInstalled { instrument, .. }
+        | ProviderCatalogEvent::StartupInstrumentResolved(instrument) => &instrument.provider,
         ProviderCatalogEvent::CommandRejected { rejection, .. } => &rejection.provider,
     }
 }
@@ -3887,6 +3888,8 @@ enum ChartSettingsAction {
     ToggleDeltaHistogram,
     ToggleTradeBubbles,
     TradeBubbleMinimumVolumeBits(u64),
+    /// Instrument ticks per footprint row; zero is automatic.
+    FootprintTicksPerRow(u32),
 }
 
 #[derive(Clone, Debug)]

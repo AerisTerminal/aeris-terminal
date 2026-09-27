@@ -141,6 +141,10 @@ pub enum ProviderCatalogEvent {
         command_generation: u64,
         instrument: InstallProviderInstrument,
     },
+    /// The runtime re-resolved the restored startup instrument against the
+    /// live provider catalog. Identity is unchanged; metadata such as the
+    /// price increment is authoritative and replaces the restored copy.
+    StartupInstrumentResolved(InstallProviderInstrument),
     CommandRejected {
         rejection: ProviderCatalogRejected,
         command: ProviderCatalogCommand,

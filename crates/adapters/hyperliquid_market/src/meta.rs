@@ -12,8 +12,10 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::decimal::{NORMALIZED_PRICE_SCALE, price_increment_near};
 use crate::identity::{
-    HyperliquidInstrument, builder_perp_with_quote, core_perp_with_quote, spot_pair,
+    HyperliquidInstrument, HyperliquidMarketKind, builder_perp_with_quote, core_perp_with_quote,
+    spot_pair,
 };
 
 /// One decoded catalog with stable identities for every supported market.
@@ -22,6 +24,7 @@ pub struct HyperliquidCatalog {
     /// All instruments keyed by stable `instrument_id`.
     pub instruments: BTreeMap<String, HyperliquidInstrument>,
     day_notional_volume: BTreeMap<String, String>,
+    price_increment: BTreeMap<String, i64>,
 }
 
 impl HyperliquidCatalog {
@@ -77,6 +80,32 @@ impl HyperliquidCatalog {
             .take(maximum_results.max(1))
             .map(|(_, instrument)| instrument.clone())
             .collect()
+    }
+
+    /// Valid price increment near the latest catalog mark price, in units of
+    /// the instrument's price scale. `None` when the context carried no
+    /// usable mark price.
+    #[must_use]
+    pub fn price_increment(&self, instrument_id: &str) -> Option<i64> {
+        self.price_increment.get(instrument_id).copied()
+    }
+
+    pub(crate) fn set_reference_price(&mut self, wire_coin: &str, mark_price: &str) {
+        let Some(instrument) = self
+            .instruments
+            .values()
+            .find(|instrument| instrument.wire_coin == wire_coin)
+        else {
+            return;
+        };
+        if u32::from(instrument.price_scale) != NORMALIZED_PRICE_SCALE {
+            return;
+        }
+        let spot = matches!(instrument.kind, HyperliquidMarketKind::Spot { .. });
+        if let Ok(increment) = price_increment_near(mark_price, instrument.sz_decimals, spot) {
+            self.price_increment
+                .insert(instrument.instrument_id.clone(), increment);
+        }
     }
 
     pub(crate) fn set_day_notional_volume(&mut self, wire_coin: &str, volume: &str) {
@@ -297,6 +326,7 @@ pub fn decode_catalog(bundle: &RawMetaBundle) -> Result<HyperliquidCatalog, Stri
     Ok(HyperliquidCatalog {
         instruments,
         day_notional_volume: BTreeMap::new(),
+        price_increment: BTreeMap::new(),
     })
 }
 

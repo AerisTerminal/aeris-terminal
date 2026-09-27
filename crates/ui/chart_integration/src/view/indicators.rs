@@ -134,9 +134,11 @@ impl NucleusChartView {
     /// Returns whether any native indicator or the reusable volume series is currently shown.
     #[must_use]
     pub fn has_indicators(&self) -> bool {
+        let footprint = self.footprint_series_id();
         self.engine.series_entries().iter().any(|series| {
             !series.removed
                 && series.id != 0
+                && Some(series.id) != footprint
                 && (series.id != self.volume_series || self.volume_legend.is_present())
         })
     }
@@ -150,6 +152,7 @@ impl NucleusChartView {
             .values()
             .map(|state| state.series_id)
             .collect::<HashSet<_>>();
+        let footprint = self.footprint_series_id();
         let ids: Vec<u32> = self
             .engine
             .series_entries()
@@ -157,13 +160,21 @@ impl NucleusChartView {
             .filter(|series| {
                 !series.removed
                     && series.id != 0
+                    && Some(series.id) != footprint
+                    && self.order_flow_study_for_series(series.id).is_none()
                     && !study_series.contains(&series.id)
                     && (series.id != self.volume_series || self.volume_legend.is_present())
             })
             .map(|series| series.id)
             .collect();
+        let mut order_flow_cleared = false;
+        for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
+            if self.has_order_flow_study(study) {
+                order_flow_cleared |= self.remove_order_flow_study(study);
+            }
+        }
         if ids.is_empty() {
-            return false;
+            return order_flow_cleared;
         }
         if self
             .engine
@@ -327,6 +338,7 @@ impl NucleusChartView {
                 settings_available: false,
             });
         }
+        self.append_order_flow_legend_rows(entries, &snapshots, &mut rows);
         self.append_study_legend_rows(entries, &snapshots, &mut rows);
         rows
     }
@@ -334,8 +346,18 @@ impl NucleusChartView {
         if let LegendItem::Study { study_id, .. } = item {
             return self.set_study_visible(study_id, visible);
         }
+        if let LegendItem::OrderFlow(study) = item {
+            let changed = self.set_order_flow_study_visible(study, visible);
+            if changed {
+                self.mark_user_state_changed();
+            }
+            return changed;
+        }
         let ids: Vec<u32> = match item {
-            LegendItem::Asset => vec![0],
+            // The footprint presents the same product price series, so they toggle together.
+            LegendItem::Asset => std::iter::once(0)
+                .chain(self.footprint_series_id())
+                .collect(),
             LegendItem::Volume if self.volume_legend.is_present() => vec![self.volume_series],
             LegendItem::Volume => return false,
             LegendItem::Indicator(binding) => self
@@ -349,7 +371,9 @@ impl NucleusChartView {
                         .is_some_and(|info| info.binding_id == binding)
                 })
                 .collect(),
-            LegendItem::Study { .. } => unreachable!("study visibility handled above"),
+            LegendItem::Study { .. } | LegendItem::OrderFlow(_) => {
+                unreachable!("study and order-flow visibility handled above")
+            }
         };
         if ids.is_empty() {
             return false;
@@ -376,6 +400,7 @@ impl NucleusChartView {
                 self.engine.set_series_visible(self.volume_series, false);
                 true
             }
+            LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
             LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => {
                 let ids = self
@@ -403,12 +428,14 @@ impl NucleusChartView {
         removed
     }
     pub(super) fn indicator_series_ids(&self) -> Vec<u32> {
+        let footprint = self.footprint_series_id();
         self.engine
             .series_entries()
             .iter()
             .filter(|series| {
                 !series.removed
                     && series.id != 0
+                    && Some(series.id) != footprint
                     && (series.id != self.volume_series || self.volume_legend.is_present())
             })
             .map(|series| series.id)

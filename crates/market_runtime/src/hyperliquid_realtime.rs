@@ -404,9 +404,14 @@ fn handle_catalog_select(
                     && instrument.venue == selection.exchange
                     && instrument_matches_entitlement(instrument, &selection.entitlement_id)
             })
-            .cloned()
+            .map(|instrument| {
+                (
+                    instrument.clone(),
+                    current.price_increment(&instrument.instrument_id),
+                )
+            })
     });
-    let Some(resolved) = resolved else {
+    let Some((resolved, price_increment)) = resolved else {
         let _ = publish_catalog(
             events,
             HyperliquidCatalogEvent::Rejected {
@@ -440,7 +445,9 @@ fn handle_catalog_select(
                 price_scale: u32::from(resolved.price_scale),
                 quantity_scale: u32::from(resolved.quantity_scale),
                 entitlement_id: HYPERLIQUID_PUBLIC_ENTITLEMENT_ID.to_string(),
-                price_increment: None,
+                // Hyperliquid ticks follow significant figures, so this is the
+                // valid increment near the catalog mark price at selection.
+                price_increment,
                 contract_metadata: Some(Box::new(ProviderContractMetadata {
                     point_value: None,
                     point_value_scale: None,

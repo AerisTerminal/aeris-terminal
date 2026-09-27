@@ -807,6 +807,8 @@ mod tests {
                 show_delta_histogram: true,
                 show_trade_bubbles: true,
                 trade_bubble_minimum_volume_bits: 25.0_f64.to_bits(),
+                ticks_per_row: 5,
+                study_visibility_revision: 1,
             }),
             context_panel_visible: true,
             context_panel_tab: 2,

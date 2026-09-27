@@ -32,6 +32,27 @@ fn order_flow_trade(ordinal: u64, timestamp_micros: i64, volume: f64) -> OrderFl
     }
 }
 
+fn enable_cvd_and_delta(
+    chart: &mut NucleusChartView,
+    aggregation: OrderFlowAggregation,
+    trades: &[OrderFlowTrade],
+) -> u32 {
+    let mut settings = chart.order_flow_settings();
+    settings.show_cumulative_delta = true;
+    settings.show_delta_histogram = true;
+    assert!(
+        chart
+            .set_order_flow_settings(settings)
+            .expect("settings apply")
+    );
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, trades)
+        .expect("selected studies are added");
+    chart
+        .footprint_series_id()
+        .expect("reconfigured footprint series")
+}
+
 #[test]
 fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_eviction() {
     let mut chart = NucleusChartView::empty();
@@ -93,6 +114,41 @@ fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_evictio
         .footprint_bars(footprint_series)
         .expect("footprint bars");
     assert!((bars.iter().map(|bar| bar.total_volume).sum::<f64>() - 8.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn footprint_rebuilds_rows_when_refreshed_metadata_corrects_the_tick_size() {
+    let mut chart = NucleusChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let mut trades = vec![
+        order_flow_trade(1, 1_000_000, 2.0),
+        order_flow_trade(2, 1_500_000, 3.0),
+    ];
+    trades[0].price = 100.0;
+    trades[1].price = 101.0;
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 1e-8, &trades)
+        .expect("fallback tick");
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 1.0, &trades)
+        .expect("corrected tick rebuilds instead of rejecting the tape");
+    let footprints = chart
+        .engine
+        .series
+        .iter()
+        .filter(|series| {
+            series.kind == aeris_charts_engine::SeriesKind::Footprint && !series.removed
+        })
+        .map(|series| series.id)
+        .collect::<Vec<_>>();
+    assert_eq!(footprints.len(), 1, "the stale footprint series is removed");
+    let bars = chart
+        .engine
+        .footprint_bars(footprints[0])
+        .expect("footprint bars");
+    assert_eq!(bars.len(), 1);
+    assert_eq!(bars[0].levels.len(), 2);
 }
 
 #[test]
@@ -3300,4 +3356,118 @@ fn pointer_cursor_truthfully_tracks_chart_and_axis_gestures() {
     assert_eq!(chart.cursor_style, CursorStyle::ClosedHand);
     chart.end_drag(300.0, 200.0);
     assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+}
+
+#[test]
+fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut chart = NucleusChartView::empty();
+    chart.load_replay(&replay).expect("snapshot installs");
+    chart.set_chart_type(ChartType::Footprint);
+    let price = series_entry(&chart, 0);
+    assert_eq!(price.kind, aeris_charts_engine::SeriesKind::Candlestick);
+    assert!(price.visible, "history stays drawn as candles");
+
+    let times = chart
+        .engine
+        .data_layer()
+        .series_data(0)
+        .expect("price data")
+        .0
+        .to_vec();
+    let spacing = times[1] - times[0];
+    let last = *times.last().expect("bars");
+    let last_micros = last * 1_000_000;
+    let trades = vec![
+        order_flow_trade(1, last_micros, 2.0),
+        order_flow_trade(2, last_micros + 1, 3.0),
+    ];
+    let aggregation =
+        OrderFlowAggregation::TimeMicros(u64::try_from(spacing * 1_000_000).expect("spacing"));
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("tape applies");
+    assert_eq!(
+        series_entry(&chart, 0).render_before_time,
+        Some(last),
+        "candles stop where the footprint begins"
+    );
+    let mut footprint = chart.footprint_series_id().expect("footprint series");
+    let footprint_entry = series_entry(&chart, footprint);
+    assert!(!footprint_entry.last_value_visible);
+    assert!(!footprint_entry.price_line_visible);
+    assert!(
+        !footprint_entry.countdown_visible,
+        "the product price series owns the only price chrome and countdown"
+    );
+
+    let rows = chart.legend_rows();
+    let price_rows = rows
+        .iter()
+        .filter(|row| row.item == LegendItem::Asset)
+        .collect::<Vec<_>>();
+    assert_eq!(price_rows.len(), 1);
+    assert!(price_rows[0].visible);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(row.item, LegendItem::OrderFlow(_)))
+    );
+    assert!(!chart.has_indicators());
+
+    footprint = enable_cvd_and_delta(&mut chart, aggregation, &trades);
+    let rows = chart.legend_rows();
+    assert!(rows.iter().any(|row| {
+        row.item == LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta) && row.title == "CVD"
+    }));
+    assert!(
+        rows.iter()
+            .any(|row| row.item == LegendItem::OrderFlow(OrderFlowStudy::Delta))
+    );
+
+    assert!(chart.set_legend_item_visible(LegendItem::Asset, false));
+    assert!(!series_entry(&chart, 0).visible);
+    assert!(!series_entry(&chart, footprint).visible);
+    assert!(chart.set_legend_item_visible(LegendItem::Asset, true));
+
+    assert!(chart.set_legend_item_visible(LegendItem::OrderFlow(OrderFlowStudy::Delta), false));
+    assert!(chart.remove_legend_indicator(LegendItem::OrderFlow(OrderFlowStudy::Delta)));
+    assert!(!chart.order_flow_settings().show_delta_histogram);
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("tape rebuilds after the settings change");
+    let rows = chart.legend_rows();
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.item == LegendItem::OrderFlow(OrderFlowStudy::Delta))
+    );
+
+    // Clearing indicators turns order-flow studies off through settings and never
+    // deletes the footprint itself.
+    assert!(chart.clear_indicators());
+    assert!(!chart.order_flow_settings().show_cumulative_delta);
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("tape rebuilds after clearing indicators");
+    assert!(chart.footprint_series_id().is_some());
+    assert!(!chart.has_indicators());
+
+    chart.set_chart_type(ChartType::Candles);
+    assert_eq!(series_entry(&chart, 0).render_before_time, None);
+    assert!(chart.footprint_series_id().is_none());
+}
+
+#[test]
+fn automatic_footprint_rows_target_legible_one_two_five_steps() {
+    use super::order_flow::auto_ticks_per_row;
+    assert_eq!(auto_ticks_per_row(None, 1.0), 1);
+    assert_eq!(auto_ticks_per_row(Some(10.0), 1.0), 1);
+    // BTC one-minute bars around $110 at a $1 tick: about 4.6 ticks per row.
+    assert_eq!(auto_ticks_per_row(Some(110.0), 1.0), 5);
+    assert_eq!(auto_ticks_per_row(Some(1_000.0), 1.0), 50);
+    assert_eq!(auto_ticks_per_row(Some(3_000.0), 1.0), 200);
+    assert_eq!(auto_ticks_per_row(Some(f64::NAN), 1.0), 1);
 }

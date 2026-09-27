@@ -898,6 +898,54 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Applies footprint order-flow actions through the chart's order-flow settings owner.
+    /// Returns whether `action` was an order-flow action.
+    fn apply_order_flow_settings_action(
+        surface: &Entity<WorkspaceSurface>,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(
+            action,
+            ChartSettingsAction::FootprintMode(_)
+                | ChartSettingsAction::ToggleCumulativeDelta
+                | ChartSettingsAction::ToggleDeltaHistogram
+                | ChartSettingsAction::ToggleTradeBubbles
+                | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
+                | ChartSettingsAction::FootprintTicksPerRow(_)
+        ) {
+            return false;
+        }
+        let Some(mut settings) = surface.read(cx).chart_order_flow_settings(cx) else {
+            return true;
+        };
+        match action {
+            ChartSettingsAction::FootprintMode(mode) => settings.display_mode = mode,
+            ChartSettingsAction::ToggleCumulativeDelta => {
+                settings.show_cumulative_delta = !settings.show_cumulative_delta;
+            }
+            ChartSettingsAction::ToggleDeltaHistogram => {
+                settings.show_delta_histogram = !settings.show_delta_histogram;
+            }
+            ChartSettingsAction::ToggleTradeBubbles => {
+                settings.show_trade_bubbles = !settings.show_trade_bubbles;
+            }
+            ChartSettingsAction::TradeBubbleMinimumVolumeBits(bits) => {
+                let value = f64::from_bits(bits);
+                if !value.is_finite() || value < 0.0 {
+                    return true;
+                }
+                settings.trade_bubble_minimum_volume = value;
+            }
+            ChartSettingsAction::FootprintTicksPerRow(ticks) => settings.ticks_per_row = ticks,
+            _ => unreachable!(),
+        }
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_order_flow_settings(settings, surface_cx);
+        });
+        true
+    }
+
     pub(super) fn apply_chart_settings_action(
         &mut self,
         menu: &ChartContextMenu,
@@ -914,40 +962,7 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        if matches!(
-            action,
-            ChartSettingsAction::FootprintMode(_)
-                | ChartSettingsAction::ToggleCumulativeDelta
-                | ChartSettingsAction::ToggleDeltaHistogram
-                | ChartSettingsAction::ToggleTradeBubbles
-                | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
-        ) {
-            let Some(mut settings) = surface.read(cx).chart_order_flow_settings(cx) else {
-                return;
-            };
-            match action {
-                ChartSettingsAction::FootprintMode(mode) => settings.display_mode = mode,
-                ChartSettingsAction::ToggleCumulativeDelta => {
-                    settings.show_cumulative_delta = !settings.show_cumulative_delta;
-                }
-                ChartSettingsAction::ToggleDeltaHistogram => {
-                    settings.show_delta_histogram = !settings.show_delta_histogram;
-                }
-                ChartSettingsAction::ToggleTradeBubbles => {
-                    settings.show_trade_bubbles = !settings.show_trade_bubbles;
-                }
-                ChartSettingsAction::TradeBubbleMinimumVolumeBits(bits) => {
-                    let value = f64::from_bits(bits);
-                    if !value.is_finite() || value < 0.0 {
-                        return;
-                    }
-                    settings.trade_bubble_minimum_volume = value;
-                }
-                _ => unreachable!(),
-            }
-            surface.update(cx, |surface, surface_cx| {
-                surface.set_chart_order_flow_settings(settings, surface_cx);
-            });
+        if Self::apply_order_flow_settings_action(&surface, action, cx) {
             cx.notify();
             return;
         }
@@ -962,7 +977,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleCumulativeDelta
             | ChartSettingsAction::ToggleDeltaHistogram
             | ChartSettingsAction::ToggleTradeBubbles
-            | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_) => unreachable!(),
+            | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
+            | ChartSettingsAction::FootprintTicksPerRow(_) => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -998,7 +1014,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleCumulativeDelta
             | ChartSettingsAction::ToggleDeltaHistogram
             | ChartSettingsAction::ToggleTradeBubbles
-            | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_) => unreachable!(),
+            | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
+            | ChartSettingsAction::FootprintTicksPerRow(_) => unreachable!(),
         });
         cx.notify();
     }

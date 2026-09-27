@@ -1,26 +1,61 @@
 use super::{
-    FootprintDisplayMode, NucleusChartView, OrderFlowAggregation, OrderFlowSettings,
-    OrderFlowSweep, OrderFlowTrade,
+    FootprintDisplayMode, LegendItem, LegendRow, LegendValueTone, NucleusChartView,
+    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, legend_series_values,
 };
+use num_traits::ToPrimitive;
+
 use aeris_charts_engine::{
     FootprintAggregationOptions, FootprintBarAggregation, FootprintCellMode,
     FootprintImbalanceOptions, FootprintSeriesOptions, FootprintTrade, FootprintVisualOptions,
-    TradeBubbleOptions, TradeStudyOptions,
+    SeriesEntry, SeriesValueSnapshot, TradeBubbleOptions, TradeStudyOptions,
 };
 
 const TRADE_BUBBLE_CAPACITY: usize = 2_048;
 const SWEEP_AGGREGATION_WINDOW_MICROS: i64 = 100_000;
+/// Recent price bars sampled for the automatic row size.
+const AUTO_ROW_SAMPLE_BARS: usize = 64;
+/// Target footprint rows across a median bar when the row size is automatic.
+const AUTO_ROWS_PER_BAR: f64 = 24.0;
+/// Largest automatic row grouping, bounding the ladder search.
+const MAXIMUM_AUTO_TICKS_PER_ROW: u32 = 1_000_000;
+
+/// Tape-derived study panes owned by the footprint presentation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum OrderFlowStudy {
+    CumulativeDelta,
+    Delta,
+}
+
+impl OrderFlowStudy {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::CumulativeDelta => "CVD",
+            Self::Delta => "Delta",
+        }
+    }
+}
 
 pub(super) struct OrderFlowChartState {
     identity: String,
     provider_generation: u64,
     aggregation: OrderFlowAggregation,
     tick_size_bits: u64,
+    ticks_per_row: u32,
     first_ingestion_ordinal: Option<u64>,
     last_ingestion_ordinal: Option<u64>,
+    trade_stream: u64,
     footprint_series: u32,
     cumulative_delta_series: Option<u32>,
     delta_series: Option<u32>,
+}
+
+impl OrderFlowChartState {
+    const fn study_series(&self, study: OrderFlowStudy) -> Option<u32> {
+        match study {
+            OrderFlowStudy::CumulativeDelta => self.cumulative_delta_series,
+            OrderFlowStudy::Delta => self.delta_series,
+        }
+    }
 }
 
 impl NucleusChartView {
@@ -48,6 +83,20 @@ impl NucleusChartView {
         Ok(true)
     }
 
+    /// Instrument ticks per footprint row currently drawn, resolving the automatic size.
+    #[must_use]
+    pub fn footprint_ticks_per_row(&self) -> Option<u32> {
+        self.order_flow_state
+            .as_ref()
+            .map(|state| state.ticks_per_row)
+    }
+
+    /// Returns the footprint to its candle history when the instrument has no known
+    /// price increment. Footprint rows are keyed by the increment, so none are guessed.
+    pub fn clear_order_flow_trades(&mut self) {
+        self.teardown_order_flow();
+    }
+
     /// Projects one runtime-authoritative bounded tape into the chart-owned
     /// footprint cache. Prefix eviction or session changes install a covering
     /// image; a stable retained prefix updates only the new suffix.
@@ -69,8 +118,16 @@ impl NucleusChartView {
         if identity.is_empty() || !tick_size.is_finite() || tick_size <= 0.0 {
             return Err("order-flow identity and tick size must be valid".to_string());
         }
-        let requires_configuration = self.order_flow_state.is_none();
-        if requires_configuration {
+        // Refreshed provider metadata can correct the price increment of the
+        // same instrument; footprint rows are keyed by it, so rebuild them.
+        if self
+            .order_flow_state
+            .as_ref()
+            .is_some_and(|state| state.tick_size_bits != tick_size.to_bits())
+        {
+            self.teardown_order_flow();
+        }
+        if self.order_flow_state.is_none() {
             self.configure_order_flow(
                 identity,
                 provider_generation,
@@ -86,7 +143,6 @@ impl NucleusChartView {
         if state.identity != identity
             || state.provider_generation != provider_generation
             || state.aggregation != aggregation
-            || state.tick_size_bits != tick_size.to_bits()
         {
             return Err("order-flow tape identity changed without replacing the chart".to_string());
         }
@@ -125,6 +181,14 @@ impl NucleusChartView {
             state.first_ingestion_ordinal = first;
             state.last_ingestion_ordinal = last;
         }
+        // Candles draw the history the tape does not cover; the footprint owns
+        // every bar from its first retained trade onward.
+        let footprint_start = self
+            .engine
+            .footprint_bar(footprint_series, 0)
+            .map(|bar| bar.start_timestamp_micros.div_euclid(1_000_000));
+        self.engine
+            .set_series_render_before_time(0, footprint_start);
         self.invalidate_series_layout();
         Ok(())
     }
@@ -137,9 +201,19 @@ impl NucleusChartView {
         tick_size: f64,
         trades: &[OrderFlowTrade],
     ) -> Result<(), String> {
+        let ticks_per_row = match self.order_flow_settings.ticks_per_row {
+            0 => auto_ticks_per_row(
+                self.product_bars.recent_median_range(AUTO_ROW_SAMPLE_BARS),
+                tick_size,
+            ),
+            configured => configured,
+        };
         let aggregation_options = FootprintAggregationOptions {
             tick_size,
-            bars: chart_aggregation(aggregation)?,
+            ticks_per_row,
+            // Footprint bars share the price series' bar opens (weekly bars do not
+            // open on the epoch's Thursday), so both presentations use one grid.
+            bars: chart_aggregation(aggregation, self.product_bars.last_time())?,
             imbalance: FootprintImbalanceOptions::default(),
         };
         let stream = self
@@ -160,7 +234,13 @@ impl NucleusChartView {
         self.engine
             .bind_footprint_series_to_stream(footprint_series, stream)
             .map_err(|error| error.to_string())?;
-        self.engine.set_series_visible(0, false);
+        // The product price series keeps the one last-price label and line.
+        if !self.engine.series_apply_options_json(
+            footprint_series,
+            r#"{"last_value_visible":false,"price_line_visible":false,"countdown_visible":false}"#,
+        ) {
+            return Err("footprint price chrome options were rejected".to_string());
+        }
 
         let cumulative_delta_series = if self.order_flow_settings.show_cumulative_delta {
             let pane = self
@@ -209,12 +289,15 @@ impl NucleusChartView {
             provider_generation,
             aggregation,
             tick_size_bits: tick_size.to_bits(),
+            ticks_per_row,
             first_ingestion_ordinal: None,
             last_ingestion_ordinal: None,
+            trade_stream: stream,
             footprint_series,
             cumulative_delta_series,
             delta_series,
         });
+        self.apply_indicator_chrome_options();
         Ok(())
     }
 
@@ -229,17 +312,143 @@ impl NucleusChartView {
             self.engine.remove_series(series);
         }
         self.engine.remove_series(state.footprint_series);
-        self.engine.set_series_visible(0, true);
+        // The stream's aggregation options are fixed at creation; release it so
+        // a reconfiguration with a new tick or bar aggregation can recreate it.
+        if let Err(error) = self.engine.remove_trade_stream(state.trade_stream) {
+            eprintln!("Aeris order-flow trade stream release failed: {error}");
+        }
+        self.engine.set_series_render_before_time(0, None);
         self.invalidate_series_layout();
+    }
+
+    /// The footprint series, which shares the product price legend row.
+    pub(super) fn footprint_series_id(&self) -> Option<u32> {
+        self.order_flow_state
+            .as_ref()
+            .map(|state| state.footprint_series)
+    }
+
+    /// Whether a study pane is currently drawn by the footprint presentation.
+    pub(super) fn has_order_flow_study(&self, study: OrderFlowStudy) -> bool {
+        self.order_flow_state
+            .as_ref()
+            .is_some_and(|state| state.study_series(study).is_some())
+    }
+
+    /// Order-flow study owning a chart series, if any.
+    pub(super) fn order_flow_study_for_series(&self, series: u32) -> Option<OrderFlowStudy> {
+        let state = self.order_flow_state.as_ref()?;
+        [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta]
+            .into_iter()
+            .find(|study| state.study_series(*study) == Some(series))
+    }
+
+    pub(super) fn append_order_flow_legend_rows(
+        &self,
+        entries: &[SeriesEntry],
+        snapshots: &[SeriesValueSnapshot],
+        rows: &mut Vec<LegendRow>,
+    ) {
+        let Some(state) = &self.order_flow_state else {
+            return;
+        };
+        for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
+            let Some(entry) = state.study_series(study).and_then(|id| {
+                entries
+                    .iter()
+                    .find(|series| series.id == id && !series.removed)
+            }) else {
+                continue;
+            };
+            rows.push(LegendRow {
+                item: LegendItem::OrderFlow(study),
+                pane: entry.pane_index,
+                title: study.title().to_string(),
+                values: if entry.visible {
+                    legend_series_values(snapshots, entry.id)
+                } else {
+                    Vec::new()
+                },
+                values_tone: LegendValueTone::Neutral,
+                visible: entry.visible,
+                settings_available: false,
+            });
+        }
+    }
+
+    pub(super) fn set_order_flow_study_visible(
+        &mut self,
+        study: OrderFlowStudy,
+        visible: bool,
+    ) -> bool {
+        let Some(series) = self
+            .order_flow_state
+            .as_ref()
+            .and_then(|state| state.study_series(study))
+        else {
+            return false;
+        };
+        let changed = self
+            .engine
+            .series_entries()
+            .iter()
+            .any(|entry| entry.id == series && !entry.removed && entry.visible != visible);
+        if changed {
+            self.engine.set_series_visible(series, visible);
+            self.invalidate_series_layout();
+        }
+        changed
+    }
+
+    /// Removes a study pane through the durable order-flow settings owner, so the
+    /// removal persists and the indicator menu can add it back.
+    pub(super) fn remove_order_flow_study(&mut self, study: OrderFlowStudy) -> bool {
+        let mut settings = self.order_flow_settings;
+        match study {
+            OrderFlowStudy::CumulativeDelta => settings.show_cumulative_delta = false,
+            OrderFlowStudy::Delta => settings.show_delta_histogram = false,
+        }
+        self.set_order_flow_settings(settings).unwrap_or(false)
     }
 }
 
-fn chart_aggregation(aggregation: OrderFlowAggregation) -> Result<FootprintBarAggregation, String> {
+/// Ticks per row so a median recent bar spans about [`AUTO_ROWS_PER_BAR`] rows, rounded up to a
+/// 1-2-5 step so the grouping reads naturally (for example $5 rows for BTC on one minute).
+pub(super) fn auto_ticks_per_row(median_bar_range: Option<f64>, tick_size: f64) -> u32 {
+    let Some(range) = median_bar_range.filter(|range| range.is_finite() && *range > 0.0) else {
+        return 1;
+    };
+    let wanted = range / AUTO_ROWS_PER_BAR / tick_size;
+    if !wanted.is_finite() || wanted <= 1.0 {
+        return 1;
+    }
+    let mut decade = 1_u32;
+    while decade <= MAXIMUM_AUTO_TICKS_PER_ROW {
+        for step in [1, 2, 5] {
+            let candidate = decade.saturating_mul(step);
+            if f64::from(candidate) >= wanted {
+                return candidate.min(MAXIMUM_AUTO_TICKS_PER_ROW);
+            }
+        }
+        decade = decade.saturating_mul(10);
+    }
+    MAXIMUM_AUTO_TICKS_PER_ROW
+}
+
+fn chart_aggregation(
+    aggregation: OrderFlowAggregation,
+    price_bar_open_seconds: Option<f64>,
+) -> Result<FootprintBarAggregation, String> {
     match aggregation {
         OrderFlowAggregation::TimeMicros(interval_micros) if interval_micros > 0 => {
+            let anchor_micros = price_bar_open_seconds
+                .map(|seconds| seconds * 1_000_000.0)
+                .filter(|micros| micros.is_finite() && micros.abs() < 9.0e15)
+                .and_then(|micros| micros.round().to_i64())
+                .unwrap_or(0);
             Ok(FootprintBarAggregation::Time {
                 interval_micros,
-                anchor_micros: 0,
+                anchor_micros,
             })
         }
         OrderFlowAggregation::Trades(trades_per_bar) if trades_per_bar > 0 => {
@@ -361,4 +570,36 @@ fn order_flow_trade(trade: &OrderFlowTrade) -> Result<FootprintTrade, String> {
         conditions: 0,
         session_id: Some(trade.session_id),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footprint_time_bars_share_the_price_series_bar_opens() {
+        const WEEK_MICROS: u64 = 7 * 24 * 60 * 60 * 1_000_000;
+        // Monday 2026-09-21 00:00 UTC; the Unix epoch fell on a Thursday.
+        let monday_open = 1_790_035_200.0;
+        let FootprintBarAggregation::Time {
+            interval_micros,
+            anchor_micros,
+        } = chart_aggregation(
+            OrderFlowAggregation::TimeMicros(WEEK_MICROS),
+            Some(monday_open),
+        )
+        .expect("weekly aggregation")
+        else {
+            panic!("time aggregation expected");
+        };
+        assert_eq!(interval_micros, WEEK_MICROS);
+        assert_eq!(anchor_micros, 1_790_035_200_000_000);
+        assert!(matches!(
+            chart_aggregation(OrderFlowAggregation::TimeMicros(WEEK_MICROS), None),
+            Ok(FootprintBarAggregation::Time {
+                anchor_micros: 0,
+                ..
+            })
+        ));
+    }
 }

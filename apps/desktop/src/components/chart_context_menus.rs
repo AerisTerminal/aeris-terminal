@@ -1239,6 +1239,7 @@ fn footprint_series_settings(
             ],
             theme,
         ))
+        .child(footprint_row_size_settings(terminal, menu, settings, theme))
         .child(settings_group_heading(
             "Order-flow studies",
             "One shared retained trade stream",
@@ -1270,6 +1271,47 @@ fn footprint_series_settings(
         ))
         .child(footprint_threshold_settings(
             terminal, menu, settings, theme,
+        ))
+        .into_any_element()
+}
+
+fn footprint_row_size_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    settings: OrderFlowSettings,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let choice = |label: &'static str, ticks: u32| {
+        (
+            label,
+            settings.ticks_per_row == ticks,
+            ChartSettingsAction::FootprintTicksPerRow(ticks),
+        )
+    };
+    div()
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "Row size",
+            &[
+                choice("Auto", 0),
+                choice("1 tick", 1),
+                choice("2", 2),
+                choice("5", 5),
+            ],
+            theme,
+        ))
+        .child(settings_choice_row(
+            terminal,
+            menu,
+            "",
+            &[
+                choice("10", 10),
+                choice("25", 25),
+                choice("50", 50),
+                choice("100 ticks", 100),
+            ],
+            theme,
         ))
         .into_any_element()
 }

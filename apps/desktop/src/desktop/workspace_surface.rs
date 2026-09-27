@@ -311,6 +311,31 @@ pub(super) fn restored_chart_appearance(
     })
 }
 
+/// Footprint study panes the indicator menu can add back after removal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OrderFlowMenuStudy {
+    CumulativeDelta,
+    Delta,
+}
+
+impl OrderFlowMenuStudy {
+    pub(super) const ALL: [Self; 2] = [Self::CumulativeDelta, Self::Delta];
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::CumulativeDelta => "Cumulative delta (CVD)",
+            Self::Delta => "Delta histogram",
+        }
+    }
+
+    pub(super) const fn is_shown(self, settings: OrderFlowSettings) -> bool {
+        match self {
+            Self::CumulativeDelta => settings.show_cumulative_delta,
+            Self::Delta => settings.show_delta_histogram,
+        }
+    }
+}
+
 fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderFlowSettingsState {
     WorkspaceOrderFlowSettingsState {
         display_mode: match settings.display_mode {
@@ -326,6 +351,8 @@ fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderF
         show_delta_histogram: settings.show_delta_histogram,
         show_trade_bubbles: settings.show_trade_bubbles,
         trade_bubble_minimum_volume_bits: settings.trade_bubble_minimum_volume.to_bits(),
+        ticks_per_row: settings.ticks_per_row,
+        study_visibility_revision: 1,
     }
 }
 
@@ -347,10 +374,13 @@ fn restored_order_flow_settings(
         .is_finite()
         .then_some(OrderFlowSettings {
             display_mode,
-            show_cumulative_delta: settings.show_cumulative_delta,
-            show_delta_histogram: settings.show_delta_histogram,
+            show_cumulative_delta: settings.study_visibility_revision >= 1
+                && settings.show_cumulative_delta,
+            show_delta_histogram: settings.study_visibility_revision >= 1
+                && settings.show_delta_histogram,
             show_trade_bubbles: settings.show_trade_bubbles,
             trade_bubble_minimum_volume,
+            ticks_per_row: settings.ticks_per_row,
         })
 }
 
@@ -3413,6 +3443,23 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).order_flow_settings())
     }
 
+    /// Shows a footprint study pane through the order-flow settings owner.
+    pub(super) fn add_order_flow_study(
+        &mut self,
+        study: OrderFlowMenuStudy,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(mut settings) = self.chart_order_flow_settings(cx) else {
+            return false;
+        };
+        match study {
+            OrderFlowMenuStudy::CumulativeDelta => settings.show_cumulative_delta = true,
+            OrderFlowMenuStudy::Delta => settings.show_delta_histogram = true,
+        }
+        self.set_chart_order_flow_settings(settings, cx);
+        true
+    }
+
     pub(super) fn set_chart_order_flow_settings(
         &mut self,
         settings: OrderFlowSettings,
@@ -3584,14 +3631,26 @@ impl WorkspaceSurface {
         let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
         self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..], threshold).into();
         let price_divisor = 10_f64.powi(i32::from(snapshot.price_scale));
-        let tick_size = product
+        // Footprint rows are keyed by the instrument's price increment. Without a
+        // provider-published increment the chart stays on candles; none is guessed.
+        let Some(tick_size) = product
             .price_increment
             .and_then(|increment| {
                 num_traits::ToPrimitive::to_f64(&increment)
                     .map(|increment| increment / price_divisor)
             })
             .filter(|tick| tick.is_finite() && *tick > 0.0)
-            .unwrap_or(1.0 / price_divisor);
+        else {
+            chart.update(cx, |chart, chart_cx| {
+                chart.clear_order_flow_trades();
+                chart_cx.notify();
+            });
+            self.indicator_message = Some(format!(
+                "Footprint is unavailable: {} has no published price increment",
+                product.display_symbol
+            ));
+            return;
+        };
         let identity = product.instrument_id.clone();
         let aggregation = order_flow_aggregation(self.interval);
         let result = chart.update(cx, |chart, chart_cx| {
@@ -3859,6 +3918,16 @@ impl WorkspaceSurface {
                 self.chart_state = ChartState::Loading;
                 self.chart_state_message = format!("Loading {} market history", interval.label());
                 self.symbol_message = format!("Loading the selected {display} market");
+            }
+            ProviderCatalogEvent::StartupInstrumentResolved(instrument) => {
+                let same_instrument = self.product.as_ref().is_some_and(|product| {
+                    product.provider == instrument.provider
+                        && product.instrument_id == instrument.instrument_id
+                });
+                if same_instrument {
+                    self.product = Some(instrument);
+                    self.chart_persistence_dirty = true;
+                }
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
                 self.apply_catalog_rejection(&rejection, command, cx);
@@ -4711,6 +4780,32 @@ impl WorkspaceSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
+        let legacy = WorkspaceOrderFlowSettingsState {
+            display_mode: 0,
+            show_cumulative_delta: true,
+            show_delta_histogram: true,
+            show_trade_bubbles: true,
+            trade_bubble_minimum_volume_bits: 0,
+            ticks_per_row: 0,
+            study_visibility_revision: 0,
+        };
+        let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
+        assert!(!restored.show_cumulative_delta);
+        assert!(!restored.show_delta_histogram);
+
+        let persisted = persisted_order_flow_settings(OrderFlowSettings {
+            show_cumulative_delta: true,
+            show_delta_histogram: true,
+            ..OrderFlowSettings::default()
+        });
+        assert_eq!(persisted.study_visibility_revision, 1);
+        let restored = restored_order_flow_settings(&persisted).expect("current settings restore");
+        assert!(restored.show_cumulative_delta);
+        assert!(restored.show_delta_histogram);
+    }
 
     fn custom_package_calculate(
         context: &mut aeris_study_sdk::StudyExecutionContext<'_>,

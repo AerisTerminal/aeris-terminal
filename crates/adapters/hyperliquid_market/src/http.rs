@@ -183,10 +183,10 @@ pub fn fetch_meta_bundle(config: HyperliquidHttpConfig) -> Result<HyperliquidCat
         perp_dexs: dexs,
         builder_metas: builder_meta_only,
     })?;
-    apply_context_volumes(&mut catalog, &core)?;
-    apply_context_volumes(&mut catalog, &spot)?;
+    apply_asset_contexts(&mut catalog, &core)?;
+    apply_asset_contexts(&mut catalog, &spot)?;
     for (_, combined) in &builder_metas {
-        apply_context_volumes(&mut catalog, combined)?;
+        apply_asset_contexts(&mut catalog, combined)?;
     }
     Ok(catalog)
 }
@@ -199,7 +199,7 @@ fn combined_meta(response: &serde_json::Value) -> Result<serde_json::Value, Stri
         .ok_or_else(|| "hyperliquid metadata and contexts are malformed".to_string())
 }
 
-fn apply_context_volumes(
+fn apply_asset_contexts(
     catalog: &mut HyperliquidCatalog,
     response: &serde_json::Value,
 ) -> Result<(), String> {
@@ -222,7 +222,7 @@ fn apply_context_volumes(
     });
     if contexts_carry_identity {
         for context in contexts {
-            apply_context_volume(catalog, context, None);
+            apply_asset_context(catalog, context, None);
         }
         return Ok(());
     }
@@ -230,12 +230,12 @@ fn apply_context_volumes(
         return Err("hyperliquid metadata and contexts are inconsistent".to_string());
     }
     for (market, context) in universe.iter().zip(contexts) {
-        apply_context_volume(catalog, context, market.get("name"));
+        apply_asset_context(catalog, context, market.get("name"));
     }
     Ok(())
 }
 
-fn apply_context_volume(
+fn apply_asset_context(
     catalog: &mut HyperliquidCatalog,
     context: &serde_json::Value,
     fallback_coin: Option<&serde_json::Value>,
@@ -245,6 +245,9 @@ fn apply_context_volume(
         .and_then(serde_json::Value::as_str)
         .or_else(|| fallback_coin.and_then(serde_json::Value::as_str))
         .unwrap_or("");
+    if let Some(mark_price) = context.get("markPx").and_then(serde_json::Value::as_str) {
+        catalog.set_reference_price(wire_coin, mark_price);
+    }
     let Some(volume) = context.get("dayNtlVlm").and_then(serde_json::Value::as_str) else {
         return;
     };
@@ -357,6 +360,48 @@ mod tests {
         assert_eq!(
             info_request_error(ureq::Error::BadUri("private URL".to_string())),
             "hyperliquid info request failed"
+        );
+    }
+
+    #[test]
+    fn asset_contexts_publish_mark_price_increments() {
+        let core_meta = json!({"universe": [
+            {"name": "BTC", "szDecimals": 5},
+            {"name": "ETH", "szDecimals": 4},
+            {"name": "DOGE", "szDecimals": 0},
+        ]});
+        let mut catalog = crate::decode_catalog(&crate::RawMetaBundle {
+            core_perp_meta: core_meta.clone(),
+            spot_meta: json!({
+                "universe": [],
+                "tokens": [{"name": "USDC", "szDecimals": 8, "index": 0}],
+            }),
+            perp_dexs: json!([null]),
+            builder_metas: Vec::new(),
+        })
+        .expect("catalog");
+        // `metaAndAssetCtxs` shape: contexts align with the universe by index.
+        apply_asset_contexts(
+            &mut catalog,
+            &json!([core_meta, [
+                {"markPx": "85031.0", "dayNtlVlm": "1.0"},
+                {"markPx": "3012.4", "dayNtlVlm": "1.0"},
+                {"dayNtlVlm": "1.0"},
+            ]]),
+        )
+        .expect("contexts");
+        assert_eq!(
+            catalog.price_increment("hyperliquid:perp:BTC"),
+            Some(100_000_000)
+        );
+        assert_eq!(
+            catalog.price_increment("hyperliquid:perp:ETH"),
+            Some(10_000_000)
+        );
+        assert_eq!(
+            catalog.price_increment("hyperliquid:perp:DOGE"),
+            None,
+            "a context without a mark price leaves the increment unknown"
         );
     }
 

@@ -356,6 +356,9 @@ fn filtered_time_sales_rows<'a>(
         .collect()
 }
 
+/// Fits an eight-decimal size such as `12.34567891` beside the price column.
+const TIME_SALES_SIZE_COLUMN_WIDTH: f32 = 84.0;
+
 fn time_sales_row(
     retained: &aeris_market_runtime::RetainedMarketTrade,
     sweeps: &[OrderFlowSweep],
@@ -391,21 +394,25 @@ fn time_sales_row(
         .h(px(22.0))
         .px_2()
         .flex()
-        .justify_between()
+        .gap_2()
         .items_center()
         .font_features(platform_tabular_numerals())
         .text_xs()
         .text_color(gpui_color(tone))
-        .child(div().w(px(62.0)).child(time))
+        .child(div().w(px(62.0)).flex_none().child(time))
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .text_right()
                 .child(market_price_text(trade.price, price_scale)),
         )
         .child(
             div()
+                .w(px(TIME_SALES_SIZE_COLUMN_WIDTH))
+                .flex_none()
                 .text_right()
+                .overflow_hidden()
                 .child(market_price_text(trade.quantity, quantity_scale)),
         )
 }
