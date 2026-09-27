@@ -177,14 +177,14 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
-            icon: HugeIcon::Delete,
+            icon: HugeIcon::Trash,
             label: "Remove drawings",
             enabled: state.enabled(ChartContextMenuState::DRAWINGS),
             action: ChartContextAction::ClearDrawings,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_indicators",
-            icon: HugeIcon::Delete,
+            icon: HugeIcon::Trash,
             label: "Remove indicators",
             enabled: state.enabled(ChartContextMenuState::INDICATORS),
             action: ChartContextAction::ClearIndicators,

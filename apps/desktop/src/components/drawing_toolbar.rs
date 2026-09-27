@@ -222,7 +222,7 @@ fn drawing_toolbar_actions(
             DrawingActionSpec::new(
                 "drawing_delete_selected",
                 "Delete selected chart object",
-                HugeIcon::Delete,
+                HugeIcon::Trash,
                 24.0,
                 false,
                 state.selection != DrawingToolbarSelection::None,

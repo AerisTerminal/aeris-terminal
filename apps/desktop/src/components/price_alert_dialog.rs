@@ -595,7 +595,7 @@ fn price_alert_existing_rows(
                         .theme(theme)
                         .with_size(px(28.0))
                         .resting_fill(colors.surface)
-                        .icon(header_icon(HugeIcon::Delete))
+                        .icon(header_icon(HugeIcon::Trash))
                         .aria_label("Delete price alert")
                         .on_click(move |_, _, cx| {
                             remove.update(cx, |surface, surface_cx| {

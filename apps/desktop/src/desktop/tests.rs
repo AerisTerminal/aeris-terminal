@@ -1614,7 +1614,7 @@ fn chart_context_remove_actions_use_destructive_color() {
         .filter(|item| item.action.is_destructive())
         .map(|item| item.icon)
         .collect::<Vec<_>>();
-    assert_eq!(trash, [super::HugeIcon::Delete, super::HugeIcon::Delete]);
+    assert_eq!(trash, [super::HugeIcon::Trash, super::HugeIcon::Trash]);
 }
 
 #[test]
