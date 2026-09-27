@@ -4,6 +4,7 @@ use crate::desktop::native_ui::theme::platform_border_width;
 // Settings header actions use one slightly larger canvas so their SVGs rasterize
 // consistently and retain equal control weight.
 const CHART_SETTINGS_ACTION_ICON_GLYPH: f32 = 16.0;
+const _: () = assert!(CHART_SETTINGS_ACTION_ICON_GLYPH > WORKSPACE_TAB_ICON_GLYPH);
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
@@ -2615,12 +2616,6 @@ fn account_menu_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chart_settings_header_actions_use_the_same_larger_canvas() {
-        assert!(CHART_SETTINGS_ACTION_ICON_GLYPH > WORKSPACE_TAB_ICON_GLYPH);
-        assert_eq!(CHART_SETTINGS_ACTION_ICON_GLYPH, 16.0);
-    }
 
     #[test]
     fn chart_settings_panel_is_centered_at_its_preferred_size() {
