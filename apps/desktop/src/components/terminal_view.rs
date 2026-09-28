@@ -925,6 +925,10 @@ fn workspace_tab_aria_label(label: &str, change: Option<&str>) -> String {
     )
 }
 
+fn workspace_tab_surface_colors(theme: &AerisTheme) -> (ThemeColor, ThemeColor) {
+    (theme.colors.surface_secondary, theme.colors.surface)
+}
+
 fn workspace_tab(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
@@ -945,9 +949,10 @@ fn workspace_tab(
     let drag = WorkspaceTabDrag { tab_id };
     let tab_focus = workspace.focus.clone();
     let mouse_focus = workspace.focus.clone();
+    let (resting_fill, selected_fill) = workspace_tab_surface_colors(&theme);
     Tab::new(("workspace_tab", tab_id), &theme)
-        .resting_fill(theme.colors.surface)
-        .selected_fill(theme.colors.surface)
+        .resting_fill(resting_fill)
+        .selected_fill(selected_fill)
         .selected(selected)
         .w(px(width))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
@@ -1325,9 +1330,11 @@ pub(super) fn workspace_tabs_root(
 
 #[cfg(test)]
 mod tests {
+    use aeris_design_system::AerisTheme;
+
     use super::{
         MarketSummaryValues, workspace_tab_aria_label, workspace_tab_change_label,
-        workspace_tab_close_drag_enabled,
+        workspace_tab_close_drag_enabled, workspace_tab_surface_colors,
     };
 
     #[test]
@@ -1336,6 +1343,15 @@ mod tests {
         assert!(!workspace_tab_close_drag_enabled(1));
         assert!(workspace_tab_close_drag_enabled(2));
         assert!(workspace_tab_close_drag_enabled(3));
+    }
+
+    #[test]
+    fn workspace_tabs_match_the_title_bar_until_selected() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let (inactive, active) = workspace_tab_surface_colors(&theme);
+            assert_eq!(inactive, theme.colors.surface_secondary);
+            assert_eq!(active, theme.colors.surface);
+        }
     }
 
     #[test]
