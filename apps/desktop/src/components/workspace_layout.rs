@@ -227,7 +227,9 @@ pub(super) fn workspace_pane_element(
         .size_full()
         .min_w_0()
         .min_h_0()
-        .pr(px(3.0))
+        // Keep the chart canvas flush with the pane's right edge. Aeris draws structural
+        // indicator separators across its complete viewport; host padding here would shorten
+        // every separator and leave a visible break before the workspace boundary.
         .pb(px(WORKSPACE_PANE_BOTTOM_INSET))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {
