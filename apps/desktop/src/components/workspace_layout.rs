@@ -16,21 +16,21 @@ pub(super) fn workspace_layout_element(
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
-    if let ChartWorkspaceLayout::Pane { pane_id } = layout {
-        return workspace_pane_element(terminal, workspace, *pane_id, theme, cx);
+    if let ChartWorkspaceLayout::Cell { id } = layout {
+        return workspace_pane_element(terminal, workspace, *id, theme, cx);
     }
 
     let ChartWorkspaceLayout::Split {
         direction,
         ratio,
-        first,
-        second,
+        a: first,
+        b: second,
     } = layout
     else {
         return div().into_any_element();
     };
-    let first_ids = first.pane_ids();
-    let second_ids = second.pane_ids();
+    let first_ids = first.leaf_ids();
+    let second_ids = second.leaf_ids();
     let left_pane_id = *first_ids.last().unwrap_or(&0);
     let right_pane_id = *second_ids.first().unwrap_or(&0);
     let first_element = workspace_layout_element(terminal, workspace, first, theme, cx);

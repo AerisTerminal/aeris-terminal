@@ -1,23 +1,18 @@
 use super::{
-    AerisChartView, FootprintDisplayMode, LegendItem, LegendRow, LegendValueTone,
-    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, legend_series_values,
+    AerisChartView, FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
+    OrderFlowTrade,
 };
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
     FootprintAggregationOptions, FootprintBarAggregation, FootprintCellMode,
-    FootprintImbalanceOptions, FootprintSeriesOptions, FootprintTrade, FootprintVisualOptions,
-    SeriesEntry, SeriesValueSnapshot, TradeBubbleOptions, TradeStudyOptions,
+    FootprintImbalanceOptions, FootprintTrade, FootprintVisualOptions, OrderFlowPresentation,
+    OrderFlowPresentationOptions,
 };
 
-const TRADE_BUBBLE_CAPACITY: usize = 2_048;
 const SWEEP_AGGREGATION_WINDOW_MICROS: i64 = 100_000;
 /// Recent price bars sampled for the automatic row size.
 const AUTO_ROW_SAMPLE_BARS: usize = 64;
-/// Target footprint rows across a median bar when the row size is automatic.
-const AUTO_ROWS_PER_BAR: f64 = 24.0;
-/// Largest automatic row grouping, bounding the ladder search.
-const MAXIMUM_AUTO_TICKS_PER_ROW: u32 = 1_000_000;
 
 /// Tape-derived study panes backed by the chart's shared order-flow stream.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -27,7 +22,7 @@ pub(super) enum OrderFlowStudy {
 }
 
 impl OrderFlowStudy {
-    const fn title(self) -> &'static str {
+    pub(super) const fn title(self) -> &'static str {
         match self {
             Self::CumulativeDelta => "CVD",
             Self::Delta => "Delta",
@@ -40,20 +35,16 @@ pub(super) struct OrderFlowChartState {
     provider_generation: u64,
     aggregation: OrderFlowAggregation,
     tick_size_bits: u64,
-    ticks_per_row: u32,
     first_ingestion_ordinal: Option<u64>,
     last_ingestion_ordinal: Option<u64>,
-    trade_stream: u64,
-    footprint_series: Option<u32>,
-    cumulative_delta_series: Option<u32>,
-    delta_series: Option<u32>,
+    presentation: OrderFlowPresentation,
 }
 
 impl OrderFlowChartState {
-    const fn study_series(&self, study: OrderFlowStudy) -> Option<u32> {
+    pub(super) const fn study_series(&self, study: OrderFlowStudy) -> Option<u32> {
         match study {
-            OrderFlowStudy::CumulativeDelta => self.cumulative_delta_series,
-            OrderFlowStudy::Delta => self.delta_series,
+            OrderFlowStudy::CumulativeDelta => self.presentation.cumulative_delta_series(),
+            OrderFlowStudy::Delta => self.presentation.delta_series(),
         }
     }
 }
@@ -88,8 +79,8 @@ impl AerisChartView {
     pub fn footprint_ticks_per_row(&self) -> Option<u32> {
         self.order_flow_state
             .as_ref()
-            .filter(|state| state.footprint_series.is_some())
-            .map(|state| state.ticks_per_row)
+            .filter(|state| state.presentation.footprint_series().is_some())
+            .map(|state| state.presentation.ticks_per_row())
     }
 
     /// Returns the footprint to its candle history when the instrument has no known
@@ -153,8 +144,7 @@ impl AerisChartView {
         let can_append = state.first_ingestion_ordinal == first
             && state.last_ingestion_ordinal.is_some()
             && state.last_ingestion_ordinal < last;
-        let trade_stream = state.trade_stream;
-        let footprint_series = state.footprint_series;
+        let presentation = state.presentation;
         let prior_last = state.last_ingestion_ordinal;
         let converted = if can_append {
             let suffix_start = trades.partition_point(|trade| {
@@ -170,28 +160,13 @@ impl AerisChartView {
                 .map(order_flow_trade)
                 .collect::<Result<Vec<_>, _>>()?
         };
-        if can_append {
-            self.engine
-                .update_trade_stream_trades(trade_stream, converted)
-                .map_err(|error| error.to_string())?;
-        } else {
-            self.engine
-                .set_trade_stream_trades(trade_stream, converted)
-                .map_err(|error| error.to_string())?;
-        }
+        self.engine
+            .update_order_flow_presentation(presentation, converted, can_append)
+            .map_err(|error| error.to_string())?;
         if let Some(state) = &mut self.order_flow_state {
             state.first_ingestion_ordinal = first;
             state.last_ingestion_ordinal = last;
         }
-        // Candles draw the history the tape does not cover; the footprint owns
-        // every bar from its first retained trade onward.
-        let footprint_start = footprint_series.and_then(|series| {
-            self.engine
-                .footprint_bar(series, 0)
-                .map(|bar| bar.start_timestamp_micros.div_euclid(1_000_000))
-        });
-        self.engine
-            .set_series_render_before_time(0, footprint_start);
         self.invalidate_series_layout();
         Ok(())
     }
@@ -204,139 +179,59 @@ impl AerisChartView {
         tick_size: f64,
         trades: &[OrderFlowTrade],
     ) -> Result<(), String> {
-        let ticks_per_row = match self.order_flow_settings.ticks_per_row {
-            0 => auto_ticks_per_row(
-                self.product_bars.recent_median_range(AUTO_ROW_SAMPLE_BARS),
-                tick_size,
-            ),
-            configured => configured,
-        };
         let aggregation_options = FootprintAggregationOptions {
             tick_size,
-            ticks_per_row,
+            ticks_per_row: self.order_flow_settings.ticks_per_row,
             // Footprint bars share the price series' bar opens (weekly bars do not
             // open on the epoch's Thursday), so both presentations use one grid.
             bars: chart_aggregation(aggregation, self.product_bars.last_time())?,
             imbalance: FootprintImbalanceOptions::default(),
         };
-        let stream = self
+        let trade_volumes = trades.iter().map(|trade| trade.volume).collect::<Vec<_>>();
+        let presentation = self
             .engine
-            .add_trade_stream(identity, aggregation_options)
-            .map_err(|error| error.to_string())?;
-        let footprint_series = self.add_footprint_presentation(aggregation_options, stream)?;
-
-        let cumulative_delta_series = if self.order_flow_settings.show_cumulative_delta {
-            let pane = self
-                .engine
-                .add_pane(false)
-                .ok_or_else(|| "order-flow pane capacity is exhausted".to_string())?;
-            Some(
-                self.engine
-                    .add_cvd_series(stream, pane, TradeStudyOptions::default())
-                    .map_err(|error| error.to_string())?,
-            )
-        } else {
-            None
-        };
-        let delta_series = if self.order_flow_settings.show_delta_histogram {
-            let pane = self
-                .engine
-                .add_pane(false)
-                .ok_or_else(|| "order-flow pane capacity is exhausted".to_string())?;
-            Some(
-                self.engine
-                    .add_delta_series(stream, pane)
-                    .map_err(|error| error.to_string())?,
-            )
-        } else {
-            None
-        };
-        if self.order_flow_settings.show_trade_bubbles
-            && let Some(footprint_series) = footprint_series
-        {
-            self.engine
-                .add_trade_bubbles(
-                    stream,
-                    footprint_series,
-                    TradeBubbleOptions {
-                        minimum_volume: adaptive_bubble_threshold(
-                            self.order_flow_settings.trade_bubble_minimum_volume,
-                            trades,
-                        ),
-                        max_markers: TRADE_BUBBLE_CAPACITY,
-                        aggregation_window_micros: SWEEP_AGGREGATION_WINDOW_MICROS,
+            .add_order_flow_presentation(
+                identity,
+                0,
+                OrderFlowPresentationOptions {
+                    aggregation: aggregation_options,
+                    visual: FootprintVisualOptions {
+                        cell_mode: cell_mode(self.order_flow_settings.display_mode),
+                        ..FootprintVisualOptions::default()
                     },
-                )
-                .map_err(|error| error.to_string())?;
-        }
+                    recent_median_price_range: self
+                        .product_bars
+                        .recent_median_range(AUTO_ROW_SAMPLE_BARS),
+                    show_footprint: self.chart_type == super::ChartType::Footprint,
+                    show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
+                    show_delta_histogram: self.order_flow_settings.show_delta_histogram,
+                    show_trade_bubbles: self.order_flow_settings.show_trade_bubbles,
+                    trade_bubble_minimum_volume: self
+                        .order_flow_settings
+                        .trade_bubble_minimum_volume,
+                },
+                &trade_volumes,
+            )
+            .map_err(|error| error.to_string())?;
         self.order_flow_state = Some(OrderFlowChartState {
             identity: identity.to_string(),
             provider_generation,
             aggregation,
             tick_size_bits: tick_size.to_bits(),
-            ticks_per_row,
             first_ingestion_ordinal: None,
             last_ingestion_ordinal: None,
-            trade_stream: stream,
-            footprint_series,
-            cumulative_delta_series,
-            delta_series,
+            presentation,
         });
-        self.apply_indicator_chrome_options();
         Ok(())
-    }
-
-    fn add_footprint_presentation(
-        &mut self,
-        aggregation: FootprintAggregationOptions,
-        stream: u64,
-    ) -> Result<Option<u32>, String> {
-        if self.chart_type != super::ChartType::Footprint {
-            return Ok(None);
-        }
-        let visual = FootprintVisualOptions {
-            cell_mode: cell_mode(self.order_flow_settings.display_mode),
-            ..FootprintVisualOptions::default()
-        };
-        let series = self
-            .engine
-            .add_footprint_series(FootprintSeriesOptions {
-                aggregation,
-                visual,
-            })
-            .map_err(|error| error.to_string())?;
-        self.engine
-            .bind_footprint_series_to_stream(series, stream)
-            .map_err(|error| error.to_string())?;
-        // The product price series keeps the one last-price label and line.
-        if !self.engine.series_apply_options_json(
-            series,
-            r#"{"last_value_visible":false,"price_line_visible":false}"#,
-        ) {
-            return Err("footprint price chrome options were rejected".to_string());
-        }
-        Ok(Some(series))
     }
 
     pub(super) fn teardown_order_flow(&mut self) {
         let Some(state) = self.order_flow_state.take() else {
             return;
         };
-        if let Some(series) = state.cumulative_delta_series {
-            self.engine.remove_series(series);
-        }
-        if let Some(series) = state.delta_series {
-            self.engine.remove_series(series);
-        }
-        if let Some(series) = state.footprint_series {
-            self.engine.remove_series(series);
-        }
-        // The stream's aggregation options are fixed at creation; release it so
-        // a reconfiguration with a new tick or bar aggregation can recreate it.
-        if let Err(error) = self.engine.remove_trade_stream(state.trade_stream) {
-            eprintln!("Aeris order-flow trade stream release failed: {error}");
-        }
-        self.engine.set_series_render_before_time(0, None);
+        let _ = self
+            .engine
+            .remove_order_flow_presentation(state.presentation);
         self.invalidate_series_layout();
     }
 
@@ -344,7 +239,7 @@ impl AerisChartView {
     pub(super) fn footprint_series_id(&self) -> Option<u32> {
         self.order_flow_state
             .as_ref()
-            .and_then(|state| state.footprint_series)
+            .and_then(|state| state.presentation.footprint_series())
     }
 
     /// Whether a tape-derived study pane is currently drawn.
@@ -362,39 +257,6 @@ impl AerisChartView {
             .find(|study| state.study_series(*study) == Some(series))
     }
 
-    pub(super) fn append_order_flow_legend_rows(
-        &self,
-        entries: &[SeriesEntry],
-        snapshots: &[SeriesValueSnapshot],
-        rows: &mut Vec<LegendRow>,
-    ) {
-        let Some(state) = &self.order_flow_state else {
-            return;
-        };
-        for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
-            let Some(entry) = state.study_series(study).and_then(|id| {
-                entries
-                    .iter()
-                    .find(|series| series.id == id && !series.removed)
-            }) else {
-                continue;
-            };
-            rows.push(LegendRow {
-                item: LegendItem::OrderFlow(study),
-                pane: entry.pane_index,
-                title: study.title().to_string(),
-                values: if entry.visible {
-                    legend_series_values(snapshots, entry.id)
-                } else {
-                    Vec::new()
-                },
-                values_tone: LegendValueTone::Neutral,
-                visible: entry.visible,
-                settings_available: false,
-            });
-        }
-    }
-
     pub(super) fn set_order_flow_study_visible(
         &mut self,
         study: OrderFlowStudy,
@@ -409,9 +271,8 @@ impl AerisChartView {
         };
         let changed = self
             .engine
-            .series_entries()
-            .iter()
-            .any(|entry| entry.id == series && !entry.removed && entry.visible != visible);
+            .series_visible(series)
+            .is_some_and(|value| value != visible);
         if changed {
             self.engine.set_series_visible(series, visible);
             self.invalidate_series_layout();
@@ -435,29 +296,6 @@ impl AerisChartView {
             || self.order_flow_settings.show_cumulative_delta
             || self.order_flow_settings.show_delta_histogram
     }
-}
-
-/// Ticks per row so a median recent bar spans about [`AUTO_ROWS_PER_BAR`] rows, rounded up to a
-/// 1-2-5 step so the grouping reads naturally (for example $5 rows for BTC on one minute).
-pub(super) fn auto_ticks_per_row(median_bar_range: Option<f64>, tick_size: f64) -> u32 {
-    let Some(range) = median_bar_range.filter(|range| range.is_finite() && *range > 0.0) else {
-        return 1;
-    };
-    let wanted = range / AUTO_ROWS_PER_BAR / tick_size;
-    if !wanted.is_finite() || wanted <= 1.0 {
-        return 1;
-    }
-    let mut decade = 1_u32;
-    while decade <= MAXIMUM_AUTO_TICKS_PER_ROW {
-        for step in [1, 2, 5] {
-            let candidate = decade.saturating_mul(step);
-            if f64::from(candidate) >= wanted {
-                return candidate.min(MAXIMUM_AUTO_TICKS_PER_ROW);
-            }
-        }
-        decade = decade.saturating_mul(10);
-    }
-    MAXIMUM_AUTO_TICKS_PER_ROW
 }
 
 fn chart_aggregation(
@@ -501,20 +339,8 @@ const fn cell_mode(mode: FootprintDisplayMode) -> FootprintCellMode {
 }
 
 fn adaptive_bubble_threshold(configured: f64, trades: &[OrderFlowTrade]) -> f64 {
-    if configured > 0.0 {
-        return configured;
-    }
-    let mut volumes = trades
-        .iter()
-        .map(|trade| trade.volume)
-        .filter(|volume| volume.is_finite() && *volume > 0.0)
-        .collect::<Vec<_>>();
-    if volumes.is_empty() {
-        return f64::MAX;
-    }
-    let index = volumes.len().saturating_mul(9).saturating_sub(1) / 10;
-    volumes.select_nth_unstable_by(index, f64::total_cmp);
-    volumes[index]
+    let volumes = trades.iter().map(|trade| trade.volume).collect::<Vec<_>>();
+    aeris_charts_engine::adaptive_trade_bubble_threshold(configured, &volumes)
 }
 
 /// Groups consecutive aggressor-side prints that cross at least two price

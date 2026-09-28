@@ -1376,7 +1376,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::Up,
-            &appearance.up_color,
+            &effective_appearance_color(&appearance.up_color, |colors| colors.bullish, theme),
             color_picker,
             theme,
         ))
@@ -1384,7 +1384,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::Down,
-            &appearance.down_color,
+            &effective_appearance_color(&appearance.down_color, |colors| colors.bearish, theme),
             color_picker,
             theme,
         ))
@@ -1405,7 +1405,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::WickUp,
-            &appearance.wick_up_color,
+            &effective_appearance_color(&appearance.wick_up_color, |colors| colors.bullish, theme),
             color_picker,
             theme,
         ))
@@ -1413,7 +1413,11 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::WickDown,
-            &appearance.wick_down_color,
+            &effective_appearance_color(
+                &appearance.wick_down_color,
+                |colors| colors.bearish,
+                theme,
+            ),
             color_picker,
             theme,
         ))
@@ -1434,7 +1438,11 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::BorderUp,
-            &appearance.border_up_color,
+            &effective_appearance_color(
+                &appearance.border_up_color,
+                |colors| colors.bullish,
+                theme,
+            ),
             color_picker,
             theme,
         ))
@@ -1442,7 +1450,11 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::BorderDown,
-            &appearance.border_down_color,
+            &effective_appearance_color(
+                &appearance.border_down_color,
+                |colors| colors.bearish,
+                theme,
+            ),
             color_picker,
             theme,
         ))
@@ -1466,7 +1478,7 @@ fn bar_series_settings(
             terminal,
             menu,
             ChartColorSetting::Up,
-            &appearance.up_color,
+            &effective_appearance_color(&appearance.up_color, |colors| colors.bullish, theme),
             color_picker,
             theme,
         ))
@@ -1474,7 +1486,7 @@ fn bar_series_settings(
             terminal,
             menu,
             ChartColorSetting::Down,
-            &appearance.down_color,
+            &effective_appearance_color(&appearance.down_color, |colors| colors.bearish, theme),
             color_picker,
             theme,
         ))
@@ -1654,7 +1666,7 @@ fn canvas_grid_settings(
             terminal,
             menu,
             ChartColorSetting::Grid,
-            &appearance.grid_color,
+            &effective_appearance_color(&appearance.grid_color, |colors| colors.grid, theme),
             color_picker,
             theme,
         ))
@@ -1701,7 +1713,11 @@ fn canvas_crosshair_settings(
             terminal,
             menu,
             ChartColorSetting::Crosshair,
-            &appearance.crosshair_color,
+            &effective_appearance_color(
+                &appearance.crosshair_color,
+                |colors| colors.crosshair,
+                theme,
+            ),
             color_picker,
             theme,
         ))
@@ -1888,6 +1904,20 @@ fn settings_toggle_row(
                         .bg(gpui_color(colors.primary_foreground)),
                 ),
         )
+}
+
+/// Effective CSS color of a theme-following appearance field under the active theme.
+fn effective_appearance_color(
+    color: &ChartAppearanceColor,
+    role: fn(ChartThemeColors) -> &'static str,
+    theme: &AerisTheme,
+) -> String {
+    match color {
+        ChartAppearanceColor::Theme => {
+            role(ChartThemeColors::for_theme(aeris_chart_theme(theme.mode))).to_string()
+        }
+        ChartAppearanceColor::Custom(color) => color.clone(),
+    }
 }
 
 fn settings_color_row(

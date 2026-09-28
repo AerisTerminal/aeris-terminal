@@ -263,17 +263,17 @@ pub(super) fn persisted_chart_appearance(
 ) -> WorkspaceChartAppearanceState {
     WorkspaceChartAppearanceState {
         grid_visible: appearance.grid_visible,
-        grid_color: appearance.grid_color.clone(),
+        grid_color: persisted_appearance_color(&appearance.grid_color),
         grid_style: u32::from(appearance.grid_style),
-        crosshair_color: appearance.crosshair_color.clone(),
+        crosshair_color: persisted_appearance_color(&appearance.crosshair_color),
         crosshair_width: u32::from(appearance.crosshair_width),
         crosshair_style: u32::from(appearance.crosshair_style),
-        up_color: appearance.up_color.clone(),
-        down_color: appearance.down_color.clone(),
-        wick_up_color: appearance.wick_up_color.clone(),
-        wick_down_color: appearance.wick_down_color.clone(),
-        border_up_color: appearance.border_up_color.clone(),
-        border_down_color: appearance.border_down_color.clone(),
+        up_color: persisted_appearance_color(&appearance.up_color),
+        down_color: persisted_appearance_color(&appearance.down_color),
+        wick_up_color: persisted_appearance_color(&appearance.wick_up_color),
+        wick_down_color: persisted_appearance_color(&appearance.wick_down_color),
+        border_up_color: persisted_appearance_color(&appearance.border_up_color),
+        border_down_color: persisted_appearance_color(&appearance.border_down_color),
         wick_visible: appearance.wick_visible,
         border_visible: appearance.border_visible,
         open_visible: appearance.open_visible,
@@ -297,17 +297,27 @@ pub(super) fn restored_chart_appearance(
     let line_style = u8::try_from(appearance.line_style).ok()?.min(4);
     Some(ChartAppearanceSettings {
         grid_visible: appearance.grid_visible,
-        grid_color: appearance.grid_color.clone(),
+        grid_color: restored_appearance_color(&appearance.grid_color, |colors| colors.grid),
         grid_style,
-        crosshair_color: appearance.crosshair_color.clone(),
+        crosshair_color: restored_appearance_color(&appearance.crosshair_color, |colors| {
+            colors.crosshair
+        }),
         crosshair_width,
         crosshair_style,
-        up_color: appearance.up_color.clone(),
-        down_color: appearance.down_color.clone(),
-        wick_up_color: appearance.wick_up_color.clone(),
-        wick_down_color: appearance.wick_down_color.clone(),
-        border_up_color: appearance.border_up_color.clone(),
-        border_down_color: appearance.border_down_color.clone(),
+        up_color: restored_appearance_color(&appearance.up_color, |colors| colors.bullish),
+        down_color: restored_appearance_color(&appearance.down_color, |colors| colors.bearish),
+        wick_up_color: restored_appearance_color(&appearance.wick_up_color, |colors| {
+            colors.bullish
+        }),
+        wick_down_color: restored_appearance_color(&appearance.wick_down_color, |colors| {
+            colors.bearish
+        }),
+        border_up_color: restored_appearance_color(&appearance.border_up_color, |colors| {
+            colors.bullish
+        }),
+        border_down_color: restored_appearance_color(&appearance.border_down_color, |colors| {
+            colors.bearish
+        }),
         wick_visible: appearance.wick_visible,
         border_visible: appearance.border_visible,
         open_visible: appearance.open_visible,
@@ -319,6 +329,32 @@ pub(super) fn restored_chart_appearance(
         baseline_top_color: appearance.baseline_top_color.clone(),
         baseline_bottom_color: appearance.baseline_bottom_color.clone(),
     })
+}
+
+/// Durable marker for an appearance color that follows the active chart theme.
+const THEME_APPEARANCE_COLOR: &str = "theme";
+
+fn persisted_appearance_color(color: &ChartAppearanceColor) -> String {
+    match color {
+        ChartAppearanceColor::Theme => THEME_APPEARANCE_COLOR.to_string(),
+        ChartAppearanceColor::Custom(color) => color.clone(),
+    }
+}
+
+/// Layouts written before typed provenance flattened a theme-following color into that
+/// theme's concrete default, so either theme's default for the role follows the theme again.
+fn restored_appearance_color(
+    color: &str,
+    role: fn(ChartThemeColors) -> &'static str,
+) -> ChartAppearanceColor {
+    let theme_default = [AerisChartTheme::Light, AerisChartTheme::Dark]
+        .into_iter()
+        .any(|theme| role(ChartThemeColors::for_theme(theme)).eq_ignore_ascii_case(color));
+    if color == THEME_APPEARANCE_COLOR || theme_default {
+        ChartAppearanceColor::Theme
+    } else {
+        ChartAppearanceColor::Custom(color.to_string())
+    }
 }
 
 /// Tape-derived study panes the indicator menu can add back after removal.

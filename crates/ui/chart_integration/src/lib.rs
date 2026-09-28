@@ -30,6 +30,9 @@ pub use aeris_charts_engine::{
     TradingPriceScale as ChartTradingPriceScale, TradingSnapshot as ChartTradingSnapshot,
     VisibleTimeRangeSync, WorkingOrder as ChartWorkingOrder,
 };
+pub use aeris_charts_engine::{
+    AppearanceColor as ChartAppearanceColor, FinancialThemeColors as ChartThemeColors,
+};
 pub use bridge::ChartBridgeMetrics;
 pub use view::{
     AerisChartView, ChartAppearanceSettings, ChartContextKind, ChartContextRequest,

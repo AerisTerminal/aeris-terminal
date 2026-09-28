@@ -2,9 +2,9 @@
 
 use super::{
     ActivationRequest, AerisChartView, ChartDrag, ChartDrawingTool, ChartType, Context,
-    CursorStyle, DrawingModifiers, KEYBOARD_PAGE_FRACTION, KeyDownEvent, ModifiersChangedEvent,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PANE_SEPARATOR_HIT, PointerInteractionState,
-    PriceScaleTarget, ScrollWheelEvent, WHEEL_LINE_HEIGHT, Window, px,
+    CursorStyle, DrawingModifiers, FinancialDrag, FinancialNavigation, KeyDownEvent,
+    ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PANE_SEPARATOR_HIT,
+    PointerInteractionState, PriceScaleTarget, ScrollWheelEvent, WHEEL_LINE_HEIGHT, Window, px,
     should_stop_mouse_up_propagation,
 };
 
@@ -44,43 +44,37 @@ impl AerisChartView {
     }
     pub(super) fn update_crosshair_magnet(&mut self, magnet: bool) {
         let enabled = magnet && self.drawing_tool.drawing_kind().is_some();
-        if self.engine.crosshair_ohlc_magnet != enabled {
-            self.engine.crosshair_ohlc_magnet = enabled;
+        if self.engine.set_crosshair_ohlc_magnet(enabled) {
             self.invalidate_series_frame();
         }
     }
     pub(super) fn update_crosshair(&mut self, pane_x: f64, y: f64) {
-        self.engine.crosshair = (self.separator_at(y).is_none()
-            && pane_x >= 0.0
-            && pane_x <= self.engine.pane_w
-            && y >= 0.0
-            && y <= self.engine.pane_h)
-            .then_some((pane_x, y));
+        self.engine
+            .update_financial_crosshair(pane_x, y, PANE_SEPARATOR_HIT);
         self.invalidate_series_frame();
     }
     pub(super) fn separator_at(&self, y: f64) -> Option<usize> {
-        self.engine
-            .panes
-            .iter()
-            .skip(1)
-            .position(|pane| (y - pane.top).abs() <= PANE_SEPARATOR_HIT)
+        self.engine.pane_separator_at(y, PANE_SEPARATOR_HIT)
     }
     pub(super) fn update_cursor(&mut self, pane_x: f64, y: f64) {
-        let active_separator = matches!(self.drag, Some(ChartDrag::PaneSeparator { .. }));
+        let native_drag = self.engine.financial_drag();
+        let active_separator = matches!(native_drag, Some(FinancialDrag::PaneSeparator { .. }));
         let separator = self.separator_at(y);
         let separator_hover = (!active_separator).then_some(separator).flatten();
-        if self.engine.separator_hover != separator_hover {
+        if self.engine.separator_hover() != separator_hover {
             self.engine.set_separator_hover(separator_hover);
             self.invalidate_series_frame();
         }
         let drawing_cursor = (self.drawing_tool == ChartDrawingTool::Cursor
             && self.drag.is_none()
+            && native_drag.is_none()
             && separator.is_none())
         .then(|| self.engine.hit_test_drawing(pane_x, y))
         .flatten()
         .map(|hit| hit.cursor);
         let hovered_series = (self.drawing_tool == ChartDrawingTool::Cursor
             && self.drag.is_none()
+            && native_drag.is_none()
             && separator.is_none()
             && drawing_cursor.is_none())
         .then(|| self.engine.hit_test_series(pane_x, y))
@@ -110,14 +104,14 @@ impl AerisChartView {
         } else if hovered_series.is_some() {
             CursorStyle::PointingHand
         } else {
-            match self.drag {
-                Some(ChartDrag::Pane { .. }) => CursorStyle::ClosedHand,
-                Some(ChartDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
-                Some(ChartDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
-                Some(ChartDrag::PaneSeparator { .. }) => CursorStyle::ResizeRow,
+            match native_drag {
+                Some(FinancialDrag::Pane { .. }) => CursorStyle::ClosedHand,
+                Some(FinancialDrag::TimeAxis) => CursorStyle::ResizeLeftRight,
+                Some(FinancialDrag::PriceAxis { .. }) => CursorStyle::ResizeUpDown,
+                Some(FinancialDrag::PaneSeparator { .. }) => CursorStyle::ResizeRow,
                 None if y > self.engine.pane_h => CursorStyle::ResizeLeftRight,
                 None if self.price_axis_at(pane_x, y).is_some() => CursorStyle::ResizeUpDown,
-                Some(ChartDrag::BrushableRange) | None => CursorStyle::Crosshair,
+                None => CursorStyle::Crosshair,
             }
         };
     }
@@ -126,27 +120,7 @@ impl AerisChartView {
         let previous_series = self.engine.selected_series();
         let previous_members = self.engine.selected_series_members().collect::<Vec<_>>();
         let previous_drawing = self.engine.selected_drawing();
-        if let Some(selected) = selected {
-            let study = self.study_series.iter().find_map(|((study_id, _), state)| {
-                (state.series_id == selected).then_some(*study_id)
-            });
-            let members = study.map(|study_id| {
-                self.study_series
-                    .iter()
-                    .filter_map(|((candidate, _), state)| {
-                        (*candidate == study_id).then_some(state.series_id)
-                    })
-                    .collect::<Vec<_>>()
-            });
-            if !members
-                .as_deref()
-                .is_some_and(|members| self.engine.set_selected_series_group(selected, members))
-            {
-                self.engine.set_selected_series(Some(selected));
-            }
-        } else {
-            self.engine.set_selected_series(None);
-        }
+        self.engine.set_selected_series(selected);
         if selected.is_some() {
             self.engine.set_selected_drawing(None);
         }
@@ -171,106 +145,50 @@ impl AerisChartView {
             .price_axis_target_at(pane, pane_x)
             .map(|target| (pane, target))
     }
-    pub(super) fn unlocked_price_pan_target(&self, pane: usize) -> Option<PriceScaleTarget> {
-        [PriceScaleTarget::Right, PriceScaleTarget::Left]
-            .into_iter()
-            .find(|&target| {
-                self.engine.price_scale_auto_scale_for(pane, target) == Some(false)
-                    && self.engine.price_axis_scalable(pane, target)
-            })
-    }
-    pub(super) fn begin_price_axis_scale(&mut self, pane: usize, target: PriceScaleTarget, y: f64) {
-        self.engine
-            .set_price_scale_auto_scale_for(pane, target, false);
-        self.engine.price_axis_start_scale(pane, target, y);
-        self.drag = Some(ChartDrag::PriceAxis { pane, target });
-    }
     pub(super) fn begin_drag(&mut self, pane_x: f64, y: f64, click_count: usize, shift: bool) {
         self.end_drag(pane_x, y);
-        let pane = self.engine.pane_index_at_y(y);
-        if click_count >= 2 {
-            if y > self.engine.pane_h {
-                self.engine.reset_time_scale();
-            } else if self.price_axis_at(pane_x, y).is_some() {
-                self.engine.reset_price_scales();
-            } else if self.chart_type == ChartType::BrushableArea {
-                self.clear_brushable_range();
-            }
+        if click_count >= 2
+            && y <= self.engine.pane_h
+            && self.price_axis_at(pane_x, y).is_none()
+            && self.chart_type == ChartType::BrushableArea
+        {
+            self.clear_brushable_range();
             self.update_crosshair(pane_x, y);
             return;
         }
-        if let Some(index) = self.separator_at(y) {
-            self.engine.set_separator_hover(None);
-            let grab_offset_y = y - self.engine.panes[index + 1].top;
-            self.drag = Some(ChartDrag::PaneSeparator {
-                index,
-                grab_offset_y,
-            });
-        } else if y > self.engine.pane_h {
-            self.engine.time_axis_start_scale(pane_x);
-            self.drag = Some(ChartDrag::TimeAxis);
-        } else if let Some((pane, target)) = self.price_axis_at(pane_x, y) {
-            if self.engine.price_axis_scalable(pane, target) {
-                self.begin_price_axis_scale(pane, target, y);
-            } else {
-                self.drag = None;
-            }
-        } else if pane_x >= 0.0 && y >= 0.0 && y <= self.engine.pane_h {
-            if self.chart_type == ChartType::BrushableArea
-                && self.drawing_tool == ChartDrawingTool::Cursor
-                && shift
-            {
-                self.begin_brushable_range(pane_x, y);
-                return;
-            }
-            self.engine.time_scale.start_scroll(pane_x);
-            let price_pan = self
-                .engine
-                .begin_price_pan_at(pane, pane_x, y)
-                .or_else(|| {
-                    let target = self.unlocked_price_pan_target(pane)?;
-                    self.engine.price_axis_start_scroll(pane, target, y);
-                    Some(target)
-                })
-                .map(|target| (pane, target));
-            self.drag = Some(ChartDrag::Pane { price_pan });
-        } else {
-            self.drag = None;
+        if self.chart_type == ChartType::BrushableArea
+            && self.drawing_tool == ChartDrawingTool::Cursor
+            && shift
+            && pane_x >= 0.0
+            && y >= 0.0
+            && y <= self.engine.pane_h
+        {
+            self.begin_brushable_range(pane_x, y);
+            return;
         }
+        let _ = self
+            .engine
+            .begin_financial_drag(pane_x, y, click_count, PANE_SEPARATOR_HIT);
         self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
     pub(super) fn drag_to(&mut self, pane_x: f64, y: f64) {
         match self.drag {
-            Some(ChartDrag::Pane { price_pan }) => {
-                self.engine.time_scale.scroll_to(pane_x);
-                if let Some((pane, target)) = price_pan {
-                    self.engine.price_axis_scroll_to(pane, target, y);
-                }
-            }
             Some(ChartDrag::BrushableRange) => {
                 self.engine.delta_tooltip_mouse_move(pane_x);
                 self.sync_brushable_range();
             }
-            Some(ChartDrag::TimeAxis) => self.engine.time_axis_scale_to(pane_x),
-            Some(ChartDrag::PriceAxis { pane, target }) => {
-                self.engine.price_axis_scale_to(pane, target, y);
-            }
-            Some(ChartDrag::PaneSeparator {
-                index,
-                grab_offset_y,
-            }) => {
-                if let Some(pane_below) = self.engine.panes.get(index + 1) {
-                    let delta = y - grab_offset_y - pane_below.top;
-                    self.engine.drag_pane_separator(index, delta);
-                    self.invalidate_series_layout();
-                }
+            None if self.engine.update_financial_drag(pane_x, y) => {
+                self.invalidate_series_layout();
             }
             None => {}
         }
         self.update_cursor(pane_x, y);
-        if matches!(self.drag, Some(ChartDrag::PaneSeparator { .. })) {
-            self.engine.crosshair = None;
+        if matches!(
+            self.engine.financial_drag(),
+            Some(FinancialDrag::PaneSeparator { .. })
+        ) {
+            self.engine.clear_crosshair_at();
             self.invalidate_series_frame();
         } else {
             self.update_crosshair(pane_x, y);
@@ -278,21 +196,11 @@ impl AerisChartView {
     }
     pub(super) fn end_drag(&mut self, pane_x: f64, y: f64) {
         match self.drag.take() {
-            Some(ChartDrag::Pane { price_pan }) => {
-                self.engine.time_scale.end_scroll();
-                if let Some((pane, target)) = price_pan {
-                    self.engine.price_axis_end_scroll(pane, target);
-                }
-            }
             Some(ChartDrag::BrushableRange) => {
                 self.engine.delta_tooltip_mouse_up();
                 self.sync_brushable_range();
             }
-            Some(ChartDrag::TimeAxis) => self.engine.time_axis_end_scale(),
-            Some(ChartDrag::PriceAxis { pane, target }) => {
-                self.engine.price_axis_end_scale(pane, target);
-            }
-            Some(ChartDrag::PaneSeparator { .. }) | None => {}
+            None => self.engine.end_financial_drag(),
         }
         self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
@@ -304,21 +212,8 @@ impl AerisChartView {
         normalized_x: f64,
         normalized_y: f64,
     ) {
-        if normalized_y != 0.0 {
-            let zoom = aeris_charts_engine::wheel_zoom_scale(normalized_y);
-            if let Some((pane, target)) = self.price_axis_at(pane_x, y) {
-                self.engine.price_axis_wheel_zoom(pane, target, y, zoom);
-            } else {
-                self.engine.time_scale.zoom(pane_x, zoom);
-            }
-        }
-        if normalized_x != 0.0 {
-            self.engine.time_scale.start_scroll(0.0);
-            self.engine
-                .time_scale
-                .scroll_to(aeris_charts_engine::WHEEL_SCROLL_PX_PER_DELTA * normalized_x);
-            self.engine.time_scale.end_scroll();
-        }
+        self.engine
+            .apply_financial_wheel(pane_x, y, normalized_x, normalized_y);
         self.update_cursor(pane_x, y);
         self.update_crosshair(pane_x, y);
     }
@@ -328,11 +223,12 @@ impl AerisChartView {
     }
     pub(super) fn cancel_pointer_gesture(&mut self) {
         self.end_drag(-1.0, -1.0);
+        self.engine.end_financial_drag();
         self.engine.drawing_drag_end();
         self.engine.brush_create_cancel();
         self.pending_brush_point = None;
-        self.engine.crosshair_ohlc_magnet = false;
-        self.engine.crosshair = None;
+        let _ = self.engine.set_crosshair_ohlc_magnet(false);
+        self.engine.clear_crosshair_at();
         self.engine.set_separator_hover(None);
         self.engine.set_hovered_series(None);
         self.cursor_style = CursorStyle::Crosshair;
@@ -355,7 +251,7 @@ impl AerisChartView {
             self.update_crosshair(pane_x, y);
             return;
         }
-        if self.drag.is_some() {
+        if self.drag.is_some() || self.engine.financial_drag().is_some() {
             if dragging {
                 self.drag_to(pane_x, y);
             } else {
@@ -371,25 +267,25 @@ impl AerisChartView {
         self.update_crosshair(pane_x, y);
     }
     pub(super) fn apply_key(&mut self, key: &str, accelerated: bool) -> bool {
-        let step = if accelerated { 10.0 } else { 1.0 };
-        let page =
-            (self.engine.pane_w / self.engine.bar_spacing() * KEYBOARD_PAGE_FRACTION).max(1.0);
-        let center = self.engine.pane_w / 2.0;
         match key {
             "left" => self
                 .engine
-                .scroll_to_position(self.engine.scroll_position() - step),
+                .apply_financial_navigation(FinancialNavigation::PreviousBar, accelerated),
             "right" => self
                 .engine
-                .scroll_to_position(self.engine.scroll_position() + step),
+                .apply_financial_navigation(FinancialNavigation::NextBar, accelerated),
             "pageup" => self
                 .engine
-                .scroll_to_position(self.engine.scroll_position() - page),
+                .apply_financial_navigation(FinancialNavigation::PreviousPage, accelerated),
             "pagedown" => self
                 .engine
-                .scroll_to_position(self.engine.scroll_position() + page),
-            "+" | "=" => self.engine.time_scale.zoom(center, 0.5),
-            "-" | "_" => self.engine.time_scale.zoom(center, -0.5),
+                .apply_financial_navigation(FinancialNavigation::NextPage, accelerated),
+            "+" | "=" => self
+                .engine
+                .apply_financial_navigation(FinancialNavigation::ZoomIn, accelerated),
+            "-" | "_" => self
+                .engine
+                .apply_financial_navigation(FinancialNavigation::ZoomOut, accelerated),
             "home" => self.reset_view(),
             "end" => self.scroll_to_latest(),
             "enter" => {
@@ -439,6 +335,7 @@ impl AerisChartView {
         self.pending_activate = ActivationRequest::Pending;
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
+        self.end_drag(pane_x, y);
         if self.engine.trading_activate_at(pane_x, y) {
             self.drag = None;
             self.cursor_style = CursorStyle::PointingHand;

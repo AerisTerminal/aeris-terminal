@@ -778,7 +778,8 @@ fn development_chart_splitting_disables_the_product_restriction() {
         super::DEVELOPMENT_CHART_PANE_SAFETY_CEILING
     );
 
-    let mut workspace = super::AerisChartWorkspace::new(1, super::CHART_PANE_CAPACITY);
+    let mut workspace = super::AerisChartWorkspace::new(1, super::CHART_PANE_CAPACITY)
+        .expect("chart workspace root");
     for pane_id in 2..=8 {
         assert!(
             workspace
@@ -786,7 +787,7 @@ fn development_chart_splitting_disables_the_product_restriction() {
                 .is_ok()
         );
     }
-    assert_eq!(workspace.layout().pane_ids().len(), 8);
+    assert_eq!(workspace.layout().leaf_ids().len(), 8);
 }
 
 #[test]
@@ -2181,4 +2182,39 @@ fn chart_detail_is_bounded_and_suppresses_generic_duplicates() {
         .expect("long detail remains visible");
     assert_eq!(detail.chars().count(), 161);
     assert!(detail.ends_with('…'));
+}
+
+#[test]
+fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() {
+    use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
+    use aeris_chart_integration::{
+        AerisChartTheme, ChartAppearanceColor, ChartAppearanceSettings, ChartThemeColors,
+    };
+
+    let appearance = ChartAppearanceSettings {
+        up_color: ChartAppearanceColor::Custom("#abcdef".to_string()),
+        ..ChartAppearanceSettings::default()
+    };
+    let persisted = persisted_chart_appearance(&appearance);
+    assert_eq!(persisted.grid_color, "theme");
+    assert_eq!(persisted.up_color, "#abcdef");
+    assert_eq!(
+        restored_chart_appearance(&persisted).expect("restored appearance"),
+        appearance
+    );
+
+    let mut legacy = persisted;
+    legacy.down_color = ChartThemeColors::for_theme(AerisChartTheme::Light)
+        .bearish
+        .to_string();
+    legacy.grid_color = ChartThemeColors::for_theme(AerisChartTheme::Dark)
+        .grid
+        .to_string();
+    let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
+    assert_eq!(restored.down_color, ChartAppearanceColor::Theme);
+    assert_eq!(restored.grid_color, ChartAppearanceColor::Theme);
+    assert_eq!(
+        restored.up_color,
+        ChartAppearanceColor::Custom("#abcdef".to_string())
+    );
 }

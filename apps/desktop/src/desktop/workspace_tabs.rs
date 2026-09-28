@@ -865,12 +865,24 @@ impl TerminalApp {
             return;
         };
         match setting {
-            ChartColorSetting::Up => appearance.up_color.clone_from(&color),
-            ChartColorSetting::Down => appearance.down_color.clone_from(&color),
-            ChartColorSetting::WickUp => appearance.wick_up_color.clone_from(&color),
-            ChartColorSetting::WickDown => appearance.wick_down_color.clone_from(&color),
-            ChartColorSetting::BorderUp => appearance.border_up_color.clone_from(&color),
-            ChartColorSetting::BorderDown => appearance.border_down_color.clone_from(&color),
+            ChartColorSetting::Up => {
+                appearance.up_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::Down => {
+                appearance.down_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::WickUp => {
+                appearance.wick_up_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::WickDown => {
+                appearance.wick_down_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::BorderUp => {
+                appearance.border_up_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::BorderDown => {
+                appearance.border_down_color = ChartAppearanceColor::Custom(color.clone());
+            }
             ChartColorSetting::Line => appearance.line_color.clone_from(&color),
             ChartColorSetting::AreaTop => appearance.area_top_color.clone_from(&color),
             ChartColorSetting::BaselineTop => {
@@ -879,8 +891,12 @@ impl TerminalApp {
             ChartColorSetting::BaselineBottom => {
                 appearance.baseline_bottom_color.clone_from(&color);
             }
-            ChartColorSetting::Grid => appearance.grid_color.clone_from(&color),
-            ChartColorSetting::Crosshair => appearance.crosshair_color = color,
+            ChartColorSetting::Grid => {
+                appearance.grid_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::Crosshair => {
+                appearance.crosshair_color = ChartAppearanceColor::Custom(color);
+            }
         }
         surface.update(cx, |surface, surface_cx| match setting {
             ChartColorSetting::Grid | ChartColorSetting::Crosshair => {
@@ -1658,7 +1674,7 @@ impl TerminalApp {
         };
         let current = workspace.layout.layout();
         if current
-            .boundary_ratio_for_panes(left_pane_id, right_pane_id)
+            .boundary_ratio(left_pane_id, right_pane_id)
             .is_some_and(|current| (current - ratio).abs() < 0.0001)
         {
             return;
@@ -2005,6 +2021,14 @@ impl TerminalApp {
         let workspace_id = pane.workspace_id;
         let pane_id = pane.pane_id;
         let consumer_id = pane.consumer_id;
+        let layout = match AerisChartWorkspace::new(pane_id, CHART_PANE_CAPACITY) {
+            Ok(layout) => layout,
+            Err(error) => {
+                self.workspace_error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
         let surface = workspace_surface_entity(
             pane.startup,
             pane.worker,
@@ -2037,7 +2061,7 @@ impl TerminalApp {
                 focus: cx.focus_handle(),
             }],
             active_pane: 0,
-            layout: AerisChartWorkspace::new(pane_id, CHART_PANE_CAPACITY),
+            layout,
             generation: 1,
             focus: cx.focus_handle(),
         });
@@ -2206,7 +2230,7 @@ impl TerminalApp {
                 )
             });
         let removed = workspace.panes.remove(workspace.active_pane);
-        let pane_order = workspace.layout.layout().pane_ids();
+        let pane_order = workspace.layout.layout().leaf_ids();
         let recipient_id = pane_order
             .get(
                 workspace

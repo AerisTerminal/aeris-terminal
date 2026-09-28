@@ -1163,7 +1163,8 @@ pub(super) fn terminal_root(
                     focus: cx.focus_handle(),
                 }],
                 active_pane: 0,
-                layout: AerisChartWorkspace::new(1, CHART_PANE_CAPACITY),
+                layout: AerisChartWorkspace::new(1, CHART_PANE_CAPACITY)
+                    .expect("startup pane identity 1 is a valid chart workspace root"),
                 generation: 1,
                 focus: cx.focus_handle(),
             }],
@@ -1304,7 +1305,7 @@ pub(super) fn workspace_tabs_root(
         let Some(layout) = tab.layout.as_ref().and_then(chart_workspace_layout) else {
             continue;
         };
-        let pane_order = layout.pane_ids();
+        let pane_order = layout.leaf_ids();
         panes.sort_by_key(|pane| {
             pane_order
                 .iter()

@@ -2,6 +2,10 @@
 
 use super::*;
 
+const VOLUME_LEGEND_IDENTITY: u64 = 1;
+const CVD_LEGEND_IDENTITY: u64 = 2;
+const DELTA_LEGEND_IDENTITY: u64 = 3;
+
 impl AerisChartView {
     /// Adds an indicator with the defaults shown by the legacy native catalog.
     ///
@@ -16,43 +20,21 @@ impl AerisChartView {
         if !self.has_market_data() {
             return Err(ChartIndicatorError::MarketDataUnavailable);
         }
-        let ids = match indicator {
-            ChartIndicator::Volume => {
-                self.volume_legend = LegendPresence::Present;
-                self.engine.set_series_visible(self.volume_series, true);
-                vec![self.volume_series]
-            }
-            ChartIndicator::Vwap => self
-                .engine
-                .add_vwap(0, Some(self.volume_series))
-                .into_iter()
-                .collect(),
-            ChartIndicator::Sma => self.engine.add_sma(0, 20).into_iter().collect(),
-            ChartIndicator::Ema => self.engine.add_ema(0, 20).into_iter().collect(),
-            ChartIndicator::EmaRibbon => self.engine.add_ema_ribbon(0, EMA_RIBBON_DEFAULT_PERIODS),
-            ChartIndicator::Wma => self.engine.add_wma(0, 20).into_iter().collect(),
-            ChartIndicator::Bollinger => self.engine.add_bollinger(0, 20, 2.0),
-            ChartIndicator::Rsi => self.engine.add_rsi(0, 14).into_iter().collect(),
-            ChartIndicator::Macd => self.engine.add_macd(0, 12, 26, 9),
-            ChartIndicator::Stochastic => self.engine.add_stochastic(0, 14, 3),
-            ChartIndicator::Atr => self.engine.add_atr(0, 14).into_iter().collect(),
+        let ids = if indicator == ChartIndicator::Volume {
+            self.volume_legend = LegendPresence::Present;
+            self.engine.set_series_visible(self.volume_series, true);
+            vec![self.volume_series]
+        } else {
+            let Some(kind) = indicator.engine_kind() else {
+                return Err(ChartIndicatorError::CreationRejected(indicator));
+            };
+            self.engine.add_indicator_kind(
+                0,
+                kind,
+                (indicator == ChartIndicator::Vwap).then_some(self.volume_series),
+            )
         };
-        let expected_outputs = match indicator {
-            ChartIndicator::EmaRibbon => 5,
-            ChartIndicator::Bollinger | ChartIndicator::Macd => 3,
-            ChartIndicator::Stochastic => 2,
-            ChartIndicator::Volume
-            | ChartIndicator::Vwap
-            | ChartIndicator::Sma
-            | ChartIndicator::Ema
-            | ChartIndicator::Wma
-            | ChartIndicator::Rsi
-            | ChartIndicator::Atr => 1,
-        };
-        if ids.len() != expected_outputs {
-            for &id in &ids {
-                self.engine.remove_series(id);
-            }
+        if ids.is_empty() {
             return Err(ChartIndicatorError::CreationRejected(indicator));
         }
         self.apply_indicator_chrome_options();
@@ -63,40 +45,19 @@ impl AerisChartView {
     /// Returns active indicator instances without engine-local series identities.
     #[must_use]
     pub fn indicator_states(&self) -> Vec<ChartIndicatorState> {
-        let entries = self.engine.series_entries();
-        let mut bindings = HashSet::new();
         let mut states = Vec::new();
-        for &id in self.engine.series_order() {
-            if id == self.volume_series {
-                if self.volume_legend.is_present() {
-                    let visible = entries
-                        .iter()
-                        .find(|series| series.id == id && !series.removed)
-                        .is_some_and(|series| series.visible);
-                    states.push(ChartIndicatorState {
-                        indicator: ChartIndicator::Volume,
-                        visible,
-                    });
-                }
-                continue;
-            }
-            let Some(info) = self.engine.indicator_info(id) else {
-                continue;
-            };
-            if !bindings.insert(info.binding_id) {
-                continue;
-            }
-            let Some(indicator) = ChartIndicator::from_engine_kind(info.kind) else {
-                continue;
-            };
-            let visible = entries.iter().any(|series| {
-                !series.removed
-                    && series.visible
-                    && self
-                        .engine
-                        .indicator_info(series.id)
-                        .is_some_and(|output| output.binding_id == info.binding_id)
+        if self.volume_legend.is_present() {
+            let visible = self.engine.series_visible(self.volume_series) == Some(true);
+            states.push(ChartIndicatorState {
+                indicator: ChartIndicator::Volume,
+                visible,
             });
+        }
+        for binding in self.engine.indicator_bindings() {
+            let Some(indicator) = ChartIndicator::from_engine_kind(&binding.kind) else {
+                continue;
+            };
+            let visible = binding.styles.iter().any(|style| style.visible);
             states.push(ChartIndicatorState { indicator, visible });
         }
         states
@@ -118,11 +79,7 @@ impl AerisChartView {
             let item = if state.indicator == ChartIndicator::Volume {
                 LegendItem::Volume
             } else {
-                let Some(binding_id) = ids
-                    .first()
-                    .and_then(|id| self.engine.indicator_info(*id))
-                    .map(|info| info.binding_id)
-                else {
+                let Some(binding_id) = ids.first().copied() else {
                     return Err(ChartIndicatorError::CreationRejected(state.indicator));
                 };
                 LegendItem::Indicator(binding_id)
@@ -134,213 +91,121 @@ impl AerisChartView {
     /// Returns whether any native indicator or the reusable volume series is currently shown.
     #[must_use]
     pub fn has_indicators(&self) -> bool {
-        let footprint = self.footprint_series_id();
-        self.engine.series_entries().iter().any(|series| {
-            !series.removed
-                && series.id != 0
-                && Some(series.id) != footprint
-                && (series.id != self.volume_series || self.volume_legend.is_present())
-        })
+        self.volume_legend.is_present()
+            || self.engine.has_indicator_bindings()
+            || self.engine.has_external_studies()
+            || [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta]
+                .into_iter()
+                .any(|study| self.has_order_flow_study(study))
     }
     /// Removes every native indicator and hides the reusable volume series.
     ///
     /// The product-owned price series is left in place. Volume stays allocated so the catalog can
     /// show it again without rebuilding live weights.
     pub fn clear_indicators(&mut self) -> bool {
-        let study_series = self
-            .study_series
-            .values()
-            .map(|state| state.series_id)
-            .collect::<HashSet<_>>();
-        let footprint = self.footprint_series_id();
-        let ids: Vec<u32> = self
-            .engine
-            .series_entries()
-            .iter()
-            .filter(|series| {
-                !series.removed
-                    && series.id != 0
-                    && Some(series.id) != footprint
-                    && self.order_flow_study_for_series(series.id).is_none()
-                    && !study_series.contains(&series.id)
-                    && (series.id != self.volume_series || self.volume_legend.is_present())
-            })
-            .map(|series| series.id)
-            .collect();
-        let mut order_flow_cleared = false;
+        let mut cleared = self.engine.clear_indicator_bindings();
+        if self.volume_legend.is_present() {
+            self.engine.set_series_visible(self.volume_series, false);
+            self.volume_legend = LegendPresence::Absent;
+            cleared = true;
+        }
         for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
             if self.has_order_flow_study(study) {
-                order_flow_cleared |= self.remove_order_flow_study(study);
+                cleared |= self.remove_order_flow_study(study);
             }
         }
-        if ids.is_empty() {
-            return order_flow_cleared;
-        }
-        if self
-            .engine
-            .selected_series()
-            .is_some_and(|series| ids.contains(&series))
-        {
-            self.engine.set_selected_series(None);
-        }
-        for id in ids {
-            if id == self.volume_series {
-                self.engine.set_series_visible(id, false);
-                self.volume_legend = LegendPresence::Absent;
-            } else {
-                let _ = self.engine.remove_series(id);
-            }
+        if !cleared {
+            return false;
         }
         self.invalidate_series_layout();
         self.mark_user_state_changed();
         true
-    }
-    /// Builds the price-series row, which carries the OHLC readout.
-    pub(super) fn asset_legend_row(
-        &self,
-        entries: &[aeris_charts_engine::SeriesEntry],
-        snapshots: &[aeris_charts_engine::SeriesValueSnapshot],
-    ) -> Option<LegendRow> {
-        let asset = entries
-            .iter()
-            .find(|series| series.id == 0 && !series.removed)?;
-        let snapshot = snapshots.iter().find(|snapshot| snapshot.series_id == 0);
-        let (values, values_tone) = if asset.visible && self.chart_type.shows_ohlc_legend() {
-            (
-                snapshot
-                    .map(|snapshot| {
-                        let value = |label: &str, value: &Option<String>| {
-                            format!("{label} {}", value.as_deref().unwrap_or("--"))
-                        };
-                        vec![
-                            value("O", &snapshot.formatted_open),
-                            value("H", &snapshot.formatted_high),
-                            value("L", &snapshot.formatted_low),
-                            value("C", &snapshot.formatted_close),
-                        ]
-                        .into_iter()
-                        .map(|text| LegendValue { text, color: None })
-                        .collect()
-                    })
-                    .unwrap_or_default(),
-                snapshot.map_or(LegendValueTone::Neutral, asset_legend_value_tone),
-            )
-        } else {
-            (Vec::new(), LegendValueTone::Neutral)
-        };
-        Some(LegendRow {
-            item: LegendItem::Asset,
-            pane: asset.pane_index,
-            title: if !self.asset_legend_title.is_empty() {
-                self.asset_legend_title.clone()
-            } else if asset.title.is_empty() {
-                "Asset".to_string()
-            } else {
-                asset.title.clone()
-            },
-            values,
-            values_tone,
-            visible: asset.visible,
-            settings_available: false,
-        })
     }
     pub(super) fn legend_rows(&self) -> Vec<LegendRow> {
         let logical_index = self
             .engine
             .crosshair
             .map(|(x, _)| self.engine.time_scale.coordinate_to_index(x));
-        let snapshots = self.engine.value_snapshot(logical_index);
-        let entries = self.engine.series_entries();
-        let mut rows = Vec::new();
-        rows.extend(self.asset_legend_row(entries, &snapshots));
-        if self.volume_legend.is_present()
-            && let Some(volume) = entries
-                .iter()
-                .find(|series| series.id == self.volume_series && !series.removed)
-        {
-            rows.push(LegendRow {
-                item: LegendItem::Volume,
-                pane: volume.pane_index,
-                title: "Volume".to_string(),
-                values: if volume.visible {
-                    legend_series_values(&snapshots, self.volume_series)
-                } else {
-                    Vec::new()
-                },
-                values_tone: snapshots
-                    .iter()
-                    .find(|snapshot| snapshot.series_id == 0)
-                    .map_or(LegendValueTone::Neutral, asset_legend_value_tone),
-                visible: volume.visible,
+        let leading = self
+            .volume_legend
+            .is_present()
+            .then_some(HostLegendSeries {
+                identity: VOLUME_LEGEND_IDENTITY,
+                series_id: self.volume_series,
+                title: "Volume",
                 settings_available: false,
-            });
-        }
-
-        let mut bindings = HashSet::new();
-        for &id in self.engine.series_order() {
-            let Some(info) = self.engine.indicator_info(id) else {
-                continue;
-            };
-            if !bindings.insert(info.binding_id) {
-                continue;
-            }
-            let outputs: Vec<_> = entries
-                .iter()
-                .filter(|series| {
-                    !series.removed
-                        && self
-                            .engine
-                            .indicator_info(series.id)
-                            .is_some_and(|output| output.binding_id == info.binding_id)
-                })
-                .collect();
-            let Some(first) = outputs.first() else {
-                continue;
-            };
-            let visible = outputs.iter().any(|series| series.visible);
-            let values = if visible {
-                outputs
-                    .iter()
-                    .filter(|series| series.visible)
-                    .filter_map(|series| {
-                        let output = self.engine.indicator_info(series.id)?;
-                        let value = legend_series_value(&snapshots, series.id);
-                        if value.is_empty() {
-                            None
-                        } else {
-                            Some(LegendValue {
-                                text: if output.output_count > 1 && output.kind != "ema_ribbon" {
-                                    format!("{} {value}", output.output_name)
-                                } else {
-                                    value
-                                },
-                                color: Some(series.line_color.clone().unwrap_or_else(|| {
-                                    aeris_charts_engine::DEFAULT_LINE_COLOR.to_css()
-                                })),
-                            })
-                        }
+                tone_from_primary: true,
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let trailing = self
+            .order_flow_state
+            .iter()
+            .flat_map(|state| {
+                [
+                    (OrderFlowStudy::CumulativeDelta, CVD_LEGEND_IDENTITY),
+                    (OrderFlowStudy::Delta, DELTA_LEGEND_IDENTITY),
+                ]
+                .into_iter()
+                .filter_map(|(study, identity)| {
+                    state.study_series(study).map(|series_id| HostLegendSeries {
+                        identity,
+                        series_id,
+                        title: study.title(),
+                        settings_available: false,
+                        tone_from_primary: false,
                     })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            rows.push(LegendRow {
-                item: LegendItem::Indicator(info.binding_id),
-                pane: first.pane_index,
-                title: if info.kind == "ema_ribbon" {
-                    "EMA Ribbon".to_string()
-                } else {
-                    first.title.clone()
-                },
-                values,
-                values_tone: LegendValueTone::Neutral,
-                visible,
-                settings_available: false,
-            });
-        }
-        self.append_order_flow_legend_rows(entries, &snapshots, &mut rows);
-        self.append_study_legend_rows(entries, &snapshots, &mut rows);
-        rows
+                })
+            })
+            .collect::<Vec<_>>();
+        self.engine
+            .financial_legend(FinancialLegendRequest {
+                logical_index,
+                primary_title: &self.asset_legend_title,
+                show_primary_ohlc: self.chart_type.shows_ohlc_legend(),
+                leading_series: &leading,
+                trailing_series: &trailing,
+            })
+            .into_iter()
+            .filter_map(|row| {
+                let item = match row.identity {
+                    FinancialLegendIdentity::Primary => LegendItem::Asset,
+                    FinancialLegendIdentity::Host(VOLUME_LEGEND_IDENTITY) => LegendItem::Volume,
+                    FinancialLegendIdentity::Host(CVD_LEGEND_IDENTITY) => {
+                        LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta)
+                    }
+                    FinancialLegendIdentity::Host(DELTA_LEGEND_IDENTITY) => {
+                        LegendItem::OrderFlow(OrderFlowStudy::Delta)
+                    }
+                    FinancialLegendIdentity::Host(_) => return None,
+                    FinancialLegendIdentity::Indicator(binding) => LegendItem::Indicator(binding),
+                    FinancialLegendIdentity::ExternalStudy(study_id) => LegendItem::Study {
+                        study_id,
+                        series_id: row.first_series_id,
+                    },
+                };
+                Some(LegendRow {
+                    item,
+                    pane: row.pane,
+                    title: row.title,
+                    values: row
+                        .values
+                        .into_iter()
+                        .map(|value| LegendValue {
+                            text: value.text,
+                            color: value.color,
+                        })
+                        .collect(),
+                    values_tone: match row.tone {
+                        FinancialLegendTone::Neutral => LegendValueTone::Neutral,
+                        FinancialLegendTone::Bullish => LegendValueTone::Bullish,
+                        FinancialLegendTone::Bearish => LegendValueTone::Bearish,
+                    },
+                    visible: row.visible,
+                    settings_available: row.settings_available,
+                })
+            })
+            .collect()
     }
     pub(super) fn set_legend_item_visible(&mut self, item: LegendItem, visible: bool) -> bool {
         if let LegendItem::Study { study_id, .. } = item {
@@ -360,17 +225,14 @@ impl AerisChartView {
                 .collect(),
             LegendItem::Volume if self.volume_legend.is_present() => vec![self.volume_series],
             LegendItem::Volume => return false,
-            LegendItem::Indicator(binding) => self
-                .engine
-                .series_order()
-                .iter()
-                .copied()
-                .filter(|&id| {
-                    self.engine
-                        .indicator_info(id)
-                        .is_some_and(|info| info.binding_id == binding)
-                })
-                .collect(),
+            LegendItem::Indicator(binding) => {
+                let changed = self.engine.set_indicator_binding_visible(binding, visible);
+                if changed {
+                    self.invalidate_series_layout();
+                    self.mark_user_state_changed();
+                }
+                return changed;
+            }
             LegendItem::Study { .. } | LegendItem::OrderFlow(_) => {
                 unreachable!("study and order-flow visibility handled above")
             }
@@ -380,9 +242,8 @@ impl AerisChartView {
         }
         let changed = ids.iter().any(|&id| {
             self.engine
-                .series_entries()
-                .iter()
-                .any(|series| series.id == id && !series.removed && series.visible != visible)
+                .series_visible(id)
+                .is_some_and(|value| value != visible)
         });
         for id in ids {
             self.engine.set_series_visible(id, visible);
@@ -402,24 +263,7 @@ impl AerisChartView {
             }
             LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
             LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
-            LegendItem::Indicator(binding) => {
-                let ids = self
-                    .engine
-                    .series_order()
-                    .iter()
-                    .copied()
-                    .filter(|id| {
-                        self.engine
-                            .indicator_info(*id)
-                            .is_some_and(|info| info.binding_id == binding)
-                    })
-                    .collect::<Vec<_>>();
-                let mut removed = false;
-                for id in ids {
-                    removed |= self.engine.remove_series(id);
-                }
-                removed
-            }
+            LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),
         };
         if removed {
             self.invalidate_series_layout();
@@ -427,33 +271,30 @@ impl AerisChartView {
         }
         removed
     }
-    pub(super) fn indicator_series_ids(&self) -> Vec<u32> {
-        let footprint = self.footprint_series_id();
-        self.engine
-            .series_entries()
-            .iter()
-            .filter(|series| {
-                !series.removed
-                    && series.id != 0
-                    && Some(series.id) != footprint
-                    && (series.id != self.volume_series || self.volume_legend.is_present())
-            })
-            .map(|series| series.id)
-            .collect()
-    }
-    pub(super) fn apply_indicator_chrome_to_series(&mut self, series_id: u32) {
+    fn apply_volume_chrome(&mut self) {
+        if !self.volume_legend.is_present() {
+            return;
+        }
         let names = self.indicator_name_labels.visible();
         let values = self.indicator_value_labels.visible();
         let price_lines = self.indicator_price_lines.visible();
         let json = format!(
             r#"{{"last_value_visible":{values},"title_visible":{names},"price_line_visible":{price_lines}}}"#
         );
-        let _ = self.engine.series_apply_options_json(series_id, &json);
+        let _ = self
+            .engine
+            .series_apply_options_json(self.volume_series, &json);
     }
     pub(super) fn apply_indicator_chrome_options(&mut self) {
-        for id in self.indicator_series_ids() {
-            self.apply_indicator_chrome_to_series(id);
-        }
+        let options = IndicatorChromeOptions {
+            name_labels_visible: self.indicator_name_labels.visible(),
+            value_labels_visible: self.indicator_value_labels.visible(),
+            price_lines_visible: self.indicator_price_lines.visible(),
+        };
+        let _ = self.engine.set_indicator_chrome_options(options);
+        // Volume is a Terminal product series; native indicators, external studies, and order-flow
+        // studies receive this policy from the engine-owned transaction above.
+        self.apply_volume_chrome();
     }
     /// Host-owned indicator name-chip chrome for every native indicator on this chart.
     #[must_use]

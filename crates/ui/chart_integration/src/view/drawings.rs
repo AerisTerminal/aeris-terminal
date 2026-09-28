@@ -18,7 +18,7 @@ impl AerisChartView {
         self.cancel_drawing_gesture();
         self.drawing_tool = tool;
         if tool.drawing_kind().is_none() {
-            self.engine.crosshair_ohlc_magnet = false;
+            let _ = self.engine.set_crosshair_ohlc_magnet(false);
         }
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
@@ -347,7 +347,7 @@ impl AerisChartView {
         }
         self.drawing_tool = ChartDrawingTool::Cursor;
         self.cursor_style = CursorStyle::Crosshair;
-        self.engine.crosshair_ohlc_magnet = false;
+        let _ = self.engine.set_crosshair_ohlc_magnet(false);
         self.invalidate_series_frame();
         self.mark_user_state_changed();
         true
@@ -440,7 +440,7 @@ impl AerisChartView {
                 if result > 0 {
                     self.drawing_tool = ChartDrawingTool::Cursor;
                     self.cursor_style = CursorStyle::Crosshair;
-                    self.engine.crosshair_ohlc_magnet = false;
+                    let _ = self.engine.set_crosshair_ohlc_magnet(false);
                     if placing_text && let Ok(id) = DrawingId::try_from(result) {
                         self.begin_text_edit(id);
                     } else {
@@ -500,7 +500,7 @@ impl AerisChartView {
             self.engine.brush_create_end();
             self.drawing_tool = ChartDrawingTool::Cursor;
             self.cursor_style = CursorStyle::Crosshair;
-            self.engine.crosshair_ohlc_magnet = false;
+            let _ = self.engine.set_crosshair_ohlc_magnet(false);
             self.mark_user_state_changed();
             return true;
         }

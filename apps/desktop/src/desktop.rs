@@ -57,14 +57,15 @@ use aeris_application::ReplayStreamUpdate;
 use aeris_chart_integration::{
     AerisChartTheme, AerisChartView, AerisChartWorkspace, ChartAggressorSide, ChartAlertCondition,
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
-    ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceSettings,
-    ChartBridgeMetrics, ChartContextKind, ChartContextRequest, ChartDrawingTool, ChartExecutionId,
-    ChartExecutionKind, ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot,
-    ChartHostTimeWindow, ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata,
-    ChartOrderId, ChartOrderKind, ChartOrderRole, ChartOrderSide, ChartOrderStatus,
-    ChartPositionId, ChartPositionSide, ChartSplitDirection, ChartStudyInputRequirements,
-    ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind,
-    ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartTradingAnnotation,
+    ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
+    ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
+    ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
+    ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
+    ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole,
+    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSplitDirection,
+    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
+    ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
+    ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
     ChartTradingAnnotationTone, ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent,
     ChartTradingIntentAction, ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot,
     ChartType, ChartWorkingOrder, ChartWorkspaceLayout, FootprintDisplayMode, OrderFlowAggregation,
@@ -4062,7 +4063,7 @@ fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<Workspace
         .iter()
         .map(|workspace| {
             let layout = workspace.layout.layout();
-            let pane_weights = layout.pane_basis_points();
+            let pane_weights = layout.basis_points();
             WorkspaceTabState {
                 workspace_id: workspace.id,
                 label: workspace.label.clone(),
@@ -4123,14 +4124,14 @@ fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<Workspace
 fn layout_root_axis(layout: &ChartWorkspaceLayout) -> WorkspaceSplitAxis {
     match layout {
         ChartWorkspaceLayout::Split { direction, .. } => split_axis(*direction),
-        ChartWorkspaceLayout::Pane { .. } => WorkspaceSplitAxis::Horizontal,
+        ChartWorkspaceLayout::Cell { .. } => WorkspaceSplitAxis::Horizontal,
     }
 }
 
 fn workspace_layout_state(layout: &ChartWorkspaceLayout) -> WorkspaceLayoutState {
     match layout {
-        ChartWorkspaceLayout::Pane { pane_id } => WorkspaceLayoutState {
-            pane_id: *pane_id,
+        ChartWorkspaceLayout::Cell { id } => WorkspaceLayoutState {
+            pane_id: *id,
             split_axis: WorkspaceSplitAxis::Horizontal as i32,
             ratio_basis_points: 0,
             first: None,
@@ -4139,8 +4140,8 @@ fn workspace_layout_state(layout: &ChartWorkspaceLayout) -> WorkspaceLayoutState
         ChartWorkspaceLayout::Split {
             direction,
             ratio,
-            first,
-            second,
+            a,
+            b,
         } => WorkspaceLayoutState {
             pane_id: 0,
             split_axis: split_axis(*direction) as i32,
@@ -4149,22 +4150,22 @@ fn workspace_layout_state(layout: &ChartWorkspaceLayout) -> WorkspaceLayoutState
                 .clamp(500.0, 9_500.0)
                 .to_u32()
                 .unwrap_or(5_000),
-            first: Some(Box::new(workspace_layout_state(first))),
-            second: Some(Box::new(workspace_layout_state(second))),
+            first: Some(Box::new(workspace_layout_state(a))),
+            second: Some(Box::new(workspace_layout_state(b))),
         },
     }
 }
 
 fn chart_workspace_layout(layout: &WorkspaceLayoutState) -> Option<ChartWorkspaceLayout> {
     match (&layout.first, &layout.second) {
-        (None, None) if layout.pane_id != 0 => Some(ChartWorkspaceLayout::Pane {
-            pane_id: layout.pane_id,
-        }),
+        (None, None) if layout.pane_id != 0 => {
+            Some(ChartWorkspaceLayout::Cell { id: layout.pane_id })
+        }
         (Some(first), Some(second)) if layout.pane_id == 0 => Some(ChartWorkspaceLayout::Split {
             direction: chart_split_direction(WorkspaceSplitAxis::try_from(layout.split_axis).ok()?),
             ratio: f64::from(layout.ratio_basis_points) / 10_000.0,
-            first: Box::new(chart_workspace_layout(first)?),
-            second: Box::new(chart_workspace_layout(second)?),
+            a: Box::new(chart_workspace_layout(first)?),
+            b: Box::new(chart_workspace_layout(second)?),
         }),
         _ => None,
     }

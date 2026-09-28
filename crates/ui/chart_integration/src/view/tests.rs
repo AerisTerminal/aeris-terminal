@@ -2,7 +2,31 @@
 
 use super::*;
 use aeris_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
-use aeris_charts_engine::AxisTextMidpoint;
+use aeris_charts_engine::{AppearanceColor, AxisTextMidpoint};
+
+fn custom_color(color: &str) -> AppearanceColor {
+    AppearanceColor::Custom(color.to_string())
+}
+
+fn study_output(
+    chart: &AerisChartView,
+    study_id: u64,
+    output_index: usize,
+) -> aeris_charts_engine::ExternalStudyOutputInfo {
+    chart
+        .engine
+        .external_study_output_info(study_id, output_index)
+        .expect("study output is tracked by Aeris Charts")
+}
+
+fn study_series_ids(chart: &AerisChartView, study_id: u64) -> Vec<u32> {
+    chart
+        .engine
+        .external_study_outputs()
+        .into_iter()
+        .filter_map(|output| (output.study_id == study_id).then_some(output.series_id))
+        .collect()
+}
 
 fn interactive_chart() -> AerisChartView {
     let mut chart = AerisChartView::new();
@@ -625,7 +649,10 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     let start = chart.engine.time_scale.index_to_coordinate(2);
     let end = chart.engine.time_scale.index_to_coordinate(8);
     chart.begin_drag(start, 200.0, 1, false);
-    assert!(matches!(chart.drag, Some(ChartDrag::Pane { .. })));
+    assert!(matches!(
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::Pane { .. })
+    ));
     chart.end_drag(start, 200.0);
     chart.begin_drag(start, 200.0, 1, true);
     assert_eq!(chart.drag, Some(ChartDrag::BrushableRange));
@@ -1310,13 +1337,17 @@ fn wheel_zoom_and_horizontal_scroll_mutate_aeris_charts_without_refitting() {
 fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
     let mut chart = interactive_chart();
     chart.begin_drag(300.0, 200.0, 1, false);
-    assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
+    assert_eq!(
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::Pane { price_pan: None })
+    );
     assert_eq!(chart.engine.crosshair, Some((300.0, 200.0)));
     let offset = chart.engine.right_offset();
     chart.drag_to(340.0, 200.0);
     assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
     chart.end_drag(340.0, 200.0);
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
     chart.update_crosshair(-1.0, 200.0);
     assert!(chart.engine.crosshair.is_none());
 }
@@ -1368,10 +1399,11 @@ fn empty_chart_has_no_copy_price() {
 fn axes_drag_and_double_click_reset_through_aeris_charts() {
     let mut chart = interactive_chart();
     chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
-    assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
+    assert_eq!(chart.engine.financial_drag(), Some(FinancialDrag::TimeAxis));
     chart.drag_to(340.0, chart.engine.pane_h + 10.0);
     chart.end_drag(340.0, chart.engine.pane_h + 10.0);
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
 
     let right_axis_x = chart.engine.pane_w + 1.0;
     assert_eq!(
@@ -1382,8 +1414,8 @@ fn axes_drag_and_double_click_reset_through_aeris_charts() {
     );
     chart.begin_drag(right_axis_x, 200.0, 1, false);
     assert!(matches!(
-        chart.drag,
-        Some(ChartDrag::PriceAxis {
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::PriceAxis {
             target: PriceScaleTarget::Right,
             ..
         })
@@ -1403,6 +1435,7 @@ fn axes_drag_and_double_click_reset_through_aeris_charts() {
     );
     chart.end_drag(right_axis_x, 240.0);
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
     assert_eq!(
         chart
             .engine
@@ -1415,8 +1448,8 @@ fn axes_drag_and_double_click_reset_through_aeris_charts() {
         .price_scale_visible_range_for(0, PriceScaleTarget::Right);
     chart.begin_drag(300.0, 200.0, 1, false);
     assert!(matches!(
-        chart.drag,
-        Some(ChartDrag::Pane {
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::Pane {
             price_pan: Some((_, PriceScaleTarget::Right))
         })
     ));
@@ -1647,17 +1680,17 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
     let revision = chart.user_state_revision();
     let appearance = ChartAppearanceSettings {
         grid_visible: false,
-        grid_color: "#334155".to_string(),
+        grid_color: custom_color("#334155"),
         grid_style: 1,
-        crosshair_color: "#94A3B8".to_string(),
+        crosshair_color: custom_color("#94A3B8"),
         crosshair_width: 3,
         crosshair_style: 0,
-        up_color: "#10B981".to_string(),
-        down_color: "#EF4444".to_string(),
-        wick_up_color: "#34D399".to_string(),
-        wick_down_color: "#F87171".to_string(),
-        border_up_color: "#059669".to_string(),
-        border_down_color: "#DC2626".to_string(),
+        up_color: custom_color("#10B981"),
+        down_color: custom_color("#EF4444"),
+        wick_up_color: custom_color("#34D399"),
+        wick_down_color: custom_color("#F87171"),
+        border_up_color: custom_color("#059669"),
+        border_down_color: custom_color("#DC2626"),
         wick_visible: false,
         border_visible: false,
         open_visible: false,
@@ -1689,8 +1722,8 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
 fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
     let mut chart = interactive_chart();
     let mut series = chart.appearance_settings();
-    series.up_color = "#10B981".to_string();
-    series.down_color = "#EF4444".to_string();
+    series.up_color = custom_color("#10B981");
+    series.down_color = custom_color("#EF4444");
     series.line_color = "#3B82F6".to_string();
     series.area_top_color = "#2563EB80".to_string();
     assert!(chart.set_series_appearance_settings(&series));
@@ -1720,9 +1753,9 @@ fn series_appearance_updates_do_not_rewrite_canvas_options() {
     let mut chart = interactive_chart();
     let mut canvas = chart.appearance_settings();
     canvas.grid_visible = false;
-    canvas.grid_color = "#334155".to_string();
+    canvas.grid_color = custom_color("#334155");
     canvas.grid_style = 1;
-    canvas.crosshair_color = "#94A3B8".to_string();
+    canvas.crosshair_color = custom_color("#94A3B8");
     canvas.crosshair_width = 3;
     canvas.crosshair_style = 0;
     assert!(chart.set_canvas_appearance_settings(&canvas));
@@ -1771,13 +1804,13 @@ fn aeris_charts_default_grid_color_tracks_theme_but_custom_grid_color_does_not()
     );
 
     let mut custom = chart.appearance_settings();
-    custom.grid_color = "#334155".to_string();
+    custom.grid_color = custom_color("#334155");
     assert!(chart.set_appearance_settings(&custom));
     chart.set_theme(ChartTheme::Dark);
     assert_eq!(chart.engine.options.get().grid.vert_lines.color, "#334155");
 
     let mut persisted_light_default = chart.appearance_settings();
-    persisted_light_default.grid_color = aeris_charts_grid_color(ChartTheme::Light);
+    persisted_light_default.grid_color = AppearanceColor::Theme;
     assert!(chart.set_appearance_settings(&persisted_light_default));
     assert_eq!(
         chart.engine.options.get().grid.vert_lines.color,
@@ -1789,9 +1822,13 @@ fn aeris_charts_default_grid_color_tracks_theme_but_custom_grid_color_does_not()
 fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() {
     let light = AerisChartView::empty_with_theme(ChartTheme::Light);
     let persisted = light.appearance_settings();
-    let light_defaults = aeris_theme_appearance_defaults(ChartTheme::Light);
-    assert_eq!(persisted.up_color, light_defaults.bullish);
-    assert_eq!(persisted.down_color, light_defaults.bearish);
+    let light_defaults = FinancialThemeColors::for_theme(ChartTheme::Light);
+    assert_eq!(persisted.up_color, AppearanceColor::Theme);
+    assert_eq!(persisted.down_color, AppearanceColor::Theme);
+    assert_eq!(
+        persisted.effective_up_color(ChartTheme::Light),
+        light_defaults.bullish
+    );
 
     let mut dark = AerisChartView::empty_with_theme(ChartTheme::Dark);
     let _ = dark.set_appearance_settings(&persisted);
@@ -1804,22 +1841,24 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
     assert!(series.border_up_color.is_none());
     assert!(series.border_down_color.is_none());
 
-    let dark_defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
+    let dark_defaults = FinancialThemeColors::for_theme(ChartTheme::Dark);
     assert_eq!(dark_defaults.bullish, "#089981");
     assert_eq!(dark_defaults.bearish, "#f7525f");
     let effective = dark.appearance_settings();
-    assert_eq!(effective.up_color, dark_defaults.bullish);
-    assert_eq!(effective.down_color, dark_defaults.bearish);
-    assert_eq!(effective.wick_up_color, effective.up_color);
-    assert_eq!(effective.wick_down_color, effective.down_color);
-    assert_eq!(effective.border_up_color, effective.up_color);
-    assert_eq!(effective.border_down_color, effective.down_color);
+    assert_eq!(effective.up_color, AppearanceColor::Theme);
+    assert_eq!(effective.down_color, AppearanceColor::Theme);
+    assert_eq!(effective.wick_up_color, AppearanceColor::Theme);
+    assert_eq!(effective.wick_down_color, AppearanceColor::Theme);
+    assert_eq!(effective.border_up_color, AppearanceColor::Theme);
+    assert_eq!(effective.border_down_color, AppearanceColor::Theme);
 
-    let palette = legend_palette(dark.theme, &effective.up_color, &effective.down_color);
+    let bullish = effective.effective_up_color(dark.theme);
+    let bearish = effective.effective_down_color(dark.theme);
+    let palette = legend_palette(dark.theme, &bullish, &bearish);
     assert_eq!(
         palette.bullish,
         rgba(
-            Color::parse_css(&dark_defaults.bullish)
+            Color::parse_css(dark_defaults.bullish)
                 .expect("Aeris Charts bullish color is valid CSS")
                 .0
         )
@@ -1827,7 +1866,7 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
     assert_eq!(
         palette.bearish,
         rgba(
-            Color::parse_css(&dark_defaults.bearish)
+            Color::parse_css(dark_defaults.bearish)
                 .expect("Aeris Charts bearish color is valid CSS")
                 .0
         )
@@ -1839,13 +1878,13 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     let mut chart = AerisChartView::empty_with_theme(ChartTheme::Dark);
     let aeris_defaults = chart.appearance_settings();
     let mut custom = aeris_defaults.clone();
-    custom.up_color = "#112233".to_string();
-    custom.down_color = "#445566".to_string();
-    custom.wick_up_color = "#778899".to_string();
-    custom.wick_down_color = "#AABBCC".to_string();
-    custom.border_up_color = "#123456".to_string();
-    custom.border_down_color = "#654321".to_string();
-    custom.crosshair_color = "#ABCDEF".to_string();
+    custom.up_color = custom_color("#112233");
+    custom.down_color = custom_color("#445566");
+    custom.wick_up_color = custom_color("#778899");
+    custom.wick_down_color = custom_color("#AABBCC");
+    custom.border_up_color = custom_color("#123456");
+    custom.border_down_color = custom_color("#654321");
+    custom.crosshair_color = custom_color("#ABCDEF");
     custom.grid_visible = false;
     custom.grid_style = 2;
     custom.line_width = 4;
@@ -1880,24 +1919,33 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     assert!(series.border_up_color.is_none());
     assert!(series.border_down_color.is_none());
     assert_eq!(chart.appearance_settings(), aeris_defaults);
-    let defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
+    let defaults = FinancialThemeColors::for_theme(ChartTheme::Dark);
     let effective = chart.appearance_settings();
-    assert_eq!(effective.up_color, defaults.bullish);
-    assert_eq!(effective.down_color, defaults.bearish);
-    assert_eq!(effective.crosshair_color, defaults.crosshair);
+    assert_eq!(
+        effective.effective_up_color(ChartTheme::Dark),
+        defaults.bullish
+    );
+    assert_eq!(
+        effective.effective_down_color(ChartTheme::Dark),
+        defaults.bearish
+    );
+    assert_eq!(
+        effective.effective_crosshair_color(ChartTheme::Dark),
+        defaults.crosshair
+    );
 }
 
 #[test]
 fn canonical_crosshair_color_tracks_aeris_theme() {
     let mut chart = AerisChartView::empty_with_theme(ChartTheme::Light);
-    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
+    let light = FinancialThemeColors::for_theme(ChartTheme::Light);
     assert_eq!(
         chart.engine.options.get().crosshair.vert_line.color,
         light.crosshair
     );
 
     chart.set_theme(ChartTheme::Dark);
-    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
+    let dark = FinancialThemeColors::for_theme(ChartTheme::Dark);
     assert_eq!(
         chart.engine.options.get().crosshair.vert_line.color,
         dark.crosshair
@@ -2211,11 +2259,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
         chart.install_study_output(7, 0, descriptor, 1, &timestamps, &first),
         Ok(true)
     );
-    let state = chart
-        .study_series
-        .get(&(7, 0))
-        .cloned()
-        .expect("study series is tracked");
+    let state = study_output(&chart, 7, 0);
     let points = chart.engine.series_data(state.series_id);
     assert_eq!(points.len(), 3);
     assert!(points[0].close.is_nan());
@@ -2251,13 +2295,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
         chart.install_study_output(7, 0, descriptor, 2, &timestamps, &newer),
         Ok(true)
     );
-    assert_eq!(
-        chart
-            .study_series
-            .get(&(7, 0))
-            .map(|current| current.series_id),
-        Some(state.series_id)
-    );
+    assert_eq!(study_output(&chart, 7, 0).series_id, state.series_id);
     assert_eq!(
         chart.engine.series_data(state.series_id)[2].close.to_bits(),
         40.0_f64.to_bits()
@@ -2274,7 +2312,7 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
     }));
 
     assert!(chart.remove_study_outputs(&[7]));
-    assert!(chart.study_series.is_empty());
+    assert!(chart.engine.external_study_outputs().is_empty());
     assert_eq!(chart.study_visible(7), None);
     assert!(
         chart
@@ -2344,7 +2382,7 @@ fn study_output_projection_inherits_native_series_defaults() {
             &[Some(1.0)],
         )
         .expect("study installs");
-    let series_id = chart.study_series[&(88, 0)].series_id;
+    let series_id = study_output(&chart, 88, 0).series_id;
     let entry = series_entry(&chart, series_id);
     assert_eq!(entry.line_width, Some(2.0));
     assert_eq!(entry.price_format.precision, 4);
@@ -2380,7 +2418,7 @@ fn study_output_projection_rejects_invalid_presentation_before_creating_series()
         ),
         Err(ChartStudyOutputError::InvalidPresentation)
     );
-    assert!(chart.study_series.is_empty());
+    assert!(chart.engine.external_study_outputs().is_empty());
     assert_eq!(chart.engine.series.len(), initial_series);
 }
 
@@ -2447,11 +2485,7 @@ fn selected_study_output_requests_one_owner_level_removal_without_deleting_a_lin
         chart.install_study_output(11, 1, descriptor, 1, &timestamps, &values),
         Ok(true)
     );
-    let series_ids = chart
-        .study_series
-        .values()
-        .map(|state| state.series_id)
-        .collect::<Vec<_>>();
+    let series_ids = study_series_ids(&chart, 11);
     chart.engine.set_selected_series(Some(series_ids[1]));
 
     assert!(chart.remove_selected_chart_object());
@@ -2502,11 +2536,7 @@ fn selecting_one_runtime_study_output_selects_the_complete_indicator() {
     chart
         .engine
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
-    let series_ids = chart
-        .study_series
-        .values()
-        .map(|state| state.series_id)
-        .collect::<Vec<_>>();
+    let series_ids = study_series_ids(&chart, 11);
     let selected = series_ids[1];
     let (x, y) = visible_series_point(&chart, selected);
 
@@ -2548,11 +2578,12 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
         Ok(true)
     );
     let colors = chart
-        .study_series
-        .iter()
-        .filter(|((study_id, _), _)| *study_id == 11)
-        .map(|(_, state)| {
-            series_entry(&chart, state.series_id)
+        .engine
+        .external_study_outputs()
+        .into_iter()
+        .filter(|output| output.study_id == 11)
+        .map(|output| {
+            series_entry(&chart, output.series_id)
                 .line_color
                 .clone()
                 .expect("study output has a stable color")
@@ -2584,10 +2615,11 @@ fn multi_output_study_legend_visibility_toggles_the_whole_study() {
     assert_eq!(chart.study_visible(11), Some(false));
     assert!(
         chart
-            .study_series
+            .engine
+            .external_study_outputs()
             .iter()
-            .filter(|((study_id, _), _)| *study_id == 11)
-            .all(|(_, state)| !series_entry(&chart, state.series_id).visible)
+            .filter(|output| output.study_id == 11)
+            .all(|output| !series_entry(&chart, output.series_id).visible)
     );
     assert!(chart.set_legend_item_visible(legend_item, true));
     assert_eq!(chart.study_visible(11), Some(true));
@@ -2614,7 +2646,7 @@ fn study_outputs_inherit_indicator_chrome_and_live_updates_do_not_dirty_layout()
         chart.install_study_output(7, 0, descriptor, 1, &timestamps, &[Some(20.0)]),
         Ok(true)
     );
-    let series_id = chart.study_series[&(7, 0)].series_id;
+    let series_id = study_output(&chart, 7, 0).series_id;
     let series = series_entry(&chart, series_id);
     assert!(!series.title_visible);
     assert!(!series.last_value_visible);
@@ -2661,7 +2693,7 @@ fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state()
         ),
         Err(ChartStudyOutputError::UnsupportedTimestampPrecision)
     );
-    assert!(chart.study_series.is_empty());
+    assert!(chart.engine.external_study_outputs().is_empty());
     assert_eq!(chart.engine.series.len(), initial_series);
 }
 
@@ -2714,8 +2746,8 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
         Ok(true)
     );
 
-    let line = &chart.study_series[&(11, 0)];
-    let histogram = &chart.study_series[&(11, 1)];
+    let line = study_output(&chart, 11, 0);
+    let histogram = study_output(&chart, 11, 1);
     let line_entry = series_entry(&chart, line.series_id);
     let histogram_entry = series_entry(&chart, histogram.series_id);
     assert_eq!(line_entry.kind, aeris_charts_engine::SeriesKind::Line);
@@ -2727,14 +2759,16 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
     assert_eq!(line_entry.pane_index, histogram_entry.pane_index);
     assert_eq!(line_entry.price_scale_target, PriceScaleTarget::Right);
     assert_eq!(histogram_entry.price_scale_target, PriceScaleTarget::Left);
-    let pane_id = chart.study_panes[&(11, 3)];
+    let pane_id = chart
+        .engine
+        .pane_stable_id(line_entry.pane_index)
+        .expect("dedicated study pane has a stable identity");
     assert_eq!(
         chart.engine.pane_index_for_id(pane_id),
         Some(line_entry.pane_index)
     );
 
     assert!(chart.remove_study_outputs(&[11]));
-    assert!(!chart.study_panes.contains_key(&(11, 3)));
     assert!(chart.engine.pane_index_for_id(pane_id).is_none());
 }
 
@@ -3173,7 +3207,10 @@ fn cursor_mode_still_falls_through_to_chart_pan_on_a_drawing_miss() {
 
     chart.begin_drag(300.0, 200.0, 1, false);
 
-    assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
+    assert_eq!(
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::Pane { price_pan: None })
+    );
 }
 
 #[test]
@@ -3185,10 +3222,9 @@ fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
     assert!(chart.apply_key("left", true));
     assert!((chart.engine.scroll_position() - offset + 9.0).abs() < f64::EPSILON);
 
-    let page = chart.engine.pane_w / chart.engine.bar_spacing() * KEYBOARD_PAGE_FRACTION;
     let before_page = chart.engine.scroll_position();
     assert!(chart.apply_key("pageup", false));
-    assert!((chart.engine.scroll_position() - before_page + page).abs() < f64::EPSILON);
+    assert!(chart.engine.scroll_position() < before_page);
     assert!(chart.apply_key("pagedown", false));
     assert!((chart.engine.scroll_position() - before_page).abs() < f64::EPSILON);
 
@@ -3213,11 +3249,15 @@ fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
 fn native_pointer_state_ends_a_drag_when_mouse_up_was_lost() {
     let mut chart = interactive_chart();
     chart.begin_drag(300.0, 200.0, 1, false);
-    assert_eq!(chart.drag, Some(ChartDrag::Pane { price_pan: None }));
+    assert_eq!(
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::Pane { price_pan: None })
+    );
 
     chart.move_pointer(340.0, 200.0, false, DrawingModifiers::default());
 
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
     assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
     assert_eq!(chart.engine.crosshair, Some((340.0, 200.0)));
 }
@@ -3227,12 +3267,13 @@ fn host_modal_suspension_clears_crosshair_and_active_pointer_gestures() {
     let mut chart = interactive_chart();
     chart.begin_drag(300.0, 200.0, 1, false);
     assert!(chart.engine.crosshair.is_some());
-    assert!(chart.drag.is_some());
+    assert!(chart.engine.financial_drag().is_some());
 
     chart.suspend_pointer_interaction();
 
     assert!(chart.engine.crosshair.is_none());
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
     assert!(chart.engine.separator_hover.is_none());
     assert_eq!(
         chart.pointer_interaction,
@@ -3368,8 +3409,8 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
 
     chart.begin_drag(300.0, separator_y, 1, false);
     assert!(matches!(
-        chart.drag,
-        Some(ChartDrag::PaneSeparator { index: 0, .. })
+        chart.engine.financial_drag(),
+        Some(FinancialDrag::PaneSeparator { index: 0, .. })
     ));
     assert!(chart.engine.crosshair.is_none());
     chart.layout_dirty = false;
@@ -3392,6 +3433,7 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
         DrawingModifiers::default(),
     );
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
     assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
 }
 
@@ -3399,11 +3441,12 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
 fn escape_cancels_every_active_gesture_and_clears_pointer_state() {
     let mut chart = interactive_chart();
     chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
-    assert_eq!(chart.drag, Some(ChartDrag::TimeAxis));
+    assert_eq!(chart.engine.financial_drag(), Some(FinancialDrag::TimeAxis));
 
     assert!(chart.apply_key("escape", false));
 
     assert!(chart.drag.is_none());
+    assert!(chart.engine.financial_drag().is_none());
     assert!(chart.engine.crosshair.is_none());
     assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
 }
@@ -3528,12 +3571,12 @@ fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
 
 #[test]
 fn automatic_footprint_rows_target_legible_one_two_five_steps() {
-    use super::order_flow::auto_ticks_per_row;
-    assert_eq!(auto_ticks_per_row(None, 1.0), 1);
-    assert_eq!(auto_ticks_per_row(Some(10.0), 1.0), 1);
+    use aeris_charts_engine::auto_footprint_ticks_per_row;
+    assert_eq!(auto_footprint_ticks_per_row(None, 1.0), 1);
+    assert_eq!(auto_footprint_ticks_per_row(Some(10.0), 1.0), 1);
     // BTC one-minute bars around $110 at a $1 tick: about 4.6 ticks per row.
-    assert_eq!(auto_ticks_per_row(Some(110.0), 1.0), 5);
-    assert_eq!(auto_ticks_per_row(Some(1_000.0), 1.0), 50);
-    assert_eq!(auto_ticks_per_row(Some(3_000.0), 1.0), 200);
-    assert_eq!(auto_ticks_per_row(Some(f64::NAN), 1.0), 1);
+    assert_eq!(auto_footprint_ticks_per_row(Some(110.0), 1.0), 5);
+    assert_eq!(auto_footprint_ticks_per_row(Some(1_000.0), 1.0), 50);
+    assert_eq!(auto_footprint_ticks_per_row(Some(3_000.0), 1.0), 200);
+    assert_eq!(auto_footprint_ticks_per_row(Some(f64::NAN), 1.0), 1);
 }

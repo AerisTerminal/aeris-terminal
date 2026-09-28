@@ -12,11 +12,25 @@ use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
+#[cfg(test)]
+use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
-    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_COLORS,
-    EMA_RIBBON_DEFAULT_PERIODS, NativePrimitiveId, PaneId, PriceScaleTarget, TradingIntent,
-    TradingSnapshot,
+    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS,
+    FinancialAppearance, FinancialDrag, FinancialLegendIdentity, FinancialLegendRequest,
+    FinancialLegendTone, FinancialNavigation, HostLegendSeries, IndicatorChromeOptions,
+    IndicatorKind, NativePrimitiveId, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag,
+    TradingIntent, TradingSnapshot,
+};
+pub use aeris_charts_engine::{
+    ExternalStudyError as ChartStudyOutputError,
+    ExternalStudyInputRequirements as ChartStudyInputRequirements,
+    ExternalStudyInputStream as ChartStudyInputStream,
+    ExternalStudyOutputDescriptor as ChartStudyOutputDescriptor,
+    ExternalStudyPaneTarget as ChartStudyPaneTarget, ExternalStudyPlotKind as ChartStudyPlotKind,
+    ExternalStudyPointStyle as ChartStudyPointStyle,
+    ExternalStudyScaleTarget as ChartStudyScaleTarget,
+    ExternalStudyThresholdRegion as ChartStudyThresholdRegion,
 };
 use aeris_charts_render::color::Color;
 use aeris_charts_render::draw_list::{LineStyle, Prim};
@@ -34,18 +48,16 @@ use gpui::{
 };
 use num_traits::ToPrimitive;
 use order_flow::{OrderFlowChartState, OrderFlowStudy};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const SCALE_FACTOR_EPSILON: f32 = 1.0e-4;
 /// How often the surface wakes itself so the candle countdown keeps moving.
 const CHART_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
 const WHEEL_LINE_HEIGHT: f32 = 32.0;
-const KEYBOARD_PAGE_FRACTION: f64 = 0.8;
 const PANE_SEPARATOR_HIT: f64 = 4.0;
 const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
 const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
@@ -60,52 +72,9 @@ fn platform_theme(theme: ChartTheme) -> AerisTheme {
     }
 }
 
-#[derive(Clone, Debug)]
-struct AerisThemeAppearanceDefaults {
-    grid: String,
-    crosshair: String,
-    bullish: String,
-    bearish: String,
-}
-
-fn aeris_theme_appearance_defaults(theme: ChartTheme) -> AerisThemeAppearanceDefaults {
-    let mut engine = ChartEngine::new(1.0, 1.0, 1.0);
-    engine.set_theme(theme);
-    let options = engine.options.get();
-    AerisThemeAppearanceDefaults {
-        grid: options.grid.vert_lines.color.clone(),
-        crosshair: options.crosshair.vert_line.color.clone(),
-        bullish: options.layout.bullish_color.clone(),
-        bearish: options.layout.bearish_color.clone(),
-    }
-}
-
 #[cfg(test)]
 fn aeris_charts_grid_color(theme: ChartTheme) -> String {
-    aeris_theme_appearance_defaults(theme).grid
-}
-
-fn same_css_color(left: &str, right: &str) -> bool {
-    match (Color::parse_css(left), Color::parse_css(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => left.eq_ignore_ascii_case(right),
-    }
-}
-
-fn matches_aeris_theme_color(color: &str, light: &str, dark: &str) -> bool {
-    same_css_color(color, light) || same_css_color(color, dark)
-}
-
-fn is_aeris_grid_default(color: &str) -> bool {
-    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
-    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
-    matches_aeris_theme_color(color, &light.grid, &dark.grid)
-}
-
-fn is_aeris_crosshair_default(color: &str) -> bool {
-    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
-    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
-    matches_aeris_theme_color(color, &light.crosshair, &dark.crosshair)
+    FinancialThemeColors::for_theme(theme).grid.to_string()
 }
 
 fn gpui_theme_color(color: ThemeColor) -> Rgba {
@@ -147,115 +116,6 @@ const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
 const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
 const TEXT_EDIT_PAD: f32 = 4.0;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ChartStudySeriesState {
-    series_id: u32,
-    generation: u64,
-    settings_available: bool,
-    legend_label: Option<String>,
-    input_requirements: ChartStudyInputRequirements,
-}
-
-/// Provider-neutral stream requirements for one runtime study output.
-///
-/// This is metadata only. The market runtime owns the canonical streams and
-/// computes the scalar output; chart integration never retains a tape or book.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ChartStudyInputRequirements(u8);
-
-impl ChartStudyInputRequirements {
-    const BARS_BIT: u8 = 1 << 0;
-    const TRADES_BIT: u8 = 1 << 1;
-    const QUOTES_BIT: u8 = 1 << 2;
-    const DEPTH_BIT: u8 = 1 << 3;
-
-    pub const NONE: Self = Self(0);
-    pub const BARS: Self = Self(Self::BARS_BIT);
-
-    #[must_use]
-    pub const fn with(self, stream: ChartStudyInputStream) -> Self {
-        let bit = match stream {
-            ChartStudyInputStream::Bars => Self::BARS_BIT,
-            ChartStudyInputStream::Trades => Self::TRADES_BIT,
-            ChartStudyInputStream::Quotes => Self::QUOTES_BIT,
-            ChartStudyInputStream::Depth => Self::DEPTH_BIT,
-        };
-        Self(self.0 | bit)
-    }
-
-    #[must_use]
-    pub const fn contains(self, stream: ChartStudyInputStream) -> bool {
-        let bit = match stream {
-            ChartStudyInputStream::Bars => Self::BARS_BIT,
-            ChartStudyInputStream::Trades => Self::TRADES_BIT,
-            ChartStudyInputStream::Quotes => Self::QUOTES_BIT,
-            ChartStudyInputStream::Depth => Self::DEPTH_BIT,
-        };
-        self.0 & bit != 0
-    }
-}
-
-/// One provider-neutral input stream a runtime study may require.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartStudyInputStream {
-    Bars,
-    Trades,
-    Quotes,
-    Depth,
-}
-
-/// Scalar plot family requested by a runtime study output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartStudyPlotKind {
-    Line,
-    Histogram,
-    Area,
-}
-
-/// Chart-host pane placement for one runtime study output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartStudyPaneTarget {
-    Price,
-    Dedicated { group: u8 },
-}
-
-/// Chart-host scale placement inside a study output's pane.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartStudyScaleTarget {
-    Primary,
-    Left,
-    Overlay,
-}
-
-/// Fixed-value background channel requested behind one scalar output.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ChartStudyThresholdRegion {
-    pub lower: f64,
-    pub upper: f64,
-}
-
-/// Semantic per-row styling policy requested by one scalar output.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ChartStudyPointStyle {
-    #[default]
-    Uniform,
-    MomentumHistogram,
-}
-
-/// Borrowed semantic presentation contract for one scalar study output.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ChartStudyOutputDescriptor<'a> {
-    pub title: &'a str,
-    pub legend_label: Option<&'a str>,
-    pub plot: ChartStudyPlotKind,
-    pub pane: ChartStudyPaneTarget,
-    pub scale: ChartStudyScaleTarget,
-    pub settings_available: bool,
-    pub threshold_region: Option<ChartStudyThresholdRegion>,
-    pub point_style: ChartStudyPointStyle,
-    pub input_requirements: ChartStudyInputRequirements,
-}
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
@@ -389,19 +249,47 @@ impl ChartIndicator {
         }
     }
 
-    fn from_engine_kind(kind: &str) -> Option<Self> {
+    fn from_engine_kind(kind: &IndicatorKind) -> Option<Self> {
         Some(match kind {
-            "vwap" => Self::Vwap,
-            "sma" => Self::Sma,
-            "ema" => Self::Ema,
-            "ema_ribbon" => Self::EmaRibbon,
-            "wma" => Self::Wma,
-            "bollinger" => Self::Bollinger,
-            "rsi" => Self::Rsi,
-            "macd" => Self::Macd,
-            "stochastic" => Self::Stochastic,
-            "atr" => Self::Atr,
+            IndicatorKind::Vwap | IndicatorKind::VwapBands { .. } => Self::Vwap,
+            IndicatorKind::Sma { .. } => Self::Sma,
+            IndicatorKind::Ema { .. } => Self::Ema,
+            IndicatorKind::EmaRibbon { .. } => Self::EmaRibbon,
+            IndicatorKind::Wma { .. } => Self::Wma,
+            IndicatorKind::Bollinger { .. } => Self::Bollinger,
+            IndicatorKind::Rsi { .. } => Self::Rsi,
+            IndicatorKind::Macd { .. } => Self::Macd,
+            IndicatorKind::Stochastic { .. } => Self::Stochastic,
+            IndicatorKind::Atr { .. } => Self::Atr,
             _ => return None,
+        })
+    }
+
+    fn engine_kind(self) -> Option<IndicatorKind> {
+        Some(match self {
+            Self::Volume => return None,
+            Self::Vwap => IndicatorKind::Vwap,
+            Self::Sma => IndicatorKind::Sma { period: 20 },
+            Self::Ema => IndicatorKind::Ema { period: 20 },
+            Self::EmaRibbon => IndicatorKind::EmaRibbon {
+                periods: EMA_RIBBON_DEFAULT_PERIODS,
+            },
+            Self::Wma => IndicatorKind::Wma { period: 20 },
+            Self::Bollinger => IndicatorKind::Bollinger {
+                period: 20,
+                deviation: 2.0,
+            },
+            Self::Rsi => IndicatorKind::Rsi { period: 14 },
+            Self::Macd => IndicatorKind::Macd {
+                fast: 12,
+                slow: 26,
+                signal: 9,
+            },
+            Self::Stochastic => IndicatorKind::Stochastic {
+                k_period: 14,
+                d_period: 3,
+            },
+            Self::Atr => IndicatorKind::Atr { period: 14 },
         })
     }
 }
@@ -431,34 +319,6 @@ impl fmt::Display for ChartIndicatorError {
 }
 
 impl std::error::Error for ChartIndicatorError {}
-
-/// Failure to project one runtime-owned scalar study output into Aeris Charts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ChartStudyOutputError {
-    LengthMismatch,
-    UnsupportedTimestampPrecision,
-    NonIncreasingTimestamp,
-    InvalidValue,
-    InvalidPresentation,
-    InstallationRejected,
-}
-
-impl fmt::Display for ChartStudyOutputError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::LengthMismatch => "study timestamps and values must have the same length",
-            Self::UnsupportedTimestampPrecision => {
-                "Aeris Charts scalar series currently require whole-second study timestamps"
-            }
-            Self::NonIncreasingTimestamp => "study output timestamps must strictly increase",
-            Self::InvalidValue => "study output contains a value Aeris Charts cannot render",
-            Self::InvalidPresentation => "study output presentation metadata is invalid",
-            Self::InstallationRejected => "Aeris Charts rejected the study output series",
-        })
-    }
-}
-
-impl std::error::Error for ChartStudyOutputError {}
 
 /// Product-owned price-series presentation forwarded to Aeris Charts `SeriesKind`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -541,163 +401,8 @@ pub struct OrderFlowSweep {
     pub aggressor: aeris_charts_engine::AggressorSide,
 }
 
-/// Durable product-owned presentation preferences for the primary market series
-/// and chart canvas. The values are intentionally renderer-neutral primitives;
-/// Aeris Charts remains the owner that interprets and paints them.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(clippy::struct_excessive_bools)] // Independent product styling toggles, not state-machine flags.
-pub struct ChartAppearanceSettings {
-    pub grid_visible: bool,
-    pub grid_color: String,
-    pub grid_style: u8,
-    pub crosshair_color: String,
-    pub crosshair_width: u8,
-    pub crosshair_style: u8,
-    pub up_color: String,
-    pub down_color: String,
-    pub wick_up_color: String,
-    pub wick_down_color: String,
-    pub border_up_color: String,
-    pub border_down_color: String,
-    pub wick_visible: bool,
-    pub border_visible: bool,
-    pub open_visible: bool,
-    pub thin_bars: bool,
-    pub line_color: String,
-    pub line_width: u8,
-    pub line_style: u8,
-    pub area_top_color: String,
-    pub baseline_top_color: String,
-    pub baseline_bottom_color: String,
-}
-
-impl Default for ChartAppearanceSettings {
-    fn default() -> Self {
-        let defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
-        Self {
-            grid_visible: true,
-            grid_color: defaults.grid,
-            grid_style: 2,
-            crosshair_color: defaults.crosshair,
-            crosshair_width: 1,
-            crosshair_style: 2,
-            up_color: defaults.bullish.clone(),
-            down_color: defaults.bearish.clone(),
-            wick_up_color: defaults.bullish.clone(),
-            wick_down_color: defaults.bearish.clone(),
-            border_up_color: defaults.bullish,
-            border_down_color: defaults.bearish,
-            wick_visible: true,
-            border_visible: true,
-            open_visible: true,
-            thin_bars: true,
-            line_color: "#2196f3".to_string(),
-            line_width: 2,
-            line_style: 0,
-            area_top_color: "#089981".to_string(),
-            baseline_top_color: "#089981".to_string(),
-            baseline_bottom_color: "#f7525f".to_string(),
-        }
-    }
-}
-
-const TRACK_UP: usize = 0;
-const TRACK_DOWN: usize = 1;
-const TRACK_WICK_UP: usize = 2;
-const TRACK_WICK_DOWN: usize = 3;
-const TRACK_BORDER_UP: usize = 4;
-const TRACK_BORDER_DOWN: usize = 5;
-
-fn normalize_theme_color(color: &mut String, active: &str, light: &str, dark: &str) -> bool {
-    let tracks_aeris = matches_aeris_theme_color(color, light, dark);
-    if tracks_aeris {
-        color.clear();
-        color.push_str(active);
-    }
-    tracks_aeris
-}
-
-fn normalize_aeris_appearance(
-    theme: ChartTheme,
-    appearance: &ChartAppearanceSettings,
-) -> (ChartAppearanceSettings, [bool; 6]) {
-    let light = aeris_theme_appearance_defaults(ChartTheme::Light);
-    let dark = aeris_theme_appearance_defaults(ChartTheme::Dark);
-    let active = match theme {
-        ChartTheme::Light => &light,
-        ChartTheme::Dark => &dark,
-    };
-    let mut normalized = appearance.clone();
-    normalize_theme_color(
-        &mut normalized.grid_color,
-        &active.grid,
-        &light.grid,
-        &dark.grid,
-    );
-    normalize_theme_color(
-        &mut normalized.crosshair_color,
-        &active.crosshair,
-        &light.crosshair,
-        &dark.crosshair,
-    );
-    let up = normalize_theme_color(
-        &mut normalized.up_color,
-        &active.bullish,
-        &light.bullish,
-        &dark.bullish,
-    );
-    let down = normalize_theme_color(
-        &mut normalized.down_color,
-        &active.bearish,
-        &light.bearish,
-        &dark.bearish,
-    );
-    let effective_up = normalized.up_color.clone();
-    let effective_down = normalized.down_color.clone();
-    let wick_up = normalize_theme_color(
-        &mut normalized.wick_up_color,
-        &effective_up,
-        &light.bullish,
-        &dark.bullish,
-    );
-    let wick_down = normalize_theme_color(
-        &mut normalized.wick_down_color,
-        &effective_down,
-        &light.bearish,
-        &dark.bearish,
-    );
-    let border_up = normalize_theme_color(
-        &mut normalized.border_up_color,
-        &effective_up,
-        &light.bullish,
-        &dark.bullish,
-    );
-    let border_down = normalize_theme_color(
-        &mut normalized.border_down_color,
-        &effective_down,
-        &light.bearish,
-        &dark.bearish,
-    );
-    (
-        normalized,
-        [up, down, wick_up, wick_down, border_up, border_down],
-    )
-}
-
-fn primary_series_requires_theme_unpin(engine: &ChartEngine, tracking: [bool; 6]) -> bool {
-    engine
-        .series
-        .iter()
-        .find(|series| series.id == 0)
-        .is_some_and(|series| {
-            (tracking[TRACK_UP] && series.up_color.is_some())
-                || (tracking[TRACK_DOWN] && series.down_color.is_some())
-                || (tracking[TRACK_WICK_UP] && series.wick_up_color.is_some())
-                || (tracking[TRACK_WICK_DOWN] && series.wick_down_color.is_some())
-                || (tracking[TRACK_BORDER_UP] && series.border_up_color.is_some())
-                || (tracking[TRACK_BORDER_DOWN] && series.border_down_color.is_some())
-        })
-}
+/// Aeris Charts-owned typed financial appearance, re-exported under the Terminal API name.
+pub type ChartAppearanceSettings = FinancialAppearance;
 
 impl ChartType {
     const fn shows_ohlc_legend(self) -> bool {
@@ -761,18 +466,6 @@ impl ChartType {
             Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,
             Self::Baseline => aeris_charts_engine::SeriesKind::Baseline,
         }
-    }
-}
-
-fn bounded_style_width(width: f64) -> u8 {
-    if width < 1.5 {
-        1
-    } else if width < 2.5 {
-        2
-    } else if width < 3.5 {
-        3
-    } else {
-        4
     }
 }
 
@@ -937,19 +630,7 @@ pub struct DrawingsLockSummary {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ChartDrag {
-    Pane {
-        price_pan: Option<(usize, PriceScaleTarget)>,
-    },
     BrushableRange,
-    TimeAxis,
-    PriceAxis {
-        pane: usize,
-        target: PriceScaleTarget,
-    },
-    PaneSeparator {
-        index: usize,
-        grab_offset_y: f64,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1062,50 +743,11 @@ const LEGEND_LOADING_ICON: &str = "aeris/icons/ui/loader.svg";
 /// One rotation of the legend's loading glyph.
 const LEGEND_LOADING_PERIOD: Duration = Duration::from_millis(700);
 
-fn legend_series_value(snapshots: &[aeris_charts_engine::SeriesValueSnapshot], id: u32) -> String {
-    snapshots
-        .iter()
-        .find(|snapshot| snapshot.series_id == id)
-        .and_then(|snapshot| {
-            snapshot
-                .formatted_value
-                .as_ref()
-                .or(snapshot.formatted_close.as_ref())
-        })
-        .cloned()
-        .unwrap_or_default()
-}
-
 fn platform_tabular_numerals() -> gpui::FontFeatures {
     gpui::FontFeatures(Arc::new(vec![(
         platform_typography().tabular_numerals_feature().to_owned(),
         1,
     )]))
-}
-
-/// One legend readout for a single-output series, or nothing when the series has no value at the
-/// crosshair.
-fn legend_series_values(
-    snapshots: &[aeris_charts_engine::SeriesValueSnapshot],
-    id: u32,
-) -> Vec<LegendValue> {
-    let value = legend_series_value(snapshots, id);
-    if value.is_empty() {
-        Vec::new()
-    } else {
-        vec![LegendValue {
-            text: value,
-            color: None,
-        }]
-    }
-}
-
-fn asset_legend_value_tone(snapshot: &aeris_charts_engine::SeriesValueSnapshot) -> LegendValueTone {
-    match (snapshot.open, snapshot.close) {
-        (Some(open), Some(close)) if close >= open => LegendValueTone::Bullish,
-        (Some(_), Some(_)) => LegendValueTone::Bearish,
-        _ => LegendValueTone::Neutral,
-    }
 }
 
 impl SeriesMutation {
@@ -1163,8 +805,6 @@ pub struct AerisChartView {
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
     product_bars: ProductPriceBars,
-    study_series: BTreeMap<(u64, usize), ChartStudySeriesState>,
-    study_panes: BTreeMap<(u64, u8), PaneId>,
     brushable_tooltip: Option<NativePrimitiveId>,
     brushable_line_width: Option<f64>,
     pending_brush_point: Option<(f64, f64)>,
@@ -1201,22 +841,7 @@ impl AerisChartView {
         &mut self,
         kind: &aeris_charts_engine::ChartSyncEventKind,
     ) -> bool {
-        let changed = match kind {
-            aeris_charts_engine::ChartSyncEventKind::Crosshair { position } => {
-                self.engine.apply_external_crosshair(Some(*position))
-            }
-            aeris_charts_engine::ChartSyncEventKind::ClearCrosshair => {
-                self.engine.apply_external_crosshair(None)
-            }
-            aeris_charts_engine::ChartSyncEventKind::VisibleTimeRange { range } => {
-                let before = self.engine.visible_time_range();
-                self.engine.set_visible_time_range(range.from, range.to);
-                // The engine deliberately publishes local range changes. A host-applied
-                // change is fenced here so it cannot bounce around a link group.
-                let _ = self.engine.take_sync_events();
-                before != self.engine.visible_time_range()
-            }
-        };
+        let changed = self.engine.apply_external_sync_event(kind);
         if changed {
             self.layout_dirty = true;
         }
@@ -1277,8 +902,6 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars: ProductPriceBars::default(),
-            study_series: BTreeMap::new(),
-            study_panes: BTreeMap::new(),
             brushable_tooltip: None,
             brushable_line_width: None,
             pending_brush_point: None,
@@ -1381,8 +1004,6 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars,
-            study_series: BTreeMap::new(),
-            study_panes: BTreeMap::new(),
             brushable_tooltip: None,
             brushable_line_width: None,
             pending_brush_point: None,
@@ -1516,20 +1137,19 @@ impl AerisChartView {
     #[must_use]
     pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
         let target = price_axis_target(left);
-        let (_, _, last_value, title, countdown, bid_ask) =
-            self.primary_series_on_scale(pane, target)?;
+        let primary = self.engine.primary_series_on_price_scale(pane, target)?;
         let options = self.engine.price_scale_options_json(pane, target)?;
         let mut flags = 0;
         if self.product_price_line_visible() {
             flags |= PriceAxisMenuState::PRICE_LINE;
         }
-        if last_value {
+        if primary.last_value_visible {
             flags |= PriceAxisMenuState::LAST_VALUE;
         }
-        if title {
+        if primary.title_visible {
             flags |= PriceAxisMenuState::TITLE;
         }
-        if countdown {
+        if primary.countdown_visible {
             flags |= PriceAxisMenuState::COUNTDOWN;
         }
         if self.indicator_name_labels.visible() {
@@ -1547,7 +1167,7 @@ impl AerisChartView {
         if self.engine.price_scale_inverted_for(pane, target)? {
             flags |= PriceAxisMenuState::INVERT_SCALE;
         }
-        if bid_ask {
+        if primary.bid_ask_visible {
             flags |= PriceAxisMenuState::BID_ASK;
         }
         if json_bool(&options, "align_labels").unwrap_or(true) {
@@ -1581,26 +1201,26 @@ impl AerisChartView {
             return false;
         };
         let applied = match action {
-            PriceAxisMenuAction::TogglePriceLine => {
-                self.toggle_series_flag(0, "price_line_visible")
-            }
-            PriceAxisMenuAction::ToggleLastValue => {
-                self.toggle_series_flag(primary_id, "last_value_visible")
-            }
-            PriceAxisMenuAction::ToggleTitle => {
-                self.toggle_series_flag(primary_id, "title_visible")
-            }
-            PriceAxisMenuAction::ToggleCountdown => {
-                self.toggle_series_flag(primary_id, "countdown_visible")
-            }
+            PriceAxisMenuAction::TogglePriceLine => self
+                .engine
+                .toggle_series_chrome(0, SeriesChromeFlag::PriceLine),
+            PriceAxisMenuAction::ToggleLastValue => self
+                .engine
+                .toggle_series_chrome(primary_id, SeriesChromeFlag::LastValue),
+            PriceAxisMenuAction::ToggleTitle => self
+                .engine
+                .toggle_series_chrome(primary_id, SeriesChromeFlag::Title),
+            PriceAxisMenuAction::ToggleCountdown => self
+                .engine
+                .toggle_series_chrome(primary_id, SeriesChromeFlag::Countdown),
             PriceAxisMenuAction::ToggleIndicatorNameLabels => self.toggle_indicator_name_labels(),
             PriceAxisMenuAction::ToggleIndicatorValueLabels => self.toggle_indicator_value_labels(),
             PriceAxisMenuAction::ToggleIndicatorPriceLines => self.toggle_indicator_price_lines(),
-            PriceAxisMenuAction::ToggleBidAsk => {
-                self.toggle_series_flag(primary_id, "bid_ask_visible")
-            }
+            PriceAxisMenuAction::ToggleBidAsk => self
+                .engine
+                .toggle_series_chrome(primary_id, SeriesChromeFlag::BidAsk),
             PriceAxisMenuAction::ToggleAlignLabels => {
-                self.toggle_price_scale_flag(pane, target, "align_labels", true)
+                self.engine.toggle_price_scale_align_labels(pane, target)
             }
             PriceAxisMenuAction::ToggleAutoScale => {
                 let enabled = self.engine.price_scale_auto_scale_for(pane, target) != Some(true);
@@ -1614,9 +1234,16 @@ impl AerisChartView {
                     .set_price_scale_inverted_for(pane, target, inverted);
                 true
             }
-            PriceAxisMenuAction::SetMode(mode) if mode <= 3 => self
-                .engine
-                .price_scale_apply_options_json(pane, target, &format!(r#"{{"mode":{mode}}}"#)),
+            PriceAxisMenuAction::SetMode(mode) if mode <= 3 => {
+                let mode = match mode {
+                    1 => PriceScaleMode::Logarithmic,
+                    2 => PriceScaleMode::Percentage,
+                    3 => PriceScaleMode::IndexedTo100,
+                    _ => PriceScaleMode::Normal,
+                };
+                self.engine.set_price_scale_mode_for(pane, target, mode);
+                true
+            }
             PriceAxisMenuAction::SetMode(_) => false,
             PriceAxisMenuAction::SetLeft(next_left) => self.move_price_axis(pane, left, next_left),
             PriceAxisMenuAction::SetPrecision(precision) => self.set_price_precision(precision),
@@ -1721,34 +1348,10 @@ impl AerisChartView {
     /// Panics when the platform font options derived from `platform.css` stop
     /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
-        let current_grid_color = self.engine.options.get().grid.vert_lines.color.clone();
-        let grid_tracks_aeris_theme = is_aeris_grid_default(&current_grid_color);
-        let current_crosshair_color = self.engine.options.get().crosshair.vert_line.color.clone();
-        let crosshair_tracks_aeris_theme = is_aeris_crosshair_default(&current_crosshair_color);
         let time_visible = self.engine.time_visible;
         self.theme = theme;
         self.engine.set_theme(theme);
         apply_platform_chrome_contract(&mut self.engine, time_visible);
-        if !grid_tracks_aeris_theme {
-            let patch = serde_json::json!({
-                "grid": {
-                    "vertLines": { "color": current_grid_color },
-                    "horzLines": { "color": current_grid_color },
-                }
-            })
-            .to_string();
-            let _ = self.engine.apply_options(&patch);
-        }
-        if !crosshair_tracks_aeris_theme {
-            let patch = serde_json::json!({
-                "crosshair": {
-                    "vertLine": { "color": current_crosshair_color },
-                    "horzLine": { "color": current_crosshair_color },
-                }
-            })
-            .to_string();
-            let _ = self.engine.apply_options(&patch);
-        }
         self.invalidate_series_layout();
     }
 
@@ -1824,11 +1427,7 @@ impl AerisChartView {
         if series == 0 {
             return false;
         }
-        if let Some(study_id) = self
-            .study_series
-            .iter()
-            .find_map(|((study_id, _), state)| (state.series_id == series).then_some(*study_id))
-        {
+        if let Some(study_id) = self.engine.external_study_for_series(series) {
             self.pending_study_remove = Some(study_id);
             self.engine.set_selected_series(None);
             return true;
@@ -1845,15 +1444,9 @@ impl AerisChartView {
             self.engine.set_series_visible(series, false);
             self.volume_legend = LegendPresence::Absent;
             self.engine.set_selected_series(None);
-        } else if let Some(binding) = self
-            .engine
-            .indicator_info(series)
-            .map(|info| info.binding_id)
+        } else if !self.engine.remove_indicator_for_series(series)
+            && !self.engine.remove_series(series)
         {
-            if !self.remove_legend_indicator(LegendItem::Indicator(binding)) {
-                return false;
-            }
-        } else if !self.engine.remove_series(series) {
             return false;
         }
         self.invalidate_series_layout();
@@ -2147,69 +1740,26 @@ impl AerisChartView {
             .unwrap_or(self.instrument_price_precision)
             .min(18);
         let min_move = price_format_min_move(precision);
-        let json = format!(r#"{{"type":"price","precision":{precision},"min_move":{min_move}}}"#);
-        let Some((pane, target)) = self
-            .engine
-            .series_entries()
-            .iter()
-            .find(|series| series.id == 0 && !series.removed)
-            .map(|series| (series.pane_index, series.price_scale_target))
-        else {
+        let Some((pane, target)) = self.engine.series_price_scale(0) else {
             return;
         };
-        let series_ids = self
-            .engine
-            .series_entries()
-            .iter()
-            .filter(|series| {
-                !series.removed && series.pane_index == pane && series.price_scale_target == target
-            })
-            .map(|series| series.id)
-            .collect::<Vec<_>>();
-        for id in series_ids {
-            let applied = self.engine.series_apply_price_format_json(id, &json);
-            debug_assert!(applied);
-        }
+        let applied =
+            self.engine
+                .set_price_format_for_scale(pane, target, u32::from(precision), min_move);
+        debug_assert!(applied);
     }
 
     fn primary_series_id_on_scale(&self, pane: usize, target: PriceScaleTarget) -> Option<u32> {
-        self.primary_series_on_scale(pane, target)
-            .map(|(id, ..)| id)
-    }
-
-    fn primary_series_on_scale(
-        &self,
-        pane: usize,
-        target: PriceScaleTarget,
-    ) -> Option<(u32, bool, bool, bool, bool, bool)> {
-        let mut fallback = None;
-        for series in self.engine.series_entries() {
-            if series.removed || series.pane_index != pane || series.price_scale_target != target {
-                continue;
-            }
-            let chrome = (
-                series.id,
-                series.price_line_visible,
-                series.last_value_visible,
-                series.title_visible,
-                series.countdown_visible,
-                series.bid_ask_visible,
-            );
-            if series.id == 0 {
-                return Some(chrome);
-            }
-            if series.visible && fallback.is_none() {
-                fallback = Some(chrome);
-            }
-        }
-        fallback
+        self.engine
+            .primary_series_on_price_scale(pane, target)
+            .map(|series| series.series_id)
     }
 
     fn product_price_line_visible(&self) -> bool {
-        self.engine
-            .series_entries()
-            .iter()
-            .any(|series| series.id == 0 && !series.removed && series.price_line_visible)
+        [PriceScaleTarget::Right, PriceScaleTarget::Left]
+            .into_iter()
+            .filter_map(|target| self.engine.primary_series_on_price_scale(0, target))
+            .any(|series| series.series_id == 0 && series.price_line_visible)
     }
 
     /// Host-owned price-series chart type forwarded to Aeris Charts.
@@ -2222,84 +1772,14 @@ impl AerisChartView {
     /// series/options internals to the desktop shell.
     #[must_use]
     pub fn appearance_settings(&self) -> ChartAppearanceSettings {
-        let mut appearance = ChartAppearanceSettings::default();
-        let options = self.engine.options.get();
-        appearance.grid_visible =
-            options.grid.vert_lines.visible && options.grid.horz_lines.visible;
-        appearance
-            .grid_color
-            .clone_from(&options.grid.vert_lines.color);
-        appearance.grid_style = options.grid.vert_lines.style.min(4);
-        appearance
-            .crosshair_color
-            .clone_from(&options.crosshair.vert_line.color);
-        appearance.crosshair_width = bounded_style_width(options.crosshair.vert_line.width);
-        appearance.crosshair_style = options.crosshair.vert_line.style.min(4);
-
-        let Some(series_json) = self.engine.series_options_json(0) else {
-            return appearance;
-        };
-        let Ok(serde_json::Value::Object(series)) =
-            serde_json::from_str::<serde_json::Value>(&series_json)
-        else {
-            return appearance;
-        };
-        let color = |key: &str, fallback: &str| {
-            series
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(fallback)
-                .to_string()
-        };
-        appearance.up_color = color("up_color", &options.layout.bullish_color);
-        appearance.down_color = color("down_color", &options.layout.bearish_color);
-        appearance.wick_up_color = color("wick_up_color", &appearance.up_color);
-        appearance.wick_down_color = color("wick_down_color", &appearance.down_color);
-        appearance.border_up_color = color("border_up_color", &appearance.up_color);
-        appearance.border_down_color = color("border_down_color", &appearance.down_color);
-        appearance.line_color = color("color", &appearance.line_color);
-        appearance.area_top_color = color("area_top_color", &appearance.area_top_color);
-        appearance.baseline_top_color = color("top_line_color", &appearance.baseline_top_color);
-        appearance.baseline_bottom_color =
-            color("bottom_line_color", &appearance.baseline_bottom_color);
-        appearance.wick_visible = series
-            .get("wick_visible")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        appearance.border_visible = series
-            .get("border_visible")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        appearance.open_visible = series
-            .get("open_visible")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        appearance.thin_bars = series
-            .get("thin_bars")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        appearance.line_width = series
-            .get("line_width")
-            .and_then(serde_json::Value::as_f64)
-            .map_or(appearance.line_width, bounded_style_width);
-        appearance.line_style = series
-            .get("line_style")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u8::try_from(value).ok())
-            .map_or(appearance.line_style, |value| value.min(4));
-        appearance
+        self.engine.financial_appearance(0).unwrap_or_default()
     }
 
     /// Applies host-authored series/canvas presentation in place. Market data,
     /// viewport state and provider ownership are untouched.
     pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        let Ok(canvas_changed) = self.apply_canvas_appearance_settings(appearance) else {
-            return false;
-        };
-        let Ok(series_changed) = self.apply_series_appearance_settings(appearance) else {
-            return false;
-        };
+        let canvas_changed = self.apply_canvas_appearance_settings(appearance);
+        let series_changed = self.apply_series_appearance_settings(appearance);
         if !canvas_changed && !series_changed {
             return false;
         }
@@ -2311,128 +1791,39 @@ impl AerisChartView {
     /// byte-for-byte untouched so a grid/crosshair edit cannot perturb price
     /// series styling such as area fills, candle colors, or line appearance.
     pub fn set_canvas_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        match self.apply_canvas_appearance_settings(appearance) {
-            Ok(true) => {
-                self.mark_user_state_changed();
-                true
-            }
-            Ok(false) | Err(()) => false,
+        if self.apply_canvas_appearance_settings(appearance) {
+            self.mark_user_state_changed();
+            true
+        } else {
+            false
         }
     }
 
     /// Applies only primary-series presentation. Canvas options are left
     /// untouched so series edits cannot rewrite grid or crosshair styling.
     pub fn set_series_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        match self.apply_series_appearance_settings(appearance) {
-            Ok(true) => {
-                self.mark_user_state_changed();
-                true
-            }
-            Ok(false) | Err(()) => false,
+        if self.apply_series_appearance_settings(appearance) {
+            self.mark_user_state_changed();
+            true
+        } else {
+            false
         }
     }
 
-    fn apply_canvas_appearance_settings(
-        &mut self,
-        appearance: &ChartAppearanceSettings,
-    ) -> Result<bool, ()> {
-        let (appearance, _) = normalize_aeris_appearance(self.theme, appearance);
-        let current = self.appearance_settings();
-        if current.grid_visible == appearance.grid_visible
-            && current.grid_color == appearance.grid_color
-            && current.grid_style == appearance.grid_style
-            && current.crosshair_color == appearance.crosshair_color
-            && current.crosshair_width == appearance.crosshair_width
-            && current.crosshair_style == appearance.crosshair_style
-        {
-            return Ok(false);
+    fn apply_canvas_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
+        let changed = self.engine.apply_financial_canvas_appearance(appearance);
+        if changed {
+            self.invalidate_series_frame();
         }
-        let chart_patch = serde_json::json!({
-            "grid": {
-                "vertLines": {
-                    "visible": appearance.grid_visible,
-                    "color": appearance.grid_color,
-                    "style": appearance.grid_style.min(4),
-                },
-                "horzLines": {
-                    "visible": appearance.grid_visible,
-                    "color": appearance.grid_color,
-                    "style": appearance.grid_style.min(4),
-                }
-            },
-            "crosshair": {
-                "vertLine": {
-                    "color": appearance.crosshair_color,
-                    "width": appearance.crosshair_width.clamp(1, 4),
-                    "style": appearance.crosshair_style.min(4),
-                },
-                "horzLine": {
-                    "color": appearance.crosshair_color,
-                    "width": appearance.crosshair_width.clamp(1, 4),
-                    "style": appearance.crosshair_style.min(4),
-                }
-            }
-        })
-        .to_string();
-        if self.engine.apply_options(&chart_patch).is_err() {
-            return Err(());
-        }
-        self.invalidate_series_frame();
-        Ok(true)
+        changed
     }
 
-    fn apply_series_appearance_settings(
-        &mut self,
-        appearance: &ChartAppearanceSettings,
-    ) -> Result<bool, ()> {
-        let (appearance, tracking) = normalize_aeris_appearance(self.theme, appearance);
-        let current = self.appearance_settings();
-        let primary_series_requires_unpin =
-            primary_series_requires_theme_unpin(&self.engine, tracking);
-        if current.up_color == appearance.up_color
-            && current.down_color == appearance.down_color
-            && current.wick_up_color == appearance.wick_up_color
-            && current.wick_down_color == appearance.wick_down_color
-            && current.border_up_color == appearance.border_up_color
-            && current.border_down_color == appearance.border_down_color
-            && current.wick_visible == appearance.wick_visible
-            && current.border_visible == appearance.border_visible
-            && current.open_visible == appearance.open_visible
-            && current.thin_bars == appearance.thin_bars
-            && current.line_color == appearance.line_color
-            && current.line_width == appearance.line_width
-            && current.line_style == appearance.line_style
-            && current.area_top_color == appearance.area_top_color
-            && current.baseline_top_color == appearance.baseline_top_color
-            && current.baseline_bottom_color == appearance.baseline_bottom_color
-            && !primary_series_requires_unpin
-        {
-            return Ok(false);
+    fn apply_series_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
+        let changed = self.engine.apply_financial_series_appearance(0, appearance);
+        if changed {
+            self.invalidate_series_frame();
         }
-        let series_patch = serde_json::json!({
-            "up_color": if tracking[TRACK_UP] { "" } else { appearance.up_color.as_str() },
-            "down_color": if tracking[TRACK_DOWN] { "" } else { appearance.down_color.as_str() },
-            "wick_up_color": if tracking[TRACK_WICK_UP] { "" } else { appearance.wick_up_color.as_str() },
-            "wick_down_color": if tracking[TRACK_WICK_DOWN] { "" } else { appearance.wick_down_color.as_str() },
-            "border_up_color": if tracking[TRACK_BORDER_UP] { "" } else { appearance.border_up_color.as_str() },
-            "border_down_color": if tracking[TRACK_BORDER_DOWN] { "" } else { appearance.border_down_color.as_str() },
-            "wick_visible": appearance.wick_visible,
-            "border_visible": appearance.border_visible,
-            "open_visible": appearance.open_visible,
-            "thin_bars": appearance.thin_bars,
-            "color": appearance.line_color,
-            "line_width": appearance.line_width.clamp(1, 4),
-            "line_style": appearance.line_style.min(4),
-            "area_top_color": appearance.area_top_color,
-            "top_line_color": appearance.baseline_top_color,
-            "bottom_line_color": appearance.baseline_bottom_color,
-        })
-        .to_string();
-        if !self.engine.series_apply_options_json(0, &series_patch) {
-            return Err(());
-        }
-        self.invalidate_series_frame();
-        Ok(true)
+        changed
     }
 
     /// Restores Aeris Charts-owned styling through the chart engine's canonical reset API.
@@ -2461,7 +1852,7 @@ impl AerisChartView {
     /// and temporary modifier-driven OHLC magnet state.
     #[must_use]
     pub fn crosshair_mode(&self) -> u8 {
-        self.engine.options.get().crosshair.mode
+        self.engine.configured_crosshair_mode()
     }
 
     /// Returns the engine-resolved height of the visible time-axis strip.
@@ -2581,11 +1972,7 @@ impl AerisChartView {
 
     /// Applies one stable Aeris Charts crosshair mode.
     pub fn set_crosshair_mode(&mut self, mode: u8) -> bool {
-        if mode > 3 || self.crosshair_mode() == mode {
-            return false;
-        }
-        let patch = serde_json::json!({ "crosshair": { "mode": mode } }).to_string();
-        if self.engine.apply_options(&patch).is_err() {
+        if !self.engine.set_configured_crosshair_mode(mode) {
             return false;
         }
         self.mark_user_state_changed();
@@ -2847,84 +2234,13 @@ impl AerisChartView {
         }
     }
 
-    fn toggle_series_flag(&mut self, id: u32, key: &str) -> bool {
-        let current = self.engine.series_entries().iter().find_map(|series| {
-            if series.id != id || series.removed {
-                return None;
-            }
-            match key {
-                "price_line_visible" => Some(series.price_line_visible),
-                "last_value_visible" => Some(series.last_value_visible),
-                "title_visible" => Some(series.title_visible),
-                "countdown_visible" => Some(series.countdown_visible),
-                "bid_ask_visible" => Some(series.bid_ask_visible),
-                _ => None,
-            }
-        });
-        let Some(current) = current else {
-            return false;
-        };
-        self.engine
-            .series_apply_options_json(id, &format!(r#"{{"{key}":{}}}"#, !current))
-    }
-
-    fn toggle_price_scale_flag(
-        &mut self,
-        pane: usize,
-        target: PriceScaleTarget,
-        key: &str,
-        default: bool,
-    ) -> bool {
-        let current = self
-            .engine
-            .price_scale_options_json(pane, target)
-            .as_deref()
-            .and_then(|options| json_bool(options, key))
-            .unwrap_or(default);
-        self.engine.price_scale_apply_options_json(
-            pane,
-            target,
-            &format!(r#"{{"{key}":{}}}"#, !current),
-        )
-    }
-
     fn move_price_axis(&mut self, pane: usize, from_left: bool, to_left: bool) -> bool {
         if from_left == to_left {
             return true;
         }
         let from = price_axis_target(from_left);
         let to = price_axis_target(to_left);
-        let ids: Vec<u32> = self
-            .engine
-            .series_entries()
-            .iter()
-            .filter(|series| {
-                !series.removed && series.pane_index == pane && series.price_scale_target == from
-            })
-            .map(|series| series.id)
-            .collect();
-        if ids.is_empty() {
-            return false;
-        }
-        let options = self.engine.price_scale_options_json(pane, from);
-        for id in ids {
-            self.engine.set_series_price_scale(id, to);
-        }
-        if !self.engine.set_price_scale_visible_for(pane, to, true) {
-            return false;
-        }
-        if let Some(options) = options {
-            let _ = self
-                .engine
-                .price_scale_apply_options_json(pane, to, &options);
-        }
-        let still_used = self.engine.series_entries().iter().any(|series| {
-            !series.removed && series.pane_index == pane && series.price_scale_target == from
-        });
-        if !still_used {
-            let _ = self.engine.set_price_scale_visible_for(pane, from, false);
-        }
-        true
+        self.engine.rebind_price_scale_series(pane, from, to)
     }
 
     fn set_price_precision(&mut self, precision: Option<u8>) -> bool {
@@ -2959,25 +2275,8 @@ impl AerisChartView {
         self.pin_host_clock();
         let dimensions = (width, height, scale_factor);
         let dimensions_changed = self.built_for != dimensions;
-        let layout_recomputed = dimensions_changed || self.layout_dirty;
-        if !layout_recomputed
-            && !self.engine.frame_requires_layout()
-            && !self.engine.frame_requires_axis()
-            && !self.frame.panes.is_empty()
-        {
-            return false;
-        }
-
         if dimensions_changed {
-            if self.built_for.2 > 0.0
-                && (self.built_for.2 - scale_factor).abs() > SCALE_FACTOR_EPSILON
-            {
-                self.renderer.invalidate_caches();
-            }
             self.built_for = dimensions;
-            self.engine.css_width = f64::from(width);
-            self.engine.css_height = f64::from(height);
-            self.engine.dpr = f64::from(scale_factor);
         }
 
         let layout = self.engine.options.get().layout.clone();
@@ -3013,26 +2312,32 @@ impl AerisChartView {
             )
         };
 
-        if layout_recomputed {
-            self.engine
-                .recompute_layout_with_measure(true, measure, countdown_measure);
-            if !self.fitted {
-                self.engine.fit_content();
-                self.fitted = true;
-                self.engine
-                    .recompute_layout_with_measure(true, measure, countdown_measure);
-            }
-            self.layout_dirty = false;
+        let fit_content = !self.fitted;
+        let preparation = self.engine.prepare_financial_frame_with_measure(
+            aeris_charts_engine::FinancialFrameRequest {
+                width: f64::from(width),
+                height: f64::from(height),
+                dpr: f64::from(scale_factor),
+                force_layout: self.layout_dirty,
+                fit_content,
+                frame: &mut self.frame,
+                axis_primitives: &mut self.axis_prims,
+            },
+            measure,
+            countdown_measure,
+        );
+        if !preparation.frame_built {
+            return false;
         }
-
-        let max_label_width = (layout.font_size + 4.0) * 5.0 / 8.0
-            * f64::from(self.engine.tick_mark_max_character_length.max(1));
-        let axis_frame = self
-            .engine
-            .build_axis_frame(max_label_width, measure, countdown_measure);
-        self.engine.build_frame_into(&mut self.frame);
-        self.engine
-            .build_axis_primitives_into(&axis_frame, &mut self.axis_prims, |_| 0.0);
+        if preparation.dpr_changed {
+            self.renderer.invalidate_caches();
+        }
+        if preparation.layout_recomputed {
+            self.layout_dirty = false;
+            self.fitted = true;
+        }
+        #[cfg(feature = "diagnostics")]
+        let layout_recomputed = preparation.layout_recomputed;
         let legend_layout_changed = self.sync_legend_pane_layout();
         #[cfg(feature = "diagnostics")]
         {
@@ -3389,13 +2694,15 @@ impl Render for AerisChartView {
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
         let appearance = self.appearance_settings();
+        let bullish = appearance.effective_up_color(self.theme);
+        let bearish = appearance.effective_down_color(self.theme);
         let legends = chart_legend_layers(
             &entity,
             &self.legend_rows(),
             &self.legend_panes,
             self.theme,
-            &appearance.up_color,
-            &appearance.down_color,
+            &bullish,
+            &bearish,
             self.asset_loading.is_present(),
         );
         let text_caret = self.text_caret_overlay(window);
