@@ -432,6 +432,20 @@ mod tests {
     }
 
     #[test]
+    fn stacked_split_icon_keeps_sixteen_pixel_snapped_geometry() {
+        let bytes = AerisAssets
+            .load(UiIcon::SplitStacked.path().as_ref())
+            .expect("asset lookup")
+            .expect("embedded stacked split icon");
+        let svg = std::str::from_utf8(&bytes).expect("UTF-8 SVG");
+
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
+        assert!(!svg.contains("transform="));
+        assert!(svg.contains("M3 6.75A3.75"));
+        assert!(svg.contains("Zm0 6v4.5A3.75"));
+    }
+
+    #[test]
     fn list_filters_the_asset_namespace() {
         let assets = AerisAssets;
         assert_eq!(
