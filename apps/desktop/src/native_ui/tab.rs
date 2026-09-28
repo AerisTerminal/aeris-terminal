@@ -27,6 +27,7 @@ pub(crate) struct Tab {
     selected: bool,
     segmented: bool,
     resting_fill: Option<ThemeColor>,
+    selected_fill: Option<ThemeColor>,
     children: Vec<AnyElement>,
 }
 
@@ -39,6 +40,7 @@ impl Tab {
             selected: false,
             segmented: false,
             resting_fill: None,
+            selected_fill: None,
             children: Vec::new(),
         }
     }
@@ -61,6 +63,13 @@ impl Tab {
     /// the shared secondary tab container.
     pub(crate) const fn resting_fill(mut self, fill: ThemeColor) -> Self {
         self.resting_fill = Some(fill);
+        self
+    }
+
+    /// Overrides the selected-state fill when selection must remain on the
+    /// same semantic surface instead of applying the shared active overlay.
+    pub(crate) const fn selected_fill(mut self, fill: ThemeColor) -> Self {
+        self.selected_fill = Some(fill);
         self
     }
 }
@@ -89,7 +98,9 @@ impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
         let resting_fill = self.resting_fill.unwrap_or(colors.surface_secondary);
-        let selected_fill = colors.active_bg.over(resting_fill);
+        let selected_fill = self
+            .selected_fill
+            .unwrap_or_else(|| colors.active_bg.over(resting_fill));
         let resting_border = resting_fill;
         let mut tab = self
             .base
@@ -152,8 +163,11 @@ mod tests {
             aeris_design_system::AerisTheme::light(),
             aeris_design_system::AerisTheme::dark(),
         ] {
-            let tab = Tab::new("surface_tab", &theme).resting_fill(theme.colors.surface);
+            let tab = Tab::new("surface_tab", &theme)
+                .resting_fill(theme.colors.surface)
+                .selected_fill(theme.colors.surface);
             assert_eq!(tab.resting_fill, Some(theme.colors.surface));
+            assert_eq!(tab.selected_fill, Some(theme.colors.surface));
         }
     }
 }
