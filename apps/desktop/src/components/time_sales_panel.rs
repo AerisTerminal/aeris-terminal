@@ -36,6 +36,7 @@ pub(super) fn time_sales_panel(
     let side_filter_app = app.clone();
     let volume_filter_app = app.clone();
     let range_app = app.clone();
+    let reset_app = app.clone();
     let symbol = div()
         .pr_1()
         .text_color(gpui_color(theme.colors.text_muted))
@@ -93,6 +94,14 @@ pub(super) fn time_sales_panel(
                     range_label,
                     move |cx| {
                         range_app.update(cx, WorkspaceSurface::cycle_time_sales_price_filter);
+                    },
+                    theme,
+                ))
+                .child(time_sales_filter_button(
+                    "time_sales_reset",
+                    "Reset",
+                    move |cx| {
+                        reset_app.update(cx, WorkspaceSurface::reset_time_sales_filter);
                     },
                     theme,
                 )),
@@ -235,9 +244,12 @@ fn time_sales_filter_button(
         .flex()
         .items_center()
         .rounded(px(3.0))
+        .border(px(theme.dimensions.border_width))
+        .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface_secondary))
-        .text_color(gpui_color(theme.colors.text_secondary))
+        .text_color(gpui_color(theme.colors.text_primary))
         .text_xs()
+        .whitespace_nowrap()
         .cursor_pointer()
         .child(label.into())
         .on_click(move |_, _, cx| on_click(cx))

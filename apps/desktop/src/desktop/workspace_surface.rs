@@ -3570,6 +3570,12 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    pub(super) fn reset_time_sales_filter(&mut self, cx: &mut Context<Self>) {
+        if self.time_sales_filter.reset() {
+            cx.notify();
+        }
+    }
+
     pub(super) fn suspend_chart_pointer(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, _| chart.suspend_pointer_interaction());

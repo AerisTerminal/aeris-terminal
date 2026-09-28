@@ -9,11 +9,11 @@ use super::{
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
     RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState, SidePanel, SidePanelVisibility,
     SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP,
-    TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeframeMenuGroup,
-    WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand,
-    WindowMoveGestureEvent, WindowMoveGestureTransition, WorkspaceDragState,
-    WorkspaceMaximizeTransition, active_workspace_after_close, aeris_chart_theme,
-    bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
+    TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter,
+    TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
+    WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
+    WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
+    aeris_chart_theme, bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
     catalog_rejection_message, chart_position_id, chart_status_detail, chart_surface_notice,
     chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
@@ -1952,6 +1952,18 @@ fn time_sales_is_an_independent_market_panel_with_a_stable_persisted_bit() {
         SidePanelVisibility::from_persisted(u32::MAX),
         SidePanelVisibility(0b111)
     );
+}
+
+#[test]
+fn time_sales_filter_reset_restores_every_default_atomically() {
+    let mut filter = TimeSalesFilter {
+        side: TimeSalesSideFilter::Sell,
+        minimum_quantity: 100.0,
+        price_range_ticks: Some(50),
+    };
+    assert!(filter.reset());
+    assert_eq!(filter, TimeSalesFilter::default());
+    assert!(!filter.reset(), "resetting defaults is an idempotent no-op");
 }
 
 #[test]

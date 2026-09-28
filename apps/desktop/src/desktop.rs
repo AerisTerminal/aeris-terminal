@@ -904,6 +904,17 @@ impl Default for TimeSalesFilter {
     }
 }
 
+impl TimeSalesFilter {
+    fn reset(&mut self) -> bool {
+        let default = Self::default();
+        if *self == default {
+            return false;
+        }
+        *self = default;
+        true
+    }
+}
+
 impl Default for TradingPnlState {
     fn default() -> Self {
         Self {
