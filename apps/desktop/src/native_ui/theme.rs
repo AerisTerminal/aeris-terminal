@@ -144,9 +144,9 @@ mod tests {
             assert_eq!(destructive.fill, theme.colors.danger);
             assert_eq!(destructive.foreground, theme.colors.danger_foreground);
 
-            let (input_fill, input_border, focus) = input_appearance(&theme);
-            assert_eq!(input_fill, secondary.fill);
-            assert_eq!(input_border, secondary.border.unwrap());
+            let (field_fill, field_border, focus) = input_appearance(&theme);
+            assert_eq!(field_fill, secondary.fill);
+            assert_eq!(field_border, secondary.border.unwrap());
             assert_eq!(focus, theme.colors.ring);
         }
     }

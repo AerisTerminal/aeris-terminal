@@ -827,8 +827,8 @@ fn workspace_tab_content(
     let change_color = values
         .change
         .map_or(theme.colors.text_muted, |value| match value.cmp(&0) {
-            std::cmp::Ordering::Less => theme.colors.market_down,
-            std::cmp::Ordering::Greater => theme.colors.market_up,
+            std::cmp::Ordering::Less => theme.colors.text_negative,
+            std::cmp::Ordering::Greater => theme.colors.text_positive,
             std::cmp::Ordering::Equal => theme.colors.text_secondary,
         });
     let exchange = match surface.provider {

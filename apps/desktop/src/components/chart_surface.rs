@@ -2342,8 +2342,8 @@ fn watchlist_row_content(row: &WatchlistRow, theme: &AerisTheme) -> Stateful<Div
     let tone = values
         .change
         .map_or(colors.text_muted, |value| match value.cmp(&0) {
-            std::cmp::Ordering::Less => colors.market_down,
-            std::cmp::Ordering::Greater => colors.market_up,
+            std::cmp::Ordering::Less => colors.text_negative,
+            std::cmp::Ordering::Greater => colors.text_positive,
             std::cmp::Ordering::Equal => colors.text_secondary,
         });
     div()

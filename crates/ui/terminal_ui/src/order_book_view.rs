@@ -1331,6 +1331,25 @@ enum BookColumnSide {
     Ask,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OrderBookSideAppearance {
+    fill: ThemeColor,
+    text: ThemeColor,
+}
+
+fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
+    match side {
+        BookColumnSide::Bid => OrderBookSideAppearance {
+            fill: theme.colors.positive_subtle,
+            text: theme.colors.text_positive,
+        },
+        BookColumnSide::Ask => OrderBookSideAppearance {
+            fill: theme.colors.negative_subtle,
+            text: theme.colors.text_negative,
+        },
+    }
+}
+
 const fn order_book_level_side(side: BookColumnSide) -> OrderBookLevelSide {
     match side {
         BookColumnSide::Bid => OrderBookLevelSide::Bid,
@@ -1436,9 +1455,10 @@ fn render_level_row(
 ) -> impl IntoElement + use<> {
     let theme = interaction.theme;
     let colors = theme.colors;
-    let (price_color, row_id) = match side {
-        BookColumnSide::Bid => (colors.primary, "order_book_bid_row"),
-        BookColumnSide::Ask => (colors.danger, "order_book_ask_row"),
+    let appearance = order_book_side_appearance(theme, side);
+    let row_id = match side {
+        BookColumnSide::Bid => "order_book_bid_row",
+        BookColumnSide::Ask => "order_book_ask_row",
     };
     let click_side = order_book_level_side(side);
     let click_price = level.price;
@@ -1459,7 +1479,7 @@ fn render_level_row(
         .map(|order| working_order_drag(order, level.price, frame.price_scale, interaction.theme));
     let context = LevelCellContext {
         columns,
-        price_color,
+        price_color: appearance.text,
         theme,
         maximum_quantity: stats.maximum_quantity,
         maximum_trade_quantity: stats.maximum_trade_quantity,
@@ -1529,9 +1549,10 @@ fn render_empty_price_tick(
 ) -> impl IntoElement + use<> {
     let theme = interaction.theme;
     let colors = theme.colors;
-    let (price_color, row_id) = match side {
-        BookColumnSide::Bid => (colors.primary, "order_book_bid_price_tick"),
-        BookColumnSide::Ask => (colors.danger, "order_book_ask_price_tick"),
+    let appearance = order_book_side_appearance(theme, side);
+    let row_id = match side {
+        BookColumnSide::Bid => "order_book_bid_price_tick",
+        BookColumnSide::Ask => "order_book_ask_price_tick",
     };
     let click_side = order_book_level_side(side);
     let order_book = interaction.order_book.clone();
@@ -1589,7 +1610,7 @@ fn render_empty_price_tick(
                         columns,
                         price,
                         price_scale,
-                        price_color,
+                        price_color: appearance.text,
                         quantity_scale,
                         trade_volumes,
                         working_order,
@@ -1654,7 +1675,7 @@ fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
             width,
             context.trade_volumes.sell,
             context.quantity_scale,
-            context.interaction.theme.colors.danger,
+            order_book_side_appearance(context.interaction.theme, BookColumnSide::Ask),
             true,
             context.maximum_trade_quantity,
         )
@@ -1663,7 +1684,7 @@ fn render_empty_price_cell(context: &EmptyPriceCellContext<'_>) -> AnyElement {
             width,
             context.trade_volumes.buy,
             context.quantity_scale,
-            context.interaction.theme.colors.primary,
+            order_book_side_appearance(context.interaction.theme, BookColumnSide::Bid),
             false,
             context.maximum_trade_quantity,
         )
@@ -1723,7 +1744,7 @@ fn render_level_cell(
         OrderBookColumn::Bid => quantity_cell(
             width,
             (side == BookColumnSide::Bid).then_some(level),
-            context.theme.colors.primary,
+            order_book_side_appearance(context.theme, BookColumnSide::Bid),
             true,
             context.maximum_quantity,
         )
@@ -1732,7 +1753,7 @@ fn render_level_cell(
             width,
             context.trade_volumes.sell,
             context.quantity_scale,
-            context.theme.colors.danger,
+            order_book_side_appearance(context.theme, BookColumnSide::Ask),
             true,
             context.maximum_trade_quantity,
         )
@@ -1747,7 +1768,7 @@ fn render_level_cell(
             width,
             context.trade_volumes.buy,
             context.quantity_scale,
-            context.theme.colors.primary,
+            order_book_side_appearance(context.theme, BookColumnSide::Bid),
             false,
             context.maximum_trade_quantity,
         )
@@ -1755,7 +1776,7 @@ fn render_level_cell(
         OrderBookColumn::Ask => quantity_cell(
             width,
             (side == BookColumnSide::Ask).then_some(level),
-            context.theme.colors.danger,
+            order_book_side_appearance(context.theme, BookColumnSide::Ask),
             false,
             context.maximum_quantity,
         )
@@ -1839,8 +1860,8 @@ fn pnl_cell(
     let pnl = marker.and_then(|marker| pnl_at_price(marker, price, price_scale));
     let color = pnl.map_or(theme.colors.text_secondary, |value| {
         match value.units().cmp(&0) {
-            std::cmp::Ordering::Greater => theme.colors.primary,
-            std::cmp::Ordering::Less => theme.colors.danger,
+            std::cmp::Ordering::Greater => theme.colors.text_positive,
+            std::cmp::Ordering::Less => theme.colors.text_negative,
             std::cmp::Ordering::Equal => theme.colors.text_secondary,
         }
     });
@@ -1896,7 +1917,7 @@ fn trade_volume_cell(
     column_width: f32,
     quantity: i64,
     quantity_scale: u8,
-    color: ThemeColor,
+    appearance: OrderBookSideAppearance,
     align_right: bool,
     maximum_trade_quantity: i64,
 ) -> impl IntoElement + use<> {
@@ -1906,7 +1927,7 @@ fn trade_volume_cell(
         .top_0()
         .bottom_0()
         .w(relative(width))
-        .bg(gpui_color(color.with_alpha(0.3)));
+        .bg(gpui_color(appearance.fill));
     let text = if quantity > 0 {
         compact_quantity_text(quantity, quantity_scale)
     } else {
@@ -1915,6 +1936,7 @@ fn trade_volume_cell(
     let cell = table_cell(column_width)
         .relative()
         .px_1()
+        .text_color(gpui_color(appearance.text))
         .children((quantity > 0).then(|| {
             if align_right {
                 bar.right_0().into_any_element()
@@ -1929,7 +1951,7 @@ fn trade_volume_cell(
 fn quantity_cell(
     column_width: f32,
     level: Option<&OrderBookColumnLevel>,
-    color: ThemeColor,
+    appearance: OrderBookSideAppearance,
     align_right: bool,
     maximum_quantity: i64,
 ) -> impl IntoElement + use<> {
@@ -1941,10 +1963,11 @@ fn quantity_cell(
         .top_0()
         .bottom_0()
         .w(relative(width))
-        .bg(gpui_color(color.with_alpha(0.2)));
+        .bg(gpui_color(appearance.fill));
     let cell = table_cell(column_width)
         .relative()
         .px_1()
+        .text_color(gpui_color(appearance.text))
         .children(level.map(|_| {
             if align_right {
                 bar.right_0().into_any_element()
@@ -2095,6 +2118,26 @@ fn gpui_color(color: ThemeColor) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_book_sides_use_semantic_text_and_subtle_fill_tokens() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            assert_eq!(
+                order_book_side_appearance(&theme, BookColumnSide::Bid),
+                OrderBookSideAppearance {
+                    fill: theme.colors.positive_subtle,
+                    text: theme.colors.text_positive,
+                }
+            );
+            assert_eq!(
+                order_book_side_appearance(&theme, BookColumnSide::Ask),
+                OrderBookSideAppearance {
+                    fill: theme.colors.negative_subtle,
+                    text: theme.colors.text_negative,
+                }
+            );
+        }
+    }
 
     fn frame(
         selection_generation: u64,
