@@ -1339,7 +1339,7 @@ struct OrderBookSideAppearance {
 
 /// One shared opacity keeps bid and ask fills equally weighted and quieter than the
 /// opaque subtle tokens, so quantities and working orders stay the ladder's focus.
-const ORDER_BOOK_SIDE_FILL_ALPHA: f32 = 0.6;
+const ORDER_BOOK_SIDE_FILL_ALPHA: f32 = 0.35;
 
 fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
     match side {
