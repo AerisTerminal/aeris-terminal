@@ -4,9 +4,13 @@ use super::{
     ActivationRequest, AerisChartView, ChartDrag, ChartDrawingTool, ChartType, Context,
     CursorStyle, DrawingModifiers, FinancialDrag, FinancialNavigation, KeyDownEvent,
     ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PANE_SEPARATOR_HIT,
-    PointerInteractionState, PriceScaleTarget, ScrollWheelEvent, WHEEL_LINE_HEIGHT, Window, px,
-    should_stop_mouse_up_propagation,
+    PointerInteractionState, PriceScaleTarget, ScrollWheelEvent, TradingTooltipDwell,
+    WHEEL_LINE_HEIGHT, Window, px, should_stop_mouse_up_propagation,
 };
+use aeris_charts_engine::{TradingCursor, TradingHitKind};
+
+/// Matches the browser host's dwell before a close control reveals its action tooltip.
+const TRADING_TOOLTIP_DWELL: std::time::Duration = std::time::Duration::from_millis(450);
 
 impl AerisChartView {
     /// Cancels transient pointer state before a host-owned modal occludes the chart.
@@ -72,6 +76,18 @@ impl AerisChartView {
         .then(|| self.engine.hit_test_drawing(pane_x, y))
         .flatten()
         .map(|hit| hit.cursor);
+        let trading_idle = self.drawing_tool == ChartDrawingTool::Cursor
+            && self.drag.is_none()
+            && native_drag.is_none()
+            && separator.is_none()
+            && !self.engine.drawing_drag_active()
+            && self.engine.trading_preview().is_none();
+        let trading_cursor = if trading_idle {
+            self.update_trading_hover(pane_x, y);
+            self.engine.trading_cursor_at(pane_x, y)
+        } else {
+            None
+        };
         let hovered_series = (self.drawing_tool == ChartDrawingTool::Cursor
             && self.drag.is_none()
             && native_drag.is_none()
@@ -83,7 +99,14 @@ impl AerisChartView {
             self.engine.set_hovered_series(hovered_series);
             self.invalidate_series_frame();
         }
-        self.cursor_style = if self.engine.alert_create_hit_at(pane_x, y) {
+        self.cursor_style = if self.engine.trading_preview().is_some() {
+            CursorStyle::ClosedHand
+        } else if let Some(cursor) = trading_cursor {
+            match cursor {
+                TradingCursor::Grab => CursorStyle::OpenHand,
+                TradingCursor::Pointer => CursorStyle::PointingHand,
+            }
+        } else if self.engine.alert_create_hit_at(pane_x, y) {
             CursorStyle::PointingHand
         } else if active_separator || separator.is_some() {
             CursorStyle::ResizeRow
@@ -113,6 +136,40 @@ impl AerisChartView {
                 None if self.price_axis_at(pane_x, y).is_some() => CursorStyle::ResizeUpDown,
                 None => CursorStyle::Crosshair,
             }
+        };
+    }
+    /// Mirrors the browser host: a changed hover repaints, and landing on a close control
+    /// starts the tooltip dwell once the caller has a context to time it.
+    fn update_trading_hover(&mut self, pane_x: f64, y: f64) {
+        if !self.engine.set_trading_hover(pane_x, y) {
+            return;
+        }
+        self.invalidate_series_frame();
+        self.trading_tooltip = if self
+            .engine
+            .trading_hit_at(pane_x, y)
+            .is_some_and(|hit| hit.kind == TradingHitKind::CancelButton)
+        {
+            TradingTooltipDwell::Pending
+        } else {
+            TradingTooltipDwell::Idle
+        };
+    }
+    fn schedule_trading_tooltip(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.trading_tooltip, TradingTooltipDwell::Pending) {
+            return;
+        }
+        self.trading_tooltip = TradingTooltipDwell::Waiting {
+            _task: cx.spawn(async move |chart, cx| {
+                cx.background_executor().timer(TRADING_TOOLTIP_DWELL).await;
+                let _ = chart.update(cx, |chart, chart_cx| {
+                    chart.trading_tooltip = TradingTooltipDwell::Idle;
+                    if chart.engine.arm_trading_tooltip() {
+                        chart.invalidate_series_frame();
+                        chart_cx.notify();
+                    }
+                });
+            }),
         };
     }
     pub(super) fn select_series_at(&mut self, pane_x: f64, y: f64) -> bool {
@@ -231,6 +288,9 @@ impl AerisChartView {
         self.engine.clear_crosshair_at();
         self.engine.set_separator_hover(None);
         self.engine.set_hovered_series(None);
+        self.engine.clear_trading_hover();
+        self.engine.clear_trading_pressed();
+        self.trading_tooltip = TradingTooltipDwell::Idle;
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }
@@ -336,6 +396,10 @@ impl AerisChartView {
         self.update_crosshair_magnet(event.modifiers.control || event.modifiers.platform);
         let (pane_x, y) = self.local_position(event.position);
         self.end_drag(pane_x, y);
+        self.trading_tooltip = TradingTooltipDwell::Idle;
+        if !self.pointer_on_axis(pane_x, y) && self.engine.set_trading_pressed(pane_x, y) {
+            self.invalidate_series_frame();
+        }
         if self.engine.trading_activate_at(pane_x, y) {
             self.drag = None;
             self.cursor_style = CursorStyle::PointingHand;
@@ -448,10 +512,14 @@ impl AerisChartView {
             event.dragging(),
             Self::drawing_modifiers(event.modifiers),
         );
+        self.schedule_trading_tooltip(cx);
         cx.notify();
     }
     pub(super) fn finish_mouse_up(&mut self, event: &MouseUpEvent) {
         let (pane_x, y) = self.local_position(event.position);
+        if self.engine.clear_trading_pressed() {
+            self.invalidate_series_frame();
+        }
         if self.engine.trading_preview().is_some() {
             self.engine.trading_drag_end();
             self.invalidate_series_frame();

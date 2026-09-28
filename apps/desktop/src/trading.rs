@@ -9,9 +9,62 @@ use aeris_trading_runtime::{
     ModifyOrder, PlaceBracket, PlaceOrder, SimulatedMarketObservation, TradeCopierConfig,
     TradingInstrument, TradingService,
 };
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 static TRADING_SERVICE: OnceLock<TradingService> = OnceLock::new();
+static TRADING_FEEDBACK: OnceLock<Mutex<TradingFeedbackState>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TradingCommandFeedback {
+    pub revision: u64,
+    pub message: String,
+    pub is_error: bool,
+}
+
+#[derive(Default)]
+struct TradingFeedbackState {
+    revision: u64,
+    latest: Option<TradingCommandFeedback>,
+}
+
+fn record_feedback(result: Result<String, String>) {
+    let feedback = TRADING_FEEDBACK.get_or_init(|| Mutex::new(TradingFeedbackState::default()));
+    let mut feedback = feedback
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    feedback.revision = feedback.revision.saturating_add(1).max(1);
+    let revision = feedback.revision;
+    feedback.latest = Some(match result {
+        Ok(message) => TradingCommandFeedback {
+            revision,
+            message,
+            is_error: false,
+        },
+        Err(message) => TradingCommandFeedback {
+            revision,
+            message,
+            is_error: true,
+        },
+    });
+}
+
+/// Records a command result for the order-entry status line and reports whether it succeeded.
+pub fn record_outcome<T>(result: Result<T, String>, success: &str) -> bool {
+    let accepted = result.is_ok();
+    record_feedback(result.map(|_| success.to_string()));
+    accepted
+}
+
+#[must_use]
+pub fn latest_feedback() -> Option<TradingCommandFeedback> {
+    TRADING_FEEDBACK.get().and_then(|feedback| {
+        feedback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest
+            .clone()
+    })
+}
 
 /// Installs the process-wide trading owner before any market worker can resolve instruments.
 ///
@@ -56,7 +109,12 @@ pub fn dispatch_simulated_order(
     time_in_force: aeris_trading::TimeInForce,
     cx: &mut gpui::App,
 ) {
+    if order_type_requires_price(order_type) {
+        record_feedback(Err(STOP_PRICE_REQUIRED.to_string()));
+        return;
+    }
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let Some((command, observation)) = prepare_simulated_order(
@@ -67,15 +125,17 @@ pub fn dispatch_simulated_order(
         order_type,
         time_in_force,
     ) else {
+        record_feedback(Err(
+            "Practice order requires a current bid, ask, and valid instrument".to_string(),
+        ));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            if service.place_order(command).is_ok()
-                && let Some(observation) = observation
-            {
-                let _ = service.observe_market(observation);
-            }
+            let result = service
+                .place_order(command)
+                .and_then(|order| placement_outcome(&service, &order.client_order_id, observation));
+            record_feedback(result);
         })
         .detach();
 }
@@ -96,7 +156,12 @@ pub fn dispatch_simulated_selected_order(
     selection: SimulatedOrderSelection,
     cx: &mut gpui::App,
 ) {
+    if order_type_requires_price(selection.order_type) {
+        record_feedback(Err(STOP_PRICE_REQUIRED.to_string()));
+        return;
+    }
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let Some((entry, observation)) = prepare_simulated_order(
@@ -107,6 +172,9 @@ pub fn dispatch_simulated_selected_order(
         selection.order_type,
         selection.time_in_force,
     ) else {
+        record_feedback(Err(
+            "Practice order requires a current bid, ask, and valid instrument".to_string(),
+        ));
         return;
     };
     cx.background_executor()
@@ -114,51 +182,106 @@ pub fn dispatch_simulated_selected_order(
             let accepted = if let Some(template_id) = selection.template_id {
                 service
                     .place_bracket(PlaceBracket { entry, template_id })
-                    .is_ok()
+                    .map(|bracket| bracket.entry_client_order_id)
             } else {
-                service.place_order(entry).is_ok()
+                service
+                    .place_order(entry)
+                    .map(|order| order.client_order_id)
             };
-            if accepted && let Some(observation) = observation {
-                let _ = service.observe_market(observation);
-            }
+            let result = accepted.and_then(|client_order_id| {
+                placement_outcome(&service, &client_order_id, observation)
+            });
+            record_feedback(result);
         })
         .detach();
 }
 
-/// Dispatches a simulated limit order at the clicked order-book price off the UI thread.
-pub fn dispatch_simulated_limit_order_at_price(
+const STOP_PRICE_REQUIRED: &str = "Click a ladder price to place a stop order";
+
+fn order_type_requires_price(order_type: aeris_trading::OrderType) -> bool {
+    matches!(
+        order_type,
+        aeris_trading::OrderType::Stop | aeris_trading::OrderType::StopLimit
+    )
+}
+
+/// Returns the working-order outcome after applying the submission-time BBO.
+fn placement_outcome(
+    service: &TradingService,
+    client_order_id: &aeris_trading::ClientOrderId,
+    observation: Option<SimulatedMarketObservation>,
+) -> Result<String, String> {
+    let fills = observation
+        .map(|observation| service.observe_market(observation))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(if fills.is_empty() {
+        format!("Practice order {} is working", client_order_id.as_str())
+    } else {
+        format!("Practice order filled · {} fill(s)", fills.len())
+    })
+}
+
+/// Applies an exact price to the price field(s) that the order type uses.
+fn price_fields(
+    order_type: aeris_trading::OrderType,
+    price: aeris_trading::FixedPoint,
+) -> (
+    Option<aeris_trading::FixedPoint>,
+    Option<aeris_trading::FixedPoint>,
+) {
+    match order_type {
+        aeris_trading::OrderType::Market => (None, None),
+        aeris_trading::OrderType::Limit => (Some(price), None),
+        aeris_trading::OrderType::Stop => (None, Some(price)),
+        aeris_trading::OrderType::StopLimit => (Some(price), Some(price)),
+    }
+}
+
+/// Exact-price ladder instruction for one simulated order.
+pub struct SimulatedPricedOrder {
+    pub side: aeris_trading::OrderSide,
+    pub order_type: aeris_trading::OrderType,
+    pub account_key: Option<String>,
+    pub quantity: u64,
+    pub time_in_force: aeris_trading::TimeInForce,
+    pub price_units: i64,
+}
+
+/// Dispatches a simulated limit or stop order at the clicked order-book price off the UI thread.
+pub fn dispatch_simulated_order_at_price(
     frame: &aeris_market_data::OrderBookFrame,
-    side: aeris_trading::OrderSide,
-    account_key: Option<String>,
-    quantity: u64,
-    time_in_force: aeris_trading::TimeInForce,
-    price_units: i64,
+    order: SimulatedPricedOrder,
     cx: &mut gpui::App,
 ) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let Some((mut command, observation)) = prepare_simulated_order(
         frame,
-        side,
-        account_key,
-        quantity,
-        aeris_trading::OrderType::Limit,
-        time_in_force,
+        order.side,
+        order.account_key,
+        order.quantity,
+        order.order_type,
+        order.time_in_force,
     ) else {
+        record_feedback(Err(
+            "Practice order requires a current bid, ask, and valid instrument".to_string(),
+        ));
         return;
     };
-    let Ok(price) = aeris_trading::FixedPoint::try_new(price_units, frame.price_scale) else {
+    let Ok(price) = aeris_trading::FixedPoint::try_new(order.price_units, frame.price_scale) else {
+        record_feedback(Err("Practice order price is invalid".to_string()));
         return;
     };
-    command.limit_price = Some(price);
+    (command.limit_price, command.stop_price) = price_fields(order.order_type, price);
     cx.background_executor()
         .spawn(async move {
-            if service.place_order(command).is_ok()
-                && let Some(observation) = observation
-            {
-                let _ = service.observe_market(observation);
-            }
+            let result = service
+                .place_order(command)
+                .and_then(|order| placement_outcome(&service, &order.client_order_id, observation));
+            record_feedback(result);
         })
         .detach();
 }
@@ -166,13 +289,18 @@ pub fn dispatch_simulated_limit_order_at_price(
 /// Cancels working orders for the selected simulated account off the UI thread.
 pub fn cancel_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let account =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok());
     cx.background_executor()
         .spawn(async move {
-            let _ = service.cancel_all(account);
+            record_feedback(
+                service
+                    .cancel_all(account)
+                    .map(|orders| format!("Cancelled {} practice order(s)", orders.len())),
+            );
         })
         .detach();
 }
@@ -180,14 +308,19 @@ pub fn cancel_simulated_account(account_key: Option<String>, cx: &mut gpui::App)
 /// Cancels one working simulated order off the UI thread.
 pub fn cancel_simulated_order(client_order_key: String, cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
+        record_feedback(Err("Practice order identifier is invalid".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            let _ = service.cancel_order(client_order_id);
+            record_outcome(
+                service.cancel_order(client_order_id),
+                "Practice order cancelled",
+            );
         })
         .detach();
 }
@@ -201,29 +334,45 @@ pub fn reprice_simulated_order(
     cx: &mut gpui::App,
 ) {
     let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(client_order_key) else {
+        record_feedback(Err("Practice order identifier is invalid".to_string()));
         return;
     };
     let Some(level) = (match side {
         aeris_trading::OrderSide::Buy => frame.best_ask.as_ref(),
         aeris_trading::OrderSide::Sell => frame.best_bid.as_ref(),
     }) else {
+        record_feedback(Err("A current bid or ask is unavailable".to_string()));
         return;
     };
     let Ok(limit_price) = aeris_trading::FixedPoint::try_new(level.price, frame.price_scale) else {
+        record_feedback(Err("Practice limit price is invalid".to_string()));
         return;
     };
-    modify_simulated_order_at_price(client_order_id, time_in_force, frame, limit_price, cx);
+    modify_simulated_order_at_price(
+        client_order_id,
+        aeris_trading::OrderType::Limit,
+        time_in_force,
+        frame,
+        limit_price,
+        cx,
+    );
 }
 
-/// Modifies one working simulated limit order to an exact ladder price off the UI thread.
+/// Moves one working simulated limit or stop order to an exact ladder price off the UI thread.
 pub fn modify_simulated_order_at_price(
     client_order_id: aeris_trading::ClientOrderId,
+    order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
     frame: &aeris_market_data::OrderBookFrame,
-    limit_price: aeris_trading::FixedPoint,
+    price: aeris_trading::FixedPoint,
     cx: &mut gpui::App,
 ) {
+    if order_type == aeris_trading::OrderType::Market {
+        record_feedback(Err("Market orders have no price to modify".to_string()));
+        return;
+    }
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let modified_unix_nanos = now();
@@ -237,17 +386,18 @@ pub fn modify_simulated_order_at_price(
             .max(1),
         observed_unix_nanos: modified_unix_nanos,
     };
+    let (limit_price, stop_price) = price_fields(order_type, price);
     let command = ModifyOrder {
         client_order_id,
         time_in_force,
-        limit_price: Some(limit_price),
-        stop_price: None,
+        limit_price,
+        stop_price,
         modified_unix_nanos,
         provenance,
     };
     cx.background_executor()
         .spawn(async move {
-            let _ = service.modify_order(command);
+            record_outcome(service.modify_order(command), "Practice order modified");
         })
         .detach();
 }
@@ -255,11 +405,16 @@ pub fn modify_simulated_order_at_price(
 /// Cancels working orders for every simulated account off the UI thread.
 pub fn cancel_simulated_accounts(cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            let _ = service.cancel_all(None);
+            record_feedback(
+                service
+                    .cancel_all(None)
+                    .map(|orders| format!("Cancelled {} practice order(s)", orders.len())),
+            );
         })
         .detach();
 }
@@ -267,6 +422,7 @@ pub fn cancel_simulated_accounts(cx: &mut gpui::App) {
 /// Locks the selected simulated account off the UI thread.
 pub fn kill_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let account =
@@ -274,7 +430,30 @@ pub fn kill_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
     let locked_at = now();
     cx.background_executor()
         .spawn(async move {
-            let _ = service.kill_switch(account, "manual kill switch".to_string(), locked_at);
+            record_feedback(
+                service
+                    .kill_switch(account, "manual kill switch".to_string(), locked_at)
+                    .map(|count| format!("Locked {count} practice account(s)")),
+            );
+        })
+        .detach();
+}
+
+/// Clears the durable manual risk lock for one selected simulated account.
+pub fn unlock_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
+        return;
+    };
+    let Some(account) =
+        account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
+    else {
+        record_feedback(Err("Select a practice account to unlock".to_string()));
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            record_outcome(service.unlock_account(account), "Practice account unlocked");
         })
         .detach();
 }
@@ -282,12 +461,17 @@ pub fn kill_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
 /// Locks every simulated account off the UI thread.
 pub fn kill_simulated_accounts(cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let locked_at = now();
     cx.background_executor()
         .spawn(async move {
-            let _ = service.kill_switch(None, "manual global kill switch".to_string(), locked_at);
+            record_feedback(
+                service
+                    .kill_switch(None, "manual global kill switch".to_string(), locked_at)
+                    .map(|count| format!("Locked {count} practice account(s)")),
+            );
         })
         .detach();
 }
@@ -295,11 +479,15 @@ pub fn kill_simulated_accounts(cx: &mut gpui::App) {
 /// Replaces one runtime-owned trade-copier configuration off the UI thread.
 pub fn register_trade_copier(config: TradeCopierConfig, cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            let _ = service.register_trade_copier(config);
+            record_outcome(
+                service.register_trade_copier(config),
+                "Practice trade copier updated",
+            );
         })
         .detach();
 }
@@ -344,7 +532,7 @@ pub fn prepare_simulated_order(
     ))
     .ok()?;
     let quantity = aeris_trading::FixedPoint::try_new(
-        i64::try_from(quantity_units).ok()?,
+        display_quantity_units(quantity_units, frame.quantity_scale)?,
         frame.quantity_scale,
     )
     .ok()?;
@@ -393,6 +581,30 @@ pub fn prepare_simulated_order(
     Some((command, observation))
 }
 
+fn display_quantity_units(quantity: u64, scale: u8) -> Option<i64> {
+    let multiplier = 10_u64.checked_pow(u32::from(scale))?;
+    quantity
+        .checked_mul(multiplier)
+        .and_then(|units| i64::try_from(units).ok())
+}
+
+/// Publishes one canonical book BBO to the simulated venue from a market worker thread.
+///
+/// The trading owner applies each provider revision once per instrument, so several panes
+/// publishing the same book do not multiply simulated-venue work. The bounded command queue
+/// never blocks the market worker; an overflow is reported and the next revision supersedes it.
+pub fn publish_simulated_market_observation(frame: &aeris_market_data::OrderBookFrame) {
+    let Some(service) = TRADING_SERVICE.get() else {
+        return;
+    };
+    let Some((_, observation)) = prepare_flatten(frame) else {
+        return;
+    };
+    if let Err(error) = service.publish_market_observation(observation) {
+        record_feedback(Err(format!("Practice market update failed: {error}")));
+    }
+}
+
 /// Flattens the simulated account using the current best bid and ask off the UI thread.
 pub fn flatten_simulated_account(frame: &aeris_market_data::OrderBookFrame, cx: &mut gpui::App) {
     flatten_simulated_account_for(frame, None, cx);
@@ -405,14 +617,22 @@ pub fn flatten_simulated_account_for(
     cx: &mut gpui::App,
 ) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let Some((account_id, observation)) = prepare_flatten_for(frame, account_key) else {
+        record_feedback(Err(
+            "Flatten requires a selected account and current bid and ask".to_string(),
+        ));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            let _ = service.flatten_account(account_id, observation);
+            record_feedback(
+                service
+                    .flatten_account(account_id, observation)
+                    .map(|fills| format!("Flattened practice account · {} fill(s)", fills.len())),
+            );
         })
         .detach();
 }
@@ -420,14 +640,20 @@ pub fn flatten_simulated_account_for(
 /// Flattens every simulated account using the current best bid and ask off the UI thread.
 pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx: &mut gpui::App) {
     let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
     let Some((_, observation)) = prepare_flatten(frame) else {
+        record_feedback(Err("Flatten requires a current bid and ask".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
-            let _ = service.flatten_all(observation);
+            record_feedback(
+                service.flatten_all(observation).map(|fills| {
+                    format!("Flattened all practice accounts · {} fill(s)", fills.len())
+                }),
+            );
         })
         .detach();
 }
@@ -666,5 +892,22 @@ mod tests {
         let observation = observation.expect("BBO observation");
         assert_eq!(observation.bid.units(), 10_000);
         assert_eq!(observation.ask.units(), 10_001);
+    }
+
+    #[test]
+    fn order_entry_converts_display_quantity_to_provider_fixed_point_units() {
+        let mut frame = order_book_frame();
+        frame.quantity_scale = 3;
+        let (order, _) = prepare_simulated_order(
+            &frame,
+            aeris_trading::OrderSide::Buy,
+            None,
+            5,
+            aeris_trading::OrderType::Market,
+            aeris_trading::TimeInForce::Day,
+        )
+        .expect("scaled order command");
+        assert_eq!(order.quantity.units(), 5_000);
+        assert_eq!(order.quantity.scale(), 3);
     }
 }

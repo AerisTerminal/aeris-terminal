@@ -364,6 +364,8 @@ pub(super) fn workspace_market_area(
                     copy_dispatches: &surface.trading_pnl.copy_dispatches,
                     strategy_templates: &surface.trading_pnl.strategy_templates,
                     managed_brackets: &surface.trading_pnl.managed_brackets,
+                    feedback: surface.trading_pnl.feedback.as_ref(),
+                    market_error: surface.trading_pnl.market_error.as_deref(),
                     order_entry: &surface.trading_pnl.order_entry,
                     theme,
                 },
@@ -489,13 +491,10 @@ fn project_working_order_markers(
         .filter(|order| selected_account.is_some_and(|account_id| &order.account_id == account_id))
         .filter(|order| order.instrument_id.as_str() == instrument_id)
         .filter_map(|order| {
-            let price = order.limit_price?;
+            let (side, price) = crate::desktop::order_book_row_price(order)?;
             Some(aeris_terminal_ui::OrderBookWorkingOrder {
                 price: price.units(),
-                side: match order.side {
-                    aeris_trading::OrderSide::Buy => aeris_terminal_ui::OrderBookLevelSide::Ask,
-                    aeris_trading::OrderSide::Sell => aeris_terminal_ui::OrderBookLevelSide::Bid,
-                },
+                side,
                 quantity: order.quantity.units(),
                 quantity_scale: order.quantity.scale(),
             })
@@ -557,86 +556,127 @@ fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<Termi
         let result = snapshot.await;
         surface.update(cx, |state, state_cx| {
             state.trading_pnl.refresh_pending = false;
-            if let Ok(snapshot) = result {
-                let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
-                let chart_snapshot = crate::desktop::chart_trading_snapshot(
-                    &snapshot,
-                    state.product.as_ref(),
-                    selected_account_id.as_ref(),
-                );
-                let host_overlay = crate::desktop::chart_session_plan_overlay(
-                    &snapshot,
-                    selected_account_id.as_ref(),
-                );
-                let session_plan_levels = crate::desktop::chart_session_plan_levels(
-                    &snapshot,
-                    state.product.as_ref(),
-                    selected_account_id.as_ref(),
-                );
-                let accounts = snapshot.accounts;
-                let account_pnl = snapshot.account_pnl;
-                state.trading_pnl.orders = snapshot.orders;
-                state.trading_pnl.fills = snapshot.fills;
-                state.trading_pnl.positions = snapshot.position_pnl;
-                state.trading_pnl.risk_meters = snapshot.risk_meters;
-                state.trading_pnl.risk_profiles = snapshot.risk_profiles;
-                state.trading_pnl.risk_locks = snapshot.risk_locks;
-                state.trading_pnl.session_plans = snapshot.session_plans;
-                state.trading_pnl.session_reviews = snapshot.session_adherence_reviews;
-                state.trading_pnl.trade_copiers = snapshot.trade_copiers;
-                state.trading_pnl.copy_dispatches = snapshot.copy_dispatches;
-                state.trading_pnl.strategy_templates = snapshot.strategy_templates;
-                state.trading_pnl.managed_brackets = snapshot.managed_brackets;
-                state.trading_pnl.accounts = accounts;
-                if state
+            let feedback = aeris_desktop::trading::latest_feedback();
+            if feedback.as_ref().map(|feedback| feedback.revision)
+                > state
                     .trading_pnl
-                    .order_entry
-                    .selected_account_id
+                    .feedback
                     .as_ref()
-                    .is_none_or(|account_id| {
-                        !state
-                            .trading_pnl
-                            .accounts
-                            .iter()
-                            .any(|account| &account.id == account_id)
-                    })
-                {
-                    state.trading_pnl.order_entry.selected_account_id = state
-                        .trading_pnl
-                        .accounts
-                        .first()
-                        .map(|account| account.id.clone());
-                }
-                state.trading_pnl.current = account_pnl.into_iter().find(|pnl| {
-                    state
-                        .trading_pnl
-                        .order_entry
-                        .selected_account_id
-                        .as_ref()
-                        .is_none_or(|account_id| account_id == &pnl.account_id)
-                });
-                let (working_orders, position_marker) =
-                    project_working_order_markers(state, state_cx);
-                state
-                    .order_book
-                    .update(state_cx, |order_book, order_book_cx| {
-                        order_book.set_working_orders(working_orders, order_book_cx);
-                        order_book.set_position_marker(position_marker, order_book_cx);
-                    });
-                if let Some(chart) = state.chart.as_ref() {
-                    refresh_chart_trading_projection(
-                        chart,
-                        chart_snapshot,
-                        host_overlay,
-                        session_plan_levels,
-                        state_cx,
-                    );
-                }
-                state_cx.notify();
+                    .map(|feedback| feedback.revision)
+            {
+                state.trading_pnl.feedback = feedback;
             }
+            match result {
+                Ok(snapshot) => apply_trading_snapshot(state, snapshot, state_cx),
+                Err(error) => {
+                    state.trading_pnl.market_error =
+                        Some(format!("Practice trading is unavailable: {error}"));
+                    state_cx.notify();
+                }
+            }
+            schedule_trading_refresh(state_cx);
         });
     })
     .detach();
+}
+
+/// Re-arms the bounded trading poll so fills and command outcomes appear even
+/// while no market publication is rendering the workspace.
+fn schedule_trading_refresh(cx: &mut Context<WorkspaceSurface>) {
+    let refresh = cx
+        .background_executor()
+        .timer(std::time::Duration::from_millis(250));
+    cx.spawn(async move |state, cx| {
+        refresh.await;
+        let _ = state.update(cx, |state, cx| {
+            state.trading_pnl.next_refresh = std::time::Instant::now();
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+fn apply_trading_snapshot(
+    state: &mut WorkspaceSurface,
+    snapshot: aeris_trading_runtime::TradingSnapshot,
+    state_cx: &mut Context<WorkspaceSurface>,
+) {
+    state.trading_pnl.market_error = snapshot
+        .market_observation_error
+        .as_ref()
+        .map(|error| format!("Practice market update failed: {error}"));
+    let selected_account_id = state.trading_pnl.order_entry.selected_account_id.clone();
+    let chart_snapshot = crate::desktop::chart_trading_snapshot(
+        &snapshot,
+        state.product.as_ref(),
+        selected_account_id.as_ref(),
+    );
+    let host_overlay =
+        crate::desktop::chart_session_plan_overlay(&snapshot, selected_account_id.as_ref());
+    let session_plan_levels = crate::desktop::chart_session_plan_levels(
+        &snapshot,
+        state.product.as_ref(),
+        selected_account_id.as_ref(),
+    );
+    let accounts = snapshot.accounts;
+    let account_pnl = snapshot.account_pnl;
+    state.trading_pnl.orders = snapshot.orders;
+    state.trading_pnl.fills = snapshot.fills;
+    state.trading_pnl.positions = snapshot.position_pnl;
+    state.trading_pnl.risk_meters = snapshot.risk_meters;
+    state.trading_pnl.risk_profiles = snapshot.risk_profiles;
+    state.trading_pnl.risk_locks = snapshot.risk_locks;
+    state.trading_pnl.session_plans = snapshot.session_plans;
+    state.trading_pnl.session_reviews = snapshot.session_adherence_reviews;
+    state.trading_pnl.trade_copiers = snapshot.trade_copiers;
+    state.trading_pnl.copy_dispatches = snapshot.copy_dispatches;
+    state.trading_pnl.strategy_templates = snapshot.strategy_templates;
+    state.trading_pnl.managed_brackets = snapshot.managed_brackets;
+    state.trading_pnl.accounts = accounts;
+    if state
+        .trading_pnl
+        .order_entry
+        .selected_account_id
+        .as_ref()
+        .is_none_or(|account_id| {
+            !state
+                .trading_pnl
+                .accounts
+                .iter()
+                .any(|account| &account.id == account_id)
+        })
+    {
+        state.trading_pnl.order_entry.selected_account_id = state
+            .trading_pnl
+            .accounts
+            .first()
+            .map(|account| account.id.clone());
+    }
+    state.trading_pnl.current = account_pnl.into_iter().find(|pnl| {
+        state
+            .trading_pnl
+            .order_entry
+            .selected_account_id
+            .as_ref()
+            .is_none_or(|account_id| account_id == &pnl.account_id)
+    });
+    let (working_orders, position_marker) = project_working_order_markers(state, state_cx);
+    state
+        .order_book
+        .update(state_cx, |order_book, order_book_cx| {
+            order_book.set_working_orders(working_orders, order_book_cx);
+            order_book.set_position_marker(position_marker, order_book_cx);
+        });
+    if let Some(chart) = state.chart.as_ref() {
+        refresh_chart_trading_projection(
+            chart,
+            chart_snapshot,
+            host_overlay,
+            session_plan_levels,
+            state_cx,
+        );
+    }
+    state_cx.notify();
 }
 
 fn refresh_chart_trading_projection(

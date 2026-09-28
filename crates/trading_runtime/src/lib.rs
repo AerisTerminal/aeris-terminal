@@ -50,6 +50,8 @@ pub use strategy::{
 };
 
 const COMMAND_CAPACITY: usize = 256;
+/// Distinct instruments whose latest BBO can wait for the trading owner at once.
+const MAXIMUM_PENDING_OBSERVATIONS: usize = 256;
 const REPLY_CAPACITY: usize = 1;
 const MAXIMUM_OPEN_ORDERS: usize = 4_096;
 const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
@@ -225,6 +227,7 @@ impl UserRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradingSnapshot {
     pub revision: u64,
+    pub market_observation_error: Option<String>,
     pub accounts: Vec<TradingAccount>,
     pub orders: Vec<Order>,
     pub order_events: Vec<OrderEvent>,
@@ -281,6 +284,18 @@ pub struct TradingService {
 struct TradingRuntime {
     stopping: AtomicBool,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
+    observations: Arc<Mutex<PendingObservations>>,
+}
+
+/// Latest-value mailbox for published market observations.
+///
+/// Market publication can outpace simulated-venue work. Keeping only the newest BBO per
+/// instrument bounds memory, and a single queued drain command keeps market traffic from
+/// occupying the command queue that user order commands share.
+#[derive(Default)]
+struct PendingObservations {
+    latest: BTreeMap<InstrumentId, SimulatedMarketObservation>,
+    drain_queued: bool,
 }
 
 enum Command {
@@ -314,6 +329,7 @@ enum Command {
         Reply<EconomicEventRiskOutcome>,
     ),
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
+    DrainObservations,
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
@@ -325,6 +341,20 @@ struct Coordinator {
     state: StoredState,
     retention: TradingRetention,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
+    market_observation_error: Option<String>,
+    observations: Arc<Mutex<PendingObservations>>,
+    observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
+}
+
+/// Latest canonical BBO applied per registered instrument. Market panes can
+/// republish the same book revision, so the trading owner applies each
+/// provider revision once and never regresses to an older one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObservationCursor {
+    session_generation: u64,
+    source_sequence: u64,
+    bid_units: i64,
+    ask_units: i64,
 }
 
 struct FillMemoryUpdate {
@@ -352,6 +382,8 @@ impl TradingService {
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (started_tx, started_rx) = mpsc::sync_channel(REPLY_CAPACITY);
         let database_path = config.database_path;
+        let observations = Arc::new(Mutex::new(PendingObservations::default()));
+        let coordinator_observations = Arc::clone(&observations);
         let worker = thread::Builder::new()
             .name("aeris-trading-owner".to_string())
             .spawn(move || {
@@ -362,6 +394,9 @@ impl TradingService {
                             state,
                             retention,
                             copy_dispatches: std::collections::VecDeque::new(),
+                            market_observation_error: None,
+                            observations: coordinator_observations,
+                            observation_cursors: BTreeMap::new(),
                         })
                     });
                 match coordinator {
@@ -384,6 +419,7 @@ impl TradingService {
             runtime: Arc::new(TradingRuntime {
                 stopping: AtomicBool::new(false),
                 worker: Mutex::new(Some(worker)),
+                observations,
             }),
         })
     }
@@ -600,6 +636,56 @@ impl TradingService {
         self.request(|reply| Command::Observe(observation, reply))
     }
 
+    /// Offers one canonical market observation without blocking its market-publication owner.
+    ///
+    /// Only the newest observation per instrument is retained until the owner drains it, and
+    /// an older provider revision never replaces a newer pending one. A full command queue
+    /// leaves the observation pending; the next publication retries the drain request.
+    ///
+    /// # Errors
+    /// Returns an error when the owner is stopping or unavailable, or when too many distinct
+    /// instruments are already pending.
+    pub fn publish_market_observation(
+        &self,
+        observation: SimulatedMarketObservation,
+    ) -> Result<(), String> {
+        if self.runtime.stopping.load(Ordering::Acquire) {
+            return Err("trading owner is stopping".to_string());
+        }
+        let mut pending = self
+            .runtime
+            .observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending_count = pending.latest.len();
+        match pending.latest.entry(observation.instrument_id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut current) => {
+                if observation_revision(&observation) >= observation_revision(current.get()) {
+                    current.insert(observation);
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(_)
+                if pending_count >= MAXIMUM_PENDING_OBSERVATIONS =>
+            {
+                return Err("pending market observation limit reached".to_string());
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(observation);
+            }
+        }
+        if pending.drain_queued {
+            return Ok(());
+        }
+        match self.commands.try_send(Command::DrainObservations) {
+            Ok(()) => {
+                pending.drain_queued = true;
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Disconnected(_)) => Err("trading owner is unavailable".to_string()),
+        }
+    }
+
     /// Stores one user-owned JSON record on the background owner.
     ///
     /// # Errors
@@ -692,6 +778,13 @@ impl Drop for TradingRuntime {
     }
 }
 
+fn observation_revision(observation: &SimulatedMarketObservation) -> (u64, u64) {
+    (
+        observation.provenance.session_generation,
+        observation.provenance.source_sequence,
+    )
+}
+
 impl Coordinator {
     fn run(&mut self, commands: &Receiver<Command>) {
         while let Ok(command) = commands.recv() {
@@ -762,8 +855,10 @@ impl Coordinator {
                         reply.send(self.apply_economic_event_risk(&event, observation.as_ref()));
                 }
                 Command::Observe(observation, reply) => {
+                    self.advance_observation_cursor(&observation);
                     let _ = reply.send(self.observe_market(&observation));
                 }
+                Command::DrainObservations => self.drain_observations(),
                 Command::PutUserRecord(record, reply) => {
                     let result = record
                         .validate()
@@ -1910,6 +2005,56 @@ impl Coordinator {
                         .map_err(|error| error.to_string())
                 },
             )
+    }
+
+    fn drain_observations(&mut self) {
+        let pending = {
+            let mut pending = self
+                .observations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending.drain_queued = false;
+            std::mem::take(&mut pending.latest)
+        };
+        for observation in pending.into_values() {
+            if self.advance_observation_cursor(&observation) {
+                self.market_observation_error = self.observe_market(&observation).err();
+            }
+        }
+    }
+
+    /// Records a published observation and reports whether it is newer than the
+    /// last one applied. Unregistered instruments cannot hold simulated orders.
+    fn advance_observation_cursor(&mut self, observation: &SimulatedMarketObservation) -> bool {
+        if !self
+            .state
+            .instruments
+            .contains_key(&observation.instrument_id)
+        {
+            return false;
+        }
+        let (session_generation, source_sequence) = observation_revision(observation);
+        let cursor = ObservationCursor {
+            session_generation,
+            source_sequence,
+            bid_units: observation.bid.units(),
+            ask_units: observation.ask.units(),
+        };
+        let is_newer = self
+            .observation_cursors
+            .get(&observation.instrument_id)
+            .is_none_or(|current| {
+                let current_revision = (current.session_generation, current.source_sequence);
+                (session_generation, source_sequence) > current_revision
+                    || ((session_generation, source_sequence) == current_revision
+                        && (cursor.bid_units, cursor.ask_units)
+                            != (current.bid_units, current.ask_units))
+            });
+        if is_newer {
+            self.observation_cursors
+                .insert(observation.instrument_id.clone(), cursor);
+        }
+        is_newer
     }
 
     fn observe_market(
@@ -3099,6 +3244,7 @@ impl Coordinator {
         }
         Ok(TradingSnapshot {
             revision: self.state.revision,
+            market_observation_error: self.market_observation_error.clone(),
             accounts: self.state.accounts.values().cloned().collect(),
             orders: self.state.orders.values().cloned().collect(),
             order_events: self

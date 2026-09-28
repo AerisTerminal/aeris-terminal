@@ -771,6 +771,14 @@ const fn should_stop_mouse_up_propagation(outside_chart: bool) -> bool {
 }
 
 /// A GPUI entity hosting one authoritative Aeris Charts chart engine and renderer.
+/// Close-control tooltip dwell. `Pending` records a hover change made without a GPUI context;
+/// the next pointer event starts the timer. Replacing `Waiting` drops and cancels its task.
+enum TradingTooltipDwell {
+    Idle,
+    Pending,
+    Waiting { _task: Task<()> },
+}
+
 pub struct AerisChartView {
     engine: ChartEngine,
     theme: ChartTheme,
@@ -826,6 +834,8 @@ pub struct AerisChartView {
     user_state_revision: u64,
     /// The pending one-second self-wake. Held so only one is ever in flight.
     clock_tick: Option<Task<()>>,
+    /// Hover dwell before a close control reveals its action tooltip; the engine owns no clock.
+    trading_tooltip: TradingTooltipDwell,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -919,6 +929,7 @@ impl AerisChartView {
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
             clock_tick: None,
+            trading_tooltip: TradingTooltipDwell::Idle,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -1022,6 +1033,7 @@ impl AerisChartView {
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
             clock_tick: None,
+            trading_tooltip: TradingTooltipDwell::Idle,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]

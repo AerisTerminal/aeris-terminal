@@ -2277,3 +2277,72 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
         ChartAppearanceColor::Custom("#abcdef".to_string())
     );
 }
+
+#[test]
+fn ladder_clicks_rest_limits_passively_and_place_stops_on_breakout() {
+    use super::ladder_click_order;
+    use aeris_terminal_ui::OrderBookLevelSide;
+    use aeris_trading::{OrderSide, OrderType};
+    assert_eq!(
+        ladder_click_order(OrderBookLevelSide::Bid, OrderType::Limit),
+        (OrderSide::Buy, OrderType::Limit)
+    );
+    assert_eq!(
+        ladder_click_order(OrderBookLevelSide::Ask, OrderType::Market),
+        (OrderSide::Sell, OrderType::Limit)
+    );
+    assert_eq!(
+        ladder_click_order(OrderBookLevelSide::Ask, OrderType::Stop),
+        (OrderSide::Buy, OrderType::Stop)
+    );
+    assert_eq!(
+        ladder_click_order(OrderBookLevelSide::Bid, OrderType::StopLimit),
+        (OrderSide::Sell, OrderType::StopLimit)
+    );
+}
+
+#[test]
+fn working_orders_are_drawn_on_the_row_side_their_click_created() {
+    use super::{ladder_click_order, order_book_row_price};
+    use aeris_terminal_ui::OrderBookLevelSide;
+    use aeris_trading::{
+        ClientOrderId, FixedPoint, Order, OrderId, OrderStatus, OrderType, TimeInForce,
+        TradingAccountId, TradingProvenance,
+    };
+    let price = FixedPoint::try_new(10_000, 2).expect("price");
+    for row_side in [OrderBookLevelSide::Bid, OrderBookLevelSide::Ask] {
+        for selected in [OrderType::Limit, OrderType::Stop, OrderType::StopLimit] {
+            let (side, order_type) = ladder_click_order(row_side, selected);
+            let (limit_price, stop_price) = match order_type {
+                OrderType::Market => (None, None),
+                OrderType::Limit => (Some(price), None),
+                OrderType::Stop => (None, Some(price)),
+                OrderType::StopLimit => (Some(price), Some(price)),
+            };
+            let order = Order {
+                id: OrderId::try_new("sim-order-1").expect("order id"),
+                client_order_id: ClientOrderId::try_new("ui-1").expect("client id"),
+                account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+                instrument_id: aeris_instruments::InstrumentId::try_new("instrument:fixture:X")
+                    .expect("instrument"),
+                side,
+                order_type,
+                time_in_force: TimeInForce::Day,
+                quantity: FixedPoint::try_new(1, 0).expect("quantity"),
+                filled_quantity: FixedPoint::try_new(0, 0).expect("filled"),
+                limit_price,
+                stop_price,
+                status: OrderStatus::Working,
+                submitted_unix_nanos: 1,
+                provenance: TradingProvenance {
+                    venue_id: "aeris-sim".to_string(),
+                    provider_id: "fixture".to_string(),
+                    session_generation: 1,
+                    source_sequence: 1,
+                    observed_unix_nanos: 1,
+                },
+            };
+            assert_eq!(order_book_row_price(&order), Some((row_side, price)));
+        }
+    }
+}

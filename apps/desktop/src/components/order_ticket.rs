@@ -19,6 +19,8 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) copy_dispatches: &'a [aeris_trading_runtime::TradeCopyDispatch],
     pub(super) strategy_templates: &'a [aeris_trading_runtime::BracketStrategyTemplate],
     pub(super) managed_brackets: &'a [aeris_trading_runtime::ManagedBracket],
+    pub(super) feedback: Option<&'a aeris_desktop::trading::TradingCommandFeedback>,
+    pub(super) market_error: Option<&'a str>,
     pub(super) order_entry: &'a super::TradingOrderEntryState,
     pub(super) theme: &'a AerisTheme,
 }
@@ -50,6 +52,8 @@ pub(super) fn trading_order_controls(
         copy_dispatches,
         strategy_templates,
         managed_brackets,
+        feedback,
+        market_error,
         order_entry,
         theme,
     } = *state;
@@ -119,14 +123,50 @@ pub(super) fn trading_order_controls(
                     order_entry,
                     order_entry_locked,
                     theme,
-                )),
+                ))
+                .children(trading_status_rows(feedback, market_error, theme)),
         )
         .child(
             trading_section()
                 .border_t_1()
                 .border_color(gpui_color(colors.border))
-                .child(order_management_buttons(frame, order_entry, theme)),
+                .child(order_management_buttons(
+                    frame,
+                    risk_locks,
+                    order_entry,
+                    theme,
+                )),
         )
+}
+
+/// Latest command outcome, plus any failure applying live prices to the simulated venue.
+fn trading_status_rows(
+    feedback: Option<&aeris_desktop::trading::TradingCommandFeedback>,
+    market_error: Option<&str>,
+    theme: &AerisTheme,
+) -> Vec<Div> {
+    let status = feedback.map(|feedback| {
+        trading_field(
+            "Status",
+            trading_field_text(
+                feedback.message.clone(),
+                if feedback.is_error {
+                    theme.colors.danger
+                } else {
+                    theme.colors.text_secondary
+                },
+            ),
+            theme,
+        )
+    });
+    let venue = market_error.map(|error| {
+        trading_field(
+            "Venue",
+            trading_field_text(error.to_string(), theme.colors.danger),
+            theme,
+        )
+    });
+    status.into_iter().chain(venue).collect()
 }
 
 fn trading_section() -> Div {
@@ -574,7 +614,7 @@ fn trading_pnl_summary(
                 .map_or_else(|| "n/a".to_string(), format_fixed_point);
             format!(
                 "{} · R {}t · U {}t",
-                format_fixed_point(position.position.net_quantity),
+                format_trimmed_fixed_point(position.position.net_quantity),
                 realized,
                 unrealized,
             )
@@ -1057,10 +1097,14 @@ fn working_order_row(
     let price = order
         .limit_price
         .or(order.stop_price)
-        .map_or_else(String::new, format_fixed_point);
+        .map_or_else(String::new, |price| {
+            format_trimmed_fixed_point(price)
+                .trim_start_matches('+')
+                .to_string()
+        });
     let label = format!(
         "{direction} {instruction} {}{}",
-        format_fixed_point(order.quantity),
+        format_trimmed_fixed_point(order.quantity).trim_start_matches('+'),
         if price.is_empty() {
             String::new()
         } else {
@@ -1109,6 +1153,21 @@ fn working_order_row(
                 aeris_desktop::trading::cancel_simulated_order(client_order_key.clone(), cx);
             }),
         )
+}
+
+/// Quantities and prices arrive at provider storage scale (eight places for Hyperliquid), so
+/// display drops trailing fractional zeros. Money keeps its currency scale via
+/// [`format_fixed_point`].
+fn format_trimmed_fixed_point(value: aeris_trading::FixedPoint) -> String {
+    let formatted = format_fixed_point(value);
+    if formatted.contains('.') {
+        formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        formatted
+    }
 }
 
 fn format_fixed_point(value: aeris_trading::FixedPoint) -> String {
@@ -1297,6 +1356,7 @@ fn best_book_order_label(
 
 fn order_management_buttons(
     frame: Option<&aeris_market_data::OrderBookFrame>,
+    risk_locks: &[aeris_trading_runtime::RiskLock],
     order_entry: &super::TradingOrderEntryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
@@ -1305,6 +1365,10 @@ fn order_management_buttons(
         .selected_account_id
         .as_ref()
         .map(|id| id.as_str().to_string());
+    let account_locked = order_entry
+        .selected_account_id
+        .as_ref()
+        .is_some_and(|account_id| risk_locks.iter().any(|lock| &lock.account_id == account_id));
     let row = |label: &'static str, buttons: [Stateful<Div>; 3]| {
         trading_field(
             label,
@@ -1326,7 +1390,7 @@ fn order_management_buttons(
             [
                 cancel_account_button(account_key.clone(), &colors),
                 flatten_account_button(frame.cloned(), account_key.clone(), &colors),
-                kill_account_button(account_key, &colors),
+                account_lock_button(account_key, account_locked, &colors),
             ],
         ))
         .child(row(
@@ -1428,19 +1492,32 @@ fn flatten_all_button(
     })
 }
 
-fn kill_account_button(
+fn account_lock_button(
     account_key: Option<String>,
+    locked: bool,
     colors: &aeris_design_system::ThemeColors,
 ) -> Stateful<Div> {
-    trading_management_button(
-        "trading_kill_switch_account",
-        "Kill",
-        "Lock the selected simulated account",
-        colors.danger,
-    )
-    .on_click(move |_, _, cx| {
-        aeris_desktop::trading::kill_simulated_account(account_key.clone(), cx);
-    })
+    if locked {
+        trading_management_button(
+            "trading_unlock_account",
+            "Unlock",
+            "Unlock the selected simulated account",
+            colors.positive,
+        )
+        .on_click(move |_, _, cx| {
+            aeris_desktop::trading::unlock_simulated_account(account_key.clone(), cx);
+        })
+    } else {
+        trading_management_button(
+            "trading_kill_switch_account",
+            "Kill",
+            "Lock the selected simulated account",
+            colors.danger,
+        )
+        .on_click(move |_, _, cx| {
+            aeris_desktop::trading::kill_simulated_account(account_key.clone(), cx);
+        })
+    }
 }
 
 fn kill_all_button(colors: &aeris_design_system::ThemeColors) -> Stateful<Div> {
@@ -1520,6 +1597,24 @@ mod tests {
         assert_eq!(two.units(), 2);
         assert_eq!(three.units(), 3);
         assert_eq!(next_copier_multiplier(three), one);
+    }
+
+    #[test]
+    fn storage_scale_quantities_and_prices_display_without_trailing_zeros() {
+        let value = |units, scale| aeris_trading::FixedPoint::try_new(units, scale).expect("value");
+        assert_eq!(
+            super::format_trimmed_fixed_point(value(100_000_000, 8)),
+            "+1"
+        );
+        assert_eq!(
+            super::format_trimmed_fixed_point(value(8_370_400_000_000, 8)),
+            "+83704"
+        );
+        assert_eq!(
+            super::format_trimmed_fixed_point(value(-12_000, 8)),
+            "-0.00012"
+        );
+        assert_eq!(super::format_fixed_point(value(0, 2)), "+0.00");
     }
 
     #[test]

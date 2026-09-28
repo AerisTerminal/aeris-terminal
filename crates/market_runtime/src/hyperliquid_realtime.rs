@@ -449,8 +449,10 @@ fn handle_catalog_select(
                 // valid increment near the catalog mark price at selection.
                 price_increment,
                 contract_metadata: Some(Box::new(ProviderContractMetadata {
-                    point_value: None,
-                    point_value_scale: None,
+                    // Hyperliquid sizes are base-asset units and its linear PnL is
+                    // (exit - entry) * size, so one size unit has a point value of one.
+                    point_value: Some(1),
+                    point_value_scale: Some(0),
                     currency: Some("USD".to_string()),
                     contract_expiry: None,
                     first_notice_date: None,

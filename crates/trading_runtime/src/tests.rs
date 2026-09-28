@@ -1464,3 +1464,58 @@ fn measured_store_workload_is_bounded_and_restartable() {
         .shutdown(Duration::from_secs(10))
         .expect("reopened service stops");
 }
+
+#[test]
+fn published_observations_fill_resting_orders_once_and_never_regress() {
+    let directory = TestDirectory::new("published-observations");
+    let service = TradingService::start(config(&directory)).expect("service");
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut buy_limit = market_order("resting-buy", OrderSide::Buy, 1, 1_000);
+    buy_limit.order_type = OrderType::Limit;
+    buy_limit.limit_price = Some(FixedPoint::try_new(500_000, 2).expect("limit"));
+    service.place_order(buy_limit).expect("resting limit");
+
+    service
+        .publish_market_observation(observation(500_025, 500_050, 3, 2_000))
+        .expect("newer quote");
+    // An older provider revision that would cross the limit must not execute.
+    service
+        .publish_market_observation(observation(499_950, 499_975, 2, 3_000))
+        .expect("stale quote is offered");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert!(snapshot.fills.is_empty());
+    assert_eq!(snapshot.market_observation_error, None);
+
+    service
+        .publish_market_observation(observation(499_950, 499_975, 4, 4_000))
+        .expect("crossing quote");
+    // Another pane republishing the same revision is applied once.
+    service
+        .publish_market_observation(observation(499_950, 499_975, 4, 4_000))
+        .expect("duplicate quote");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.fills.len(), 1);
+    assert_eq!(snapshot.fills[0].price.units(), 499_975);
+    assert_eq!(snapshot.position_pnl.len(), 1);
+    assert_eq!(snapshot.position_pnl[0].position.net_quantity.units(), 1);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
+fn published_observations_for_unregistered_instruments_are_ignored() {
+    let directory = TestDirectory::new("unregistered-observation");
+    let service = TradingService::start(config(&directory)).expect("service");
+    service
+        .publish_market_observation(observation(500_000, 500_025, 1, 1_000))
+        .expect("offered");
+    assert_eq!(
+        service
+            .snapshot()
+            .expect("snapshot")
+            .market_observation_error,
+        None
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}

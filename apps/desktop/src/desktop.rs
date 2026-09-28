@@ -805,6 +805,8 @@ struct TradingPnlState {
     copy_dispatches: Vec<aeris_trading_runtime::TradeCopyDispatch>,
     strategy_templates: Vec<aeris_trading_runtime::BracketStrategyTemplate>,
     managed_brackets: Vec<aeris_trading_runtime::ManagedBracket>,
+    feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
+    market_error: Option<String>,
     order_entry: TradingOrderEntryState,
     refresh_pending: bool,
     next_refresh: Instant,
@@ -932,6 +934,8 @@ impl Default for TradingPnlState {
             copy_dispatches: Vec::new(),
             strategy_templates: Vec::new(),
             managed_brackets: Vec::new(),
+            feedback: None,
+            market_error: None,
             order_entry: TradingOrderEntryState::default(),
             refresh_pending: false,
             next_refresh: Instant::now(),
@@ -1696,10 +1700,13 @@ fn chart_trading_snapshot(
                     .and_then(|scale| chart_decimal(units, scale))
             })
     });
+    // Fixed-point scales are storage precision (Hyperliquid stores every value at eight places),
+    // not display precision. Leaving both unset lets the chart format trading prices with its
+    // price-axis formatter and show sizes without trailing zeros.
     let instrument = ChartInstrumentMetadata {
         tick_size: price_increment,
-        price_precision: Some(product.price_scale),
-        quantity_precision: Some(product.quantity_scale),
+        price_precision: None,
+        quantity_precision: None,
         minimum_quantity: None,
         point_value,
         currency: Some(account.currency.clone()),
@@ -1899,9 +1906,12 @@ fn dispatch_chart_cancel(
     service: aeris_trading_runtime::TradingService,
     cx: &mut Context<WorkspaceSurface>,
 ) {
-    let task = cx
-        .background_executor()
-        .spawn(async move { service.cancel_order(client_order_id).is_ok() });
+    let task = cx.background_executor().spawn(async move {
+        aeris_desktop::trading::record_outcome(
+            service.cancel_order(client_order_id),
+            "Practice order cancelled",
+        )
+    });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
         chart.update(cx, |chart, _| {
@@ -2003,10 +2013,10 @@ fn dispatch_chart_place_bracket(
         return;
     };
     let task = cx.background_executor().spawn(async move {
-        service
+        let result = service
             .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket { entry, template })
-            .and_then(|_| service.observe_market(observation).map(|_| ()))
-            .is_ok()
+            .and_then(|_| service.observe_market(observation));
+        aeris_desktop::trading::record_outcome(result, "Practice bracket placed")
     });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
@@ -2069,10 +2079,10 @@ fn dispatch_chart_create_protection(
         aeris_trading_runtime::ProtectiveOrderRole::TakeProfit
     };
     let task = cx.background_executor().spawn(async move {
-        service
+        let result = service
             .place_protective_order(aeris_trading_runtime::PlaceProtectiveOrder { order, role })
-            .and_then(|_| service.observe_market(observation).map(|_| ()))
-            .is_ok()
+            .and_then(|_| service.observe_market(observation));
+        aeris_desktop::trading::record_outcome(result, "Practice protective order placed")
     });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
@@ -2144,9 +2154,12 @@ fn dispatch_chart_modify(
             observed_unix_nanos: modified_unix_nanos,
         },
     };
-    let task = cx
-        .background_executor()
-        .spawn(async move { service.modify_order(command).is_ok() });
+    let task = cx.background_executor().spawn(async move {
+        aeris_desktop::trading::record_outcome(
+            service.modify_order(command),
+            "Practice order modified",
+        )
+    });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
         chart.update(cx, |chart, _| {
@@ -2199,9 +2212,12 @@ fn dispatch_chart_close_position(
         resolve_chart_intent(&chart, sequence, false, cx);
         return;
     };
-    let task = cx
-        .background_executor()
-        .spawn(async move { service.flatten_account(account_id, observation).is_ok() });
+    let task = cx.background_executor().spawn(async move {
+        aeris_desktop::trading::record_outcome(
+            service.flatten_account(account_id, observation),
+            "Practice position closed",
+        )
+    });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
         chart.update(cx, |chart, _| {
@@ -3609,6 +3625,56 @@ struct WorkspaceSurfaceRestore {
     side_panel: Option<(u32, u32, u32)>,
 }
 
+/// Maps a ladder click to a resting order at that price.
+///
+/// Bid rows sit below the market and ask rows above it. Limit orders rest on the passive side
+/// (buy below, sell above); stop orders trigger on a breakout (buy above, sell below). A market
+/// selection places a resting limit, because a ladder click always names a price.
+pub(crate) fn ladder_click_order(
+    row_side: OrderBookLevelSide,
+    selected_type: aeris_trading::OrderType,
+) -> (aeris_trading::OrderSide, aeris_trading::OrderType) {
+    let order_type = match selected_type {
+        aeris_trading::OrderType::Market => aeris_trading::OrderType::Limit,
+        order_type => order_type,
+    };
+    let breakout = matches!(
+        order_type,
+        aeris_trading::OrderType::Stop | aeris_trading::OrderType::StopLimit
+    );
+    let side = match (row_side, breakout) {
+        (OrderBookLevelSide::Bid, false) | (OrderBookLevelSide::Ask, true) => {
+            aeris_trading::OrderSide::Buy
+        }
+        (OrderBookLevelSide::Ask, false) | (OrderBookLevelSide::Bid, true) => {
+            aeris_trading::OrderSide::Sell
+        }
+    };
+    (side, order_type)
+}
+
+/// Returns the ladder row side and price where a working order is drawn and dragged.
+pub(crate) fn order_book_row_price(
+    order: &aeris_trading::Order,
+) -> Option<(OrderBookLevelSide, aeris_trading::FixedPoint)> {
+    let (price, breakout) = match order.order_type {
+        aeris_trading::OrderType::Market => return None,
+        aeris_trading::OrderType::Limit => (order.limit_price?, false),
+        aeris_trading::OrderType::Stop | aeris_trading::OrderType::StopLimit => {
+            (order.stop_price?, true)
+        }
+    };
+    let side = match (order.side, breakout) {
+        (aeris_trading::OrderSide::Buy, false) | (aeris_trading::OrderSide::Sell, true) => {
+            OrderBookLevelSide::Bid
+        }
+        (aeris_trading::OrderSide::Sell, false) | (aeris_trading::OrderSide::Buy, true) => {
+            OrderBookLevelSide::Ask
+        }
+    };
+    Some((side, price))
+}
+
 fn subscribe_order_book_trading(
     workspace: &Entity<WorkspaceSurface>,
     order_book: &Entity<ReadOnlyOrderBookView>,
@@ -3633,19 +3699,19 @@ fn subscribe_order_book_trading(
                 let Some(frame) = frame else {
                     return;
                 };
-                let side = match event.side {
-                    OrderBookLevelSide::Ask => aeris_trading::OrderSide::Buy,
-                    OrderBookLevelSide::Bid => aeris_trading::OrderSide::Sell,
-                };
-                aeris_desktop::trading::dispatch_simulated_limit_order_at_price(
+                let (side, order_type) = ladder_click_order(event.side, order_entry.order_type);
+                aeris_desktop::trading::dispatch_simulated_order_at_price(
                     &frame,
-                    side,
-                    order_entry
-                        .selected_account_id
-                        .map(|id| id.as_str().to_string()),
-                    order_entry.quantity,
-                    order_entry.time_in_force,
-                    event.price,
+                    aeris_desktop::trading::SimulatedPricedOrder {
+                        side,
+                        order_type,
+                        account_key: order_entry
+                            .selected_account_id
+                            .map(|id| id.as_str().to_string()),
+                        quantity: order_entry.quantity,
+                        time_in_force: order_entry.time_in_force,
+                        price_units: event.price,
+                    },
                     cx,
                 );
             },
@@ -3676,19 +3742,13 @@ fn subscribe_order_book_trading(
                 let Some(frame) = drop_order_book.read(cx).frame().cloned() else {
                     return;
                 };
-                let order_side = match event.source_side {
-                    OrderBookLevelSide::Ask => aeris_trading::OrderSide::Buy,
-                    OrderBookLevelSide::Bid => aeris_trading::OrderSide::Sell,
-                };
                 let Some(order) = orders.into_iter().find(|order| {
                     order.status.is_open()
-                        && order.order_type == aeris_trading::OrderType::Limit
-                        && order.side == order_side
                         && order.account_id.as_str() == account_id.as_str()
                         && order.instrument_id.as_str() == frame.instrument_id.as_str()
-                        && order
-                            .limit_price
-                            .is_some_and(|price| price.units() == event.source_price)
+                        && order_book_row_price(order).is_some_and(|(side, price)| {
+                            side == event.source_side && price.units() == event.source_price
+                        })
                 }) else {
                     return;
                 };
@@ -3699,6 +3759,7 @@ fn subscribe_order_book_trading(
                 };
                 aeris_desktop::trading::modify_simulated_order_at_price(
                     order.client_order_id,
+                    order.order_type,
                     order.time_in_force,
                     &frame,
                     target_price,

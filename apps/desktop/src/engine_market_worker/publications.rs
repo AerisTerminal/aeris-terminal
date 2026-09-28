@@ -2,13 +2,13 @@
 
 use super::{
     ChartInterval, ChartState, EngineFaultCode, FeedConnectionState, InstallProviderInstrument,
-    MarketDemandError, MarketPublicationGeneration, MarketRuntimeEvent, MarketSeriesSnapshot,
-    MarketSeriesState, MarketSeriesUpdate, MarketService, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender, ProviderConnectionState,
-    ProviderState, PushedEventContext, ReplayRecoveryCommand, ReplayStreamUpdate, SeriesLoadState,
-    WorkerEndpoint, chart_streams, demand_error, provider_display_name, replay_runtime_snapshot,
-    replay_runtime_tail_update, runtime_generation_from_snapshot, runtime_order_book_frame,
-    series_key, worker_identity,
+    MarketDemandError, MarketOrderBookSnapshot, MarketPublicationGeneration, MarketRuntimeEvent,
+    MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
+    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
+    ProviderConnectionState, ProviderState, PushedEventContext, ReplayRecoveryCommand,
+    ReplayStreamUpdate, SeriesLoadState, WorkerEndpoint, chart_streams, demand_error,
+    provider_display_name, replay_runtime_snapshot, replay_runtime_tail_update,
+    runtime_generation_from_snapshot, runtime_order_book_frame, series_key, worker_identity,
 };
 
 /// Applies one series-readiness transition, reporting a live handoff to the UI.
@@ -87,6 +87,34 @@ pub(super) fn apply_series_state(
     }
 }
 
+fn apply_order_book_snapshot(
+    snapshot: &MarketOrderBookSnapshot,
+    context: &PushedEventContext<'_>,
+    messages: &MarketWorkerSender,
+) -> Result<(), String> {
+    let &PushedEventContext {
+        consumer_id,
+        active_generation,
+        instrument,
+        ..
+    } = context;
+    if snapshot.consumer_id.0.get() != consumer_id {
+        return Err("engine order-book consumer mismatched".to_string());
+    }
+    let Some(frame) = runtime_order_book_frame(snapshot, instrument, active_generation) else {
+        // Depth is an ancillary stream. A stale or malformed book
+        // image must never transition the price chart into a fatal
+        // state; retain the last valid Order Book frame and wait for the next
+        // canonical snapshot.
+        return Ok(());
+    };
+    aeris_desktop::trading::publish_simulated_market_observation(&frame);
+    messages
+        .send(MarketWorkerMessage::OrderBook(frame))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(super) fn apply_pushed_event(
     event: MarketRuntimeEvent,
     context: &PushedEventContext<'_>,
@@ -117,21 +145,7 @@ pub(super) fn apply_pushed_event(
             apply_realtime_demand_error(&error, consumer_id, active_generation, messages)
         }
         MarketRuntimeEvent::OrderBookSnapshot(snapshot) => {
-            if snapshot.consumer_id.0.get() != consumer_id {
-                return Err("engine order-book consumer mismatched".to_string());
-            }
-            let Some(frame) = runtime_order_book_frame(&snapshot, instrument, active_generation)
-            else {
-                // Depth is an ancillary stream. A stale or malformed book
-                // image must never transition the price chart into a fatal
-                // state; retain the last valid Order Book frame and wait for the next
-                // canonical snapshot.
-                return Ok(());
-            };
-            messages
-                .send(MarketWorkerMessage::OrderBook(frame))
-                .map_err(|error| error.to_string())?;
-            Ok(())
+            apply_order_book_snapshot(&snapshot, context, messages)
         }
         MarketRuntimeEvent::TradeTapeSnapshot(snapshot) => {
             if snapshot.consumer_id.0.get() != consumer_id {
