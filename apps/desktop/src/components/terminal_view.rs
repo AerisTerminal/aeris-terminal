@@ -946,6 +946,7 @@ fn workspace_tab(
     let tab_focus = workspace.focus.clone();
     let mouse_focus = workspace.focus.clone();
     Tab::new(("workspace_tab", tab_id), &theme)
+        .resting_fill(theme.colors.surface)
         .selected(selected)
         .w(px(width))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))

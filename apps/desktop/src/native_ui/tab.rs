@@ -1,4 +1,6 @@
-use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole, platform_font_family};
+use aeris_design_system::{
+    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
+};
 use gpui::{
     AnyElement, App, ElementId, InteractiveElement, Interactivity, IntoElement, ParentElement,
     RenderOnce, StyleRefinement, Styled, Window, prelude::*, px,
@@ -24,6 +26,7 @@ pub(crate) struct Tab {
     theme: AerisTheme,
     selected: bool,
     segmented: bool,
+    resting_fill: Option<ThemeColor>,
     children: Vec<AnyElement>,
 }
 
@@ -35,6 +38,7 @@ impl Tab {
             theme: *theme,
             selected: false,
             segmented: false,
+            resting_fill: None,
             children: Vec::new(),
         }
     }
@@ -49,6 +53,14 @@ impl Tab {
     /// full-radius pill and uses the canonical input/interaction/text tokens.
     pub(crate) const fn segmented(mut self) -> Self {
         self.segmented = true;
+        self
+    }
+
+    /// Sets the authoritative surface beneath this tab and its interaction
+    /// overlays. Callers use this when a tab belongs to a surface other than
+    /// the shared secondary tab container.
+    pub(crate) const fn resting_fill(mut self, fill: ThemeColor) -> Self {
+        self.resting_fill = Some(fill);
         self
     }
 }
@@ -76,9 +88,9 @@ impl gpui::StatefulInteractiveElement for Tab {}
 impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
-        let resting_fill = colors.surface_secondary;
+        let resting_fill = self.resting_fill.unwrap_or(colors.surface_secondary);
         let selected_fill = colors.active_bg.over(resting_fill);
-        let resting_border = colors.surface_secondary;
+        let resting_border = resting_fill;
         let mut tab = self
             .base
             .occlude()
@@ -127,10 +139,21 @@ impl RenderOnce for Tab {
 mod tests {
     use gpui::px;
 
-    use super::tab_radius;
+    use super::{Tab, tab_radius};
 
     #[test]
     fn shared_tabs_use_the_platform_full_radius_token() {
         assert_eq!(tab_radius(), px(999.0));
+    }
+
+    #[test]
+    fn tabs_can_bind_interaction_states_to_their_own_surface() {
+        for theme in [
+            aeris_design_system::AerisTheme::light(),
+            aeris_design_system::AerisTheme::dark(),
+        ] {
+            let tab = Tab::new("surface_tab", &theme).resting_fill(theme.colors.surface);
+            assert_eq!(tab.resting_fill, Some(theme.colors.surface));
+        }
     }
 }
