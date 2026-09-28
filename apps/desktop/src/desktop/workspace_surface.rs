@@ -321,7 +321,7 @@ pub(super) fn restored_chart_appearance(
     })
 }
 
-/// Footprint study panes the indicator menu can add back after removal.
+/// Tape-derived study panes the indicator menu can add back after removal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OrderFlowMenuStudy {
     CumulativeDelta,
@@ -3452,7 +3452,7 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).order_flow_settings())
     }
 
-    /// Shows a footprint study pane through the order-flow settings owner.
+    /// Shows a tape-derived study pane through the order-flow settings owner.
     pub(super) fn add_order_flow_study(
         &mut self,
         study: OrderFlowMenuStudy,
@@ -3690,9 +3690,7 @@ impl WorkspaceSurface {
                 chart_cx.notify();
             });
         }
-        if chart_type == ChartType::Footprint
-            && let Some(snapshot) = self.trade_tape.clone()
-        {
+        if let Some(snapshot) = self.trade_tape.clone() {
             self.apply_trade_tape_to_chart(&snapshot, cx);
         }
         let preferences = self.chart_chrome;

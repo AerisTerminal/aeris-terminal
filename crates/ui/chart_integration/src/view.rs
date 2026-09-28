@@ -2449,7 +2449,7 @@ impl AerisChartView {
         if self.chart_type == chart_type {
             return;
         }
-        if self.chart_type == ChartType::Footprint {
+        if self.chart_type == ChartType::Footprint || chart_type == ChartType::Footprint {
             self.teardown_order_flow();
         }
         self.chart_type = chart_type;

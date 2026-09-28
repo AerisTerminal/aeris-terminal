@@ -54,6 +54,64 @@ fn enable_cvd_and_delta(
 }
 
 #[test]
+fn cvd_and_delta_run_on_every_primary_chart_presentation() {
+    let mut chart = AerisChartView::empty();
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let mut trades = vec![
+        order_flow_trade(1, 1_000_000, 2.0),
+        order_flow_trade(2, 2_000_000, 3.0),
+    ];
+    let mut settings = chart.order_flow_settings();
+    settings.show_cumulative_delta = true;
+    settings.show_delta_histogram = true;
+    assert!(
+        chart
+            .set_order_flow_settings(settings)
+            .expect("settings apply")
+    );
+
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("candlestick chart accepts order-flow studies");
+    assert!(chart.footprint_series_id().is_none());
+    assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
+    assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
+    assert_eq!(series_entry(&chart, 0).render_before_time, None);
+    assert!(chart.order_flow_state.is_some());
+
+    chart.set_chart_type(ChartType::Line);
+    assert!(
+        chart.order_flow_state.is_some(),
+        "switching between ordinary price presentations preserves the shared stream"
+    );
+    assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
+    assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
+    trades.push(order_flow_trade(3, 3_000_000, 5.0));
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("line chart advances order-flow studies");
+
+    chart.set_chart_type(ChartType::Footprint);
+    assert!(chart.order_flow_state.is_none());
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("footprint transition rebuilds the shared presentation");
+    assert!(chart.footprint_series_id().is_some());
+    assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
+    assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
+
+    chart.set_chart_type(ChartType::Bars);
+    assert!(chart.order_flow_state.is_none());
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("bar transition rebuilds only the study panes");
+    assert!(chart.footprint_series_id().is_none());
+    assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
+    assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
+    assert_eq!(series_entry(&chart, 0).render_before_time, None);
+}
+
+#[test]
 fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_eviction() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);

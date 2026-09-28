@@ -146,17 +146,13 @@ pub(super) fn indicator_dialog_content(
         ))
 }
 
-/// Footprint study panes that are currently hidden and match the search, shown only while the
-/// chart presents a footprint.
+/// Tape-derived study panes that are currently hidden and match the search.
 fn order_flow_menu_studies(
     app: &Entity<WorkspaceSurface>,
     query: &str,
     cx: &App,
 ) -> Vec<OrderFlowMenuStudy> {
     let surface = app.read(cx);
-    if surface.chart_type(cx) != ChartType::Footprint {
-        return Vec::new();
-    }
     let Some(settings) = surface.chart_order_flow_settings(cx) else {
         return Vec::new();
     };
