@@ -12,6 +12,29 @@ use aeris_charts_engine::{TradingCursor, TradingHitKind};
 /// Matches the browser host's dwell before a close control reveals its action tooltip.
 const TRADING_TOOLTIP_DWELL: std::time::Duration = std::time::Duration::from_millis(450);
 
+/// GPUI's Windows backend currently falls back to the arrow for both hand cursors. Price lines
+/// move only on the Y axis, so use the native vertical-resize affordance there instead of
+/// presenting a draggable trading line as inert.
+#[cfg(target_os = "windows")]
+pub(super) const fn trading_line_cursor() -> CursorStyle {
+    CursorStyle::ResizeUpDown
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) const fn trading_line_cursor() -> CursorStyle {
+    CursorStyle::OpenHand
+}
+
+#[cfg(target_os = "windows")]
+pub(super) const fn trading_line_drag_cursor() -> CursorStyle {
+    CursorStyle::ResizeUpDown
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) const fn trading_line_drag_cursor() -> CursorStyle {
+    CursorStyle::ClosedHand
+}
+
 impl AerisChartView {
     /// Cancels transient pointer state before a host-owned modal occludes the chart.
     pub fn suspend_pointer_interaction(&mut self) {
@@ -100,10 +123,10 @@ impl AerisChartView {
             self.invalidate_series_frame();
         }
         self.cursor_style = if self.engine.trading_preview().is_some() {
-            CursorStyle::ClosedHand
+            trading_line_drag_cursor()
         } else if let Some(cursor) = trading_cursor {
             match cursor {
-                TradingCursor::Grab => CursorStyle::OpenHand,
+                TradingCursor::Grab => trading_line_cursor(),
                 TradingCursor::Pointer => CursorStyle::PointingHand,
             }
         } else if self.engine.alert_create_hit_at(pane_x, y) {
@@ -406,7 +429,7 @@ impl AerisChartView {
             self.invalidate_series_frame();
         } else if !self.pointer_on_axis(pane_x, y) && self.engine.trading_drag_start_at(pane_x, y) {
             self.drag = None;
-            self.cursor_style = CursorStyle::ClosedHand;
+            self.cursor_style = trading_line_drag_cursor();
             self.invalidate_series_frame();
         } else if self.engine.activate_alert_create_at(pane_x, y) {
             self.drag = None;

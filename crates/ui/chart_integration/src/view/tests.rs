@@ -3468,6 +3468,21 @@ fn pointer_cursor_truthfully_tracks_chart_and_axis_gestures() {
 }
 
 #[test]
+fn trading_line_cursor_uses_a_visible_native_drag_affordance() {
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(input::trading_line_cursor(), CursorStyle::ResizeUpDown);
+        assert_eq!(input::trading_line_drag_cursor(), CursorStyle::ResizeUpDown);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(input::trading_line_cursor(), CursorStyle::OpenHand);
+        assert_eq!(input::trading_line_drag_cursor(), CursorStyle::ClosedHand);
+    }
+}
+
+#[test]
 fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
