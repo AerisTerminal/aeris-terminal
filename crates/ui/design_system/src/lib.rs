@@ -310,8 +310,7 @@ pub struct ThemeColors {
     pub danger_foreground: ThemeColor,
     pub warning: ThemeColor,
     pub positive: ThemeColor,
-    pub positive_subtle: ThemeColor,
-    pub negative_subtle: ThemeColor,
+    pub negative: ThemeColor,
     pub button_fill: ThemeColor,
     pub button_fill_hover: ThemeColor,
     pub button_fill_active: ThemeColor,
@@ -376,7 +375,7 @@ impl AerisTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 29] {
+    pub fn color_tokens(self) -> [ColorToken; 28] {
         let colors = self.colors;
         let sources = match self.mode {
             ThemeMode::Light => LIGHT_COLOR_SOURCES,
@@ -402,20 +401,19 @@ impl AerisTheme {
             ColorToken::new("danger-foreground", sources[16], colors.danger_foreground),
             ColorToken::new("warning", sources[17], colors.warning),
             ColorToken::new("positive", sources[18], colors.positive),
-            ColorToken::new("positive-subtle", sources[19], colors.positive_subtle),
-            ColorToken::new("negative-subtle", sources[20], colors.negative_subtle),
-            ColorToken::new("button-fill", sources[21], colors.button_fill),
-            ColorToken::new("button-fill-hover", sources[22], colors.button_fill_hover),
-            ColorToken::new("button-fill-active", sources[23], colors.button_fill_active),
+            ColorToken::new("negative", sources[19], colors.negative),
+            ColorToken::new("button-fill", sources[20], colors.button_fill),
+            ColorToken::new("button-fill-hover", sources[21], colors.button_fill_hover),
+            ColorToken::new("button-fill-active", sources[22], colors.button_fill_active),
             ColorToken::new(
                 "button-fill-foreground",
-                sources[24],
+                sources[23],
                 colors.button_fill_foreground,
             ),
-            ColorToken::new("button-fill-subtle", sources[25], colors.button_fill_subtle),
-            ColorToken::new("ring", sources[26], colors.ring),
-            ColorToken::new("bullish", sources[27], colors.bullish),
-            ColorToken::new("bearish", sources[28], colors.bearish),
+            ColorToken::new("button-fill-subtle", sources[24], colors.button_fill_subtle),
+            ColorToken::new("ring", sources[25], colors.ring),
+            ColorToken::new("bullish", sources[26], colors.bullish),
+            ColorToken::new("bearish", sources[27], colors.bearish),
         ]
     }
 }
@@ -434,7 +432,7 @@ fn dark_colors() -> ThemeColors {
     generated_colors(DARK_COLORS)
 }
 
-fn generated_colors(values: [[u8; 4]; 29]) -> ThemeColors {
+fn generated_colors(values: [[u8; 4]; 28]) -> ThemeColors {
     let color = |index: usize| {
         let [red, green, blue, alpha] = values[index];
         ThemeColor::from_rgba8(red, green, blue, alpha)
@@ -459,16 +457,15 @@ fn generated_colors(values: [[u8; 4]; 29]) -> ThemeColors {
         danger_foreground: color(16),
         warning: color(17),
         positive: color(18),
-        positive_subtle: color(19),
-        negative_subtle: color(20),
-        button_fill: color(21),
-        button_fill_hover: color(22),
-        button_fill_active: color(23),
-        button_fill_foreground: color(24),
-        button_fill_subtle: color(25),
-        ring: color(26),
-        bullish: color(27),
-        bearish: color(28),
+        negative: color(19),
+        button_fill: color(20),
+        button_fill_hover: color(21),
+        button_fill_active: color(22),
+        button_fill_foreground: color(23),
+        button_fill_subtle: color(24),
+        ring: color(25),
+        bullish: color(26),
+        bearish: color(27),
     }
 }
 
@@ -627,12 +624,10 @@ mod tests {
         let dark = AerisTheme::dark().colors;
         assert_eq!(light.text_positive, light.positive);
         assert_eq!(dark.text_positive, dark.positive);
-        assert_eq!(light.text_negative, ThemeColor::from_rgb8(247, 82, 95));
-        assert_eq!(dark.text_negative, light.text_negative);
-        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(219, 252, 231));
-        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(13, 84, 43));
-        assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(255, 226, 226));
-        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(70, 8, 9));
+        assert_eq!(light.negative, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(dark.negative, light.negative);
+        assert_eq!(light.text_negative, light.negative);
+        assert_eq!(dark.text_negative, dark.negative);
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
@@ -644,10 +639,10 @@ mod tests {
             token_source(&light_tokens, "text-negative"),
             "var(--negative)"
         );
-        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dbfce7");
-        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#0d542b");
-        assert_eq!(token_source(&light_tokens, "negative-subtle"), "#ffe2e2");
-        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#460809");
+        assert_eq!(token_source(&light_tokens, "positive"), "#089981");
+        assert_eq!(token_source(&dark_tokens, "positive"), "#089981");
+        assert_eq!(token_source(&light_tokens, "negative"), "#f7525f");
+        assert_eq!(token_source(&dark_tokens, "negative"), "#f7525f");
     }
 
     #[test]
