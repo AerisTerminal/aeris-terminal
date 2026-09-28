@@ -98,7 +98,11 @@ const MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS: usize = MAXIMUM_STORED_BARS;
 const MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE: usize =
     MAXIMUM_STUDY_OUTPUTS * HISTORY_SERIES_HIGH_WATERMARK * size_of::<f64>() * 2;
 const MAXIMUM_STUDY_TOTAL_STATE_BYTES: usize = 64 * 1024 * 1024;
-const INITIAL_HISTORY_BARS: usize = 600;
+/// First history page for a newly selected series, served in one provider round trip.
+/// Charts open on their latest ~600 bars; the remaining 1,000 bars are indicator warm-up
+/// (five periods of a 200-bar average), so studies are converged at the visible left edge
+/// instead of filling in after a second viewport-driven fetch.
+const INITIAL_HISTORY_BARS: usize = 1_600;
 const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;

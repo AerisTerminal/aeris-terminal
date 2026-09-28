@@ -92,6 +92,10 @@ fn replay_time_visible(replay: &ReplaySnapshot) -> bool {
         || (definition.calendar_months.is_none() && definition.interval_seconds < 86_400)
 }
 
+/// Bars a freshly installed market opens on, matching the runtime's visible share of its
+/// first history page.
+const INITIAL_VISIBLE_BARS: f64 = 600.0;
+
 fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) {
     let options = serde_json::json!({
         "layout": {
@@ -2254,6 +2258,44 @@ impl AerisChartView {
         true
     }
 
+    fn prepare_frame(
+        &mut self,
+        (width, height, scale_factor): (f32, f32, f32),
+        force_layout: bool,
+        fit_content: bool,
+        measure: impl Fn(&str, bool) -> f64 + Copy,
+        countdown_measure: impl Fn(&str, bool) -> f64 + Copy,
+    ) -> aeris_charts_engine::FinancialFramePreparation {
+        self.engine.prepare_financial_frame_with_measure(
+            aeris_charts_engine::FinancialFrameRequest {
+                width: f64::from(width),
+                height: f64::from(height),
+                dpr: f64::from(scale_factor),
+                force_layout,
+                fit_content,
+                frame: &mut self.frame,
+                axis_primitives: &mut self.axis_prims,
+            },
+            measure,
+            countdown_measure,
+        )
+    }
+
+    /// Opens a freshly installed market on its latest bars instead of fitting everything
+    /// loaded. Older history is indicator warm-up and back-scroll runway, so long studies
+    /// are already converged at the visible left edge.
+    fn narrow_to_initial_window(&mut self) -> bool {
+        let Some((left, right)) = self.engine.visible_logical_range() else {
+            return false;
+        };
+        if right - left <= INITIAL_VISIBLE_BARS {
+            return false;
+        }
+        self.engine
+            .set_visible_logical_range(right - INITIAL_VISIBLE_BARS, right);
+        true
+    }
+
     fn invalidate_series_layout(&mut self) {
         self.invalidate_series_frame();
         self.layout_dirty = true;
@@ -2313,19 +2355,19 @@ impl AerisChartView {
         };
 
         let fit_content = !self.fitted;
-        let preparation = self.engine.prepare_financial_frame_with_measure(
-            aeris_charts_engine::FinancialFrameRequest {
-                width: f64::from(width),
-                height: f64::from(height),
-                dpr: f64::from(scale_factor),
-                force_layout: self.layout_dirty,
-                fit_content,
-                frame: &mut self.frame,
-                axis_primitives: &mut self.axis_prims,
-            },
+        let force_layout = self.layout_dirty;
+        let mut preparation = self.prepare_frame(
+            dimensions,
+            force_layout,
+            fit_content,
             measure,
             countdown_measure,
         );
+        // The fit needs the laid-out width, so a freshly installed market that holds
+        // more than its opening window is narrowed and laid out once more.
+        if fit_content && preparation.layout_recomputed && self.narrow_to_initial_window() {
+            preparation = self.prepare_frame(dimensions, true, false, measure, countdown_measure);
+        }
         if !preparation.frame_built {
             return false;
         }

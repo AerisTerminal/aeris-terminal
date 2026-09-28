@@ -214,7 +214,7 @@ fn covering_snapshot_is_popped_before_live_state() {
 }
 
 #[test]
-fn initial_history_is_small_and_viewport_fetches_are_bounded() {
+fn initial_history_covers_visible_window_and_warm_up_and_viewport_fetches_are_bounded() {
     let series = BarSeriesKey {
         provider_id: "hyperliquid".to_string(),
         instrument_id: "instrument:hyperliquid:BTC".to_string(),
@@ -226,6 +226,7 @@ fn initial_history_is_small_and_viewport_fetches_are_bounded() {
         history::history_request_bar_limit(&series, None),
         INITIAL_HISTORY_BARS
     );
+    const { assert!(INITIAL_HISTORY_BARS <= MAXIMUM_HISTORY_BARS_PER_REQUEST) };
 
     let minute = 60_i64 * 1_000_000_000;
     let visible = HistoryRange {

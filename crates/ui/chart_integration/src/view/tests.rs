@@ -3580,3 +3580,36 @@ fn automatic_footprint_rows_target_legible_one_two_five_steps() {
     assert_eq!(auto_footprint_ticks_per_row(Some(3_000.0), 1.0), 200);
     assert_eq!(auto_footprint_ticks_per_row(Some(f64::NAN), 1.0), 1);
 }
+
+#[test]
+fn fresh_market_opens_on_latest_bars_keeping_warm_up_history_off_screen() {
+    let fitted_chart = |bar_count: usize| {
+        let replay = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count })
+            .expect("embedded replay");
+        let mut chart = AerisChartView::with_replay(&replay);
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+        chart.engine.fit_content();
+        chart
+    };
+
+    let mut chart = fitted_chart(1_600);
+    let (_, fitted_right) = chart.engine.visible_logical_range().expect("fitted range");
+    assert!(chart.narrow_to_initial_window());
+    let (left, right) = chart
+        .engine
+        .visible_logical_range()
+        .expect("narrowed range");
+    assert!(
+        (right - fitted_right).abs() <= 1.0,
+        "the latest bar stays in view"
+    );
+    assert!(right - left <= INITIAL_VISIBLE_BARS + 1.0);
+    assert!(left >= 900.0, "warm-up history stays left of the viewport");
+    assert!(!chart.narrow_to_initial_window());
+
+    let mut short = fitted_chart(400);
+    assert!(!short.narrow_to_initial_window());
+}
