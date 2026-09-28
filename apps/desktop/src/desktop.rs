@@ -214,7 +214,7 @@ use terminal_chrome::{
 use terminal_chrome::{
     WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
     button_activation, button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
-    fullscreen_escape_command, header_icon, series_glyph, terminal_header,
+    fullscreen_escape_command, header_icon, round_icon_button, series_glyph, terminal_header,
     window_move_gesture_transition, workspace_title_bar, workspace_title_bar_visible,
 };
 use terminal_view::{
@@ -430,8 +430,12 @@ const CHART_SETTINGS_PANEL_WIDTH: f32 = 900.0;
 const CHART_SETTINGS_PANEL_HEIGHT: f32 = 660.0;
 const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 176.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
+// GPUI snaps the hover fill and the glyph to device pixels independently, so the
+// hit/glyph inset must be a whole, equal number of device pixels on both sides at
+// every supported scale. 24/16 satisfies that at 100/125/150/175/200%; an odd or
+// fractional inset (the former 13px glyph) leaves the glyph off-centre in its hover.
 const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
-const WORKSPACE_TAB_ICON_GLYPH: f32 = 13.0;
+const WORKSPACE_TAB_ICON_GLYPH: f32 = 16.0;
 const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.

@@ -1,11 +1,6 @@
 use super::*;
 use crate::desktop::native_ui::theme::platform_border_width;
 
-// Settings header actions use one slightly larger canvas so their SVGs rasterize
-// consistently and retain equal control weight.
-const CHART_SETTINGS_ACTION_ICON_GLYPH: f32 = 16.0;
-const _: () = assert!(CHART_SETTINGS_ACTION_ICON_GLYPH > WORKSPACE_TAB_ICON_GLYPH);
-
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
     2.0 + CHART_CONTEXT_MENU_ROW_HEIGHT * rows + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
@@ -859,7 +854,6 @@ fn chart_settings_actions(
         .child(chrome_icon_button(
             "chart_settings_reset",
             HugeIcon::Refresh,
-            CHART_SETTINGS_ACTION_ICON_GLYPH,
             "Reset settings",
             ChromeIconButtonTone::Neutral,
             theme,
@@ -872,7 +866,6 @@ fn chart_settings_actions(
         .child(chrome_icon_button(
             "chart_settings_close",
             HugeIcon::Close,
-            CHART_SETTINGS_ACTION_ICON_GLYPH,
             "Close",
             ChromeIconButtonTone::Destructive,
             theme,

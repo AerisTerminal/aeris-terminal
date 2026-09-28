@@ -150,26 +150,15 @@ pub(super) enum ChromeIconButtonTone {
 pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
     id: &'static str,
     icon: HugeIcon,
-    icon_size: f32,
     label: &'static str,
     tone: ChromeIconButtonTone,
     theme: &AerisTheme,
     on_activate: F,
 ) -> impl IntoElement + use<F> {
     let colors = theme.colors;
-    div()
-        .id(id)
-        .occlude()
-        .size(px(WORKSPACE_TAB_ICON_HIT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+    round_icon_button(id, icon, label)
         .text_color(gpui_color(colors.icon))
         .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(label)
         .hover(move |button| match tone {
             ChromeIconButtonTone::Neutral => button
                 .bg(gpui_color(colors.hover_bg.over(colors.surface)))
@@ -182,7 +171,6 @@ pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
             on_activate(window, cx);
             cx.stop_propagation();
         })
-        .child(header_icon(icon).with_size(px(icon_size)))
 }
 
 pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
@@ -193,7 +181,6 @@ pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
     chrome_icon_button(
         id,
         HugeIcon::Close,
-        WORKSPACE_TAB_ICON_GLYPH,
         "Close",
         ChromeIconButtonTone::Destructive,
         theme,

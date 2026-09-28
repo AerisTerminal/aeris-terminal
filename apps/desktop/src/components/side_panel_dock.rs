@@ -342,23 +342,13 @@ pub(super) fn side_panel_header_button<F: Fn(&mut gpui::App) + 'static>(
     chrome_tooltip(
         id,
         label,
-        div()
-            .id(id)
-            .occlude()
-            .size(px(WORKSPACE_TAB_ICON_HIT))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        round_icon_button(id, icon, label)
             .text_color(gpui_color(if active {
                 colors.icon_active
             } else {
                 colors.icon
             }))
             .cursor_pointer()
-            .role(Role::Button)
-            .aria_label(label)
             .when(active, |button| {
                 button.bg(gpui_color(colors.active_bg.over(colors.surface)))
             })
@@ -366,8 +356,7 @@ pub(super) fn side_panel_header_button<F: Fn(&mut gpui::App) + 'static>(
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 on_press(cx);
                 cx.stop_propagation();
-            })
-            .child(header_icon(icon).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
+            }),
         theme,
     )
     .into_any_element()

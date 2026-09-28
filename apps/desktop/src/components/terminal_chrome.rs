@@ -871,6 +871,28 @@ pub(super) fn header_icon(name: HugeIcon) -> Icon {
     Icon::default().path(name.path())
 }
 
+/// Shared geometry of every round chrome icon action (panel headers, menu close,
+/// workspace tab close/add): a full-radius hit with the glyph centred at the one
+/// pixel-aligned size. Callers own colours, hover/active fills and activation.
+pub(super) fn round_icon_button(
+    id: impl Into<gpui::ElementId>,
+    icon: HugeIcon,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .occlude()
+        .size(px(WORKSPACE_TAB_ICON_HIT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .role(Role::Button)
+        .aria_label(label)
+        .child(header_icon(icon).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
+}
+
 pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
     match chart_type {
         ChartType::Candles | ChartType::Footprint => assets::SeriesIcon::Candlestick,
@@ -1256,5 +1278,25 @@ pub(super) const fn aeris_chart_theme(mode: ThemeMode) -> AerisChartTheme {
     match mode {
         ThemeMode::Light => AerisChartTheme::Light,
         ThemeMode::Dark => AerisChartTheme::Dark,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT};
+
+    #[test]
+    fn round_icon_glyph_centres_on_whole_device_pixels_at_supported_scales() {
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
+            let hit = WORKSPACE_TAB_ICON_HIT * scale;
+            let glyph = WORKSPACE_TAB_ICON_GLYPH * scale;
+            let inset = (hit - glyph) / 2.0;
+            for (name, device_pixels) in [("hit", hit), ("glyph", glyph), ("inset", inset)] {
+                assert!(
+                    device_pixels.fract().abs() < f32::EPSILON,
+                    "{name} is {device_pixels} device px at {scale}x"
+                );
+            }
+        }
     }
 }
