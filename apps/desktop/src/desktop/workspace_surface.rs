@@ -4074,6 +4074,31 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    pub(super) fn toggle_time_sales(&mut self, cx: &mut Context<Self>) {
+        let visible = !self.side_panels.time_sales_visible();
+        self.set_time_sales_visible(visible, cx);
+    }
+
+    pub(super) fn set_time_sales_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.side_panels.time_sales_visible() == visible {
+            return;
+        }
+        self.side_panels.set_time_sales_visible(visible);
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
+    /// Applies a whole docked-panel layout, as when the active pane hands its panels over.
+    pub(super) fn apply_side_panels(
+        &mut self,
+        panels: SidePanelVisibility,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_order_book_visible(panels.contains(SidePanel::OrderBook), cx);
+        self.set_watchlist_visible(panels.contains(SidePanel::Watchlist), cx);
+        self.set_time_sales_visible(panels.time_sales_visible(), cx);
+    }
+
     pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<Self>) {
         self.set_context_panel_visible(!self.context_panel_visible, cx);
     }

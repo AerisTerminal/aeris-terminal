@@ -593,14 +593,12 @@ impl TerminalApp {
                 )
             });
         previous.update(cx, |surface, surface_cx| {
-            surface.set_order_book_visible(false, surface_cx);
-            surface.set_watchlist_visible(false, surface_cx);
+            surface.apply_side_panels(SidePanelVisibility::default(), surface_cx);
         });
         next.update(cx, |surface, surface_cx| {
             surface.side_panel_width = side_panel_width;
             surface.side_panel_split_basis_points = side_panel_split;
-            surface.set_order_book_visible(side_panels.contains(SidePanel::OrderBook), surface_cx);
-            surface.set_watchlist_visible(side_panels.contains(SidePanel::Watchlist), surface_cx);
+            surface.apply_side_panels(side_panels, surface_cx);
         });
 
         let workspace = &mut self.workspaces[workspace_index];
@@ -2121,8 +2119,7 @@ impl TerminalApp {
             surface.select_drawing_tool(drawing_tool, surface_cx);
             surface.side_panel_width = side_panel_width;
             surface.side_panel_split_basis_points = side_panel_split;
-            surface.set_order_book_visible(side_panels.contains(SidePanel::OrderBook), surface_cx);
-            surface.set_watchlist_visible(side_panels.contains(SidePanel::Watchlist), surface_cx);
+            surface.apply_side_panels(side_panels, surface_cx);
         });
         cx.observe(&surface, |app, surface, cx| {
             if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
@@ -2146,8 +2143,7 @@ impl TerminalApp {
             return;
         }
         source_surface.update(cx, |surface, surface_cx| {
-            surface.set_order_book_visible(false, surface_cx);
-            surface.set_watchlist_visible(false, surface_cx);
+            surface.apply_side_panels(SidePanelVisibility::default(), surface_cx);
         });
         workspace.panes.insert(
             insertion_index,
@@ -2227,8 +2223,7 @@ impl TerminalApp {
         workspace.active_pane = recipient;
         workspace.generation = workspace.generation.saturating_add(1);
         removed.surface.update(cx, |surface, surface_cx| {
-            surface.set_order_book_visible(false, surface_cx);
-            surface.set_watchlist_visible(false, surface_cx);
+            surface.apply_side_panels(SidePanelVisibility::default(), surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Detached);
             surface.retire_market_worker(surface_cx);
         });
@@ -2237,14 +2232,7 @@ impl TerminalApp {
             .update(cx, |surface, surface_cx| {
                 surface.side_panel_width = removed_side_panel_width;
                 surface.side_panel_split_basis_points = removed_side_panel_split;
-                surface.set_order_book_visible(
-                    removed_side_panels.contains(SidePanel::OrderBook),
-                    surface_cx,
-                );
-                surface.set_watchlist_visible(
-                    removed_side_panels.contains(SidePanel::Watchlist),
-                    surface_cx,
-                );
+                surface.apply_side_panels(removed_side_panels, surface_cx);
             });
         workspace.panes[recipient].focus.focus(window, cx);
         self.workspace_error = None;

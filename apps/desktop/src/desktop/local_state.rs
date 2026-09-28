@@ -356,7 +356,8 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         .iter_mut()
         .flat_map(|tab| tab.panes.iter_mut())
     {
-        pane.side_panel_visibility &= 0b11;
+        // Order book, watchlist and the order book's docked Time & Sales column.
+        pane.side_panel_visibility &= 0b111;
         if pane.side_panel_width != 0 {
             pane.side_panel_width = pane.side_panel_width.clamp(360, 480);
         }
@@ -951,7 +952,7 @@ mod tests {
         assert_eq!(sanitized.watchlist_entries.len(), 1);
         assert_eq!(sanitized.watchlist, vec!["BTC-USDC"]);
         let pane = &sanitized.workspace_tabs[0].panes[0];
-        assert_eq!(pane.side_panel_visibility, 3);
+        assert_eq!(pane.side_panel_visibility, 7);
         assert_eq!(pane.side_panel_width, 480);
         assert_eq!(pane.side_panel_split_basis_points, 9_500);
     }

@@ -392,15 +392,14 @@ impl RenderOnce for MenuRow {
     }
 }
 
-/// Flush compact dropdown surface: 1px rounded border, no panel padding.
+/// Flat, shadowless compact dropdown surface: 1px rounded border, no panel padding.
 /// Rows use [`MenuRow::compact`] plus [`MenuRow::flush_in_panel`]; do not wrap
 /// this panel in `py`/`px` or `overflow_hidden` (that clips the border).
-fn compact_menu_panel_with_elevation(
+pub(crate) fn flat_compact_menu_panel(
     id: impl Into<ElementId>,
     origin: Point<Pixels>,
     width: Pixels,
     theme: &AerisTheme,
-    elevated: bool,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     div()
@@ -414,32 +413,10 @@ fn compact_menu_panel_with_elevation(
         .border(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
-        .when(elevated, gpui::Styled::shadow_md)
         .font_family(platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_primary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-}
-
-pub(crate) fn compact_menu_panel(
-    id: impl Into<ElementId>,
-    origin: Point<Pixels>,
-    width: Pixels,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    compact_menu_panel_with_elevation(id, origin, width, theme, true)
-}
-
-/// Flat compact dropdown surface used by chart-native menus that sit directly
-/// against chart chrome. The shared geometry remains identical to elevated
-/// menus; only the box shadow is omitted.
-pub(crate) fn flat_compact_menu_panel(
-    id: impl Into<ElementId>,
-    origin: Point<Pixels>,
-    width: Pixels,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    compact_menu_panel_with_elevation(id, origin, width, theme, false)
 }
 
 pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {

@@ -103,11 +103,7 @@ struct OrderBookPanelState<'a> {
     app: &'a Entity<WorkspaceSurface>,
     order_book: &'a Entity<ReadOnlyOrderBookView>,
     order_book_frame: Option<&'a aeris_market_data::OrderBookFrame>,
-    trade_tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
-    trade_sweeps: &'a [OrderFlowSweep],
-    product: Option<&'a InstallProviderInstrument>,
-    time_sales_filter: super::TimeSalesFilter,
-    time_sales_scroll: &'a ScrollHandle,
+    time_sales_visible: bool,
     trading_pnl: Option<&'a aeris_trading::AccountPnl>,
     trading_accounts: &'a [aeris_trading::TradingAccount],
     trading_orders: &'a [aeris_trading::Order],
@@ -131,11 +127,7 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         app,
         order_book,
         order_book_frame,
-        trade_tape,
-        trade_sweeps,
-        product,
-        time_sales_filter,
-        time_sales_scroll,
+        time_sales_visible,
         trading_pnl,
         trading_accounts,
         trading_orders,
@@ -163,9 +155,20 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         .child(side_panel_header(
             SidePanel::OrderBook,
             (*app).clone(),
-            column_menu_open,
+            OrderBookHeaderState {
+                column_menu_open,
+                time_sales_visible,
+            },
             theme,
         ))
+        .child(
+            div()
+                .id("order_book_rows")
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(order_book.clone()),
+        )
         .child(trading_order_controls(&TradingOrderControlsState {
             app,
             frame: order_book_frame,
@@ -184,26 +187,6 @@ fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
             order_entry: trading_order_entry,
             theme,
         }))
-        .child(
-            div()
-                .id("order_book_rows")
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .child(order_book.clone()),
-        )
-        .child(time_sales_panel(
-            TimeSalesPanelState {
-                app: (*app).clone(),
-                tape: trade_tape,
-                sweeps: trade_sweeps,
-                product,
-                book: order_book_frame,
-                filter: time_sales_filter,
-                scroll: time_sales_scroll,
-            },
-            theme,
-        ))
         .children(
             column_menu_open
                 .then(|| order_book_column_menu_layer((*app).clone(), order_book, columns, theme)),
@@ -220,7 +203,11 @@ struct TimeSalesPanelState<'a> {
     scroll: &'a ScrollHandle,
 }
 
-fn time_sales_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> Div {
+/// Fixed width of the docked Time & Sales column, including its leading border: a
+/// time column, a flexible price column and the eight-decimal size column.
+const TIME_SALES_PANEL_WIDTH: f32 = 260.0;
+
+fn time_sales_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> Stateful<Div> {
     let TimeSalesPanelState {
         app,
         tape,
@@ -233,7 +220,7 @@ fn time_sales_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> Div {
     let rows = filtered_time_sales_rows(tape, product, book, filter);
     let side_filter_app = app.clone();
     let volume_filter_app = app.clone();
-    let range_app = app;
+    let range_app = app.clone();
     let price_scale = tape.map_or(0, |snapshot| u32::from(snapshot.price_scale));
     let quantity_scale = tape.map_or(0, |snapshot| u32::from(snapshot.quantity_scale));
     let size_label = if filter.minimum_quantity == 0.0 {
@@ -247,28 +234,41 @@ fn time_sales_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> Div {
     );
 
     div()
-        .h(px(210.0))
+        .id("time_sales_panel")
+        .w(px(TIME_SALES_PANEL_WIDTH))
+        .h_full()
         .flex_none()
         .flex()
         .flex_col()
-        .border_t_1()
-        .border_color(gpui_color(theme.colors.border_secondary))
+        .overflow_hidden()
+        .bg(gpui_color(theme.colors.surface))
+        .border_l_1()
+        .border_color(gpui_color(theme.colors.border))
         .child(
-            div()
-                .h(px(28.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .justify_between()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("TIME & SALES")
-                .child(product.map_or_else(String::new, |product| product.display_symbol.clone())),
+            side_panel_header_bar("TIME & SALES", theme)
+                .child(
+                    div()
+                        .pr_1()
+                        .text_color(gpui_color(theme.colors.text_muted))
+                        .child(
+                            product
+                                .map_or_else(String::new, |product| product.display_symbol.clone()),
+                        ),
+                )
+                .child(chrome_tooltip(
+                    "close_time_sales_panel",
+                    "Hide time & sales",
+                    chrome_close_button("close_time_sales_panel", theme, move |_, cx| {
+                        app.update(cx, |surface, surface_cx| {
+                            surface.set_time_sales_visible(false, surface_cx);
+                        });
+                    }),
+                    theme,
+                )),
         )
         .child(
             div()
-                .px_1()
-                .pb_1()
+                .p_1()
                 .flex()
                 .gap_1()
                 .child(time_sales_filter_button(
@@ -497,7 +497,7 @@ fn trading_order_controls(state: &TradingOrderControlsState<'_>) -> impl IntoEle
         .flex()
         .flex_col()
         .flex_none()
-        .border_b_1()
+        .border_t_1()
         .border_color(gpui_color(colors.border))
         .text_xs()
         .child(
@@ -1904,7 +1904,12 @@ fn watchlist_side_panel(
         .overflow_hidden()
         .bg(gpui_color(theme.colors.surface))
         .size_full()
-        .child(side_panel_header(SidePanel::Watchlist, app, false, theme))
+        .child(side_panel_header(
+            SidePanel::Watchlist,
+            app,
+            OrderBookHeaderState::default(),
+            theme,
+        ))
         .child(watchlist_table(
             terminal,
             rows,
@@ -1914,27 +1919,37 @@ fn watchlist_side_panel(
         ))
 }
 
+/// Flexes a docked panel so fixed columns such as Time & Sales can sit beside it.
 fn side_panel_region(content: Div, panel: SidePanel, both_visible: bool, ratio: f32) -> Div {
-    if !both_visible {
-        return content;
-    }
+    let grow = match panel {
+        _ if !both_visible => 1.0,
+        SidePanel::OrderBook => ratio,
+        SidePanel::Watchlist => 1.0 - ratio,
+    };
     div()
         .h_full()
         .min_w_0()
         .flex_basis(px(0.0))
-        .flex_grow(match panel {
-            SidePanel::OrderBook => ratio,
-            SidePanel::Watchlist => 1.0 - ratio,
-        })
+        .flex_grow(grow)
         .overflow_hidden()
         .child(content)
 }
 
-fn side_panel_total_width(width: f32, both_visible: bool) -> f32 {
-    if both_visible {
+fn side_panel_total_width(width: f32, both_visible: bool, time_sales_width: f32) -> f32 {
+    let panels = if both_visible {
         width * 2.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH
     } else {
         width
+    };
+    panels + time_sales_width
+}
+
+/// Fixed width the docked Time & Sales column adds beside a visible order book.
+fn time_sales_docked_width(visible: SidePanelVisibility) -> f32 {
+    if visible.contains(SidePanel::OrderBook) && visible.time_sales_visible() {
+        TIME_SALES_PANEL_WIDTH
+    } else {
+        0.0
     }
 }
 
@@ -1987,7 +2002,22 @@ fn side_panel_ratio(width: f32, split_basis_points: u32, both_visible: bool) -> 
 pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl IntoElement + use<> {
     let (order_book_visible, watchlist_visible, both_visible) =
         side_panel_visibility(state.visible);
+    let time_sales_width = time_sales_docked_width(state.visible);
     let order_book_panel = workspace_order_book_panel(&state, order_book_visible, both_visible);
+    let time_sales = (time_sales_width > 0.0).then(|| {
+        time_sales_panel(
+            TimeSalesPanelState {
+                app: state.app.clone(),
+                tape: state.trade_tape,
+                sweeps: state.trade_sweeps,
+                product: state.product,
+                book: state.order_book_frame.as_ref(),
+                filter: state.time_sales_filter,
+                scroll: &state.time_sales_scroll,
+            },
+            state.theme,
+        )
+    });
     let WorkspaceSidePanelState {
         app,
         terminal,
@@ -2001,7 +2031,11 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
     let split_drag_app = app.clone();
     div()
         .id(("workspace_side_panel", workspace_id))
-        .w(px(side_panel_total_width(width, both_visible)))
+        .w(px(side_panel_total_width(
+            width,
+            both_visible,
+            time_sales_width,
+        )))
         .h_full()
         .flex_none()
         .relative()
@@ -2011,6 +2045,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         .border_l_1()
         .border_color(gpui_color(theme.colors.border))
         .children(order_book_panel)
+        .children(time_sales)
         .children(
             both_visible
                 .then(|| side_panel_split_handle(workspace_id, gpui_color(theme.colors.border))),
@@ -2024,9 +2059,10 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
             )
         }))
         .on_drag_move::<SidePanelSplitDrag>(move |event, _, cx| {
+            // The fixed Time & Sales column sits left of the split handle.
             let Some(ratio) = side_panel_split_ratio_from_drag(
-                f32::from(event.bounds.left()),
-                f32::from(event.bounds.size.width),
+                f32::from(event.bounds.left()) + time_sales_width,
+                f32::from(event.bounds.size.width) - time_sales_width,
                 f32::from(event.event.position.x),
             ) else {
                 return;
@@ -2037,7 +2073,7 @@ pub(super) fn workspace_side_panel(state: WorkspaceSidePanelState<'_>) -> impl I
         })
         .on_drag_move::<SidePanelWidthDrag>(move |event, _, cx| {
             let width = side_panel_width_from_drag(
-                f32::from(event.bounds.right()),
+                f32::from(event.bounds.right()) - time_sales_width,
                 f32::from(event.event.position.x),
                 both_visible,
             );
@@ -2059,11 +2095,7 @@ fn workspace_order_book_panel(
                 app: &state.app,
                 order_book: state.order_book,
                 order_book_frame: state.order_book_frame.as_ref(),
-                trade_tape: state.trade_tape,
-                trade_sweeps: state.trade_sweeps,
-                product: state.product,
-                time_sales_filter: state.time_sales_filter,
-                time_sales_scroll: &state.time_sales_scroll,
+                time_sales_visible: state.visible.time_sales_visible(),
                 trading_pnl: state.trading_pnl,
                 trading_accounts: state.trading_accounts,
                 trading_orders: state.trading_orders,
@@ -2498,18 +2530,16 @@ fn compact_watchlist_volume(value: i64, scale: u32) -> String {
     format!("{value:.2}")
 }
 
-pub(super) fn side_panel_header(
-    panel: SidePanel,
-    app: Entity<WorkspaceSurface>,
-    order_book_column_menu_open: bool,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
+/// Order-book header controls: the column menu and the docked Time & Sales column.
+#[derive(Clone, Copy, Default)]
+pub(super) struct OrderBookHeaderState {
+    pub(super) column_menu_open: bool,
+    pub(super) time_sales_visible: bool,
+}
+
+/// Shared title bar of every docked side column; callers append trailing controls.
+fn side_panel_header_bar(title: impl Into<SharedString>, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
-    let settings_app = app.clone();
-    let close_id = match panel {
-        SidePanel::OrderBook => "close_order_book_panel",
-        SidePanel::Watchlist => "close_watchlist_panel",
-    };
     div()
         .h(px(SIDE_PANEL_HEADER_HEIGHT))
         .flex_none()
@@ -2521,42 +2551,89 @@ pub(super) fn side_panel_header(
         .bg(gpui_color(colors.surface))
         .text_xs()
         .text_color(gpui_color(colors.text_secondary))
-        .child(div().flex_1().child(panel.title().to_uppercase()))
-        .children((panel == SidePanel::OrderBook).then(|| {
-            chrome_tooltip(
-                "order_book_column_settings",
-                "Choose order-book columns",
-                div()
-                    .id("order_book_column_settings")
-                    .occlude()
-                    .size(px(WORKSPACE_TAB_ICON_HIT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-                    .text_color(gpui_color(if order_book_column_menu_open {
-                        colors.icon_active
+        .child(div().flex_1().min_w_0().child(title.into()))
+}
+
+fn side_panel_header_toggle<F: Fn(&mut gpui::App) + 'static>(
+    id: &'static str,
+    label: &'static str,
+    icon: HugeIcon,
+    active: bool,
+    on_press: F,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<F> {
+    let colors = theme.colors;
+    chrome_tooltip(
+        id,
+        label,
+        div()
+            .id(id)
+            .occlude()
+            .size(px(WORKSPACE_TAB_ICON_HIT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+            .text_color(gpui_color(if active {
+                colors.icon_active
+            } else {
+                colors.icon
+            }))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(label)
+            .when(active, |button| {
+                button.bg(gpui_color(colors.active_bg.over(colors.surface)))
+            })
+            .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                on_press(cx);
+                cx.stop_propagation();
+            })
+            .child(header_icon(icon).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
+        theme,
+    )
+}
+
+pub(super) fn side_panel_header(
+    panel: SidePanel,
+    app: Entity<WorkspaceSurface>,
+    order_book_header: OrderBookHeaderState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let close_id = match panel {
+        SidePanel::OrderBook => "close_order_book_panel",
+        SidePanel::Watchlist => "close_watchlist_panel",
+    };
+    let time_sales_app = app.clone();
+    let settings_app = app.clone();
+    side_panel_header_bar(panel.title().to_uppercase(), theme)
+        .when(panel == SidePanel::OrderBook, |header| {
+            header
+                .child(side_panel_header_toggle(
+                    "order_book_time_sales_toggle",
+                    if order_book_header.time_sales_visible {
+                        "Hide time & sales"
                     } else {
-                        colors.icon
-                    }))
-                    .cursor_pointer()
-                    .role(Role::Button)
-                    .aria_label("Choose order-book columns")
-                    .when(order_book_column_menu_open, |button| {
-                        button.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                    })
-                    .hover(move |button| {
-                        button.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                    })
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        "Show time & sales"
+                    },
+                    HugeIcon::SplitSideBySide,
+                    order_book_header.time_sales_visible,
+                    move |cx| time_sales_app.update(cx, WorkspaceSurface::toggle_time_sales),
+                    theme,
+                ))
+                .child(side_panel_header_toggle(
+                    "order_book_column_settings",
+                    "Choose order-book columns",
+                    HugeIcon::Settings,
+                    order_book_header.column_menu_open,
+                    move |cx| {
                         settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
-                        cx.stop_propagation();
-                    })
-                    .child(header_icon(HugeIcon::Settings).with_size(px(WORKSPACE_TAB_ICON_GLYPH))),
-                theme,
-            )
-        }))
+                    },
+                    theme,
+                ))
+        })
         .children(
             (panel == SidePanel::Watchlist)
                 .then(|| watchlist_add_symbol_control(app.clone(), theme)),
@@ -2809,11 +2886,35 @@ mod tests {
 
     #[test]
     fn simultaneous_side_panels_allocate_two_docked_columns() {
-        assert!((side_panel_total_width(400.0, false) - 400.0).abs() < f32::EPSILON);
+        assert!((side_panel_total_width(400.0, false, 0.0) - 400.0).abs() < f32::EPSILON);
         assert!(
-            (side_panel_total_width(400.0, true) - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH)).abs()
+            (side_panel_total_width(400.0, true, 0.0) - (800.0 + SIDE_PANEL_SPLIT_DIVIDER_WIDTH))
+                .abs()
                 < f32::EPSILON
         );
+    }
+
+    #[test]
+    fn time_sales_docks_beside_the_order_book_only() {
+        let mut visible = SidePanelVisibility::default();
+        visible.set_time_sales_visible(true);
+        assert!(
+            !visible.any(),
+            "Time & Sales never renders without its order book"
+        );
+        assert!(time_sales_docked_width(visible).abs() < f32::EPSILON);
+
+        visible.set(SidePanel::OrderBook, true);
+        let docked = time_sales_docked_width(visible);
+        assert!((docked - TIME_SALES_PANEL_WIDTH).abs() < f32::EPSILON);
+        assert!(
+            (side_panel_total_width(400.0, false, docked) - (400.0 + TIME_SALES_PANEL_WIDTH)).abs()
+                < f32::EPSILON
+        );
+
+        visible.set_time_sales_visible(false);
+        assert!(visible.contains(SidePanel::OrderBook));
+        assert!(time_sales_docked_width(visible).abs() < f32::EPSILON);
     }
 
     #[test]

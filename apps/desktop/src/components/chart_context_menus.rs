@@ -2273,18 +2273,19 @@ pub(super) fn account_menu_layer(
         ),
     );
     let animation_origin = PopupAnimationOrigin::from_trigger(anchor, popup_bounds);
-    let panel = compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
-        .children(header)
-        .children(has_header.then(|| menu_separator(theme)))
-        .children(account_menu_actions(&action_terminal, account, theme))
-        .children(account.error.as_deref().map(|error| {
-            div()
-                .px_3()
-                .py_1()
-                .text_xs()
-                .text_color(gpui_color(colors.danger))
-                .child(error.to_string())
-        }));
+    let panel =
+        flat_compact_menu_panel("account_menu", origin, px(CHART_SETTINGS_MENU_WIDTH), theme)
+            .children(header)
+            .children(has_header.then(|| menu_separator(theme)))
+            .children(account_menu_actions(&action_terminal, account, theme))
+            .children(account.error.as_deref().map(|error| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(gpui_color(colors.danger))
+                    .child(error.to_string())
+            }));
     div()
         .id("account_menu_scrim")
         .absolute()

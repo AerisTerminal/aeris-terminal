@@ -160,8 +160,8 @@ use native_ui::{
     input::{Input, InputEvent, InputState},
     loader::Loader,
     menu::{
-        MenuRow, PopupAnimationOrigin, animate_popup_from_origin, compact_menu_panel,
-        flat_compact_menu_panel, menu_separator,
+        MenuRow, PopupAnimationOrigin, animate_popup_from_origin, flat_compact_menu_panel,
+        menu_separator,
     },
     platform_font_weight, platform_tabular_numerals,
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
@@ -2497,6 +2497,14 @@ struct SidePanelVisibility(u8);
 impl SidePanelVisibility {
     const ORDER_BOOK: u8 = 1;
     const WATCHLIST: u8 = 2;
+    /// Time & Sales docks beside the order book and is toggled from its header, so it
+    /// is a preference of the order-book panel rather than a header-level side panel.
+    const TIME_SALES: u8 = 4;
+    const PERSISTED: u8 = Self::ORDER_BOOK | Self::WATCHLIST | Self::TIME_SALES;
+
+    fn from_persisted(bits: u32) -> Self {
+        Self(u8::try_from(bits & u32::from(Self::PERSISTED)).unwrap_or_default())
+    }
 
     const fn contains(self, panel: SidePanel) -> bool {
         let bit = match panel {
@@ -2518,8 +2526,21 @@ impl SidePanelVisibility {
         }
     }
 
+    const fn time_sales_visible(self) -> bool {
+        self.0 & Self::TIME_SALES != 0
+    }
+
+    fn set_time_sales_visible(&mut self, visible: bool) {
+        if visible {
+            self.0 |= Self::TIME_SALES;
+        } else {
+            self.0 &= !Self::TIME_SALES;
+        }
+    }
+
+    /// Whether any docked column renders. Time & Sales only renders with its order book.
     const fn any(self) -> bool {
-        self.0 != 0
+        self.0 & (Self::ORDER_BOOK | Self::WATCHLIST) != 0
     }
 }
 
@@ -3708,8 +3729,7 @@ fn workspace_surface_entity(
             } else {
                 split.clamp(500, 9_500)
             };
-            surface.set_order_book_visible(visibility & 1 != 0, surface_cx);
-            surface.set_watchlist_visible(visibility & 2 != 0, surface_cx);
+            surface.apply_side_panels(SidePanelVisibility::from_persisted(visibility), surface_cx);
             surface.chart_persistence_dirty = false;
         });
     }
