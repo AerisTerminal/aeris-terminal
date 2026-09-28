@@ -76,12 +76,12 @@ use aeris_chart_integration::{
     ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
     ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
     ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
-    ChartTradingAnnotationTone, ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent,
-    ChartTradingIntentAction, ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot,
-    ChartType, ChartWorkingOrder, ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH,
-    FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH, OrderFlowAggregation, OrderFlowSettings,
-    OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    classify_order_flow_sweeps,
+    ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
+    ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
+    ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
+    ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH,
+    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction,
+    PriceAxisMenuState, classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -1396,8 +1396,12 @@ fn chart_working_orders(
     snapshot
         .orders
         .iter()
+        // The chart draws actionable lines. Cancelled, rejected and filled orders stay in the
+        // runtime's history but must leave the chart, or a cancel appears to do nothing.
         .filter(|order| {
-            &order.account_id == account_id && order.instrument_id.as_str() == instrument_id
+            order.status.is_open()
+                && &order.account_id == account_id
+                && order.instrument_id.as_str() == instrument_id
         })
         .filter_map(|order| {
             let price = chart_price(order.limit_price.or(order.stop_price))?;
@@ -1507,19 +1511,9 @@ fn chart_order_semantics(
         .map_or((None, None), |bracket| {
             managed_trigger_prices(snapshot, bracket, price_increment)
         });
-    let mut annotations = if is_protection {
-        vec![ChartTradingAnnotation {
-            id: "local-managed".to_string(),
-            text: aeris_trading_runtime::ManagedBracket::MANAGEMENT_LABEL.to_string(),
-            tooltip: Some(
-                "Stop, targets, trailing, and break-even are managed by this local runtime"
-                    .to_string(),
-            ),
-            ..ChartTradingAnnotation::default()
-        }]
-    } else {
-        Vec::new()
-    };
+    // Every practice protection is locally managed, so a chip saying so carries no information
+    // and an inline chip would cover the marker's quantity, drag surface and cursor.
+    let mut annotations = Vec::new();
     if let Some(warning) = snapshot.order_events.iter().find_map(|event| {
         (event.order_id == order.id && event.kind == aeris_trading::OrderEventKind::Accepted)
             .then_some(event.detail.as_deref())
@@ -1531,7 +1525,8 @@ fn chart_order_semantics(
             text: "RISK".to_string(),
             tooltip: Some(warning.to_string()),
             tone: ChartTradingAnnotationTone::Warning,
-            ..ChartTradingAnnotation::default()
+            // Above the line, so the warning never covers the marker's drag and close controls.
+            placement: ChartTradingAnnotationPlacement::Above,
         });
     }
     ChartOrderSemantics {
@@ -1888,14 +1883,22 @@ fn chart_order_from_intent(
     ))
 }
 
-fn resolve_chart_intent(
+/// Rolls back a chart trading intent the desktop could not dispatch, and says so in the
+/// order-entry status line instead of leaving the chart silently unchanged.
+fn reject_chart_intent(
     chart: &Entity<AerisChartView>,
     sequence: u32,
-    accepted: bool,
     cx: &mut Context<WorkspaceSurface>,
 ) {
+    aeris_desktop::trading::record_outcome(
+        Err::<(), _>(
+            "Chart order action needs a selected, unlocked practice account, a current bid and              ask, and the chart's instrument"
+                .to_string(),
+        ),
+        "",
+    );
     chart.update(cx, |chart, _| {
-        chart.resolve_trading_intent(sequence, accepted);
+        chart.resolve_trading_intent(sequence, false);
     });
 }
 
@@ -1944,35 +1947,35 @@ fn dispatch_chart_place_bracket(
 ) {
     let sequence = intent.sequence;
     let Some(frame) = app.order_book.read(cx).frame().cloned() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some((entry, observation)) =
         chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::Limit)
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(product) = app.product.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(stop_price) = intent
         .stop_loss_price
         .and_then(|price| chart_price_fixed_point(price, product.price_scale))
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(target_price) = intent
         .take_profit_price
         .and_then(|price| chart_price_fixed_point(price, product.price_scale))
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(entry_price) = entry.limit_price else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let tick = product.price_increment.filter(|tick| *tick > 0);
@@ -1992,7 +1995,7 @@ fn dispatch_chart_place_bracket(
             ))
         })?
     }) else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let template = aeris_trading_runtime::BracketStrategyTemplate {
@@ -2009,7 +2012,7 @@ fn dispatch_chart_place_bracket(
         enabled: true,
     };
     let Some(service) = aeris_desktop::trading::handle() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let task = cx.background_executor().spawn(async move {
@@ -2035,11 +2038,11 @@ fn dispatch_chart_create_protection(
 ) {
     let sequence = intent.sequence;
     let Some(account_id) = app.trading_pnl.order_entry.selected_account_id.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(product) = app.product.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let identity_matches = intent.position_id.as_ref().is_some_and(|position_id| {
@@ -2052,11 +2055,11 @@ fn dispatch_chart_create_protection(
         })
     });
     if !identity_matches {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     }
     let Some(frame) = app.order_book.read(cx).frame().cloned() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let order_type = if intent.action == ChartTradingIntentAction::CreateStopLoss {
@@ -2066,11 +2069,11 @@ fn dispatch_chart_create_protection(
     };
     let Some((order, observation)) = chart_order_from_intent(intent, app, &frame, order_type)
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(service) = aeris_desktop::trading::handle() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let role = if intent.action == ChartTradingIntentAction::CreateStopLoss {
@@ -2102,37 +2105,37 @@ fn dispatch_chart_modify(
 ) {
     let sequence = intent.sequence;
     let Some(product) = app.product.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(frame) = app.order_book.read(cx).frame().cloned() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(service) = aeris_desktop::trading::handle() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(order_id) = intent.order_id.as_ref().map(ChartOrderId::as_str) else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(order_id.to_string()) else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(price) = intent
         .price
         .and_then(|value| chart_price_fixed_point(value, product.price_scale))
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let (limit_price, stop_price) = match order.order_type {
         aeris_trading::OrderType::Limit => (Some(price), None),
         aeris_trading::OrderType::Stop => (None, Some(price)),
         aeris_trading::OrderType::Market | aeris_trading::OrderType::StopLimit => {
-            resolve_chart_intent(&chart, sequence, false, cx);
+            reject_chart_intent(&chart, sequence, cx);
             return;
         }
     };
@@ -2177,15 +2180,15 @@ fn dispatch_chart_close_position(
 ) {
     let sequence = intent.sequence;
     let Some(account_id) = app.trading_pnl.order_entry.selected_account_id.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(product) = app.product.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(expected_position_id) = chart_position_id(account_id, &product.instrument_id) else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     if intent.position_id.as_ref() != Some(&expected_position_id)
@@ -2195,21 +2198,21 @@ fn dispatch_chart_close_position(
                 && position.position.net_quantity.units() != 0
         })
     {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     }
     let Some(frame) = app.order_book.read(cx).frame().cloned() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some((account_id, observation)) =
         aeris_desktop::trading::prepare_flatten_for(&frame, Some(account_id.as_str().to_string()))
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(service) = aeris_desktop::trading::handle() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let task = cx.background_executor().spawn(async move {
@@ -2236,7 +2239,7 @@ fn dispatch_chart_trading_intent(
     let sequence = intent.sequence;
     let action = intent.action;
     if !chart_intent_has_confirmation_evidence(intent) {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     }
     if selected_account_lock_reason(&app.trading_pnl).is_some()
@@ -2245,7 +2248,7 @@ fn dispatch_chart_trading_intent(
             ChartTradingIntentAction::CancelOrder | ChartTradingIntentAction::ClosePosition
         )
     {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     }
     let supported = matches!(
@@ -2258,7 +2261,7 @@ fn dispatch_chart_trading_intent(
             | ChartTradingIntentAction::ClosePosition
     );
     if !supported {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     }
     if action == ChartTradingIntentAction::ClosePosition {
@@ -2277,7 +2280,7 @@ fn dispatch_chart_trading_intent(
         return;
     }
     let Some(order_id) = intent.order_id.as_ref().map(ChartOrderId::as_str) else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(order) = app
@@ -2286,11 +2289,11 @@ fn dispatch_chart_trading_intent(
         .iter()
         .find(|order| order.client_order_id.as_str() == order_id)
     else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Some(selected_account) = app.trading_pnl.order_entry.selected_account_id.as_ref() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     if &order.account_id != selected_account
@@ -2299,15 +2302,15 @@ fn dispatch_chart_trading_intent(
             .as_ref()
             .is_none_or(|product| product.instrument_id != order.instrument_id.as_str())
     {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     }
     let Some(service) = aeris_desktop::trading::handle() else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     let Ok(client_order_id) = aeris_trading::ClientOrderId::try_new(order_id.to_string()) else {
-        resolve_chart_intent(&chart, sequence, false, cx);
+        reject_chart_intent(&chart, sequence, cx);
         return;
     };
     match action {
@@ -2317,7 +2320,7 @@ fn dispatch_chart_trading_intent(
         ChartTradingIntentAction::ModifyOrder => {
             dispatch_chart_modify(chart, intent, order, app, cx);
         }
-        _ => resolve_chart_intent(&chart, sequence, false, cx),
+        _ => reject_chart_intent(&chart, sequence, cx),
     }
 }
 

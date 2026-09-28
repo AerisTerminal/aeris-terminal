@@ -1519,3 +1519,42 @@ fn published_observations_for_unregistered_instruments_are_ignored() {
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
+
+#[test]
+fn cancelling_a_protective_stop_leaves_it_cancelled() {
+    let directory = TestDirectory::new("protective-cancel");
+    let service = TradingService::start(config(&directory)).expect("service");
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    service
+        .place_order(market_order("entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry");
+    service
+        .observe_market(observation(500_000, 500_025, 2, 2_000))
+        .expect("fill");
+    let mut stop = market_order("stop", OrderSide::Sell, 3, 3_000);
+    stop.order_type = OrderType::Stop;
+    stop.stop_price = Some(FixedPoint::try_new(499_000, 2).expect("stop"));
+    service
+        .place_protective_order(PlaceProtectiveOrder {
+            order: stop,
+            role: ProtectiveOrderRole::StopLoss,
+        })
+        .expect("protective stop");
+    service
+        .cancel_order(ClientOrderId::try_new("stop").expect("id"))
+        .expect("cancel");
+    service
+        .observe_market(observation(500_050, 500_075, 4, 4_000))
+        .expect("observe");
+    let snapshot = service.snapshot().expect("snapshot");
+    let open = snapshot
+        .orders
+        .iter()
+        .filter(|order| order.status.is_open())
+        .map(|order| order.client_order_id.as_str().to_string())
+        .collect::<Vec<_>>();
+    assert!(open.is_empty(), "open orders after cancel: {open:?}");
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}

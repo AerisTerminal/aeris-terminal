@@ -2346,3 +2346,95 @@ fn working_orders_are_drawn_on_the_row_side_their_click_created() {
         }
     }
 }
+
+#[test]
+fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
+    use aeris_instruments::{
+        ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
+    };
+    use aeris_trading::{
+        ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingAccountId,
+        TradingProvenance,
+    };
+    use aeris_trading_runtime::{
+        PlaceOrder, TradingInstrument, TradingRetention, TradingService, TradingServiceConfig,
+    };
+    let directory = std::env::temp_dir().join(format!(
+        "aeris-chart-open-orders-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let service = TradingService::start(TradingServiceConfig {
+        database_path: directory.join("trading.sqlite3"),
+        retention: TradingRetention::default(),
+    })
+    .expect("trading service");
+    let instrument_id = InstrumentId::try_new("instrument:fixture:BTC").expect("instrument");
+    service
+        .register_instrument(TradingInstrument {
+            instrument_id: instrument_id.clone(),
+            price_scale: 2,
+            quantity_scale: 0,
+            contract: ContractMetadata {
+                tick_size: Some(InstrumentDecimal::try_new(1, 2).expect("tick")),
+                point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point value")),
+                currency: "USD".to_string(),
+                expiry: None,
+                first_notice: None,
+                last_trade: None,
+                session_hours: Vec::new(),
+                provenance: InstrumentMetadataProvenance {
+                    provider_id: "fixture".to_string(),
+                    provider_symbol: "BTC".to_string(),
+                    session_generation: 1,
+                },
+            },
+        })
+        .expect("register instrument");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let limit = |id: &str| PlaceOrder {
+        client_order_id: ClientOrderId::try_new(id).expect("client id"),
+        account_id: account.clone(),
+        instrument_id: instrument_id.clone(),
+        side: OrderSide::Buy,
+        order_type: OrderType::Limit,
+        time_in_force: TimeInForce::GoodTillCancelled,
+        quantity: FixedPoint::try_new(1, 0).expect("quantity"),
+        limit_price: Some(FixedPoint::try_new(10_000, 2).expect("price")),
+        stop_price: None,
+        submitted_unix_nanos: 1,
+        provenance: TradingProvenance {
+            venue_id: "aeris-sim".to_string(),
+            provider_id: "fixture".to_string(),
+            session_generation: 1,
+            source_sequence: 1,
+            observed_unix_nanos: 1,
+        },
+    };
+    service
+        .place_order(limit("working"))
+        .expect("working order");
+    service
+        .place_order(limit("cancelled"))
+        .expect("second order");
+    service
+        .cancel_order(ClientOrderId::try_new("cancelled").expect("client id"))
+        .expect("cancel");
+    let snapshot = service.snapshot().expect("snapshot");
+    let orders = super::chart_working_orders(&snapshot, &account, instrument_id.as_str(), None);
+    assert_eq!(
+        orders
+            .iter()
+            .map(|order| order.id.as_str())
+            .collect::<Vec<_>>(),
+        ["working"]
+    );
+    assert!(orders.iter().all(|order| order.annotations.is_empty()));
+    service
+        .shutdown(std::time::Duration::from_secs(2))
+        .expect("shutdown");
+    let _ = std::fs::remove_dir_all(directory);
+}

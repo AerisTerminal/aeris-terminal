@@ -24,6 +24,7 @@ pub use aeris_charts_engine::{
     OrderId as ChartOrderId, OrderKind as ChartOrderKind, OrderRole as ChartOrderRole,
     OrderSide as ChartOrderSide, OrderStatus as ChartOrderStatus, PositionId as ChartPositionId,
     PositionSide as ChartPositionSide, TradingAnnotation as ChartTradingAnnotation,
+    TradingAnnotationPlacement as ChartTradingAnnotationPlacement,
     TradingAnnotationTone as ChartTradingAnnotationTone, TradingExecution as ChartTradingExecution,
     TradingGroupId as ChartTradingGroupId, TradingIntent as ChartTradingIntent,
     TradingIntentAction as ChartTradingIntentAction, TradingPosition as ChartTradingPosition,
