@@ -3613,3 +3613,49 @@ fn fresh_market_opens_on_latest_bars_keeping_warm_up_history_off_screen() {
     let mut short = fitted_chart(400);
     assert!(!short.narrow_to_initial_window());
 }
+
+#[test]
+fn study_line_width_applies_to_current_and_later_outputs_and_clears_on_removal() {
+    let mut chart = AerisChartView::empty();
+    let timestamps = [60_i64 * 1_000_000_000, 120_i64 * 1_000_000_000];
+    let values = [Some(10.0), Some(11.0)];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Ribbon",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::BARS,
+    };
+    let width_of = |chart: &AerisChartView, output_index: usize| {
+        series_entry(chart, study_output(chart, 9, output_index).series_id).line_width
+    };
+
+    assert_eq!(
+        chart.install_study_output(9, 0, descriptor, 1, &timestamps, &values),
+        Ok(true)
+    );
+    assert_eq!(chart.study_line_width(9), DEFAULT_STUDY_LINE_WIDTH);
+    assert!(chart.set_study_line_width(9, 4));
+    assert!(!chart.set_study_line_width(9, 4));
+    assert_eq!(width_of(&chart, 0), Some(4.0));
+
+    assert_eq!(
+        chart.install_study_output(9, 1, descriptor, 1, &timestamps, &values),
+        Ok(true)
+    );
+    assert_eq!(width_of(&chart, 1), Some(4.0));
+
+    assert!(chart.set_study_line_width(9, 1));
+    assert!(
+        chart.set_study_line_width(9, 9),
+        "out-of-range widths clamp to the maximum"
+    );
+    assert_eq!(chart.study_line_width(9), MAXIMUM_STUDY_LINE_WIDTH);
+
+    assert!(chart.remove_study_outputs(&[9]));
+    assert_eq!(chart.study_line_width(9), DEFAULT_STUDY_LINE_WIDTH);
+}

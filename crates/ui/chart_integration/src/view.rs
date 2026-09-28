@@ -791,6 +791,8 @@ pub struct AerisChartView {
     built_for: (f32, f32, f32),
     layout_dirty: bool,
     fitted: bool,
+    /// Host-selected stroke width per external study, kept for outputs installed later.
+    study_line_widths: std::collections::BTreeMap<u64, u8>,
     viewport_origin: (f32, f32),
     drag: Option<ChartDrag>,
     drawing_tool: ChartDrawingTool,
@@ -888,6 +890,7 @@ impl AerisChartView {
             built_for: (0.0, 0.0, 0.0),
             layout_dirty: true,
             fitted: false,
+            study_line_widths: std::collections::BTreeMap::new(),
             viewport_origin: (0.0, 0.0),
             drag: None,
             drawing_tool: ChartDrawingTool::Cursor,
@@ -990,6 +993,7 @@ impl AerisChartView {
             built_for: (0.0, 0.0, 0.0),
             layout_dirty: true,
             fitted: false,
+            study_line_widths: std::collections::BTreeMap::new(),
             viewport_origin: (0.0, 0.0),
             drag: None,
             drawing_tool: ChartDrawingTool::Cursor,
@@ -2810,3 +2814,4 @@ mod input;
 mod order_flow;
 pub use order_flow::classify_order_flow_sweeps;
 mod studies;
+pub use studies::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};

@@ -4,6 +4,11 @@ use super::{
     AerisChartView, ChartStudyInputRequirements, ChartStudyOutputDescriptor, ChartStudyOutputError,
 };
 
+/// Stroke width Aeris Charts gives a study output until the host chooses one.
+pub const DEFAULT_STUDY_LINE_WIDTH: u8 = 2;
+/// Widest selectable study stroke, matching the chart's other line-width controls.
+pub const MAXIMUM_STUDY_LINE_WIDTH: u8 = 4;
+
 impl AerisChartView {
     #[must_use]
     pub fn study_output_input_requirements(
@@ -56,6 +61,15 @@ impl AerisChartView {
             timestamps_unix_nanos,
             values,
         )?;
+        if created
+            && let Some(width) = self.study_line_widths.get(&study_id).copied()
+            && let Some(output) = self
+                .engine
+                .external_study_output_info(study_id, output_index)
+        {
+            self.engine
+                .series_apply_options_json(output.series_id, &study_line_width_patch(width));
+        }
         if changed {
             if created {
                 self.invalidate_series_layout();
@@ -66,11 +80,50 @@ impl AerisChartView {
         Ok(changed)
     }
 
+    /// Sets the stroke width of every output of one study, including outputs installed later.
+    pub fn set_study_line_width(&mut self, study_id: u64, width: u8) -> bool {
+        let width = width.clamp(1, MAXIMUM_STUDY_LINE_WIDTH);
+        if self.study_line_widths.insert(study_id, width) == Some(width) {
+            return false;
+        }
+        let patch = study_line_width_patch(width);
+        let series = self
+            .engine
+            .external_study_outputs()
+            .into_iter()
+            .filter(|output| output.study_id == study_id)
+            .map(|output| output.series_id)
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for series_id in series {
+            changed |= self.engine.series_apply_options_json(series_id, &patch);
+        }
+        if changed {
+            self.invalidate_series_frame();
+        }
+        changed
+    }
+
+    #[must_use]
+    pub fn study_line_width(&self, study_id: u64) -> u8 {
+        self.study_line_widths
+            .get(&study_id)
+            .copied()
+            .unwrap_or(DEFAULT_STUDY_LINE_WIDTH)
+    }
+
     pub fn remove_study_outputs(&mut self, study_ids: &[u64]) -> bool {
+        for study_id in study_ids {
+            self.study_line_widths.remove(study_id);
+        }
         let changed = self.engine.remove_external_studies(study_ids);
         if changed {
             self.invalidate_series_layout();
         }
         changed
     }
+}
+
+fn study_line_width_patch(width: u8) -> String {
+    format!("{{\"line_width\":{width}}}")
 }

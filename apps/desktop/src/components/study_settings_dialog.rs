@@ -187,6 +187,60 @@ fn setting_control(
     }
 }
 
+/// Host-owned style row shown for every study, independent of its SDK settings.
+fn line_thickness_row(
+    app: &Entity<WorkspaceSurface>,
+    selected: u8,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let mut choices = div().flex().flex_wrap().gap_2();
+    for width in 1..=MAXIMUM_STUDY_LINE_WIDTH {
+        let update = app.clone();
+        choices = choices.child(
+            Button::new(("study_line_width", usize::from(width)))
+                .theme(theme)
+                .resting_fill(theme.colors.surface_secondary)
+                .selected(selected == width)
+                .label(format!("{width} px"))
+                .on_click(move |_, _, cx| {
+                    update.update(cx, |surface, surface_cx| {
+                        surface.set_study_settings_line_width(width, surface_cx);
+                    });
+                }),
+        );
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+        .bg(gpui_color(colors.surface))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .text_color(gpui_color(colors.text_primary))
+                        .child("Line thickness"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(colors.text_muted))
+                        .child("Stroke width of every line this study draws"),
+                ),
+        )
+        .child(choices)
+        .into_any_element()
+}
+
 fn setting_row(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -297,6 +351,16 @@ fn study_settings_body(
             body = body.child(row);
         }
     }
+    body = body
+        .child(
+            div()
+                .mt_1()
+                .text_xs()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_muted))
+                .child("Style"),
+        )
+        .child(line_thickness_row(app, dialog.line_width, theme));
     if let Some(message) = &dialog.message {
         body = body.child(
             div()

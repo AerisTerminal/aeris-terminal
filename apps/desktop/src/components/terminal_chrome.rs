@@ -426,8 +426,7 @@ pub(super) fn header_controls(
     // Give the global controls an explicit, non-shrinking track. GPUI cannot
     // infer a stable intrinsic width for this mixed Button/avatar group, which
     // previously let the flex item collapse to zero even on wide windows.
-    let (order_book_toggle, watchlist_toggle, context_toggle, link_toggle) =
-        header_panel_toggles(app, &state);
+    let (side_panel_toggles, context_toggle, link_toggle) = header_panel_toggles(app, &state);
     let connection = connection_presentation(
         state.provider,
         state.connection_state,
@@ -496,8 +495,7 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(order_book_toggle)
-        .child(watchlist_toggle)
+        .children(side_panel_toggles)
         .child(context_toggle)
         .child(link_toggle);
     let global_controls = header_global_controls(terminal, &state.theme);
@@ -516,21 +514,19 @@ pub(super) fn header_controls(
 fn header_panel_toggles(
     app: &Entity<WorkspaceSurface>,
     state: &HeaderState,
-) -> (AnyElement, AnyElement, AnyElement, AnyElement) {
-    let order_book = side_panel_toggle(
-        app.clone(),
-        &state.theme,
-        SidePanel::OrderBook,
-        state.controls.enabled(HeaderControls::ORDER_BOOK),
-        state.order_book_visible,
-    );
-    let watchlist = side_panel_toggle(
-        app.clone(),
-        &state.theme,
-        SidePanel::Watchlist,
-        true,
-        state.watchlist_visible,
-    );
+) -> (Vec<AnyElement>, AnyElement, AnyElement) {
+    let side_panels = SidePanel::ALL
+        .into_iter()
+        .map(|panel| {
+            side_panel_toggle(
+                app.clone(),
+                &state.theme,
+                panel,
+                !panel.requires_market() || state.controls.enabled(HeaderControls::MARKET_PANELS),
+                state.side_panels.contains(panel),
+            )
+        })
+        .collect();
     let context_command = aeris_desktop::command_registry::command(
         aeris_desktop::command_registry::CommandId::ToggleContext,
     );
@@ -569,7 +565,7 @@ fn header_panel_toggles(
         app.clone(),
     )
     .into_any_element();
-    (order_book, watchlist, context, link)
+    (side_panels, context, link)
 }
 
 fn header_global_controls(
@@ -602,6 +598,13 @@ pub(super) fn side_panel_toggle(
             WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleOrderBook,
+        ),
+        SidePanel::TimeSales => (
+            "time_sales_toggle",
+            HugeIcon::SidebarRight,
+            WorkspaceSurface::toggle_time_sales
+                as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
+            aeris_desktop::command_registry::CommandId::ToggleTimeSales,
         ),
         SidePanel::Watchlist => (
             "watchlist_toggle",

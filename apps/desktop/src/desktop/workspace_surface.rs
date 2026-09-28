@@ -1159,6 +1159,14 @@ fn legacy_bollinger_contract() -> (
     )
 }
 
+/// Stroke width a persisted study draws with; zero predates the setting.
+fn persisted_study_line_width(persisted: &WorkspaceChartStudyState) -> u8 {
+    u8::try_from(persisted.line_width)
+        .ok()
+        .filter(|width| (1..=MAXIMUM_STUDY_LINE_WIDTH).contains(width))
+        .unwrap_or(DEFAULT_STUDY_LINE_WIDTH)
+}
+
 fn legacy_runtime_study(
     local_id: u64,
     indicator: ChartIndicator,
@@ -1167,6 +1175,7 @@ fn legacy_runtime_study(
     let (identifier, implementation_revision, settings, output_identifiers) =
         legacy_runtime_study_contract(indicator)?;
     Some(WorkspaceChartStudyState {
+        line_width: 0,
         local_id,
         identifier: identifier.to_string(),
         implementation_revision,
@@ -2919,13 +2928,18 @@ impl WorkspaceSurface {
                     .find(|state| state.study_id == snapshot.study_id)
                     .map(|state| state.persisted.visible)
             });
-        let settings_available = self
+        // Every study has host-owned style settings, so the legend always offers them.
+        let settings_available = true;
+        let line_width = self
             .studies
             .active
             .iter()
             .find(|state| state.study_id == snapshot.study_id)
-            .is_some_and(|state| !state.persisted.settings.is_empty());
+            .map_or(DEFAULT_STUDY_LINE_WIDTH, |state| {
+                persisted_study_line_width(&state.persisted)
+            });
         chart.update(cx, |chart, chart_cx| {
+            chart.set_study_line_width(snapshot.study_id.get(), line_width);
             match chart.install_study_output(
                 snapshot.study_id.get(),
                 snapshot.output_id.output_index,
@@ -4067,59 +4081,51 @@ impl WorkspaceSurface {
         self.dispatch_retained_symbol_search(cx);
     }
 
-    /// Whether a market is selected. The header enables the Order Book toggle on this
-    /// and `toggle_order_book` opens on it, so the two cannot drift apart again.
+    /// Whether a market is selected. The header enables the market panels on this and
+    /// `toggle_side_panel` opens them on it, so the two cannot drift apart.
     pub(super) fn has_market_selection(&self) -> bool {
         self.symbol_browser.selected().is_some() || self.product.is_some()
     }
 
+    pub(super) fn toggle_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
+        if panel.requires_market() && !self.has_market_selection() {
+            return;
+        }
+        let visible = !self.side_panels.contains(panel);
+        self.set_side_panel_visible(panel, visible, cx);
+    }
+
     pub(super) fn toggle_order_book(&mut self, cx: &mut Context<Self>) {
-        if self.has_market_selection() {
-            let visible = !self.side_panels.contains(SidePanel::OrderBook);
-            self.set_order_book_visible(visible, cx);
-        }
-    }
-
-    pub(super) fn set_order_book_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.side_panels.contains(SidePanel::OrderBook) == visible {
-            return;
-        }
-        self.side_panels.set(SidePanel::OrderBook, visible);
-        if visible {
-            self.order_book
-                .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
-        } else {
-            self.menu_state.order_book_column_open = false;
-        }
-        let _ = self.market_worker.try_set_order_book_visible(visible);
-        self.chart_persistence_dirty = true;
-        cx.notify();
-    }
-
-    pub(super) fn toggle_watchlist(&mut self, cx: &mut Context<Self>) {
-        let visible = !self.side_panels.contains(SidePanel::Watchlist);
-        self.set_watchlist_visible(visible, cx);
-    }
-
-    pub(super) fn set_watchlist_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.side_panels.contains(SidePanel::Watchlist) == visible {
-            return;
-        }
-        self.side_panels.set(SidePanel::Watchlist, visible);
-        self.chart_persistence_dirty = true;
-        cx.notify();
+        self.toggle_side_panel(SidePanel::OrderBook, cx);
     }
 
     pub(super) fn toggle_time_sales(&mut self, cx: &mut Context<Self>) {
-        let visible = !self.side_panels.time_sales_visible();
-        self.set_time_sales_visible(visible, cx);
+        self.toggle_side_panel(SidePanel::TimeSales, cx);
     }
 
-    pub(super) fn set_time_sales_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.side_panels.time_sales_visible() == visible {
+    pub(super) fn toggle_watchlist(&mut self, cx: &mut Context<Self>) {
+        self.toggle_side_panel(SidePanel::Watchlist, cx);
+    }
+
+    pub(super) fn set_side_panel_visible(
+        &mut self,
+        panel: SidePanel,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.side_panels.contains(panel) == visible {
             return;
         }
-        self.side_panels.set_time_sales_visible(visible);
+        self.side_panels.set(panel, visible);
+        if panel == SidePanel::OrderBook {
+            if visible {
+                self.order_book
+                    .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
+            } else {
+                self.menu_state.order_book_column_open = false;
+            }
+            let _ = self.market_worker.try_set_order_book_visible(visible);
+        }
         self.chart_persistence_dirty = true;
         cx.notify();
     }
@@ -4130,9 +4136,9 @@ impl WorkspaceSurface {
         panels: SidePanelVisibility,
         cx: &mut Context<Self>,
     ) {
-        self.set_order_book_visible(panels.contains(SidePanel::OrderBook), cx);
-        self.set_watchlist_visible(panels.contains(SidePanel::Watchlist), cx);
-        self.set_time_sales_visible(panels.time_sales_visible(), cx);
+        for panel in SidePanel::ALL {
+            self.set_side_panel_visible(panel, panels.contains(panel), cx);
+        }
     }
 
     pub(super) fn toggle_context_panel(&mut self, cx: &mut Context<Self>) {
@@ -4316,10 +4322,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn close_side_panel(&mut self, panel: SidePanel, cx: &mut Context<Self>) {
-        match panel {
-            SidePanel::OrderBook => self.set_order_book_visible(false, cx),
-            SidePanel::Watchlist => self.set_watchlist_visible(false, cx),
-        }
+        self.set_side_panel_visible(panel, false, cx);
     }
 
     pub(super) fn set_side_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -4499,6 +4502,7 @@ impl WorkspaceSurface {
             title: study_display_name(&active.persisted.identifier),
             specs: registration.definition.settings,
             draft_values,
+            line_width: persisted_study_line_width(&active.persisted),
             inputs,
             _subscriptions: subscriptions,
             message: None,
@@ -4508,6 +4512,41 @@ impl WorkspaceSurface {
         self.timeframe_menu_flyout = None;
         self.chrome_selection = 0;
         cx.notify();
+    }
+
+    pub(super) fn set_study_settings_line_width(&mut self, width: u8, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.study_settings_dialog
+            && dialog.line_width != width
+        {
+            dialog.line_width = width;
+            cx.notify();
+        }
+    }
+
+    /// Applies a study's stroke width to the chart and its durable state.
+    fn apply_study_line_width(
+        &mut self,
+        study_id: StudyInstanceId,
+        width: u8,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(active) = self
+            .studies
+            .active
+            .iter_mut()
+            .find(|state| state.study_id == study_id)
+            && active.persisted.line_width != u32::from(width)
+        {
+            active.persisted.line_width = u32::from(width);
+            self.chart_persistence_dirty = true;
+        }
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.set_study_line_width(study_id.get(), width) {
+                    chart_cx.notify();
+                }
+            });
+        }
     }
 
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
@@ -4604,6 +4643,7 @@ impl WorkspaceSurface {
             }
             dialog.draft_values.insert(spec.identifier.clone(), value);
         }
+        dialog.line_width = DEFAULT_STUDY_LINE_WIDTH;
         dialog.message = None;
         cx.notify();
     }
@@ -4616,20 +4656,19 @@ impl WorkspaceSurface {
         if self.studies.reinitializing.contains_key(&study_id) {
             return;
         }
-        let mut values = Vec::with_capacity(dialog.specs.len());
-        for spec in &dialog.specs {
-            let value = match study_setting_value_from_dialog(dialog, spec, cx) {
-                Ok(value) => value,
-                Err(message) => {
-                    if let Some(dialog) = &mut self.study_settings_dialog {
-                        dialog.message = Some(message);
-                    }
-                    cx.notify();
-                    return;
-                }
-            };
-            values.push((spec.identifier.clone(), value));
-        }
+        let line_width = dialog.line_width;
+        let values = dialog
+            .specs
+            .iter()
+            .map(|spec| {
+                study_setting_value_from_dialog(dialog, spec, cx)
+                    .map(|value| (spec.identifier.clone(), value))
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let values = match values {
+            Ok(values) => values,
+            Err(message) => return self.show_study_settings_message(Some(message), cx),
+        };
         let Some(active) = self
             .studies
             .active
@@ -4637,13 +4676,13 @@ impl WorkspaceSurface {
             .find(|state| state.study_id == study_id)
             .cloned()
         else {
-            if let Some(dialog) = &mut self.study_settings_dialog {
-                dialog.message = Some("Study is no longer active".to_string());
-            }
-            cx.notify();
-            return;
+            let message = "Study is no longer active".to_string();
+            return self.show_study_settings_message(Some(message), cx);
         };
+        self.apply_study_line_width(study_id, line_width, cx);
+        let active_settings = active.persisted.settings.clone();
         let mut replacement = active.persisted;
+        replacement.line_width = u32::from(line_width);
         replacement.settings = values
             .iter()
             .map(|(identifier, value)| WorkspaceStudySettingState {
@@ -4651,36 +4690,25 @@ impl WorkspaceSurface {
                 value: Some(persisted_study_setting_value(value)),
             })
             .collect();
-        let series = match self.current_runtime_series() {
-            Ok(series) => series,
-            Err(message) => {
-                if let Some(dialog) = &mut self.study_settings_dialog {
-                    dialog.message = Some(message);
-                }
-                cx.notify();
-                return;
-            }
-        };
-        let registration =
-            match runtime_study_registration(&replacement, &series, &self.studies.active) {
-                Ok(registration) => registration,
-                Err(message) => {
-                    if let Some(dialog) = &mut self.study_settings_dialog {
-                        dialog.message = Some(message);
-                    }
-                    cx.notify();
-                    return;
-                }
-            };
-        if !self.retry_automatic_study_removals() {
-            if let Some(dialog) = &mut self.study_settings_dialog {
-                dialog.message =
-                    Some("Study cancellation is waiting for runtime capacity".to_string());
-            }
+        if replacement.settings == active_settings {
+            // Only presentation changed; the runtime computation stays as it is.
+            self.study_settings_dialog = None;
             cx.notify();
             return;
         }
-        match self
+        let registration = self.current_runtime_series().and_then(|series| {
+            runtime_study_registration(&replacement, &series, &self.studies.active)
+                .map(|registration| (series, registration))
+        });
+        let (series, registration) = match registration {
+            Ok(registration) => registration,
+            Err(message) => return self.show_study_settings_message(Some(message), cx),
+        };
+        if !self.retry_automatic_study_removals() {
+            let message = "Study cancellation is waiting for runtime capacity".to_string();
+            return self.show_study_settings_message(Some(message), cx);
+        }
+        let message = match self
             .market_worker
             .try_reinitialize_study(study_id, registration)
         {
@@ -4692,20 +4720,19 @@ impl WorkspaceSurface {
                         replacement_persisted: Some(replacement),
                     },
                 );
-                if let Some(dialog) = &mut self.study_settings_dialog {
-                    dialog.message = None;
-                }
+                None
             }
             Err(TrySendError::Full(_)) => {
-                if let Some(dialog) = &mut self.study_settings_dialog {
-                    dialog.message = Some("Study settings queue is busy; try again".to_string());
-                }
+                Some("Study settings queue is busy; try again".to_string())
             }
-            Err(TrySendError::Disconnected(_)) => {
-                if let Some(dialog) = &mut self.study_settings_dialog {
-                    dialog.message = Some("Study runtime is unavailable".to_string());
-                }
-            }
+            Err(TrySendError::Disconnected(_)) => Some("Study runtime is unavailable".to_string()),
+        };
+        self.show_study_settings_message(message, cx);
+    }
+
+    fn show_study_settings_message(&mut self, message: Option<String>, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.study_settings_dialog {
+            dialog.message = message;
         }
         cx.notify();
     }
@@ -4955,6 +4982,7 @@ mod tests {
         let registry = aeris_study_sdk::TrustedStudyRegistry::from_packages(&packages)
             .expect("custom package registry");
         let persisted = WorkspaceChartStudyState {
+            line_width: 0,
             local_id: 7,
             identifier: "example.workspace_reconnect".to_string(),
             implementation_revision: 1,
@@ -5013,6 +5041,7 @@ mod tests {
     #[test]
     fn missing_custom_package_does_not_starve_later_independent_study_restore() {
         let missing = WorkspaceChartStudyState {
+            line_width: 0,
             local_id: 1,
             identifier: "example.missing".to_string(),
             implementation_revision: 1,

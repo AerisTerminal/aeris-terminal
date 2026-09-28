@@ -356,7 +356,7 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         .iter_mut()
         .flat_map(|tab| tab.panes.iter_mut())
     {
-        // Order book, watchlist and the order book's docked Time & Sales column.
+        // Order book, watchlist and Time & Sales panels.
         pane.side_panel_visibility &= 0b111;
         if pane.side_panel_width != 0 {
             pane.side_panel_width = pane.side_panel_width.clamp(360, 480);
@@ -535,7 +535,10 @@ fn sanitize_studies(studies: Vec<WorkspaceChartStudyState>) -> Vec<WorkspaceChar
     let mut prior_outputs =
         std::collections::BTreeMap::<u64, std::collections::BTreeSet<String>>::new();
     let mut sanitized = Vec::with_capacity(studies.len());
-    for study in studies {
+    for mut study in studies {
+        study.line_width = study
+            .line_width
+            .min(u32::from(aeris_chart_integration::MAXIMUM_STUDY_LINE_WIDTH));
         if !valid_study_header(&study, last_local_id)
             || !valid_study_settings(&study)
             || !valid_study_outputs(&study)
@@ -709,6 +712,7 @@ mod tests {
 
     fn persisted_sma_study(local_id: u64, period: i64, visible: bool) -> WorkspaceChartStudyState {
         WorkspaceChartStudyState {
+            line_width: 0,
             local_id,
             identifier: aeris_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
             implementation_revision: aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
@@ -728,6 +732,7 @@ mod tests {
 
     fn persisted_bollinger_study(local_id: u64, visible: bool) -> WorkspaceChartStudyState {
         WorkspaceChartStudyState {
+            line_width: 0,
             local_id,
             identifier: aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER.to_string(),
             implementation_revision: aeris_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
@@ -1158,6 +1163,7 @@ mod tests {
             .chart
             .get_or_insert_with(WorkspaceChartState::default);
         let custom = WorkspaceChartStudyState {
+            line_width: 0,
             local_id: 41,
             identifier: "example.workspace_reconnect".to_string(),
             implementation_revision: 3,
@@ -1199,6 +1205,7 @@ mod tests {
         chart.studies = vec![
             persisted_sma_study(1, 20, true),
             WorkspaceChartStudyState {
+                line_width: 0,
                 local_id: 2,
                 identifier: aeris_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
                 implementation_revision: aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
@@ -1216,6 +1223,7 @@ mod tests {
                 output_identifiers: vec!["sma".to_string()],
             },
             WorkspaceChartStudyState {
+                line_width: 0,
                 local_id: 3,
                 identifier: aeris_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
                 implementation_revision: aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,

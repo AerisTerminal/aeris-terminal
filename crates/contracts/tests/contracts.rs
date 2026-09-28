@@ -64,6 +64,7 @@ fn workspace_tab() -> WorkspaceTabState {
                     }],
                     visible: true,
                     output_identifiers: vec!["sma".into()],
+                    line_width: 3,
                 }],
                 ..WorkspaceChartState::default()
             }),

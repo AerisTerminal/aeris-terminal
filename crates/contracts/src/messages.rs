@@ -415,6 +415,10 @@ pub struct WorkspaceChartStudyState {
     /// Stable output interface captured for dependency restoration/migration.
     #[prost(string, repeated, tag = "7")]
     pub output_identifiers: Vec<String>,
+    /// Output stroke width in CSS px (1-4). Zero, as in layouts saved before this field,
+    /// keeps the chart's default width.
+    #[prost(uint32, tag = "8")]
+    pub line_width: u32,
 }
 
 /// Durable static dependency for one native study.

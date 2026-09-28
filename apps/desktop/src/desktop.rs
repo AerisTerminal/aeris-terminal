@@ -30,6 +30,10 @@ mod indicator_menu;
 mod local_state;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
+#[path = "components/order_book_panel.rs"]
+mod order_book_panel;
+#[path = "components/order_ticket.rs"]
+mod order_ticket;
 #[path = "components/price_alert_dialog.rs"]
 mod price_alert_dialog;
 #[cfg(any(test, feature = "diagnostics"))]
@@ -37,6 +41,8 @@ mod price_alert_dialog;
 mod readiness_conformance;
 #[path = "rithmic_shell.rs"]
 mod rithmic_shell;
+#[path = "components/side_panel_dock.rs"]
+mod side_panel_dock;
 #[path = "study_packages.rs"]
 mod study_packages;
 #[path = "components/study_settings_dialog.rs"]
@@ -47,8 +53,12 @@ mod symbol_menu;
 mod terminal_chrome;
 #[path = "components/terminal_view.rs"]
 mod terminal_view;
+#[path = "components/time_sales_panel.rs"]
+mod time_sales_panel;
 #[path = "update.rs"]
 mod update;
+#[path = "components/watchlist_panel.rs"]
+mod watchlist_panel;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
 
@@ -68,8 +78,9 @@ use aeris_chart_integration::{
     ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
     ChartTradingAnnotationTone, ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent,
     ChartTradingIntentAction, ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot,
-    ChartType, ChartWorkingOrder, ChartWorkspaceLayout, FootprintDisplayMode, OrderFlowAggregation,
-    OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
+    ChartType, ChartWorkingOrder, ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH,
+    FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH, OrderFlowAggregation, OrderFlowSettings,
+    OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
     classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
@@ -119,10 +130,7 @@ use chart_context_menus::{
     PriceAxisMenuRow, chart_context_menu_items, clamp_chart_context_menu_origin,
     clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
 };
-use chart_surface::{
-    MarketWorkspaceState, WATCHLIST_ROW_HEIGHT, WatchlistPanelState, WorkspaceSidePanelState,
-    market_workspace, workspace_side_panel,
-};
+use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
     chrome_overlay_layer, chrome_typeahead_blocked, chrome_typeahead_char,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
@@ -171,10 +179,13 @@ use native_ui::{
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
+use order_book_panel::OrderBookPanelState;
+use order_ticket::TradingOrderControlsState;
 use price_alert_dialog::{
     price_alert_dialog_layer, replace_chart_price_alert_lines, runtime_price_alerts,
 };
 use reqwest_client::ReqwestClient;
+use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
@@ -209,7 +220,9 @@ use terminal_chrome::{
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
 };
+use time_sales_panel::TimeSalesPanelState;
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
+use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 use workspace_layout::workspace_market_area;
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
@@ -981,6 +994,8 @@ struct StudySettingsDialogState {
     title: String,
     specs: Vec<StudySettingSpec>,
     draft_values: BTreeMap<String, StudySettingValue>,
+    /// Host-owned output stroke width; presentation only, so it never reinitializes the study.
+    line_width: u8,
     inputs: HashMap<String, Entity<InputState>>,
     _subscriptions: Vec<gpui::Subscription>,
     message: Option<String>,
@@ -2464,8 +2479,7 @@ struct HeaderState {
     pending: HeaderPendingState,
     drawing_history: DrawingHistoryState,
     controls: HeaderControls,
-    order_book_visible: bool,
-    watchlist_visible: bool,
+    side_panels: SidePanelVisibility,
     context_visible: bool,
     chart_link_group: u8,
     connection_state: FeedConnectionState,
@@ -2486,9 +2500,11 @@ struct HeaderPendingState {
     series: bool,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+/// Docked workspace side panels, listed in docking order from the chart outward.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SidePanel {
     OrderBook,
+    TimeSales,
     Watchlist,
 }
 
@@ -2496,52 +2512,26 @@ enum SidePanel {
 struct SidePanelVisibility(u8);
 
 impl SidePanelVisibility {
-    const ORDER_BOOK: u8 = 1;
-    const WATCHLIST: u8 = 2;
-    /// Time & Sales docks beside the order book and is toggled from its header, so it
-    /// is a preference of the order-book panel rather than a header-level side panel.
-    const TIME_SALES: u8 = 4;
-    const PERSISTED: u8 = Self::ORDER_BOOK | Self::WATCHLIST | Self::TIME_SALES;
+    const PERSISTED: u8 = 0b111;
 
     fn from_persisted(bits: u32) -> Self {
         Self(u8::try_from(bits & u32::from(Self::PERSISTED)).unwrap_or_default())
     }
 
     const fn contains(self, panel: SidePanel) -> bool {
-        let bit = match panel {
-            SidePanel::OrderBook => Self::ORDER_BOOK,
-            SidePanel::Watchlist => Self::WATCHLIST,
-        };
-        self.0 & bit != 0
+        self.0 & panel.persisted_bit() != 0
     }
 
     fn set(&mut self, panel: SidePanel, visible: bool) {
-        let bit = match panel {
-            SidePanel::OrderBook => Self::ORDER_BOOK,
-            SidePanel::Watchlist => Self::WATCHLIST,
-        };
         if visible {
-            self.0 |= bit;
+            self.0 |= panel.persisted_bit();
         } else {
-            self.0 &= !bit;
+            self.0 &= !panel.persisted_bit();
         }
     }
 
-    const fn time_sales_visible(self) -> bool {
-        self.0 & Self::TIME_SALES != 0
-    }
-
-    fn set_time_sales_visible(&mut self, visible: bool) {
-        if visible {
-            self.0 |= Self::TIME_SALES;
-        } else {
-            self.0 &= !Self::TIME_SALES;
-        }
-    }
-
-    /// Whether any docked column renders. Time & Sales only renders with its order book.
     const fn any(self) -> bool {
-        self.0 & (Self::ORDER_BOOK | Self::WATCHLIST) != 0
+        self.0 != 0
     }
 }
 
@@ -2585,11 +2575,29 @@ fn claim_once(claimed: &mut bool) -> bool {
 }
 
 impl SidePanel {
+    const ALL: [Self; 3] = [Self::OrderBook, Self::TimeSales, Self::Watchlist];
+
     const fn title(self) -> &'static str {
         match self {
             Self::OrderBook => "Order Book",
+            Self::TimeSales => "Time & Sales",
             Self::Watchlist => "Watchlist",
         }
+    }
+
+    /// Durable workspace bit. Values are stable across releases; Time & Sales keeps the
+    /// bit it used while it was docked inside the order book.
+    const fn persisted_bit(self) -> u8 {
+        match self {
+            Self::OrderBook => 1,
+            Self::Watchlist => 2,
+            Self::TimeSales => 4,
+        }
+    }
+
+    /// Market panels need a selected instrument before they can open.
+    const fn requires_market(self) -> bool {
+        matches!(self, Self::OrderBook | Self::TimeSales)
     }
 }
 
@@ -2910,7 +2918,8 @@ struct HeaderControls(u8);
 impl HeaderControls {
     const INSTRUMENT: u8 = 1;
     const SERIES: u8 = 2;
-    const ORDER_BOOK: u8 = 4;
+    /// Order book and Time & Sales, which need a selected market.
+    const MARKET_PANELS: u8 = 4;
     const INDICATOR: u8 = 8;
     const CHART_TYPE: u8 = 16;
 
@@ -2924,7 +2933,7 @@ impl HeaderControls {
             controls |= Self::INSTRUMENT;
         }
         if selection {
-            controls |= Self::SERIES | Self::ORDER_BOOK;
+            controls |= Self::SERIES | Self::MARKET_PANELS;
         }
         Self(controls)
     }

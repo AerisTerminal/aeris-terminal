@@ -6,6 +6,7 @@ pub enum CommandId {
     OpenPalette,
     ToggleContext,
     ToggleOrderBook,
+    ToggleTimeSales,
     ToggleWatchlist,
     ChartCandles,
     ChartBars,
@@ -29,10 +30,11 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::OpenPalette,
         Self::ToggleContext,
         Self::ToggleOrderBook,
+        Self::ToggleTimeSales,
         Self::ToggleWatchlist,
         Self::ChartCandles,
         Self::ChartBars,
@@ -81,6 +83,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         id: CommandId::ToggleOrderBook,
         title: "Order book",
         keywords: "toggle show hide dom depth",
+        chord: None,
+    },
+    CommandSpec {
+        id: CommandId::ToggleTimeSales,
+        title: "Time & Sales",
+        keywords: "toggle show hide tape trades prints",
         chord: None,
     },
     CommandSpec {

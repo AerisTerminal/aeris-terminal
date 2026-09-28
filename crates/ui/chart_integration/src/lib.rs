@@ -43,4 +43,5 @@ pub use view::{
     FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade,
     PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
 };
+pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

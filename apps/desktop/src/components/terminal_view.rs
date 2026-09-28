@@ -30,8 +30,7 @@ fn active_header_state(
             workspace.has_market_selection(),
         )
         .with_chart_controls(chart_has_market_data),
-        order_book_visible: workspace.side_panels.contains(SidePanel::OrderBook),
-        watchlist_visible: workspace.side_panels.contains(SidePanel::Watchlist),
+        side_panels: workspace.side_panels,
         context_visible: workspace.context_panel_visible,
         chart_link_group: workspace.chart_link_group,
         connection_state: workspace
@@ -136,6 +135,7 @@ impl TerminalApp {
             CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
             CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
             CommandId::ToggleOrderBook => surface.update(cx, WorkspaceSurface::toggle_order_book),
+            CommandId::ToggleTimeSales => surface.update(cx, WorkspaceSurface::toggle_time_sales),
             CommandId::ToggleWatchlist => surface.update(cx, WorkspaceSurface::toggle_watchlist),
             CommandId::ChartCandles
             | CommandId::ChartBars
