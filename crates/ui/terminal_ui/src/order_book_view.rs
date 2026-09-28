@@ -1340,11 +1340,11 @@ struct OrderBookSideAppearance {
 fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
     match side {
         BookColumnSide::Bid => OrderBookSideAppearance {
-            fill: theme.colors.positive,
+            fill: theme.colors.positive_subtle,
             text: theme.colors.text_positive,
         },
         BookColumnSide::Ask => OrderBookSideAppearance {
-            fill: theme.colors.negative,
+            fill: theme.colors.negative_subtle,
             text: theme.colors.text_negative,
         },
     }
@@ -2120,19 +2120,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn order_book_sides_use_semantic_text_and_solid_fill_tokens() {
+    fn order_book_sides_use_semantic_text_and_subtle_fill_tokens() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             assert_eq!(
                 order_book_side_appearance(&theme, BookColumnSide::Bid),
                 OrderBookSideAppearance {
-                    fill: theme.colors.positive,
+                    fill: theme.colors.positive_subtle,
                     text: theme.colors.text_positive,
                 }
             );
             assert_eq!(
                 order_book_side_appearance(&theme, BookColumnSide::Ask),
                 OrderBookSideAppearance {
-                    fill: theme.colors.negative,
+                    fill: theme.colors.negative_subtle,
                     text: theme.colors.text_negative,
                 }
             );
