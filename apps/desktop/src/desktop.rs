@@ -223,9 +223,11 @@ use terminal_view::{
 use time_sales_panel::TimeSalesPanelState;
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
-use workspace_layout::workspace_market_area;
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
+use workspace_layout::{
+    WorkspaceMaximizeTransition, workspace_market_area, workspace_maximize_transition,
+};
 
 fn install_platform_http_client(cx: &mut App) {
     match ReqwestClient::user_agent(concat!("Aeris/", env!("CARGO_PKG_VERSION"))) {
@@ -3767,6 +3769,12 @@ struct WorkspaceTab {
     panes: Vec<WorkspacePane>,
     active_pane: usize,
     layout: AerisChartWorkspace,
+    /// Ephemeral host presentation state matching the Aeris Charts grid contract. This is not
+    /// persisted because maximizing a pane must not replace or mutate the authoritative layout.
+    maximized_pane: Option<u64>,
+    /// An Alt+click changes the layout below the pointer. Consume its matching release so the
+    /// newly mounted chart cannot receive a stray click or drawing anchor.
+    swallow_pane_mouse_up: bool,
     generation: u64,
     focus: FocusHandle,
 }

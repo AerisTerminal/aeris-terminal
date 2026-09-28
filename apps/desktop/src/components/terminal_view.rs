@@ -1147,6 +1147,8 @@ pub(super) fn terminal_root(
                 active_pane: 0,
                 layout: AerisChartWorkspace::new(1, CHART_PANE_CAPACITY)
                     .expect("startup pane identity 1 is a valid chart workspace root"),
+                maximized_pane: None,
+                swallow_pane_mouse_up: false,
                 generation: 1,
                 focus: cx.focus_handle(),
             }],
@@ -1307,6 +1309,8 @@ pub(super) fn workspace_tabs_root(
             panes,
             active_pane,
             layout,
+            maximized_pane: None,
+            swallow_pane_mouse_up: false,
             generation: tab.generation,
             focus: cx.focus_handle(),
         });

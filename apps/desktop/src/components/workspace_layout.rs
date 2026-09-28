@@ -6,7 +6,31 @@ pub(super) fn workspace_pane_grid(
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
+    if let Some(pane_id) = workspace.maximized_pane {
+        return workspace_pane_element(terminal, workspace, pane_id, theme, cx);
+    }
     workspace_layout_element(terminal, workspace, &workspace.layout.layout(), theme, cx)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkspaceMaximizeTransition {
+    Ignore,
+    Set(Option<u64>),
+}
+
+pub(super) fn workspace_maximize_transition(
+    current: Option<u64>,
+    pane_id: u64,
+    pane_count: usize,
+) -> WorkspaceMaximizeTransition {
+    if pane_count < 2 && current.is_none() {
+        return WorkspaceMaximizeTransition::Ignore;
+    }
+    WorkspaceMaximizeTransition::Set(if current == Some(pane_id) {
+        None
+    } else {
+        Some(pane_id)
+    })
 }
 
 pub(super) fn workspace_layout_element(
@@ -221,6 +245,8 @@ pub(super) fn workspace_pane_element(
     let pane_focus = pane.focus.clone();
     let select_terminal = terminal.clone();
     let context_terminal = terminal.clone();
+    let maximize_terminal = terminal.clone();
+    let release_terminal = terminal.clone();
     div()
         .id(("workspace_pane", pane_id))
         .relative()
@@ -231,6 +257,30 @@ pub(super) fn workspace_pane_element(
         // indicator separators across its complete viewport; host padding here would shorten
         // every separator and leave a visible break before the workspace boundary.
         .pb(px(WORKSPACE_PANE_BOTTOM_INSET))
+        // Match the Aeris Charts grid contract: Alt+primary-click toggles one cell over the full
+        // workspace. Capture and consume the press before the chart can pan, select, or place a
+        // drawing, then consume the corresponding release after the layout has changed.
+        .capture_any_mouse_down(move |event, _, app| {
+            let toggled = maximize_terminal.update(app, |terminal, cx| {
+                terminal.begin_workspace_pane_alt_click(
+                    workspace_id,
+                    pane_id,
+                    event.button == MouseButton::Left && event.modifiers.alt,
+                    cx,
+                )
+            });
+            if toggled {
+                app.stop_propagation();
+            }
+        })
+        .capture_any_mouse_up(move |_, _, app| {
+            let swallow = release_terminal.update(app, |terminal, _| {
+                terminal.take_workspace_pane_mouse_up(workspace_id)
+            });
+            if swallow {
+                app.stop_propagation();
+            }
+        })
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.select_pane(workspace_id, pane_id, terminal_cx);

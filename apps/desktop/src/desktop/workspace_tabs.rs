@@ -608,6 +608,49 @@ impl TerminalApp {
         cx.notify();
     }
 
+    pub(super) fn begin_workspace_pane_alt_click(
+        &mut self,
+        workspace_id: u64,
+        pane_id: u64,
+        alt_primary: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(workspace_index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            return false;
+        };
+        self.workspaces[workspace_index].swallow_pane_mouse_up = false;
+        if !alt_primary {
+            return false;
+        }
+        let workspace = &self.workspaces[workspace_index];
+        if !workspace.panes.iter().any(|pane| pane.id == pane_id) {
+            return false;
+        }
+        let WorkspaceMaximizeTransition::Set(maximized_pane) =
+            workspace_maximize_transition(workspace.maximized_pane, pane_id, workspace.panes.len())
+        else {
+            return false;
+        };
+
+        self.select_pane(workspace_id, pane_id, cx);
+        let workspace = &mut self.workspaces[workspace_index];
+        workspace.maximized_pane = maximized_pane;
+        workspace.swallow_pane_mouse_up = true;
+        cx.notify();
+        true
+    }
+
+    pub(super) fn take_workspace_pane_mouse_up(&mut self, workspace_id: u64) -> bool {
+        self.workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+            .is_some_and(|workspace| std::mem::take(&mut workspace.swallow_pane_mouse_up))
+    }
+
     pub(super) fn absorb_pane_activate_requests(&mut self, cx: &mut Context<Self>) {
         let mut requested = None;
         for workspace in &self.workspaces {
@@ -2062,6 +2105,8 @@ impl TerminalApp {
             }],
             active_pane: 0,
             layout,
+            maximized_pane: None,
+            swallow_pane_mouse_up: false,
             generation: 1,
             focus: cx.focus_handle(),
         });
@@ -2153,6 +2198,8 @@ impl TerminalApp {
         })
         .detach();
         let workspace = &mut self.workspaces[self.active];
+        workspace.maximized_pane = None;
+        workspace.swallow_pane_mouse_up = false;
         let source_pane_id = workspace.panes[workspace.active_pane].id;
         if let Err(error) = workspace
             .layout
@@ -2213,6 +2260,8 @@ impl TerminalApp {
         if workspace.panes.len() == 1 {
             return;
         }
+        workspace.maximized_pane = None;
+        workspace.swallow_pane_mouse_up = false;
         let removed_pane_id = workspace.panes[workspace.active_pane].id;
         if let Err(error) = workspace.layout.remove(removed_pane_id) {
             self.workspace_error = Some(error.to_string());
