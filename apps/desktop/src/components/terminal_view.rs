@@ -841,7 +841,12 @@ fn workspace_tab_content(
         .flex()
         .items_center()
         .gap_1()
-        .child(exchange_mark(exchange, px(16.0), false, &theme.colors))
+        .child(exchange_mark(
+            exchange,
+            px(WORKSPACE_TAB_EXCHANGE_GLYPH),
+            false,
+            &theme.colors,
+        ))
         .child(
             div()
                 .flex_1()
@@ -889,14 +894,28 @@ fn workspace_tab_width(
         )
     };
     let rem = f32::from(window.rem_size());
-    let gap = rem * 0.25;
-    let mut width = rem * 0.75 + 16.0 + gap + measure(label, rem * 0.875, font.clone()) + gap;
-    if let Some(change) = change {
+    let label_width = measure(label, rem * 0.875, font.clone());
+    let change_width = change.map(|change| {
         font.features = platform_tabular_numerals();
-        width += gap + measure(change, rem * 0.75, font);
+        measure(change, rem * 0.75, font)
+    });
+    workspace_tab_width_from_measurements(label_width, change_width, show_close)
+}
+
+fn workspace_tab_width_from_measurements(
+    label_width: f32,
+    change_width: Option<f32>,
+    show_close: bool,
+) -> f32 {
+    let mut width = WORKSPACE_TAB_HORIZONTAL_PADDING * 2.0
+        + WORKSPACE_TAB_EXCHANGE_GLYPH
+        + WORKSPACE_TAB_CONTENT_GAP
+        + label_width;
+    if let Some(change_width) = change_width {
+        width += WORKSPACE_TAB_CONTENT_GAP + change_width;
     }
     if show_close {
-        width += gap + WORKSPACE_TAB_ICON_HIT;
+        width += WORKSPACE_TAB_CLOSE_GAP + WORKSPACE_TAB_ICON_HIT;
     }
     width.ceil().min(WORKSPACE_TAB_MAX_WIDTH)
 }
@@ -959,9 +978,8 @@ fn workspace_tab(
         .flex_none()
         .flex()
         .items_center()
-        .gap_1()
-        .pl_3()
-        .pr_1()
+        .gap_2()
+        .px_3()
         .text_sm()
         .track_focus(&tab_focus)
         .aria_label(aria_label)
@@ -1333,8 +1351,9 @@ mod tests {
     use aeris_design_system::AerisTheme;
 
     use super::{
-        MarketSummaryValues, workspace_tab_aria_label, workspace_tab_change_label,
-        workspace_tab_close_drag_enabled, workspace_tab_surface_colors,
+        MarketSummaryValues, WORKSPACE_TAB_MAX_WIDTH, workspace_tab_aria_label,
+        workspace_tab_change_label, workspace_tab_close_drag_enabled, workspace_tab_surface_colors,
+        workspace_tab_width_from_measurements,
     };
 
     #[test]
@@ -1366,5 +1385,15 @@ mod tests {
             workspace_tab_aria_label("BTC-USD", change.as_deref()),
             "BTC-USD, change +6.00%"
         );
+    }
+
+    #[test]
+    fn workspace_tab_width_tracks_content_and_preserves_trailing_space() {
+        let without_close = workspace_tab_width_from_measurements(100.0, Some(50.0), false);
+        assert!((without_close - 198.0).abs() < f32::EPSILON);
+        let with_close = workspace_tab_width_from_measurements(100.0, Some(50.0), true);
+        assert!((with_close - 230.0).abs() < f32::EPSILON);
+        let capped = workspace_tab_width_from_measurements(1_000.0, None, false);
+        assert!((capped - WORKSPACE_TAB_MAX_WIDTH).abs() < f32::EPSILON);
     }
 }

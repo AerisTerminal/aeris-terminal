@@ -1024,6 +1024,30 @@ fn workspace_drag_reflows_at_neighbor_slot_boundaries() {
         Some(10.0)
     );
     assert_eq!(workspace_drag_translation(Some(drag), 8, 1, &widths), None);
+    assert_eq!(
+        workspace_drag_translation(
+            Some(WorkspaceDragState {
+                pointer_x: Some(strip_left - 500.0),
+                ..drag
+            }),
+            7,
+            1,
+            &widths
+        ),
+        Some(-(widths[0] + WORKSPACE_TAB_GAP))
+    );
+    assert_eq!(
+        workspace_drag_translation(
+            Some(WorkspaceDragState {
+                pointer_x: Some(third_center + 500.0),
+                ..drag
+            }),
+            7,
+            1,
+            &widths
+        ),
+        Some(widths[2] + WORKSPACE_TAB_GAP)
+    );
 }
 
 #[test]

@@ -423,9 +423,13 @@ const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // messages stay queued and wake the next GPUI frame.
 const MARKET_MESSAGES_PER_FRAME: usize = 64;
 const CHART_SYNC_EVENTS_PER_SURFACE: usize = 32;
-const WORKSPACE_TAB_MAX_WIDTH: f32 = 248.0;
+const WORKSPACE_TAB_MAX_WIDTH: f32 = 360.0;
 const WORKSPACE_TAB_GAP: f32 = 2.0;
 const WORKSPACE_TAB_STRIP_PADDING_LEFT: f32 = 8.0;
+const WORKSPACE_TAB_HORIZONTAL_PADDING: f32 = 12.0;
+const WORKSPACE_TAB_CONTENT_GAP: f32 = 4.0;
+const WORKSPACE_TAB_CLOSE_GAP: f32 = 8.0;
+const WORKSPACE_TAB_EXCHANGE_GLYPH: f32 = 16.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const CHROME_OVERLAY_EXIT_DURATION: Duration = Duration::from_millis(100);
@@ -4217,12 +4221,22 @@ fn workspace_drag_translation(
 ) -> Option<f32> {
     let drag = drag.filter(|drag| drag.tab_id == tab_id)?;
     let pointer_x = drag.pointer_x?;
+    let dragged_width = *tab_widths.get(index)?;
     let index_offset = tab_widths
         .get(..index)?
         .iter()
         .fold(0.0, |offset, width| offset + width + WORKSPACE_TAB_GAP);
-    let slot_left = drag.strip_left + WORKSPACE_TAB_STRIP_PADDING_LEFT + index_offset;
-    Some(pointer_x - drag.cursor_offset_x - slot_left)
+    let occupied_width = tab_widths
+        .iter()
+        .copied()
+        .reduce(|total, width| total + WORKSPACE_TAB_GAP + width)?;
+    let requested_left =
+        pointer_x - drag.cursor_offset_x - drag.strip_left - WORKSPACE_TAB_STRIP_PADDING_LEFT;
+    if !requested_left.is_finite() || !occupied_width.is_finite() {
+        return None;
+    }
+    let bounded_left = requested_left.clamp(0.0, (occupied_width - dragged_width).max(0.0));
+    Some(bounded_left - index_offset)
 }
 
 fn watchlist_drag_destination(
