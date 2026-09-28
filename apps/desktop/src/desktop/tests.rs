@@ -768,6 +768,28 @@ fn workspace_tabs_switch_one_surface_and_preserve_stable_labels() {
 }
 
 #[test]
+fn development_chart_splitting_disables_the_product_restriction() {
+    const {
+        assert!(!super::CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED);
+        assert!(super::CHART_PANE_CAPACITY > super::PRODUCTION_CHART_PANE_LIMIT);
+    }
+    assert_eq!(
+        super::CHART_PANE_CAPACITY,
+        super::DEVELOPMENT_CHART_PANE_SAFETY_CEILING
+    );
+
+    let mut workspace = super::AerisChartWorkspace::new(1, super::CHART_PANE_CAPACITY);
+    for pane_id in 2..=8 {
+        assert!(
+            workspace
+                .split(1, ChartSplitDirection::Horizontal, pane_id)
+                .is_ok()
+        );
+    }
+    assert_eq!(workspace.layout().pane_ids().len(), 8);
+}
+
+#[test]
 fn workspace_tabs_reorder_and_close_without_changing_active_identity() {
     let mut ids = vec![1, 2, 3];
     assert!(reorder_workspace_ids(&mut ids, 1, 2));

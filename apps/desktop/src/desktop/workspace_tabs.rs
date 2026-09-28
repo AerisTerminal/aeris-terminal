@@ -2039,7 +2039,7 @@ impl TerminalApp {
                 focus: cx.focus_handle(),
             }],
             active_pane: 0,
-            layout: AerisChartWorkspace::new(pane_id, MAXIMUM_PANES_PER_WORKSPACE),
+            layout: AerisChartWorkspace::new(pane_id, CHART_PANE_CAPACITY),
             generation: 1,
             focus: cx.focus_handle(),
         });
@@ -2071,10 +2071,9 @@ impl TerminalApp {
             return;
         };
         let workspace = &self.workspaces[self.active];
-        let maximum = current_plan_limits().panes_per_workspace;
-        if workspace.panes.len() >= maximum {
+        if workspace.panes.len() >= CHART_PANE_CAPACITY {
             self.workspace_error = Some(format!(
-                "Your plan supports at most {maximum} charts per workspace"
+                "Development safety ceiling of {CHART_PANE_CAPACITY} chart panes reached"
             ));
             cx.notify();
             return;
@@ -2645,7 +2644,7 @@ impl TerminalApp {
             if chart_has_market_data {
                 flags |= ChartContextMenuState::READY;
             }
-            if self.workspace_factory.is_some() && pane_count < MAXIMUM_PANES_PER_WORKSPACE {
+            if self.workspace_factory.is_some() && pane_count < CHART_PANE_CAPACITY {
                 flags |= ChartContextMenuState::SPLIT;
             }
             if has_drawings {

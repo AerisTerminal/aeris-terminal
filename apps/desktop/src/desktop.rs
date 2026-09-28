@@ -367,12 +367,22 @@ const CONTEXT_PANEL_MAXIMUM_HEIGHT: f32 = 640.0;
 const CONTEXT_PANEL_MINIMUM_CHART_HEIGHT: f32 = 160.0;
 const MAXIMUM_STATUS_CHARACTERS: usize = 160;
 const MAXIMUM_OPEN_WORKSPACES: usize = 8;
-const MAXIMUM_PANES_PER_WORKSPACE: usize = 4;
+// PRE-PRODUCTION: re-enable this product restriction and qualify the production
+// value before publishing Aeris. Development keeps product gating disabled while
+// retaining a hard ceiling so pane-owned charts, market demand, persistence, and
+// worker queues remain bounded.
+const CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED: bool = false;
+const PRODUCTION_CHART_PANE_LIMIT: usize = 4;
+const DEVELOPMENT_CHART_PANE_SAFETY_CEILING: usize = 64;
+const CHART_PANE_CAPACITY: usize = if CHART_PANE_PRODUCT_RESTRICTIONS_ENABLED {
+    PRODUCTION_CHART_PANE_LIMIT
+} else {
+    DEVELOPMENT_CHART_PANE_SAFETY_CEILING
+};
 
 #[derive(Clone, Copy)]
 struct PlanLimits {
     workspaces: usize,
-    panes_per_workspace: usize,
     indicators_per_chart: usize,
     extended_timeframes: bool,
 }
@@ -383,7 +393,6 @@ fn current_plan_limits() -> PlanLimits {
     // until paid-plan enforcement is deliberately enabled.
     PlanLimits {
         workspaces: MAXIMUM_OPEN_WORKSPACES,
-        panes_per_workspace: MAXIMUM_PANES_PER_WORKSPACE,
         indicators_per_chart: usize::MAX,
         extended_timeframes: true,
     }
