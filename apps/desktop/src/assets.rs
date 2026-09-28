@@ -432,17 +432,27 @@ mod tests {
     }
 
     #[test]
-    fn stacked_split_icon_keeps_sixteen_pixel_snapped_geometry() {
-        let bytes = AerisAssets
+    fn stacked_split_icon_is_the_side_by_side_geometry_rotated_one_quarter_turn() {
+        fn path_data(svg: &str) -> &str {
+            svg.split_once("<path d=\"")
+                .and_then(|(_, path)| path.split_once('\"'))
+                .map(|(path, _)| path)
+                .expect("SVG path data")
+        }
+
+        let side_by_side_bytes = AerisAssets
+            .load(UiIcon::SplitSideBySide.path().as_ref())
+            .expect("asset lookup")
+            .expect("embedded side-by-side split icon");
+        let stacked_bytes = AerisAssets
             .load(UiIcon::SplitStacked.path().as_ref())
             .expect("asset lookup")
             .expect("embedded stacked split icon");
-        let svg = std::str::from_utf8(&bytes).expect("UTF-8 SVG");
+        let side_by_side = std::str::from_utf8(&side_by_side_bytes).expect("UTF-8 SVG");
+        let stacked = std::str::from_utf8(&stacked_bytes).expect("UTF-8 SVG");
 
-        assert!(svg.contains("viewBox=\"0 0 24 24\""));
-        assert!(!svg.contains("transform="));
-        assert!(svg.contains("M3 6.75A3.75"));
-        assert!(svg.contains("Zm0 6v4.5A3.75"));
+        assert_eq!(path_data(stacked), path_data(side_by_side));
+        assert!(stacked.contains("transform=\"rotate(90 12 12)\""));
     }
 
     #[test]
