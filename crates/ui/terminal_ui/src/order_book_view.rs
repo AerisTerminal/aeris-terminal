@@ -1337,14 +1337,24 @@ struct OrderBookSideAppearance {
     text: ThemeColor,
 }
 
+/// One shared opacity keeps bid and ask fills equally weighted and quieter than the
+/// opaque subtle tokens, so quantities and working orders stay the ladder's focus.
+const ORDER_BOOK_SIDE_FILL_ALPHA: f32 = 0.6;
+
 fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
     match side {
         BookColumnSide::Bid => OrderBookSideAppearance {
-            fill: theme.colors.positive_subtle,
+            fill: theme
+                .colors
+                .positive_subtle
+                .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
             text: theme.colors.text_positive,
         },
         BookColumnSide::Ask => OrderBookSideAppearance {
-            fill: theme.colors.negative_subtle,
+            fill: theme
+                .colors
+                .negative_subtle
+                .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
             text: theme.colors.text_negative,
         },
     }
@@ -2122,17 +2132,31 @@ mod tests {
     #[test]
     fn order_book_sides_use_semantic_text_and_subtle_fill_tokens() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let bid = order_book_side_appearance(&theme, BookColumnSide::Bid);
+            let ask = order_book_side_appearance(&theme, BookColumnSide::Ask);
+            assert!(
+                (bid.fill.hsla_components().3 - ask.fill.hsla_components().3).abs() < f32::EPSILON
+            );
+            assert!(
+                bid.fill.hsla_components().3 < theme.colors.positive_subtle.hsla_components().3
+            );
             assert_eq!(
-                order_book_side_appearance(&theme, BookColumnSide::Bid),
+                bid,
                 OrderBookSideAppearance {
-                    fill: theme.colors.positive_subtle,
+                    fill: theme
+                        .colors
+                        .positive_subtle
+                        .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
                     text: theme.colors.text_positive,
                 }
             );
             assert_eq!(
                 order_book_side_appearance(&theme, BookColumnSide::Ask),
                 OrderBookSideAppearance {
-                    fill: theme.colors.negative_subtle,
+                    fill: theme
+                        .colors
+                        .negative_subtle
+                        .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
                     text: theme.colors.text_negative,
                 }
             );
