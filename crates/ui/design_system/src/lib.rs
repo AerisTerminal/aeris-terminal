@@ -564,6 +564,11 @@ mod tests {
         );
         assert_eq!(light.button_fill, ThemeColor::from_rgb8(51, 51, 51));
         assert_eq!(dark.button_fill, ThemeColor::from_rgb8(245, 245, 245));
+        assert_eq!(dark.button_fill_hover, ThemeColor::from_rgb8(224, 224, 224));
+        assert_eq!(
+            dark.button_fill_active,
+            ThemeColor::from_rgb8(212, 212, 212)
+        );
         assert_eq!(
             light.button_fill_foreground,
             ThemeColor::from_rgb8(255, 255, 255)

@@ -371,7 +371,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "ebfcbf6";
+        let expected_revision = "5b77434";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",

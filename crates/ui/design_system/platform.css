@@ -186,8 +186,8 @@
 
   /* Buttons — neutral default button */
   --button-fill: #f5f5f5;
-  --button-fill-hover: #f0f0f0;
-  --button-fill-active: #e5e5e5;
+  --button-fill-hover: #e0e0e0;
+  --button-fill-active: #d4d4d4;
   --button-fill-foreground: #404040;
   --button-fill-subtle: #222222;
 
