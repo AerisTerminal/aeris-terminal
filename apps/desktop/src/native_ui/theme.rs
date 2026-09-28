@@ -25,7 +25,7 @@ pub(crate) struct ButtonAppearance {
 pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> ButtonAppearance {
     let colors = theme.colors;
     let (fill, foreground, border) = match variant {
-        ButtonVariant::Filled => (colors.button_fill, colors.surface, None),
+        ButtonVariant::Filled => (colors.button_fill, colors.button_fill_foreground, None),
         ButtonVariant::Secondary => (
             colors.surface_secondary,
             colors.text_primary,
@@ -34,19 +34,24 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
         ButtonVariant::Ghost => (colors.surface, colors.text_secondary, None),
         ButtonVariant::Destructive => (colors.danger, colors.danger_foreground, None),
     };
+    let (hover, active) = match variant {
+        ButtonVariant::Filled => (colors.button_fill_hover, colors.button_fill_active),
+        ButtonVariant::Destructive => (colors.danger, colors.danger),
+        ButtonVariant::Secondary | ButtonVariant::Ghost => (colors.hover_bg, colors.active_bg),
+    };
     ButtonAppearance {
         fill,
         foreground,
         border,
-        hover: colors.hover_bg.over(fill),
-        active: colors.active_bg.over(fill),
+        hover,
+        active,
     }
 }
 
 pub(crate) fn input_appearance(theme: &AerisTheme) -> (ThemeColor, ThemeColor, ThemeColor) {
     (
-        theme.colors.input_fill,
-        theme.colors.input_border,
+        theme.colors.surface_secondary,
+        theme.colors.border_secondary,
         theme.colors.ring,
     )
 }
@@ -90,7 +95,7 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
         destructive: gpui_color(colors.danger),
         destructive_foreground: gpui_color(colors.danger_foreground),
         border: gpui_color(colors.border),
-        input: gpui_color(colors.input_border),
+        input: gpui_color(colors.border_secondary),
         ring: gpui_color(colors.ring),
         selection,
     };
@@ -129,7 +134,7 @@ mod tests {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let filled = button_appearance(&theme, ButtonVariant::Filled);
             assert_eq!(filled.fill, theme.colors.button_fill);
-            assert_eq!(filled.foreground, theme.colors.surface);
+            assert_eq!(filled.foreground, theme.colors.button_fill_foreground);
 
             let secondary = button_appearance(&theme, ButtonVariant::Secondary);
             assert_eq!(secondary.fill, theme.colors.surface_secondary);

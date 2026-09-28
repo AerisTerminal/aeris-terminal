@@ -26,46 +26,91 @@
   /* Surfaces */
   --surface: #ffffff;
   --surface-secondary: #fafafa;
+  --surface-subtle: #fafafa;
+  --surface-raised: #f0f0f0;
+  --surface-overlay: color-mix(in srgb, #000000 50%, transparent);
+  --surface-inverse: #222222;
 
   /* Borders */
-  --border: #1414140f;
+  --border: #e5e5e5;
   --border-secondary: var(--border);
+  --border-subtle: #f0f0f0;
+  --border-softer: #f5f5f5;
+  --border-strong: #c2c2c2;
+  --border-inverse: #222222;
   --border-width: 0.5px;
-  --input-fill: var(--surface-secondary);
-  --input-border: var(--border-secondary);
 
   /* Text */
-  --text-primary: #333333;
-  --text-secondary: #7B7B7B;
-  --text-muted: #D1D1D1;
+  --text-primary: #222222;
+  --text-default: #404040;
+  --text-secondary: #646465;
+  --text-muted: #c2c2c2;
+  --text-positive: var(--positive);
+  --text-negative: var(--negative);
+  --text-danger: var(--danger);
+  --text-warning: #ff6900;
+  --text-interactive: #646465;
+  --text-hover: #404040;
+  --text-active: #404040;
 
-  /* Interaction states */
-  --hover-bg: #14141409;
-  --active-bg: #1414140d;
+  /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
+  --hover-bg: #f0f0f0;
+  --active-bg: #e5e5e5;
+  --disabled-bg: #e5e5e5;
 
-  /* Icons */
-  --icon: #14141480;
-  --icon-active: #141414;
+  /* Icons — normal and hovered/pressed/selected */
+  --icon: #646465;
+  --icon-active: #404040;
+
+  /* Status */
+  --positive: #089981;
+  --positive-subtle: #dbfce7;
+  --negative: #f7525f;
+  --negative-subtle: #ffe2e2;
+  --warning: #ff6900;
+  --warning-subtle: #ffedd4;
+  --indigo: #615fff;
+  --indigo-subtle: #e0e7ff;
+  --purple: #ad46ff;
+  --purple-subtle: #f3e8ff;
 
   /* Actions */
-  --primary: #168ef7;
-  --primary-foreground: #fff;
-  --danger: #fb3748;
+  --primary: #0091ff;
+  --primary-hover: #0077fa;
+  --primary-active: #0050b2;
+  --primary-disabled: #b7d9f8;
+  --primary-disabled-foreground: #5eb0ef;
+  --primary-ring: #cee7fe;
+  --primary-subtle: #e1f0ff;
+  --primary-foreground: #ffffff;
+  --danger: #f7525f;
+  --danger-disabled: #ffc9c9;
+  --danger-disabled-foreground: #ffa2a2;
+  --danger-ring: #ffc9c9;
   --danger-foreground: #ffffff;
-  --warning: #F5A623;
-  --success: #089981;
 
-  /* Buttons */
+  /* Buttons — neutral default button */
   --button-fill: #333333;
+  --button-fill-hover: #404040;
+  --button-fill-active: #222222;
+  --button-fill-foreground: #ffffff;
+  --button-fill-subtle: #f5f5f5;
 
   /* Focus */
-  --ring: #14141433;
+  --ring: color-mix(in srgb, #c2c2c2 50%, transparent);
 
   /* Radius */
   --radius-default: 8px;
   --radius-medium: 12px;
   --radius-small: 4px;
   --radius-large: 999px;
+  --radius-button: 6px;
+
+  /* Shadows */
+  --shadow-1: 0 0 1px 0 color-mix(in srgb, #000000 20%, transparent), 0 1px 2px 0 color-mix(in srgb, #000000 5%, transparent), 0 1px 1px 0 color-mix(in srgb, #000000 1%, transparent);
+  --shadow-2: 0 1px 6px 0 color-mix(in srgb, #000000 10%, transparent);
+  --shadow-3: 0 2.75px 5.5px 0 color-mix(in srgb, #000000 10%, transparent);
+  --shadow-dialog: 0 4px 6px -4px color-mix(in srgb, #101828 10%, transparent), 0 10px 15px -3px color-mix(in srgb, #000000 10%, transparent);
 
   /* Chart */
   --bullish: #089981;
@@ -74,46 +119,84 @@
 
 .dark {
   /* Surfaces */
-  --surface: #141414;
-  --surface-secondary: #181818;
+  --surface: #1f1f1f;
+  --surface-secondary: #222222;
+  --surface-subtle: #2b2b2b;
+  --surface-raised: #333333;
+  --surface-overlay: color-mix(in srgb, #000000 60%, transparent);
+  --surface-inverse: #ffffff;
 
   /* Borders */
-  --border: #f0f0f014;
+  --border: #333333;
   --border-secondary: var(--border);
+  --border-subtle: #333333;
+  --border-softer: #2b2b2b;
+  --border-strong: #404040;
+  --border-inverse: #ffffff;
   --border-width: 0.5px;
-  --input-fill: var(--surface-secondary);
-  --input-border: var(--border-secondary);
 
   /* Text */
-  --text-primary: #f0f0f0;
-  --text-secondary: #AEAEB2;
-  --text-muted: #f0f0f05c;
+  --text-primary: #f5f5f5;
+  --text-default: #f0f0f0;
+  --text-secondary: #c2c2c2;
+  --text-muted: #808080;
+  --text-positive: var(--positive);
+  --text-negative: var(--negative);
+  --text-danger: #ffa2a2;
+  --text-warning: #ffb86a;
+  --text-interactive: #c2c2c2;
+  --text-hover: #f0f0f0;
+  --text-active: #f0f0f0;
 
   /* Interaction states */
-  --hover-bg: #f0f0f014;
-  --active-bg: #f0f0f024;
+  --hover-bg: #333333;
+  --active-bg: #404040;
+  --disabled-bg: #404040;
 
   /* Icons */
-  --icon: #f0f0f0a8;
+  --icon: #c2c2c2;
   --icon-active: #f0f0f0;
 
-  /* Actions */
-  --primary: #168ef7;
-  --primary-foreground: #fff;
-  --danger: #fb3748;
-  --danger-foreground: #ffffff;
-  --warning: #F5A623;
-  --success: #089981;
+  /* Status */
+  --positive: #089981;
+  --positive-subtle: #0d542b;
+  --negative: #f7525f;
+  --negative-subtle: #460809;
+  --warning: #ff6900;
+  --warning-subtle: #7e2a0c;
+  --indigo: #615fff;
+  --indigo-subtle: #312c85;
+  --purple: #ad46ff;
+  --purple-subtle: #59168b;
 
-  /* Buttons */
-  --button-fill: #EBEBEB;
+  /* Actions */
+  --primary: #0091ff;
+  --primary-hover: #0077fa;
+  --primary-active: #0050b2;
+  --primary-disabled: #5eb0ef;
+  --primary-disabled-foreground: #b7d9f8;
+  --primary-ring: #5eb0ef;
+  --primary-subtle: #0050b2;
+  --primary-foreground: #ffffff;
+  --danger: #f7525f;
+  --danger-disabled: #9f0712;
+  --danger-disabled-foreground: #ff6467;
+  --danger-ring: #c10007;
+  --danger-foreground: #ffffff;
+
+  /* Buttons — neutral default button */
+  --button-fill: #f5f5f5;
+  --button-fill-hover: #f0f0f0;
+  --button-fill-active: #e5e5e5;
+  --button-fill-foreground: #404040;
+  --button-fill-subtle: #222222;
 
   /* Focus */
-  --ring: #f0f0f026;
+  --ring: color-mix(in srgb, #404040 50%, transparent);
 
   /* Chart */
-  --bullish: #7c8db0;
-  --bearish: #98615c;
+  --bullish: #089981;
+  --bearish: #f7525f;
 }
 
 *,
@@ -171,18 +254,22 @@ button,
 .button-primary,
 .button-outline,
 .button-ghost {
-  border-radius: var(--radius-default);
+  border-radius: var(--radius-button);
   transition: background-color 150ms ease, color 150ms ease;
 }
 
 .button-primary {
   border: var(--border-width) solid transparent;
   background: var(--button-fill);
-  color: var(--surface);
+  color: var(--button-fill-foreground);
 }
 
 .button-primary:hover:not(:disabled):not([aria-disabled="true"]) {
-  background: color-mix(in srgb, var(--button-fill) 85%, var(--surface));
+  background: var(--button-fill-hover);
+}
+
+.button-primary:active:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--button-fill-active);
 }
 
 .button-outline {
@@ -223,15 +310,16 @@ button:disabled,
 
 .button-primary:disabled,
 .button-primary[aria-disabled="true"] {
-  opacity: 0.5;
+  background: var(--disabled-bg);
+  color: var(--text-muted);
 }
 
 input,
 select,
 textarea {
-  border: var(--border-width) solid var(--input-border);
+  border: var(--border-width) solid var(--border-secondary);
   border-radius: var(--radius-default);
-  background: var(--input-fill);
+  background: var(--surface-secondary);
   color: var(--text-primary);
 }
 

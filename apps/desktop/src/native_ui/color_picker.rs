@@ -442,8 +442,8 @@ fn hex_input_row(
         .items_center()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border(platform_border_width(theme))
-        .border_color(gpui_color(theme.colors.input_border))
-        .bg(gpui_color(theme.colors.input_fill))
+        .border_color(gpui_color(theme.colors.border_secondary))
+        .bg(gpui_color(theme.colors.surface_secondary))
         .overflow_hidden()
         .child(
             div()

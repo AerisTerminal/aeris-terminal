@@ -381,7 +381,7 @@ fn time_sales_row(
         seconds % 60
     );
     let tone = match trade.aggressor {
-        aeris_market_data::AggressorSide::Buy => theme.colors.success,
+        aeris_market_data::AggressorSide::Buy => theme.colors.positive,
         aeris_market_data::AggressorSide::Sell => theme.colors.danger,
         aeris_market_data::AggressorSide::Unknown => theme.colors.text_muted,
     };
@@ -435,7 +435,7 @@ fn time_sales_filter_button(
         .flex()
         .items_center()
         .rounded(px(3.0))
-        .bg(gpui_color(theme.colors.input_fill))
+        .bg(gpui_color(theme.colors.surface_secondary))
         .text_color(gpui_color(theme.colors.text_secondary))
         .text_xs()
         .cursor_pointer()
@@ -708,7 +708,7 @@ fn trading_strategy_selector(
         },
     );
     let strategy_app = (*app).clone();
-    let hover = colors.hover_bg.over(colors.input_fill);
+    let hover = colors.hover_bg;
     div()
         .id("trading_strategy_selector")
         .flex_1()
@@ -719,7 +719,7 @@ fn trading_strategy_selector(
         .gap_2()
         .px_2()
         .rounded(px(3.0))
-        .bg(gpui_color(colors.input_fill))
+        .bg(gpui_color(colors.surface_secondary))
         .cursor_pointer()
         .role(Role::Button)
         .aria_label("Select a locally managed bracket strategy")
@@ -786,7 +786,7 @@ fn trading_account_selector(
     );
     let account_app = (*app).clone();
     let account_count = accounts.len();
-    let hover = colors.hover_bg.over(colors.input_fill);
+    let hover = colors.hover_bg;
     let selector = div()
         .id("trading_account_selector")
         .flex_1()
@@ -797,7 +797,7 @@ fn trading_account_selector(
         .gap_2()
         .px_2()
         .rounded(px(3.0))
-        .bg(gpui_color(colors.input_fill))
+        .bg(gpui_color(colors.surface_secondary))
         .cursor_pointer()
         .role(Role::Button)
         .aria_label("Select the simulated trading account")
@@ -927,7 +927,7 @@ fn trading_segmented_control(colors: &aeris_design_system::ThemeColors) -> Div {
         .gap(px(2.0))
         .p(px(2.0))
         .rounded(px(4.0))
-        .bg(gpui_color(colors.input_fill))
+        .bg(gpui_color(colors.surface_secondary))
 }
 
 fn trading_choice_button<T: Into<gpui::ElementId>>(

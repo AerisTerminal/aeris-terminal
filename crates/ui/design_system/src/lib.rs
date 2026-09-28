@@ -295,8 +295,6 @@ pub struct ThemeColors {
     pub surface_secondary: ThemeColor,
     pub border: ThemeColor,
     pub border_secondary: ThemeColor,
-    pub input_fill: ThemeColor,
-    pub input_border: ThemeColor,
     pub text_primary: ThemeColor,
     pub text_secondary: ThemeColor,
     pub text_muted: ThemeColor,
@@ -309,8 +307,12 @@ pub struct ThemeColors {
     pub danger: ThemeColor,
     pub danger_foreground: ThemeColor,
     pub warning: ThemeColor,
-    pub success: ThemeColor,
+    pub positive: ThemeColor,
     pub button_fill: ThemeColor,
+    pub button_fill_hover: ThemeColor,
+    pub button_fill_active: ThemeColor,
+    pub button_fill_foreground: ThemeColor,
+    pub button_fill_subtle: ThemeColor,
     pub ring: ThemeColor,
     /// Portable chart bullish token. Aeris Charts remains authoritative for chart rendering.
     pub bullish: ThemeColor,
@@ -374,7 +376,7 @@ impl AerisTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 23] {
+    pub fn color_tokens(self) -> [ColorToken; 25] {
         let colors = self.colors;
         let sources = match self.mode {
             ThemeMode::Light => LIGHT_COLOR_SOURCES,
@@ -385,25 +387,31 @@ impl AerisTheme {
             ColorToken::new("surface-secondary", sources[1], colors.surface_secondary),
             ColorToken::new("border", sources[2], colors.border),
             ColorToken::new("border-secondary", sources[3], colors.border_secondary),
-            ColorToken::new("input-fill", sources[4], colors.input_fill),
-            ColorToken::new("input-border", sources[5], colors.input_border),
-            ColorToken::new("text-primary", sources[6], colors.text_primary),
-            ColorToken::new("text-secondary", sources[7], colors.text_secondary),
-            ColorToken::new("text-muted", sources[8], colors.text_muted),
-            ColorToken::new("hover-bg", sources[9], colors.hover_bg),
-            ColorToken::new("active-bg", sources[10], colors.active_bg),
-            ColorToken::new("icon", sources[11], colors.icon),
-            ColorToken::new("icon-active", sources[12], colors.icon_active),
-            ColorToken::new("primary", sources[13], colors.primary),
-            ColorToken::new("primary-foreground", sources[14], colors.primary_foreground),
-            ColorToken::new("danger", sources[15], colors.danger),
-            ColorToken::new("danger-foreground", sources[16], colors.danger_foreground),
-            ColorToken::new("warning", sources[17], colors.warning),
-            ColorToken::new("success", sources[18], colors.success),
-            ColorToken::new("button-fill", sources[19], colors.button_fill),
-            ColorToken::new("ring", sources[20], colors.ring),
-            ColorToken::new("bullish", sources[21], colors.bullish),
-            ColorToken::new("bearish", sources[22], colors.bearish),
+            ColorToken::new("text-primary", sources[4], colors.text_primary),
+            ColorToken::new("text-secondary", sources[5], colors.text_secondary),
+            ColorToken::new("text-muted", sources[6], colors.text_muted),
+            ColorToken::new("hover-bg", sources[7], colors.hover_bg),
+            ColorToken::new("active-bg", sources[8], colors.active_bg),
+            ColorToken::new("icon", sources[9], colors.icon),
+            ColorToken::new("icon-active", sources[10], colors.icon_active),
+            ColorToken::new("primary", sources[11], colors.primary),
+            ColorToken::new("primary-foreground", sources[12], colors.primary_foreground),
+            ColorToken::new("danger", sources[13], colors.danger),
+            ColorToken::new("danger-foreground", sources[14], colors.danger_foreground),
+            ColorToken::new("warning", sources[15], colors.warning),
+            ColorToken::new("positive", sources[16], colors.positive),
+            ColorToken::new("button-fill", sources[17], colors.button_fill),
+            ColorToken::new("button-fill-hover", sources[18], colors.button_fill_hover),
+            ColorToken::new("button-fill-active", sources[19], colors.button_fill_active),
+            ColorToken::new(
+                "button-fill-foreground",
+                sources[20],
+                colors.button_fill_foreground,
+            ),
+            ColorToken::new("button-fill-subtle", sources[21], colors.button_fill_subtle),
+            ColorToken::new("ring", sources[22], colors.ring),
+            ColorToken::new("bullish", sources[23], colors.bullish),
+            ColorToken::new("bearish", sources[24], colors.bearish),
         ]
     }
 }
@@ -422,7 +430,7 @@ fn dark_colors() -> ThemeColors {
     generated_colors(DARK_COLORS)
 }
 
-fn generated_colors(values: [[u8; 4]; 23]) -> ThemeColors {
+fn generated_colors(values: [[u8; 4]; 25]) -> ThemeColors {
     let color = |index: usize| {
         let [red, green, blue, alpha] = values[index];
         ThemeColor::from_rgba8(red, green, blue, alpha)
@@ -432,27 +440,29 @@ fn generated_colors(values: [[u8; 4]; 23]) -> ThemeColors {
         surface_secondary: color(1),
         border: color(2),
         border_secondary: color(3),
-        input_fill: color(4),
-        input_border: color(5),
-        text_primary: color(6),
-        text_secondary: color(7),
-        text_muted: color(8),
-        hover_bg: color(9),
-        active_bg: color(10),
-        icon: color(11),
-        icon_active: color(12),
-        primary: color(13),
-        primary_foreground: color(14),
-        danger: color(15),
-        danger_foreground: color(16),
-        warning: color(17),
-        success: color(18),
-        button_fill: color(19),
-        ring: color(20),
-        bullish: color(21),
-        bearish: color(22),
-        market_up: color(18),
-        market_down: ThemeColor::from_rgb8(247, 82, 95),
+        text_primary: color(4),
+        text_secondary: color(5),
+        text_muted: color(6),
+        hover_bg: color(7),
+        active_bg: color(8),
+        icon: color(9),
+        icon_active: color(10),
+        primary: color(11),
+        primary_foreground: color(12),
+        danger: color(13),
+        danger_foreground: color(14),
+        warning: color(15),
+        positive: color(16),
+        button_fill: color(17),
+        button_fill_hover: color(18),
+        button_fill_active: color(19),
+        button_fill_foreground: color(20),
+        button_fill_subtle: color(21),
+        ring: color(22),
+        bullish: color(23),
+        bearish: color(24),
+        market_up: color(16),
+        market_down: color(24),
     }
 }
 
@@ -462,6 +472,7 @@ pub enum RadiusToken {
     Sm,
     Default,
     Medium,
+    Button,
     Full,
 }
 
@@ -473,6 +484,7 @@ impl RadiusToken {
             Self::Sm => "radius-small",
             Self::Default => "radius-default",
             Self::Medium => "radius-medium",
+            Self::Button => "radius-button",
             Self::Full => "radius-large",
         }
     }
@@ -490,6 +502,7 @@ impl RadiusToken {
             Self::Sm => RADIUS_SMALL,
             Self::Default => RADIUS_DEFAULT,
             Self::Medium => RADIUS_MEDIUM,
+            Self::Button => RADIUS_BUTTON,
             Self::Full => RADIUS_LARGE,
         }
     }
@@ -520,45 +533,49 @@ mod tests {
             light.surface_secondary,
             ThemeColor::from_rgb8(250, 250, 250)
         );
-        assert_eq!(light.input_fill, light.surface_secondary);
-        assert_eq!(light.input_border, light.border);
         assert_eq!(light.border_secondary, light.border);
-        assert_eq!(light.border, ThemeColor::from_rgba8(20, 20, 20, 0x0f));
+        assert_eq!(light.border, ThemeColor::from_rgb8(229, 229, 229));
         assert_eq!(
             light.danger_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
-        assert_eq!(dark.surface, ThemeColor::from_rgb8(20, 20, 20));
-        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(24, 24, 24));
-        assert_eq!(dark.input_fill, dark.surface_secondary);
-        assert_eq!(dark.input_border, dark.border);
+        assert_eq!(dark.surface, ThemeColor::from_rgb8(31, 31, 31));
+        assert_eq!(dark.surface_secondary, ThemeColor::from_rgb8(34, 34, 34));
         assert_eq!(dark.border_secondary, dark.border);
-        assert_eq!(light.text_primary, ThemeColor::from_rgb8(51, 51, 51));
-        assert_eq!(light.text_secondary, ThemeColor::from_rgb8(123, 123, 123));
-        assert_eq!(light.text_muted, ThemeColor::from_rgb8(209, 209, 209));
-        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(174, 174, 178));
-        assert_eq!(light.primary, ThemeColor::from_rgb8(22, 142, 247));
+        assert_eq!(light.text_primary, ThemeColor::from_rgb8(34, 34, 34));
+        assert_eq!(light.text_secondary, ThemeColor::from_rgb8(100, 100, 101));
+        assert_eq!(light.text_muted, ThemeColor::from_rgb8(194, 194, 194));
+        assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(194, 194, 194));
+        assert_eq!(light.primary, ThemeColor::from_rgb8(0, 145, 255));
         assert_eq!(dark.primary, light.primary);
-        assert_eq!(light.warning, ThemeColor::from_rgb8(245, 166, 35));
+        assert_eq!(light.warning, ThemeColor::from_rgb8(255, 105, 0));
         assert_eq!(dark.warning, light.warning);
-        assert_eq!(light.success, ThemeColor::from_rgb8(8, 153, 129));
-        assert_eq!(dark.success, light.success);
+        assert_eq!(light.positive, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(dark.positive, light.positive);
         assert_eq!(
             light.primary_foreground,
             ThemeColor::from_rgb8(255, 255, 255)
         );
         assert_eq!(light.button_fill, ThemeColor::from_rgb8(51, 51, 51));
-        assert_eq!(dark.button_fill, ThemeColor::from_rgb8(235, 235, 235));
+        assert_eq!(dark.button_fill, ThemeColor::from_rgb8(245, 245, 245));
+        assert_eq!(
+            light.button_fill_foreground,
+            ThemeColor::from_rgb8(255, 255, 255)
+        );
+        assert_eq!(
+            dark.button_fill_foreground,
+            ThemeColor::from_rgb8(64, 64, 64)
+        );
         assert_eq!(light.bullish, ThemeColor::from_rgb8(8, 153, 129));
         assert_eq!(light.bearish, ThemeColor::from_rgb8(247, 82, 95));
-        assert_eq!(dark.bullish, ThemeColor::from_rgb8(124, 141, 176));
-        assert_eq!(dark.bearish, ThemeColor::from_rgb8(152, 97, 92));
+        assert_eq!(dark.bullish, light.bullish);
+        assert_eq!(dark.bearish, light.bearish);
         assert_eq!(light.market_up, ThemeColor::from_rgb8(8, 153, 129));
         assert_eq!(light.market_down, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.market_up, light.market_up);
         assert_eq!(dark.market_down, light.market_down);
-        assert_eq!(light.hover_bg, ThemeColor::from_rgba8(20, 20, 20, 0x09));
-        assert_eq!(dark.active_bg, ThemeColor::from_rgba8(240, 240, 240, 0x24));
+        assert_eq!(light.hover_bg, ThemeColor::from_rgb8(240, 240, 240));
+        assert_eq!(dark.active_bg, ThemeColor::from_rgb8(64, 64, 64));
         let (_, hover_saturation, _, _) = light.hover_bg.hsla_components();
         assert!(hover_saturation.abs() < f32::EPSILON);
 
@@ -567,8 +584,8 @@ mod tests {
             light.active_bg.over(light.surface),
             dark.hover_bg.over(dark.surface),
             dark.active_bg.over(dark.surface),
-            light.hover_bg.over(light.input_fill),
-            light.active_bg.over(light.input_fill),
+            light.hover_bg.over(light.surface_secondary),
+            light.active_bg.over(light.surface_secondary),
         ] {
             assert!((composited.alpha() - 1.0).abs() < f32::EPSILON);
             assert!((composited.red() - composited.green()).abs() < f32::EPSILON);
@@ -580,26 +597,26 @@ mod tests {
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
         assert_eq!(token_source(&light_tokens, "surface"), "#ffffff");
-        assert_eq!(token_source(&light_tokens, "border"), "#1414140f");
-        assert_eq!(token_source(&dark_tokens, "surface"), "#141414");
-        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#f0f0f014");
-        assert_eq!(token_source(&light_tokens, "text-muted"), "#D1D1D1");
-        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#AEAEB2");
-        assert_eq!(
-            token_source(&light_tokens, "input-fill"),
-            "var(--surface-secondary)"
-        );
-        assert_eq!(token_source(&dark_tokens, "danger"), "#fb3748");
-        assert_eq!(token_source(&dark_tokens, "warning"), "#F5A623");
-        assert_eq!(token_source(&dark_tokens, "success"), "#089981");
-        assert_eq!(token_source(&dark_tokens, "primary"), "#168ef7");
+        assert_eq!(token_source(&light_tokens, "border"), "#e5e5e5");
+        assert_eq!(token_source(&dark_tokens, "surface"), "#1f1f1f");
+        assert_eq!(token_source(&dark_tokens, "hover-bg"), "#333333");
+        assert_eq!(token_source(&light_tokens, "text-muted"), "#c2c2c2");
+        assert_eq!(token_source(&dark_tokens, "text-secondary"), "#c2c2c2");
+        assert_eq!(token_source(&dark_tokens, "danger"), "#f7525f");
+        assert_eq!(token_source(&dark_tokens, "warning"), "#ff6900");
+        assert_eq!(token_source(&dark_tokens, "positive"), "#089981");
+        assert_eq!(token_source(&dark_tokens, "primary"), "#0091ff");
         assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
-        assert_eq!(token_source(&dark_tokens, "button-fill"), "#EBEBEB");
+        assert_eq!(token_source(&dark_tokens, "button-fill"), "#f5f5f5");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
         assert_eq!(token_source(&light_tokens, "bullish"), "#089981");
         assert_eq!(token_source(&light_tokens, "bearish"), "#f7525f");
-        assert_eq!(token_source(&dark_tokens, "bullish"), "#7c8db0");
-        assert_eq!(token_source(&dark_tokens, "bearish"), "#98615c");
+        assert_eq!(token_source(&dark_tokens, "bullish"), "#089981");
+        assert_eq!(token_source(&dark_tokens, "bearish"), "#f7525f");
+        assert_eq!(
+            token_source(&light_tokens, "ring"),
+            "color-mix(in srgb, #c2c2c2 50%, transparent)"
+        );
     }
 
     #[test]
@@ -607,6 +624,7 @@ mod tests {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
         assert_eq!(RadiusToken::Default.logical_pixels(), 8);
         assert_eq!(RadiusToken::Medium.logical_pixels(), 12);
+        assert_eq!(RadiusToken::Button.logical_pixels(), 6);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
         assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius-small");
         assert_eq!(
@@ -615,6 +633,7 @@ mod tests {
         );
         assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-large");
         assert_eq!(RadiusToken::Medium.css_custom_property(), "--radius-medium");
+        assert_eq!(RadiusToken::Button.css_custom_property(), "--radius-button");
     }
 
     #[test]
@@ -675,14 +694,12 @@ mod tests {
             "--foreground:",
             "--card:",
             "--card-foreground",
-            "--primary-hover",
             "--muted:",
             "--muted-foreground",
             "--disabled-foreground",
             "--accent:",
             "--muted-border",
             "--overlay",
-            "--negative",
             "--destructive",
             "--radius-sm:",
             "--radius-df",
@@ -696,7 +713,9 @@ mod tests {
             "--border_",
             "--chart_",
             "--chart-1",
-            "--positive",
+            "--input-fill",
+            "--input-border",
+            "--success",
             "--profit",
             "--loss",
             "--radius_",

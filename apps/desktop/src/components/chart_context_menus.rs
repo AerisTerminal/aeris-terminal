@@ -1869,7 +1869,9 @@ fn settings_toggle_row(
                     track.justify_end().bg(gpui_color(colors.primary))
                 })
                 .when(!enabled, |track| {
-                    track.justify_start().bg(gpui_color(colors.input_border))
+                    track
+                        .justify_start()
+                        .bg(gpui_color(colors.border_secondary))
                 })
                 .rounded_full()
                 .cursor_pointer()
@@ -2056,8 +2058,8 @@ fn settings_choice_row(
         .p(px(2.0))
         .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
         .border_1()
-        .border_color(gpui_color(colors.input_border))
-        .bg(gpui_color(colors.input_fill))
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
         .role(Role::TabList)
         .aria_label(label);
     for (index, (choice, selected, action)) in choices.iter().copied().enumerate() {

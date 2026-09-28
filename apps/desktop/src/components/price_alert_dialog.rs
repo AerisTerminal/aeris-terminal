@@ -390,16 +390,16 @@ fn dropdown_trigger(
         .border_color(gpui_color(if open {
             colors.ring
         } else {
-            colors.input_border
+            colors.border_secondary
         }))
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .bg(gpui_color(colors.input_fill))
+        .bg(gpui_color(colors.surface_secondary))
         .text_sm()
         .text_color(gpui_color(colors.text_primary))
         .cursor_pointer()
         .role(Role::Button)
         .aria_label(label)
-        .hover(move |style| style.bg(gpui_color(colors.hover_bg.over(colors.input_fill))))
+        .hover(move |style| style.bg(gpui_color(colors.hover_bg)))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
             toggle.update(cx, |surface, surface_cx| {

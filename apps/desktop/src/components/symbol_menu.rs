@@ -30,7 +30,7 @@ pub(super) fn instrument_selector(
         .caret(header_icon(HugeIcon::ChevronDown))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
         .border_1()
-        .border_color(gpui_color(theme.colors.input_border))
+        .border_color(gpui_color(theme.colors.border_secondary))
         .bg(gpui_color(theme.colors.surface))
         .text_color(gpui_color(theme.colors.text_primary))
         .theme(theme)

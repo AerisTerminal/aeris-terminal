@@ -1470,7 +1470,7 @@ fn connection_indicator_is_transport_only() {
     assert_eq!(live.provider, "Rithmic");
     assert_eq!(live.status, "Live");
     assert_eq!(live.latency, "Measuring…");
-    assert_eq!((live.color)(&theme), colors.success);
+    assert_eq!((live.color)(&theme), colors.positive);
 
     let recovering = connection_presentation(
         TerminalProvider::Rithmic,

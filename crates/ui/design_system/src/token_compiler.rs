@@ -135,6 +135,40 @@ pub(crate) fn parse_hex(value: &str) -> Result<[u8; 4], String> {
     ])
 }
 
+pub(crate) fn parse_color(value: &str) -> Result<[u8; 4], String> {
+    if value.starts_with('#') {
+        return parse_hex(value);
+    }
+    let inner = value
+        .strip_prefix("color-mix(in srgb,")
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| format!("expected a supported color, found `{value}`"))?
+        .trim();
+    let (color_and_weight, transparent) = inner
+        .split_once(',')
+        .ok_or_else(|| format!("invalid color-mix `{value}`"))?;
+    if transparent.trim() != "transparent" {
+        return Err(format!("unsupported color-mix `{value}`"));
+    }
+    let (color, weight) = color_and_weight
+        .trim()
+        .split_once(' ')
+        .ok_or_else(|| format!("color-mix is missing a percentage in `{value}`"))?;
+    let percent = weight
+        .trim()
+        .strip_suffix('%')
+        .ok_or_else(|| format!("color-mix is missing a percentage in `{value}`"))?
+        .parse::<u16>()
+        .map_err(|_| format!("invalid color-mix percentage in `{value}`"))?;
+    if percent > 100 {
+        return Err(format!("color-mix percentage is out of range in `{value}`"));
+    }
+    let [red, green, blue, color_alpha] = parse_hex(color)?;
+    let alpha = u8::try_from((u16::from(color_alpha) * percent + 50) / 100)
+        .map_err(|_| format!("color-mix alpha is out of range in `{value}`"))?;
+    Ok([red, green, blue, alpha])
+}
+
 pub(crate) fn parse_pixels(value: &str) -> Result<f32, String> {
     value
         .strip_suffix("px")
@@ -174,5 +208,14 @@ mod tests {
         assert!(resolve(&root, "missing").is_err());
         assert!(parse_pixels("1rem").is_err());
         assert!(parse_hex("red").is_err());
+        assert!(parse_color("color-mix(in srgb, red 50%, transparent)").is_err());
+    }
+
+    #[test]
+    fn color_mix_with_transparency_resolves_to_rgba() {
+        assert_eq!(
+            parse_color("color-mix(in srgb, #c2c2c2 50%, transparent)").unwrap(),
+            [194, 194, 194, 128]
+        );
     }
 }

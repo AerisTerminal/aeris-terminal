@@ -76,17 +76,9 @@ impl gpui::StatefulInteractiveElement for Tab {}
 impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
-        let resting_fill = if self.segmented {
-            colors.input_fill
-        } else {
-            colors.surface_secondary
-        };
+        let resting_fill = colors.surface_secondary;
         let selected_fill = colors.active_bg.over(resting_fill);
-        let resting_border = if self.segmented {
-            colors.input_fill
-        } else {
-            colors.surface_secondary
-        };
+        let resting_border = colors.surface_secondary;
         let mut tab = self
             .base
             .occlude()

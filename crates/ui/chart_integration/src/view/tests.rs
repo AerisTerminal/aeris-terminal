@@ -1747,7 +1747,8 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
     assert!(series.border_down_color.is_none());
 
     let dark_defaults = aeris_theme_appearance_defaults(ChartTheme::Dark);
-    assert_eq!(dark_defaults.bullish, "#7c8db0");
+    assert_eq!(dark_defaults.bullish, "#089981");
+    assert_eq!(dark_defaults.bearish, "#f7525f");
     let effective = dark.appearance_settings();
     assert_eq!(effective.up_color, dark_defaults.bullish);
     assert_eq!(effective.down_color, dark_defaults.bearish);

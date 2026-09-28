@@ -1,5 +1,5 @@
 param(
-    [string]$WebsiteCss = (Join-Path $PSScriptRoot "..\..\axiusflow-website\src\styles\platform.css")
+    [string]$WebsiteCss = (Join-Path $PSScriptRoot "..\..\..\Axiusflow-Org\axiusflow-website\src\styles\platform.css")
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,6 +7,7 @@ $nativeCss = Join-Path $PSScriptRoot "..\crates\ui\design_system\platform.css"
 
 function Read-ThemeTokens([string]$Path) {
     $text = Get-Content -LiteralPath $Path -Raw
+    $text = [regex]::Replace($text, '/\*[\s\S]*?\*/', '')
     $tokens = [ordered]@{}
     foreach ($mode in @("root", "dark")) {
         $selector = if ($mode -eq "root") { ":root" } else { ".dark" }

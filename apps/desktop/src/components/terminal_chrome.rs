@@ -1219,7 +1219,7 @@ pub(super) fn connection_presentation(
         FeedConnectionState::Disconnected => ("Offline", |theme| theme.colors.danger),
         FeedConnectionState::Discovering => ("Connecting", |theme| theme.colors.warning),
         FeedConnectionState::Authenticating => ("Authenticating", |theme| theme.colors.warning),
-        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.success),
+        FeedConnectionState::Streaming => ("Live", |theme| theme.colors.positive),
         FeedConnectionState::Recovering => ("Reconnecting", |theme| theme.colors.warning),
         FeedConnectionState::Stopped => ("Stopped", |theme| theme.colors.danger),
     };

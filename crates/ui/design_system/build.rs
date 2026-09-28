@@ -2,15 +2,13 @@
 mod token_compiler;
 
 use std::{env, fmt::Write as _, fs, path::PathBuf};
-use token_compiler::{cascade, parse_hex, parse_pixels, parse_theme_blocks, resolve, source};
+use token_compiler::{cascade, parse_color, parse_pixels, parse_theme_blocks, resolve, source};
 
-const COLORS: [&str; 23] = [
+const COLORS: [&str; 25] = [
     "surface",
     "surface-secondary",
     "border",
     "border-secondary",
-    "input-fill",
-    "input-border",
     "text-primary",
     "text-secondary",
     "text-muted",
@@ -23,8 +21,12 @@ const COLORS: [&str; 23] = [
     "danger",
     "danger-foreground",
     "warning",
-    "success",
+    "positive",
     "button-fill",
+    "button-fill-hover",
+    "button-fill-active",
+    "button-fill-foreground",
+    "button-fill-subtle",
     "ring",
     "bullish",
     "bearish",
@@ -98,6 +100,11 @@ fn compile_tokens() -> Result<(), String> {
         "RADIUS_LARGE",
         &resolve(&root, "radius-large")?,
     )?;
+    emit_pixel_u16(
+        &mut output,
+        "RADIUS_BUTTON",
+        &resolve(&root, "radius-button")?,
+    )?;
 
     let path = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)
         .join("platform_tokens.rs");
@@ -142,7 +149,7 @@ fn emit_colors(
     )
     .expect("writing generated tokens to a String cannot fail");
     for token in COLORS {
-        let [r, g, b, a] = parse_hex(&resolve(declarations, token)?)?;
+        let [r, g, b, a] = parse_color(&resolve(declarations, token)?)?;
         writeln!(output, "    [{r}, {g}, {b}, {a}],")
             .expect("writing generated tokens to a String cannot fail");
     }
