@@ -343,9 +343,9 @@ fn account_summary(
         |value| format!("Equity {}", format_money(pnl, value)),
     );
     let pnl_color = if pnl.realized.units().saturating_add(pnl.unrealized.units()) >= 0 {
-        theme.colors.bullish
+        theme.colors.text_positive
     } else {
-        theme.colors.bearish
+        theme.colors.text_negative
     };
     Some(
         div()

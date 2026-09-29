@@ -4,6 +4,8 @@
 //! checked CSS manifest uses generated custom-property names, while painting
 //! code consumes typed values without string lookup.
 
+#[macro_use]
+mod color_registry;
 #[cfg(test)]
 mod token_compiler;
 
@@ -302,58 +304,33 @@ impl ColorToken {
     }
 }
 
-/// Core, semantic, and trading colors resolved for one application mode.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ThemeColors {
-    pub surface: ThemeColor,
-    pub surface_secondary: ThemeColor,
-    pub border: ThemeColor,
-    pub border_secondary: ThemeColor,
-    pub text_primary: ThemeColor,
-    pub text_secondary: ThemeColor,
-    pub text_muted: ThemeColor,
-    pub text_positive: ThemeColor,
-    pub text_negative: ThemeColor,
-    pub hover_bg: ThemeColor,
-    pub active_bg: ThemeColor,
-    pub icon: ThemeColor,
-    pub icon_active: ThemeColor,
-    pub primary: ThemeColor,
-    pub primary_foreground: ThemeColor,
-    pub danger: ThemeColor,
-    pub danger_foreground: ThemeColor,
-    pub danger_disabled: ThemeColor,
-    pub danger_disabled_foreground: ThemeColor,
-    pub danger_ring: ThemeColor,
-    pub warning: ThemeColor,
-    pub positive: ThemeColor,
-    pub positive_subtle: ThemeColor,
-    pub negative_subtle: ThemeColor,
-    pub button_fill: ThemeColor,
-    pub button_fill_hover: ThemeColor,
-    pub button_fill_active: ThemeColor,
-    pub button_fill_foreground: ThemeColor,
-    pub button_fill_subtle: ThemeColor,
-    pub buy: ThemeColor,
-    pub buy_hover: ThemeColor,
-    pub buy_active: ThemeColor,
-    pub buy_disabled: ThemeColor,
-    pub buy_disabled_foreground: ThemeColor,
-    pub buy_ring: ThemeColor,
-    pub buy_foreground: ThemeColor,
-    pub sell: ThemeColor,
-    pub sell_hover: ThemeColor,
-    pub sell_active: ThemeColor,
-    pub sell_disabled: ThemeColor,
-    pub sell_disabled_foreground: ThemeColor,
-    pub sell_ring: ThemeColor,
-    pub sell_foreground: ThemeColor,
-    pub ring: ThemeColor,
-    /// Portable chart bullish token. Aeris Charts remains authoritative for chart rendering.
-    pub bullish: ThemeColor,
-    /// Portable chart bearish token. Aeris Charts remains authoritative for chart rendering.
-    pub bearish: ThemeColor,
+macro_rules! theme_colors {
+    ($($(#[$meta:meta])* $field:ident => $identifier:literal,)*) => {
+        /// Every color token in `platform.css`, resolved for one application mode.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        pub struct ThemeColors {
+            $($(#[$meta])* pub $field: ThemeColor,)*
+        }
+
+        /// Canonical identifiers in registry order, parallel to the generated arrays.
+        const COLOR_IDENTIFIERS: [&str; PLATFORM_COLOR_COUNT] = [$($identifier),*];
+
+        impl ThemeColors {
+            fn from_generated(values: [[u8; 4]; PLATFORM_COLOR_COUNT]) -> Self {
+                let [$($field),*] = values;
+                Self {
+                    $($field: ThemeColor::from_rgba8($field[0], $field[1], $field[2], $field[3]),)*
+                }
+            }
+
+            const fn in_registry_order(self) -> [ThemeColor; PLATFORM_COLOR_COUNT] {
+                [$(self.$field),*]
+            }
+        }
+    };
 }
+
+platform_color_registry!(theme_colors);
 
 /// Native application dimensions that are not part of the portable CSS token contract.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -405,78 +382,17 @@ impl AerisTheme {
         Self::for_mode(self.mode.toggled())
     }
 
-    /// Returns canonical source metadata for every foundational color resolved here.
+    /// Returns canonical source metadata for every color token resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 46] {
-        let colors = self.colors;
+    pub fn color_tokens(self) -> [ColorToken; PLATFORM_COLOR_COUNT] {
+        let colors = self.colors.in_registry_order();
         let sources = match self.mode {
             ThemeMode::Light => LIGHT_COLOR_SOURCES,
             ThemeMode::Dark => DARK_COLOR_SOURCES,
         };
-        [
-            ColorToken::new("surface", sources[0], colors.surface),
-            ColorToken::new("surface-secondary", sources[1], colors.surface_secondary),
-            ColorToken::new("border", sources[2], colors.border),
-            ColorToken::new("border-secondary", sources[3], colors.border_secondary),
-            ColorToken::new("text-primary", sources[4], colors.text_primary),
-            ColorToken::new("text-secondary", sources[5], colors.text_secondary),
-            ColorToken::new("text-muted", sources[6], colors.text_muted),
-            ColorToken::new("text-positive", sources[7], colors.text_positive),
-            ColorToken::new("text-negative", sources[8], colors.text_negative),
-            ColorToken::new("hover-bg", sources[9], colors.hover_bg),
-            ColorToken::new("active-bg", sources[10], colors.active_bg),
-            ColorToken::new("icon", sources[11], colors.icon),
-            ColorToken::new("icon-active", sources[12], colors.icon_active),
-            ColorToken::new("primary", sources[13], colors.primary),
-            ColorToken::new("primary-foreground", sources[14], colors.primary_foreground),
-            ColorToken::new("danger", sources[15], colors.danger),
-            ColorToken::new("danger-foreground", sources[16], colors.danger_foreground),
-            ColorToken::new("danger-disabled", sources[17], colors.danger_disabled),
-            ColorToken::new(
-                "danger-disabled-foreground",
-                sources[18],
-                colors.danger_disabled_foreground,
-            ),
-            ColorToken::new("danger-ring", sources[19], colors.danger_ring),
-            ColorToken::new("warning", sources[20], colors.warning),
-            ColorToken::new("positive", sources[21], colors.positive),
-            ColorToken::new("positive-subtle", sources[22], colors.positive_subtle),
-            ColorToken::new("negative-subtle", sources[23], colors.negative_subtle),
-            ColorToken::new("button-fill", sources[24], colors.button_fill),
-            ColorToken::new("button-fill-hover", sources[25], colors.button_fill_hover),
-            ColorToken::new("button-fill-active", sources[26], colors.button_fill_active),
-            ColorToken::new(
-                "button-fill-foreground",
-                sources[27],
-                colors.button_fill_foreground,
-            ),
-            ColorToken::new("button-fill-subtle", sources[28], colors.button_fill_subtle),
-            ColorToken::new("buy", sources[29], colors.buy),
-            ColorToken::new("buy-hover", sources[30], colors.buy_hover),
-            ColorToken::new("buy-active", sources[31], colors.buy_active),
-            ColorToken::new("buy-disabled", sources[32], colors.buy_disabled),
-            ColorToken::new(
-                "buy-disabled-foreground",
-                sources[33],
-                colors.buy_disabled_foreground,
-            ),
-            ColorToken::new("buy-ring", sources[34], colors.buy_ring),
-            ColorToken::new("buy-foreground", sources[35], colors.buy_foreground),
-            ColorToken::new("sell", sources[36], colors.sell),
-            ColorToken::new("sell-hover", sources[37], colors.sell_hover),
-            ColorToken::new("sell-active", sources[38], colors.sell_active),
-            ColorToken::new("sell-disabled", sources[39], colors.sell_disabled),
-            ColorToken::new(
-                "sell-disabled-foreground",
-                sources[40],
-                colors.sell_disabled_foreground,
-            ),
-            ColorToken::new("sell-ring", sources[41], colors.sell_ring),
-            ColorToken::new("sell-foreground", sources[42], colors.sell_foreground),
-            ColorToken::new("ring", sources[43], colors.ring),
-            ColorToken::new("bullish", sources[44], colors.bullish),
-            ColorToken::new("bearish", sources[45], colors.bearish),
-        ]
+        std::array::from_fn(|index| {
+            ColorToken::new(COLOR_IDENTIFIERS[index], sources[index], colors[index])
+        })
     }
 }
 
@@ -487,66 +403,11 @@ impl Default for AerisTheme {
 }
 
 fn light_colors() -> ThemeColors {
-    generated_colors(LIGHT_COLORS)
+    ThemeColors::from_generated(LIGHT_COLORS)
 }
 
 fn dark_colors() -> ThemeColors {
-    generated_colors(DARK_COLORS)
-}
-
-fn generated_colors(values: [[u8; 4]; 46]) -> ThemeColors {
-    let color = |index: usize| {
-        let [red, green, blue, alpha] = values[index];
-        ThemeColor::from_rgba8(red, green, blue, alpha)
-    };
-    ThemeColors {
-        surface: color(0),
-        surface_secondary: color(1),
-        border: color(2),
-        border_secondary: color(3),
-        text_primary: color(4),
-        text_secondary: color(5),
-        text_muted: color(6),
-        text_positive: color(7),
-        text_negative: color(8),
-        hover_bg: color(9),
-        active_bg: color(10),
-        icon: color(11),
-        icon_active: color(12),
-        primary: color(13),
-        primary_foreground: color(14),
-        danger: color(15),
-        danger_foreground: color(16),
-        danger_disabled: color(17),
-        danger_disabled_foreground: color(18),
-        danger_ring: color(19),
-        warning: color(20),
-        positive: color(21),
-        positive_subtle: color(22),
-        negative_subtle: color(23),
-        button_fill: color(24),
-        button_fill_hover: color(25),
-        button_fill_active: color(26),
-        button_fill_foreground: color(27),
-        button_fill_subtle: color(28),
-        buy: color(29),
-        buy_hover: color(30),
-        buy_active: color(31),
-        buy_disabled: color(32),
-        buy_disabled_foreground: color(33),
-        buy_ring: color(34),
-        buy_foreground: color(35),
-        sell: color(36),
-        sell_hover: color(37),
-        sell_active: color(38),
-        sell_disabled: color(39),
-        sell_disabled_foreground: color(40),
-        sell_ring: color(41),
-        sell_foreground: color(42),
-        ring: color(43),
-        bullish: color(44),
-        bearish: color(45),
-    }
+    ThemeColors::from_generated(DARK_COLORS)
 }
 
 /// The complete set of concrete radius tokens. No additional radius is valid.
@@ -726,6 +587,31 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "sell"), "#f7525f");
         assert_eq!(token_source(&light_tokens, "sell-hover"), "#e5404d");
         assert_eq!(token_source(&dark_tokens, "sell-hover"), "#f96a75");
+    }
+
+    #[test]
+    fn order_book_tokens_match_the_platform_contract() {
+        let light = AerisTheme::light().colors;
+        let dark = AerisTheme::dark().colors;
+        assert_eq!(light.book_bid_fill, ThemeColor::from_rgb8(224, 243, 239));
+        assert_eq!(light.book_bid_flash, ThemeColor::from_rgb8(210, 239, 233));
+        assert_eq!(light.book_bid_text, ThemeColor::from_rgb8(6, 122, 102));
+        assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(253, 238, 240));
+        assert_eq!(light.book_ask_flash, ThemeColor::from_rgb8(252, 228, 231));
+        assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(217, 26, 43));
+        assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(22, 51, 46));
+        assert_eq!(dark.book_bid_flash, ThemeColor::from_rgb8(28, 70, 64));
+        assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(34, 195, 166));
+        assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(58, 33, 36));
+        assert_eq!(dark.book_ask_flash, ThemeColor::from_rgb8(78, 42, 46));
+        assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 107, 118));
+
+        let light_tokens = AerisTheme::light().color_tokens();
+        let dark_tokens = AerisTheme::dark().color_tokens();
+        assert_eq!(token_source(&light_tokens, "book-bid-fill"), "#e0f3ef");
+        assert_eq!(token_source(&light_tokens, "book-ask-text"), "#d91a2b");
+        assert_eq!(token_source(&dark_tokens, "book-bid-text"), "#22c3a6");
+        assert_eq!(token_source(&dark_tokens, "book-ask-flash"), "#4e2a2e");
     }
 
     #[test]

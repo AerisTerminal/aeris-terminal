@@ -470,9 +470,9 @@ fn source_status_bar(snapshot: &ContextSnapshot, theme: &AerisTheme) -> Div {
     let statuses = snapshot.source_statuses.iter().map(|status| {
         let (label, color) = match status.availability {
             SourceAvailability::Pending => ("pending", theme.colors.text_muted),
-            SourceAvailability::Available => ("ready", theme.colors.bullish),
+            SourceAvailability::Available => ("ready", theme.colors.text_positive),
             SourceAvailability::MissingCredential => ("key required", theme.colors.warning),
-            SourceAvailability::Unavailable => ("unavailable", theme.colors.bearish),
+            SourceAvailability::Unavailable => ("unavailable", theme.colors.text_negative),
         };
         div()
             .text_xs()

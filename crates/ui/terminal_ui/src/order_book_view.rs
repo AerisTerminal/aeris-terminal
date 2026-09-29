@@ -1337,25 +1337,17 @@ struct OrderBookSideAppearance {
     text: ThemeColor,
 }
 
-/// One shared opacity keeps bid and ask fills equally weighted and quieter than the
-/// opaque subtle tokens, so quantities and working orders stay the ladder's focus.
-const ORDER_BOOK_SIDE_FILL_ALPHA: f32 = 0.35;
-
+/// Each side's text token is tuned for 4.5:1 on its own fill, so a side's fill and
+/// text always travel together and are painted opaque, exactly as declared.
 fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
     match side {
         BookColumnSide::Bid => OrderBookSideAppearance {
-            fill: theme
-                .colors
-                .positive_subtle
-                .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
-            text: theme.colors.text_positive,
+            fill: theme.colors.book_bid_fill,
+            text: theme.colors.book_bid_text,
         },
         BookColumnSide::Ask => OrderBookSideAppearance {
-            fill: theme
-                .colors
-                .negative_subtle
-                .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
-            text: theme.colors.text_negative,
+            fill: theme.colors.book_ask_fill,
+            text: theme.colors.book_ask_text,
         },
     }
 }
@@ -1515,6 +1507,7 @@ fn render_level_row(
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
+        .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .on_click(move |_, _, cx| {
             order_book.update(cx, |_, order_book_cx| {
                 order_book_cx.emit(OrderBookLevelClick {
@@ -1589,6 +1582,7 @@ fn render_empty_price_tick(
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
+        .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .on_click(move |_, _, cx| {
             order_book.update(cx, |_, order_book_cx| {
                 order_book_cx.emit(OrderBookLevelClick {
@@ -1860,6 +1854,18 @@ fn pnl_at_price(
     .ok()
 }
 
+/// Ladder P/L sits inside the order book, where the status tokens fail contrast,
+/// so gains and losses borrow the book's contrast-tuned text tokens.
+fn pnl_color(pnl: Option<FixedPoint>, theme: &AerisTheme) -> ThemeColor {
+    pnl.map_or(theme.colors.text_secondary, |value| {
+        match value.units().cmp(&0) {
+            std::cmp::Ordering::Greater => theme.colors.book_bid_text,
+            std::cmp::Ordering::Less => theme.colors.book_ask_text,
+            std::cmp::Ordering::Equal => theme.colors.text_secondary,
+        }
+    })
+}
+
 fn pnl_cell(
     width: f32,
     marker: Option<&OrderBookPositionMarker>,
@@ -1868,13 +1874,7 @@ fn pnl_cell(
     theme: &AerisTheme,
 ) -> Div {
     let pnl = marker.and_then(|marker| pnl_at_price(marker, price, price_scale));
-    let color = pnl.map_or(theme.colors.text_secondary, |value| {
-        match value.units().cmp(&0) {
-            std::cmp::Ordering::Greater => theme.colors.text_positive,
-            std::cmp::Ordering::Less => theme.colors.text_negative,
-            std::cmp::Ordering::Equal => theme.colors.text_secondary,
-        }
-    });
+    let color = pnl_color(pnl, theme);
     let label = pnl.map_or_else(String::new, |value| {
         let text = grouped_fixed_point_text(value.units(), value.scale());
         if value.units() > 0 {
@@ -2130,36 +2130,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn order_book_sides_use_semantic_text_and_subtle_fill_tokens() {
+    fn order_book_sides_pair_each_book_text_token_with_its_own_opaque_fill() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
-            let bid = order_book_side_appearance(&theme, BookColumnSide::Bid);
-            let ask = order_book_side_appearance(&theme, BookColumnSide::Ask);
-            assert!(
-                (bid.fill.hsla_components().3 - ask.fill.hsla_components().3).abs() < f32::EPSILON
-            );
-            assert!(
-                bid.fill.hsla_components().3 < theme.colors.positive_subtle.hsla_components().3
-            );
             assert_eq!(
-                bid,
+                order_book_side_appearance(&theme, BookColumnSide::Bid),
                 OrderBookSideAppearance {
-                    fill: theme
-                        .colors
-                        .positive_subtle
-                        .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
-                    text: theme.colors.text_positive,
+                    fill: theme.colors.book_bid_fill,
+                    text: theme.colors.book_bid_text,
                 }
             );
             assert_eq!(
                 order_book_side_appearance(&theme, BookColumnSide::Ask),
                 OrderBookSideAppearance {
-                    fill: theme
-                        .colors
-                        .negative_subtle
-                        .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
-                    text: theme.colors.text_negative,
+                    fill: theme.colors.book_ask_fill,
+                    text: theme.colors.book_ask_text,
                 }
             );
+            assert!((theme.colors.book_bid_fill.alpha() - 1.0).abs() < f32::EPSILON);
+            assert!((theme.colors.book_ask_fill.alpha() - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn ladder_pnl_uses_book_text_tokens_instead_of_status_colors() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let at = |units| Some(FixedPoint::try_new(units, 2).expect("valid P/L"));
+            assert_eq!(pnl_color(at(125), &theme), theme.colors.book_bid_text);
+            assert_eq!(pnl_color(at(-125), &theme), theme.colors.book_ask_text);
+            assert_eq!(pnl_color(at(0), &theme), theme.colors.text_secondary);
+            assert_eq!(pnl_color(None, &theme), theme.colors.text_secondary);
         }
     }
 

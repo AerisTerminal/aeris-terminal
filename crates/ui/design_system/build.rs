@@ -4,58 +4,30 @@ mod token_compiler;
 use std::{env, fmt::Write as _, fs, path::PathBuf};
 use token_compiler::{cascade, parse_color, parse_pixels, parse_theme_blocks, resolve, source};
 
-const COLORS: [&str; 46] = [
-    "surface",
-    "surface-secondary",
-    "border",
-    "border-secondary",
-    "text-primary",
-    "text-secondary",
-    "text-muted",
-    "text-positive",
-    "text-negative",
-    "hover-bg",
-    "active-bg",
-    "icon",
-    "icon-active",
-    "primary",
-    "primary-foreground",
-    "danger",
-    "danger-foreground",
-    "danger-disabled",
-    "danger-disabled-foreground",
-    "danger-ring",
-    "warning",
-    "positive",
-    "positive-subtle",
-    "negative-subtle",
-    "button-fill",
-    "button-fill-hover",
-    "button-fill-active",
-    "button-fill-foreground",
-    "button-fill-subtle",
-    "buy",
-    "buy-hover",
-    "buy-active",
-    "buy-disabled",
-    "buy-disabled-foreground",
-    "buy-ring",
-    "buy-foreground",
-    "sell",
-    "sell-hover",
-    "sell-active",
-    "sell-disabled",
-    "sell-disabled-foreground",
-    "sell-ring",
-    "sell-foreground",
-    "ring",
-    "bullish",
-    "bearish",
-];
+#[macro_use]
+#[path = "src/color_registry.rs"]
+mod color_registry;
+
+macro_rules! color_identifiers {
+    ($($(#[$meta:meta])* $field:ident => $identifier:literal,)*) => {
+        const COLORS: &[&str] = &[$($identifier),*];
+    };
+}
+
+platform_color_registry!(color_identifiers);
+
+/// Non-color custom properties the token contract owns outside the color registry.
+fn is_non_color_token(name: &str) -> bool {
+    name == "border-width"
+        || ["font-", "radius-", "shadow-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=platform.css");
     println!("cargo:rerun-if-changed=src/token_compiler.rs");
+    println!("cargo:rerun-if-changed=src/color_registry.rs");
     if let Err(error) = compile_tokens() {
         panic!("invalid platform.css contract: {error}");
     }
@@ -65,6 +37,8 @@ fn compile_tokens() -> Result<(), String> {
     let css = fs::read_to_string("platform.css").map_err(|error| error.to_string())?;
     let (root, dark_overrides) = parse_theme_blocks(&css)?;
     let dark = cascade(&root, &dark_overrides);
+    require_registered_colors(&root)?;
+    require_registered_colors(&dark)?;
     let mut output = String::new();
 
     emit_string(&mut output, "FONT_STACK", &resolve(&root, "font-sans")?);
@@ -92,6 +66,13 @@ fn compile_tokens() -> Result<(), String> {
     let feature = resolve(&root, "font-feature-tabular-numerals")?;
     emit_string(&mut output, "TABULAR_FEATURE", feature.trim_matches('"'));
 
+    writeln!(
+        output,
+        "/// Number of color tokens `platform.css` declares.
+pub const PLATFORM_COLOR_COUNT: usize = {};",
+        COLORS.len()
+    )
+    .expect("writing generated tokens to a String cannot fail");
     emit_colors(&mut output, "LIGHT_COLORS", &root)?;
     emit_colors(&mut output, "DARK_COLORS", &dark)?;
     emit_sources(&mut output, "LIGHT_COLOR_SOURCES", &root)?;
@@ -132,6 +113,25 @@ fn compile_tokens() -> Result<(), String> {
     fs::write(path, output).map_err(|error| error.to_string())
 }
 
+/// Every color the stylesheet declares must be projected natively, and every
+/// other custom property must belong to a known non-color token family.
+fn require_registered_colors(declarations: &token_compiler::Declarations) -> Result<(), String> {
+    for name in declarations.keys() {
+        if COLORS.contains(&name.as_str()) {
+            continue;
+        }
+        if parse_color(&resolve(declarations, name)?).is_ok() {
+            return Err(format!(
+                "color --{name} is missing from src/color_registry.rs"
+            ));
+        }
+        if !is_non_color_token(name) {
+            return Err(format!("--{name} is not a recognised platform token"));
+        }
+    }
+    Ok(())
+}
+
 fn emit_string(output: &mut String, name: &str, value: &str) {
     writeln!(output, "pub(crate) const {name}: &str = {value:?};")
         .expect("writing generated tokens to a String cannot fail");
@@ -165,8 +165,7 @@ fn emit_colors(
 ) -> Result<(), String> {
     writeln!(
         output,
-        "pub(crate) const {name}: [[u8; 4]; {}] = [",
-        COLORS.len()
+        "pub(crate) const {name}: [[u8; 4]; PLATFORM_COLOR_COUNT] = ["
     )
     .expect("writing generated tokens to a String cannot fail");
     for token in COLORS {
@@ -185,8 +184,7 @@ fn emit_sources(
 ) -> Result<(), String> {
     writeln!(
         output,
-        "pub(crate) const {name}: [&str; {}] = [",
-        COLORS.len()
+        "pub(crate) const {name}: [&str; PLATFORM_COLOR_COUNT] = ["
     )
     .expect("writing generated tokens to a String cannot fail");
     for token in COLORS {
