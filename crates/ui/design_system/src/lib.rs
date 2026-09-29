@@ -635,9 +635,9 @@ mod tests {
         assert_eq!(light.text_negative, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.text_negative, light.text_negative);
         assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(219, 252, 231));
-        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(13, 84, 43));
+        assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(25, 60, 55));
         assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(255, 226, 226));
-        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(70, 8, 9));
+        assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(83, 43, 46));
 
         let light_tokens = AerisTheme::light().color_tokens();
         let dark_tokens = AerisTheme::dark().color_tokens();
@@ -650,9 +650,9 @@ mod tests {
             "var(--negative)"
         );
         assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dbfce7");
-        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#0d542b");
+        assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#193c37");
         assert_eq!(token_source(&light_tokens, "negative-subtle"), "#ffe2e2");
-        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#460809");
+        assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#532b2e");
     }
 
     #[test]

@@ -49,6 +49,10 @@
   --text-negative: var(--negative);
   --text-danger: var(--danger);
   --text-warning: #ff6900;
+  /* Text on interactive items (buttons, tabs, links). Keep these values in
+     step with --icon / --icon-active: normal text = normal icon colour,
+     hover/active text = active icon colour. They are separate tokens on
+     purpose, never point one at the other. */
   --text-interactive: #646465;
   --text-hover: #404040;
   --text-active: #404040;
@@ -62,7 +66,7 @@
   --icon: #646465;
   --icon-active: #404040;
 
-  /* Status */
+  /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
   --positive-subtle: #dbfce7;
   --negative: #f7525f;
@@ -157,11 +161,11 @@
   --icon: #c2c2c2;
   --icon-active: #f0f0f0;
 
-  /* Status */
+  /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
-  --positive-subtle: #0d542b;
+  --positive-subtle: #193c37;
   --negative: #f7525f;
-  --negative-subtle: #460809;
+  --negative-subtle: #532b2e;
   --warning: #ff6900;
   --warning-subtle: #7e2a0c;
   --indigo: #615fff;
