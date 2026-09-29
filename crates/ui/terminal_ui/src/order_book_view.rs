@@ -604,14 +604,7 @@ fn render_ladder(
     }
     let list = render_virtualized_ladder_list(&frame, columns, ladder_scroll, interaction);
 
-    body.child(
-        div()
-            .relative()
-            .size_full()
-            .overflow_hidden()
-            .child(list)
-            .children(column_rails(columns, theme)),
-    )
+    body.child(div().relative().size_full().overflow_hidden().child(list))
 }
 
 fn render_virtualized_ladder_list(
@@ -1500,6 +1493,7 @@ fn render_level_row(
         .flex_none()
         .flex()
         .items_center()
+        .relative()
         .overflow_hidden()
         .border_b_1()
         .border_color(gpui_color(colors.border))
@@ -1535,6 +1529,7 @@ fn render_level_row(
                 .filter(|column| columns.is_visible(*column))
                 .map(|column| render_level_cell(column, level, side, &context)),
         )
+        .children(column_rails(columns, theme))
 }
 
 /// A price-grid tick with no corresponding provider depth. Resting quantity and
@@ -1575,6 +1570,7 @@ fn render_empty_price_tick(
         .flex_none()
         .flex()
         .items_center()
+        .relative()
         .overflow_hidden()
         .border_b_1()
         .border_color(gpui_color(colors.border))
@@ -1624,6 +1620,7 @@ fn render_empty_price_tick(
                     })
                 }),
         )
+        .children(column_rails(columns, theme))
 }
 
 fn working_order_drag(
@@ -2010,6 +2007,8 @@ fn visible_quantity_width(quantity: i64, maximum_quantity: i64) -> f32 {
     f32::from(basis_points) / 10_000.0
 }
 
+/// Column dividers drawn inside each price row, so the spread row between
+/// asks and bids stays one uninterrupted band.
 fn column_rails(
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
