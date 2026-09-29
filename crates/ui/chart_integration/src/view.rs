@@ -2061,6 +2061,23 @@ impl AerisChartView {
         aeris_charts_engine::TRADINGVIEW_TIME_ZONES
     }
 
+    /// Current DST-aware zone badge for a supported IANA identifier.
+    ///
+    /// The offset is resolved for the supplied UTC instant rather than being stored as a static
+    /// property, so zones that observe daylight saving time remain accurate throughout the year.
+    #[must_use]
+    pub fn time_zone_badge_label(time_zone: &str, utc_seconds: i64) -> Option<String> {
+        let zone = aeris_charts_engine::ChartTimeZone::parse(time_zone)?;
+        let parts = zone.local_parts(utc_seconds)?;
+        let offset = format_utc_offset(parts.offset_seconds);
+        let abbreviation = zone.abbreviation(utc_seconds);
+        Some(if abbreviation == "UTC" && parts.offset_seconds == 0 {
+            "UTC".to_string()
+        } else {
+            format!("{abbreviation} · {offset}")
+        })
+    }
+
     /// Applies a selected IANA display time zone and records it as durable presentation state.
     ///
     /// # Errors
@@ -2536,6 +2553,14 @@ impl AerisChartView {
             }
         }
     }
+}
+
+fn format_utc_offset(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let total_minutes = offset_seconds.unsigned_abs() / 60;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    format!("UTC{sign}{hours:02}:{minutes:02}")
 }
 
 impl Default for AerisChartView {

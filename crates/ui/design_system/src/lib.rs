@@ -18,6 +18,14 @@ pub static PLATFORM_FONT_BYTES: [&[u8]; 2] = [
     include_bytes!("../assets/fonts/HKGrotesk-Bold.ttf"),
 ];
 
+/// Bundled Aeris brand face. It is intentionally separate from the platform
+/// typography so only explicit brand lockups opt into it.
+pub static BRAND_FONT_BYTES: &[u8] =
+    include_bytes!("../assets/fonts/faculty-glyphic/FacultyGlyphic-Regular.ttf");
+
+/// The display face used for the Aeris wordmark in native chrome.
+pub const BRAND_FONT_FAMILY: &str = "Faculty Glyphic";
+
 /// Semantic roles in the canonical platform typography hierarchy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypographyRole {
@@ -93,6 +101,12 @@ pub fn platform_font_stack() -> &'static str {
 #[must_use]
 pub fn platform_font_family() -> &'static str {
     platform_typography().family()
+}
+
+/// Returns the dedicated Aeris brand font family.
+#[must_use]
+pub const fn brand_font_family() -> &'static str {
+    BRAND_FONT_FAMILY
 }
 
 /// The application-wide color mode.
@@ -580,8 +594,8 @@ impl RadiusToken {
 #[cfg(test)]
 mod tests {
     use super::{
-        AerisTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
-        platform_font_stack, platform_typography,
+        AerisTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, brand_font_family,
+        platform_font_family, platform_font_stack, platform_typography,
     };
 
     fn token_source<'a>(tokens: &'a [ColorToken], identifier: &str) -> &'a str {
@@ -769,9 +783,9 @@ mod tests {
     }
 
     #[test]
-    fn bundled_platform_fonts_are_exactly_medium_and_bold() {
+    fn bundled_platform_fonts_keep_platform_faces_separate_from_the_brand_face() {
         let font_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
-        let mut bundled_fonts = std::fs::read_dir(font_dir)
+        let mut bundled_fonts = std::fs::read_dir(&font_dir)
             .expect("platform font directory is readable")
             .filter_map(Result::ok)
             .map(|entry| entry.path())
@@ -793,6 +807,11 @@ mod tests {
             bundled_fonts,
             ["HKGrotesk-Bold.ttf", "HKGrotesk-Medium.ttf"]
         );
+        let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
+        let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
+        assert!(brand_font.is_file());
+        assert!(brand_license.is_file());
+        assert_eq!(brand_font_family(), "Faculty Glyphic");
     }
 
     #[test]

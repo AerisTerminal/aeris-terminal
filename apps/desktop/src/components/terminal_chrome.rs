@@ -169,7 +169,8 @@ fn header_brand(theme: &AerisTheme) -> Stateful<Div> {
         .child(
             div()
                 .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .font_family(aeris_design_system::brand_font_family())
+                .font_weight(gpui::FontWeight(400.0))
                 .text_color(gpui_color(theme.colors.text_primary))
                 .child("Aeris"),
         )

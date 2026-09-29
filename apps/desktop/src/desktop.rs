@@ -97,7 +97,8 @@ use aeris_contracts::{
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
-    AerisTheme, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode, TypographyRole,
+    AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
+    TypographyRole,
 };
 use aeris_desktop::market_worker::{
     ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
@@ -4679,6 +4680,7 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
                     PLATFORM_FONT_BYTES
                         .iter()
                         .map(|font| Cow::Borrowed(*font))
+                        .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
                         .collect(),
                 )
                 .expect("the bundled platform font is valid");

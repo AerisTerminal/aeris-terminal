@@ -653,6 +653,11 @@ pub(super) fn time_zone_overlay_content(
     let colors = theme.colors;
     let matches = app_state.time_zone_matches(cx);
     let selected = app_state.chart_time_zone_id(cx);
+    let utc_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(0);
     let mut rows = div()
         .id("time_zone_rows")
         .flex()
@@ -662,7 +667,10 @@ pub(super) fn time_zone_overlay_content(
         .track_scroll(&app_state.scrolls.time_zone);
     for (index, time_zone) in matches.into_iter().enumerate() {
         let row_app = app.clone();
-        let mut row = MenuRow::compact(("time_zone_row", index), time_zone, theme)
+        let display_name = time_zone.replace('_', " ");
+        let badge = AerisChartView::time_zone_badge_label(time_zone, utc_seconds)
+            .unwrap_or_else(|| "UTC".to_string());
+        let mut row = MenuRow::compact(("time_zone_row", index), display_name, theme)
             .highlighted(app_state.chrome_selection == index)
             .fill_width()
             .on_click(move |_, window, cx| {
@@ -672,13 +680,20 @@ pub(super) fn time_zone_overlay_content(
                     }
                 });
             });
-        if time_zone == selected {
-            row = row.trailing(
-                header_icon(HugeIcon::CheckIcon)
-                    .with_size(px(16.0))
-                    .color(gpui_color(colors.icon)),
-            );
-        }
+        row = row.trailing(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(time_zone_badge(badge, theme))
+                .when(time_zone == selected, |trailing| {
+                    trailing.child(
+                        header_icon(HugeIcon::CheckIcon)
+                            .with_size(px(16.0))
+                            .color(gpui_color(colors.icon)),
+                    )
+                }),
+        );
         rows = rows.child(row);
     }
     div()
@@ -695,6 +710,25 @@ pub(super) fn time_zone_overlay_content(
                 .child(Input::new(&app_state.time_zone_input).platform(theme)),
         )
         .child(rows)
+}
+
+fn time_zone_badge(label: String, theme: &AerisTheme) -> impl IntoElement {
+    let colors = theme.colors;
+    div()
+        .flex_none()
+        .h(px(18.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
+        .font_family(aeris_design_system::platform_font_family())
+        .font_features(platform_tabular_numerals())
+        .text_xs()
+        .text_color(gpui_color(colors.text_muted))
+        .child(label)
 }
 
 pub(super) fn quick_timeframe_overlay_content(

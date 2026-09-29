@@ -1663,6 +1663,11 @@ impl WorkspaceSurface {
             .value()
             .trim()
             .to_ascii_lowercase();
+        let utc_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .unwrap_or(0);
         AerisChartView::supported_time_zones()
             .iter()
             .copied()
@@ -1671,7 +1676,12 @@ impl WorkspaceSurface {
                     return true;
                 }
                 let normalized = zone.replace(['_', '/'], " ").to_ascii_lowercase();
-                zone.to_ascii_lowercase().contains(&query) || normalized.contains(&query)
+                let badge = AerisChartView::time_zone_badge_label(zone, utc_seconds)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                zone.to_ascii_lowercase().contains(&query)
+                    || normalized.contains(&query)
+                    || badge.contains(&query)
             })
             .collect()
     }

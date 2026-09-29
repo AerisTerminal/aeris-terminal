@@ -233,8 +233,8 @@ impl BrandAsset {
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::MainLogo => "logo.svg",
-            Self::LogomarkDark => "Logomark-dark.svg",
-            Self::LogomarkWhite => "Logomark-white.svg",
+            Self::LogomarkDark => "logomark-dark.svg",
+            Self::LogomarkWhite => "logomark-white.svg",
         };
         format!("{BRAND_ASSET_PREFIX}{name}").into()
     }
@@ -364,8 +364,8 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
 fn brand_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(BRAND_ASSET_PREFIX)? {
         "logo.svg" => include_bytes!("../assets/aeris_assets/logo.svg"),
-        "Logomark-dark.svg" => include_bytes!("../assets/aeris_assets/Logomark-dark.svg"),
-        "Logomark-white.svg" => include_bytes!("../assets/aeris_assets/Logomark-white.svg"),
+        "logomark-dark.svg" => include_bytes!("../assets/aeris_assets/logomark-dark.svg"),
+        "logomark-white.svg" => include_bytes!("../assets/aeris_assets/logomark-white.svg"),
         _ => return None,
     })
 }

@@ -1766,6 +1766,26 @@ fn chart_time_zone_is_durable_user_state_and_uses_the_shared_parity_list() {
 }
 
 #[test]
+fn time_zone_badges_are_dst_aware_and_include_the_current_utc_offset() {
+    assert_eq!(
+        AerisChartView::time_zone_badge_label("America/New_York", 1_768_435_200),
+        Some("EST · UTC-05:00".to_string())
+    );
+    assert_eq!(
+        AerisChartView::time_zone_badge_label("America/New_York", 1_784_073_600),
+        Some("EDT · UTC-04:00".to_string())
+    );
+    assert_eq!(
+        AerisChartView::time_zone_badge_label("Asia/Kolkata", 1_784_073_600),
+        Some("IST · UTC+05:30".to_string())
+    );
+    assert_eq!(
+        AerisChartView::time_zone_badge_label("Etc/UTC", 1_784_073_600),
+        Some("UTC".to_string())
+    );
+}
+
+#[test]
 fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
     let mut chart = interactive_chart();
     let mut series = chart.appearance_settings();
