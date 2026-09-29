@@ -269,8 +269,7 @@ impl TerminalApp {
                 .order_book
                 .read(cx)
                 .frame()
-                .and_then(aeris_desktop::trading::prepare_flatten)
-                .map(|(_, observation)| observation);
+                .and_then(aeris_desktop::trading::simulated_market_observation);
             (
                 Arc::clone(&surface.context_snapshot),
                 maximum_lead_seconds,

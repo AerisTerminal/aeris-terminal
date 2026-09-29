@@ -337,20 +337,7 @@ pub(super) fn workspace_market_area(
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
     let order_book_frame = surface.order_book.read(cx).frame().cloned();
-    let has_open_position = order_book_frame.as_ref().is_some_and(|frame| {
-        surface
-            .trading_pnl
-            .order_entry
-            .selected_account_id
-            .as_ref()
-            .is_some_and(|account_id| {
-                surface.trading_pnl.positions.iter().any(|position| {
-                    &position.position.account_id == account_id
-                        && position.position.instrument_id.as_str() == frame.instrument_id
-                        && position.position.net_quantity.units() != 0
-                })
-            })
-    });
+    let has_open_position = has_selected_open_position(surface, order_book_frame.as_ref());
     let side_panel = surface.side_panels.any().then(|| {
         workspace_side_panel(WorkspaceSidePanelState {
             app: active_surface.clone(),
@@ -374,6 +361,10 @@ pub(super) fn workspace_market_area(
                     market_error: surface.trading_pnl.market_error.as_deref(),
                     order_entry: &surface.trading_pnl.order_entry,
                     account_creator: surface.trading_pnl.account_creator.as_ref(),
+                    account_delete_confirmation: surface
+                        .trading_pnl
+                        .account_delete_confirmation
+                        .as_ref(),
                     theme,
                 },
             },
@@ -417,6 +408,26 @@ pub(super) fn workspace_market_area(
             ))
         })
         .children(price_alert_dialog)
+}
+
+fn has_selected_open_position(
+    surface: &WorkspaceSurface,
+    frame: Option<&aeris_market_data::OrderBookFrame>,
+) -> bool {
+    frame.is_some_and(|frame| {
+        surface
+            .trading_pnl
+            .order_entry
+            .selected_account_id
+            .as_ref()
+            .is_some_and(|account_id| {
+                surface.trading_pnl.positions.iter().any(|position| {
+                    &position.position.account_id == account_id
+                        && position.position.instrument_id.as_str() == frame.instrument_id
+                        && position.position.net_quantity.units() != 0
+                })
+            })
+    })
 }
 
 /// Chart grid plus the bottom context panel, inset past the drawing toolbar.
@@ -617,7 +628,8 @@ fn apply_trading_snapshot(
         &snapshot,
         state.product.as_ref(),
         selected_account_id.as_ref(),
-    );
+    )
+    .map(|snapshot| apply_chart_trading_visibility(snapshot, state.chart_trading_visibility));
     let host_overlay =
         crate::desktop::chart_session_plan_overlay(&snapshot, selected_account_id.as_ref());
     let session_plan_levels = crate::desktop::chart_session_plan_levels(
@@ -685,9 +697,11 @@ fn refresh_chart_trading_projection(
     session_plan_levels: Vec<(f64, String)>,
     cx: &mut Context<WorkspaceSurface>,
 ) {
-    if let Some(trading) = trading
-        && chart.read(cx).trading_snapshot() != trading
-    {
+    // `None` is authoritative too: it means the selected account/product no longer projects any
+    // trading state. Leaving the previous snapshot installed is how cancelled/deleted practice
+    // orders can appear to remain stuck on the chart after the runtime has already removed them.
+    let trading = authoritative_chart_trading_projection(trading);
+    if chart.read(cx).trading_snapshot() != trading {
         let _ = chart.update(cx, |chart, _| chart.set_trading_snapshot(trading));
     }
     if chart.read(cx).host_overlay() != host_overlay {
@@ -697,5 +711,121 @@ fn refresh_chart_trading_projection(
         let _ = chart.update(cx, |chart, _| {
             chart.replace_session_plan_levels(session_plan_levels)
         });
+    }
+}
+
+fn authoritative_chart_trading_projection(
+    trading: Option<ChartTradingSnapshot>,
+) -> ChartTradingSnapshot {
+    trading.unwrap_or_default()
+}
+
+pub(crate) fn apply_chart_trading_visibility(
+    mut trading: ChartTradingSnapshot,
+    visibility: ChartTradingVisibilitySettings,
+) -> ChartTradingSnapshot {
+    if !visibility.show_order_management_lines {
+        trading.positions.clear();
+        trading.orders.clear();
+    }
+    if !visibility.show_execution_marks {
+        trading.executions.clear();
+    }
+    trading
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_authoritative_trading_projection_clears_stale_chart_state() {
+        let stale = ChartTradingSnapshot {
+            orders: vec![aeris_chart_integration::ChartWorkingOrder {
+                id: aeris_chart_integration::ChartOrderId::new("stale-order").expect("order id"),
+                account_id: None,
+                pane_index: 0,
+                price_scale: aeris_chart_integration::ChartTradingPriceScale::Right,
+                side: aeris_chart_integration::ChartOrderSide::Buy,
+                kind: aeris_chart_integration::ChartOrderKind::Limit,
+                role: aeris_chart_integration::ChartOrderRole::Working,
+                status: aeris_chart_integration::ChartOrderStatus::Working,
+                price: 100.0,
+                stop_price: None,
+                trailing_trigger_price: None,
+                break_even_trigger_price: None,
+                quantity: 1.0,
+                filled_quantity: 0.0,
+                position_id: None,
+                parent_order_id: None,
+                bracket_id: None,
+                oco_group_id: None,
+                revision: 1,
+                annotations: Vec::new(),
+            }],
+            ..ChartTradingSnapshot::default()
+        };
+        assert_eq!(stale.orders.len(), 1);
+
+        let cleared = authoritative_chart_trading_projection(None);
+        assert!(cleared.orders.is_empty());
+        assert!(cleared.positions.is_empty());
+    }
+
+    #[test]
+    fn chart_trading_visibility_filters_presentation_without_mutating_runtime_truth() {
+        let snapshot = ChartTradingSnapshot {
+            positions: vec![aeris_chart_integration::ChartTradingPosition {
+                id: aeris_chart_integration::ChartPositionId::new("position:test")
+                    .expect("position id"),
+                account_id: None,
+                pane_index: 0,
+                price_scale: aeris_chart_integration::ChartTradingPriceScale::Right,
+                side: aeris_chart_integration::ChartPositionSide::Long,
+                average_price: 100.0,
+                quantity: 1.0,
+                display_pnl: Some(0.0),
+                currency: Some("USD".to_string()),
+                annotations: Vec::new(),
+            }],
+            executions: vec![aeris_chart_integration::ChartTradingExecution {
+                id: aeris_chart_integration::ChartExecutionId::new("execution:test")
+                    .expect("execution id"),
+                account_id: None,
+                pane_index: 0,
+                price_scale: aeris_chart_integration::ChartTradingPriceScale::Right,
+                side: aeris_chart_integration::ChartOrderSide::Buy,
+                kind: aeris_chart_integration::ChartExecutionKind::PartialFill,
+                time: 1,
+                price: 100.0,
+                quantity: 1.0,
+                order_id: None,
+                position_id: None,
+                marker_shape: aeris_chart_integration::ChartExecutionMarkerShape::default(),
+                size_by_quantity: false,
+            }],
+            ..ChartTradingSnapshot::default()
+        };
+
+        let filtered = apply_chart_trading_visibility(
+            snapshot.clone(),
+            ChartTradingVisibilitySettings {
+                show_order_management_lines: false,
+                show_execution_marks: true,
+            },
+        );
+        assert!(filtered.positions.is_empty());
+        assert_eq!(filtered.executions.len(), 1);
+        assert_eq!(snapshot.positions.len(), 1);
+
+        let filtered = apply_chart_trading_visibility(
+            snapshot,
+            ChartTradingVisibilitySettings {
+                show_order_management_lines: true,
+                show_execution_marks: false,
+            },
+        );
+        assert_eq!(filtered.positions.len(), 1);
+        assert!(filtered.executions.is_empty());
     }
 }

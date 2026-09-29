@@ -19,8 +19,10 @@ use super::{
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type Hover = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 
-const COMPACT_ROW_HEIGHT: Pixels = px(32.0);
-const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
+// Row geometry is in rems (32px / 36px at the root rem) so rows also follow an
+// enclosing `RemScale` panel, not only an explicit `MenuRow::scale`.
+const COMPACT_ROW_HEIGHT: Rems = Rems(2.0);
+const SEARCH_ROW_HEIGHT: Rems = Rems(2.25);
 const SEPARATOR_HEIGHT: Pixels = px(1.0);
 const POPUP_ENTER_DURATION: Duration = Duration::from_millis(130);
 const POPUP_ENTER_TRAVEL: f32 = 2.0;
@@ -154,12 +156,12 @@ enum RowKind {
     SearchResult,
 }
 
-fn row_geometry(kind: RowKind, scale: MenuScale) -> (Pixels, Pixels, bool) {
+fn row_geometry(kind: RowKind, scale: MenuScale) -> (Rems, Rems, bool) {
     let (height, padding, rounded) = match kind {
-        RowKind::Compact => (COMPACT_ROW_HEIGHT, px(12.0), false),
-        RowKind::SearchResult => (SEARCH_ROW_HEIGHT, px(8.0), true),
+        RowKind::Compact => (COMPACT_ROW_HEIGHT, Rems(0.75), false),
+        RowKind::SearchResult => (SEARCH_ROW_HEIGHT, Rems(0.5), true),
     };
-    (height * scale.factor(), padding * scale.factor(), rounded)
+    (scale.rems(height.0), scale.rems(padding.0), rounded)
 }
 
 const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
@@ -203,8 +205,8 @@ struct MenuRowPresentation {
     label_color: ThemeColor,
     highlighted_fill: ThemeColor,
     hover_fill: ThemeColor,
-    height: Pixels,
-    horizontal_padding: Pixels,
+    height: Rems,
+    horizontal_padding: Rems,
     rounded: bool,
     inner_radius: Pixels,
 }
@@ -493,7 +495,7 @@ pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Bounds, point, px, size};
+    use gpui::{Bounds, Rems, point, px, size};
 
     use super::{
         COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MenuScale, POPUP_ENTER_TRAVEL, PopupAnimationOrigin,
@@ -511,15 +513,15 @@ mod tests {
     fn row_kinds_preserve_menu_geometry() {
         assert_eq!(
             row_geometry(RowKind::Compact, MenuScale::BASE),
-            (COMPACT_ROW_HEIGHT, px(12.0), false)
+            (COMPACT_ROW_HEIGHT, Rems(0.75), false)
         );
         assert_eq!(
             row_geometry(RowKind::SearchResult, MenuScale::BASE),
-            (SEARCH_ROW_HEIGHT, px(8.0), true)
+            (SEARCH_ROW_HEIGHT, Rems(0.5), true)
         );
         assert_eq!(
             row_geometry(RowKind::SearchResult, MenuScale::clamped(1.5)),
-            (px(54.0), px(12.0), true)
+            (Rems(3.375), Rems(0.75), true)
         );
     }
 

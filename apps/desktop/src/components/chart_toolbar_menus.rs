@@ -653,7 +653,6 @@ pub(super) fn time_zone_overlay_content(
     let colors = theme.colors;
     let matches = app_state.time_zone_matches(cx);
     let selected = app_state.chart_time_zone_id(cx);
-    let last = matches.len().saturating_sub(1);
     let mut rows = div()
         .id("time_zone_rows")
         .flex()
@@ -665,7 +664,7 @@ pub(super) fn time_zone_overlay_content(
         let row_app = app.clone();
         let mut row = MenuRow::compact(("time_zone_row", index), time_zone, theme)
             .highlighted(app_state.chrome_selection == index)
-            .flush_in_panel(index == 0, index == last)
+            .fill_width()
             .on_click(move |_, window, cx| {
                 row_app.update(cx, |app, app_cx| {
                     if app.set_chart_time_zone(time_zone, app_cx) {
@@ -692,8 +691,8 @@ pub(super) fn time_zone_overlay_content(
             div()
                 .p_2()
                 .border_b_1()
-                .border_color(gpui_color(colors.border))
-                .child(Input::new(&app_state.time_zone_input)),
+                .border_color(gpui_color(colors.border_secondary))
+                .child(Input::new(&app_state.time_zone_input).platform(theme)),
         )
         .child(rows)
 }

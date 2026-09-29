@@ -223,6 +223,14 @@ pub struct WorkspaceChartSettingsTemplateState {
     /// Persisted IANA display time zone. Empty in legacy workspaces means Etc/UTC.
     #[prost(string, tag = "5")]
     pub time_zone: String,
+    /// Whether host-projected position/order management lines are visible. Absent means visible
+    /// for legacy templates.
+    #[prost(bool, optional, tag = "6")]
+    pub show_order_management_lines: Option<bool>,
+    /// Whether host-projected execution/fill markers are visible. Absent means visible for legacy
+    /// templates.
+    #[prost(bool, optional, tag = "7")]
+    pub show_execution_marks: Option<bool>,
 }
 
 /// Persisted presentation state for one pane.
@@ -319,6 +327,12 @@ pub struct WorkspaceChartState {
     /// Persisted IANA display time zone. Empty in legacy workspaces means Etc/UTC.
     #[prost(string, tag = "16")]
     pub time_zone: String,
+    /// Host-only chart trading presentation. Absent in legacy workspaces means visible.
+    #[prost(bool, optional, tag = "17")]
+    pub show_order_management_lines: Option<bool>,
+    /// Host-only execution/fill marker presentation. Absent in legacy workspaces means visible.
+    #[prost(bool, optional, tag = "18")]
+    pub show_execution_marks: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]

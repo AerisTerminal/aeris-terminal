@@ -317,6 +317,20 @@ pub struct ThemeColors {
     pub button_fill_active: ThemeColor,
     pub button_fill_foreground: ThemeColor,
     pub button_fill_subtle: ThemeColor,
+    pub buy: ThemeColor,
+    pub buy_hover: ThemeColor,
+    pub buy_active: ThemeColor,
+    pub buy_disabled: ThemeColor,
+    pub buy_disabled_foreground: ThemeColor,
+    pub buy_ring: ThemeColor,
+    pub buy_foreground: ThemeColor,
+    pub sell: ThemeColor,
+    pub sell_hover: ThemeColor,
+    pub sell_active: ThemeColor,
+    pub sell_disabled: ThemeColor,
+    pub sell_disabled_foreground: ThemeColor,
+    pub sell_ring: ThemeColor,
+    pub sell_foreground: ThemeColor,
     pub ring: ThemeColor,
     /// Portable chart bullish token. Aeris Charts remains authoritative for chart rendering.
     pub bullish: ThemeColor,
@@ -376,7 +390,7 @@ impl AerisTheme {
 
     /// Returns canonical source metadata for every foundational color resolved here.
     #[must_use]
-    pub fn color_tokens(self) -> [ColorToken; 29] {
+    pub fn color_tokens(self) -> [ColorToken; 43] {
         let colors = self.colors;
         let sources = match self.mode {
             ThemeMode::Light => LIGHT_COLOR_SOURCES,
@@ -413,9 +427,31 @@ impl AerisTheme {
                 colors.button_fill_foreground,
             ),
             ColorToken::new("button-fill-subtle", sources[25], colors.button_fill_subtle),
-            ColorToken::new("ring", sources[26], colors.ring),
-            ColorToken::new("bullish", sources[27], colors.bullish),
-            ColorToken::new("bearish", sources[28], colors.bearish),
+            ColorToken::new("buy", sources[26], colors.buy),
+            ColorToken::new("buy-hover", sources[27], colors.buy_hover),
+            ColorToken::new("buy-active", sources[28], colors.buy_active),
+            ColorToken::new("buy-disabled", sources[29], colors.buy_disabled),
+            ColorToken::new(
+                "buy-disabled-foreground",
+                sources[30],
+                colors.buy_disabled_foreground,
+            ),
+            ColorToken::new("buy-ring", sources[31], colors.buy_ring),
+            ColorToken::new("buy-foreground", sources[32], colors.buy_foreground),
+            ColorToken::new("sell", sources[33], colors.sell),
+            ColorToken::new("sell-hover", sources[34], colors.sell_hover),
+            ColorToken::new("sell-active", sources[35], colors.sell_active),
+            ColorToken::new("sell-disabled", sources[36], colors.sell_disabled),
+            ColorToken::new(
+                "sell-disabled-foreground",
+                sources[37],
+                colors.sell_disabled_foreground,
+            ),
+            ColorToken::new("sell-ring", sources[38], colors.sell_ring),
+            ColorToken::new("sell-foreground", sources[39], colors.sell_foreground),
+            ColorToken::new("ring", sources[40], colors.ring),
+            ColorToken::new("bullish", sources[41], colors.bullish),
+            ColorToken::new("bearish", sources[42], colors.bearish),
         ]
     }
 }
@@ -434,7 +470,7 @@ fn dark_colors() -> ThemeColors {
     generated_colors(DARK_COLORS)
 }
 
-fn generated_colors(values: [[u8; 4]; 29]) -> ThemeColors {
+fn generated_colors(values: [[u8; 4]; 43]) -> ThemeColors {
     let color = |index: usize| {
         let [red, green, blue, alpha] = values[index];
         ThemeColor::from_rgba8(red, green, blue, alpha)
@@ -466,9 +502,23 @@ fn generated_colors(values: [[u8; 4]; 29]) -> ThemeColors {
         button_fill_active: color(23),
         button_fill_foreground: color(24),
         button_fill_subtle: color(25),
-        ring: color(26),
-        bullish: color(27),
-        bearish: color(28),
+        buy: color(26),
+        buy_hover: color(27),
+        buy_active: color(28),
+        buy_disabled: color(29),
+        buy_disabled_foreground: color(30),
+        buy_ring: color(31),
+        buy_foreground: color(32),
+        sell: color(33),
+        sell_hover: color(34),
+        sell_active: color(35),
+        sell_disabled: color(36),
+        sell_disabled_foreground: color(37),
+        sell_ring: color(38),
+        sell_foreground: color(39),
+        ring: color(40),
+        bullish: color(41),
+        bearish: color(42),
     }
 }
 
@@ -627,6 +677,31 @@ mod tests {
     }
 
     #[test]
+    fn trade_button_tokens_match_the_platform_contract() {
+        let light = AerisTheme::light().colors;
+        let dark = AerisTheme::dark().colors;
+        assert_eq!(light.buy, ThemeColor::from_rgb8(8, 153, 129));
+        assert_eq!(light.buy_hover, ThemeColor::from_rgb8(7, 135, 111));
+        assert_eq!(light.buy_active, ThemeColor::from_rgb8(5, 111, 92));
+        assert_eq!(dark.buy_hover, ThemeColor::from_rgb8(10, 173, 146));
+        assert_eq!(dark.buy_active, ThemeColor::from_rgb8(11, 192, 162));
+        assert_eq!(light.sell, ThemeColor::from_rgb8(247, 82, 95));
+        assert_eq!(light.sell_hover, ThemeColor::from_rgb8(229, 64, 77));
+        assert_eq!(light.sell_active, ThemeColor::from_rgb8(201, 48, 60));
+        assert_eq!(dark.sell_hover, ThemeColor::from_rgb8(249, 106, 117));
+        assert_eq!(dark.sell_active, ThemeColor::from_rgb8(251, 131, 140));
+
+        let light_tokens = AerisTheme::light().color_tokens();
+        let dark_tokens = AerisTheme::dark().color_tokens();
+        assert_eq!(token_source(&light_tokens, "buy"), "#089981");
+        assert_eq!(token_source(&light_tokens, "buy-hover"), "#07876f");
+        assert_eq!(token_source(&dark_tokens, "buy-hover"), "#0aad92");
+        assert_eq!(token_source(&light_tokens, "sell"), "#f7525f");
+        assert_eq!(token_source(&light_tokens, "sell-hover"), "#e5404d");
+        assert_eq!(token_source(&dark_tokens, "sell-hover"), "#f96a75");
+    }
+
+    #[test]
     fn semantic_status_tokens_match_the_platform_contract() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
@@ -634,7 +709,7 @@ mod tests {
         assert_eq!(dark.text_positive, dark.positive);
         assert_eq!(light.text_negative, ThemeColor::from_rgb8(247, 82, 95));
         assert_eq!(dark.text_negative, light.text_negative);
-        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(219, 252, 231));
+        assert_eq!(light.positive_subtle, ThemeColor::from_rgb8(220, 245, 240));
         assert_eq!(dark.positive_subtle, ThemeColor::from_rgb8(25, 60, 55));
         assert_eq!(light.negative_subtle, ThemeColor::from_rgb8(255, 226, 226));
         assert_eq!(dark.negative_subtle, ThemeColor::from_rgb8(83, 43, 46));
@@ -649,7 +724,7 @@ mod tests {
             token_source(&light_tokens, "text-negative"),
             "var(--negative)"
         );
-        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dbfce7");
+        assert_eq!(token_source(&light_tokens, "positive-subtle"), "#dcf5f0");
         assert_eq!(token_source(&dark_tokens, "positive-subtle"), "#193c37");
         assert_eq!(token_source(&light_tokens, "negative-subtle"), "#ffe2e2");
         assert_eq!(token_source(&dark_tokens, "negative-subtle"), "#532b2e");

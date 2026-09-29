@@ -27,6 +27,19 @@ pub(super) fn restored_context_panel_height(restored: Option<&WorkspaceChartStat
         .map_or(CONTEXT_PANEL_INITIAL_HEIGHT, clamped_context_panel_height)
 }
 
+pub(super) fn restored_chart_trading_visibility(
+    restored: Option<&WorkspaceChartState>,
+) -> ChartTradingVisibilitySettings {
+    ChartTradingVisibilitySettings {
+        show_order_management_lines: restored
+            .and_then(|state| state.show_order_management_lines)
+            .unwrap_or(true),
+        show_execution_marks: restored
+            .and_then(|state| state.show_execution_marks)
+            .unwrap_or(true),
+    }
+}
+
 struct WorkspaceSurfaceInitialization {
     startup: TerminalStartupState,
     market_worker: MarketDataWorker,
@@ -58,6 +71,8 @@ struct WorkspaceSurfaceInitialization {
 
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
     let startup = init.startup;
+    let chart_trading_visibility =
+        restored_chart_trading_visibility(init.restored_chart_state.as_ref());
     WorkspaceSurface {
         chart: startup.chart,
         order_book: init.order_book,
@@ -95,6 +110,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         connection_message: startup.connection_message,
         provider_transport_rtt_nanos: None,
         trading_pnl: TradingPnlState::default(),
+        chart_trading_visibility,
         symbol_browser: init.symbol_browser,
         symbol_message: initial_symbol_message(startup.provider),
         market_state: WorkspaceMarketState::default(),
@@ -1343,6 +1359,10 @@ impl WorkspaceSurface {
             chart_link_group: u32::from(self.chart_link_group),
             chart_link_flags: u32::from(self.chart_link_flags),
             time_zone: chart.time_zone_id().to_string(),
+            show_order_management_lines: Some(
+                self.chart_trading_visibility.show_order_management_lines,
+            ),
+            show_execution_marks: Some(self.chart_trading_visibility.show_execution_marks),
         })
     }
 
@@ -2145,6 +2165,25 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.trading_pnl.account_creator.is_some() {
+            if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                self.trading_pnl.account_creator = None;
+                cx.notify();
+                return true;
+            }
+            // Text editing inside the modal owns ordinary key input. In particular, do not let
+            // the workspace-wide symbol/timeframe typeahead treat account-name characters as
+            // chart shortcuts after the Input has received them.
+            return false;
+        }
+        if self.trading_pnl.account_delete_confirmation.is_some() {
+            if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                self.trading_pnl.account_delete_confirmation = None;
+                cx.notify();
+                return true;
+            }
+            return false;
+        }
         if let Some(command) =
             fullscreen_escape_command(event.keystroke.key.as_str(), window.is_fullscreen())
         {
@@ -3625,6 +3664,35 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).order_flow_settings())
     }
 
+    pub(super) const fn chart_trading_visibility(&self) -> ChartTradingVisibilitySettings {
+        self.chart_trading_visibility
+    }
+
+    pub(super) fn set_chart_trading_visibility(
+        &mut self,
+        visibility: ChartTradingVisibilitySettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_trading_visibility == visibility {
+            return;
+        }
+        self.chart_trading_visibility = visibility;
+        if let Some(chart) = &self.chart {
+            let current = chart.read(cx).trading_snapshot();
+            let filtered = workspace_layout::apply_chart_trading_visibility(current, visibility);
+            chart.update(cx, |chart, chart_cx| {
+                if chart.set_trading_snapshot(filtered).is_ok() {
+                    chart_cx.notify();
+                }
+            });
+        }
+        // Enabling either layer needs the next authoritative runtime snapshot to restore any
+        // presentation objects that were intentionally filtered out while hidden.
+        self.trading_pnl.next_refresh = std::time::Instant::now();
+        self.chart_persistence_dirty = true;
+        cx.notify();
+    }
+
     /// Shows a tape-derived study pane through the order-flow settings owner.
     pub(super) fn add_order_flow_study(
         &mut self,
@@ -5013,6 +5081,31 @@ impl WorkspaceSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_restore() {
+        assert_eq!(
+            restored_chart_trading_visibility(None),
+            ChartTradingVisibilitySettings::default()
+        );
+        let legacy = WorkspaceChartState::default();
+        assert_eq!(
+            restored_chart_trading_visibility(Some(&legacy)),
+            ChartTradingVisibilitySettings::default()
+        );
+        let explicit = WorkspaceChartState {
+            show_order_management_lines: Some(false),
+            show_execution_marks: Some(true),
+            ..WorkspaceChartState::default()
+        };
+        assert_eq!(
+            restored_chart_trading_visibility(Some(&explicit)),
+            ChartTradingVisibilitySettings {
+                show_order_management_lines: false,
+                show_execution_marks: true,
+            }
+        );
+    }
 
     #[test]
     fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {

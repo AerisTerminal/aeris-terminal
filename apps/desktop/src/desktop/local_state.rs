@@ -833,6 +833,8 @@ mod tests {
             chart_link_flags: 3,
             context_panel_height: 320,
             time_zone: "America/New_York".to_string(),
+            show_order_management_lines: Some(false),
+            show_execution_marks: Some(true),
         }
     }
 
@@ -843,6 +845,8 @@ mod tests {
             appearance: round_trip_chart_state().appearance,
             crosshair_mode: 1,
             time_zone: "Europe/London".to_string(),
+            show_order_management_lines: Some(false),
+            show_execution_marks: Some(true),
         }
     }
 

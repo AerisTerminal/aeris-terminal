@@ -96,6 +96,28 @@ fn instrument() -> TradingInstrument {
     }
 }
 
+fn high_precision_crypto_instrument() -> TradingInstrument {
+    TradingInstrument {
+        instrument_id: InstrumentId::try_new("hyperliquid:perp:BTC").expect("instrument"),
+        price_scale: 8,
+        quantity_scale: 8,
+        contract: ContractMetadata {
+            tick_size: Some(InstrumentDecimal::try_new(1_000_000, 8).expect("tick")),
+            point_value: Some(InstrumentDecimal::try_new(100_000_000, 8).expect("point value")),
+            currency: "USD".to_string(),
+            expiry: None,
+            first_notice: None,
+            last_trade: None,
+            session_hours: Vec::new(),
+            provenance: InstrumentMetadataProvenance {
+                provider_id: "hyperliquid".to_string(),
+                provider_symbol: "BTC".to_string(),
+                session_generation: 1,
+            },
+        },
+    }
+}
+
 fn provenance(sequence: u64, time: i64) -> TradingProvenance {
     TradingProvenance {
         venue_id: "aeris-sim".to_string(),
@@ -161,6 +183,162 @@ fn practice_accounts_are_user_created_with_durable_opening_equity() {
     assert_eq!(
         reopened.snapshot().expect("restored snapshot").accounts[0],
         created
+    );
+    reopened
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn high_precision_crypto_pnl_updates_live_and_closes_without_overflow() {
+    let directory = TestDirectory::new("crypto-pnl");
+    let service = start_service(&directory);
+    let instrument = high_precision_crypto_instrument();
+    service
+        .register_instrument(instrument.clone())
+        .expect("crypto instrument registers");
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let order = PlaceOrder {
+        client_order_id: ClientOrderId::try_new("btc-entry").expect("client id"),
+        account_id: account_id.clone(),
+        instrument_id: instrument.instrument_id.clone(),
+        side: OrderSide::Buy,
+        order_type: OrderType::Market,
+        time_in_force: TimeInForce::Day,
+        quantity: FixedPoint::try_new(1_500_000_000, 8).expect("15 BTC"),
+        limit_price: None,
+        stop_price: None,
+        submitted_unix_nanos: 1_000,
+        provenance: TradingProvenance {
+            venue_id: "aeris-sim".to_string(),
+            provider_id: "hyperliquid".to_string(),
+            session_generation: 1,
+            source_sequence: 1,
+            observed_unix_nanos: 1_000,
+        },
+    };
+    service.place_order(order.clone()).expect("entry accepted");
+    let observation = |bid: i64, ask: i64, sequence: u64, time: i64| SimulatedMarketObservation {
+        instrument_id: instrument.instrument_id.clone(),
+        bid: FixedPoint::try_new(bid, 8).expect("bid"),
+        ask: FixedPoint::try_new(ask, 8).expect("ask"),
+        provenance: TradingProvenance {
+            venue_id: "aeris-sim".to_string(),
+            provider_id: "hyperliquid".to_string(),
+            session_generation: 1,
+            source_sequence: sequence,
+            observed_unix_nanos: time,
+        },
+    };
+    service
+        .observe_market(observation(8_399_900_000_000, 8_400_000_000_000, 2, 2_000))
+        .expect("entry fills");
+    service
+        .observe_market(observation(8_410_000_000_000, 8_410_100_000_000, 3, 3_000))
+        .expect("live mark updates without overflow");
+    let open = service.snapshot().expect("open snapshot");
+    let position = open
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument.instrument_id)
+        .expect("open BTC position");
+    assert_eq!(
+        position.unrealized_pnl,
+        FixedPoint::try_new(150_000, 2).expect("$1500 unrealized")
+    );
+
+    service
+        .flatten_account(
+            account_id,
+            observation(8_410_000_000_000, 8_410_100_000_000, 4, 4_000),
+        )
+        .expect("close succeeds without overflow");
+    let closed = service.snapshot().expect("closed snapshot");
+    let position = closed
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument.instrument_id)
+        .expect("closed BTC position retained");
+    assert_eq!(position.net_quantity.units(), 0);
+    assert_eq!(
+        position.realized_pnl,
+        FixedPoint::try_new(150_000, 2).expect("$1500 realized")
+    );
+    assert_eq!(position.unrealized_pnl.units(), 0);
+}
+
+#[test]
+fn practice_account_delete_requires_flat_state_and_is_durable() {
+    let directory = TestDirectory::new("practice-account-delete");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    let created = service
+        .create_practice_account(CreatePracticeAccount {
+            display_name: "Disposable".to_string(),
+            starting_equity: FixedPoint::try_new(5_000_000, 2).expect("equity"),
+        })
+        .expect("account creates");
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+
+    let mut working = market_order("delete-guard", OrderSide::Buy, 1, 1_000);
+    working.account_id = created.id.clone();
+    working.order_type = OrderType::Limit;
+    working.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    service
+        .place_order(working)
+        .expect("working order accepted");
+    assert!(
+        service
+            .delete_practice_account(created.id.clone())
+            .expect_err("working order blocks deletion")
+            .contains("cancel working orders")
+    );
+
+    service
+        .cancel_all(Some(created.id.clone()))
+        .expect("working orders cancel");
+    let deleted = service
+        .delete_practice_account(created.id.clone())
+        .expect("flat account deletes");
+    assert_eq!(deleted, created);
+    let snapshot = service.snapshot().expect("snapshot");
+    assert!(
+        snapshot
+            .accounts
+            .iter()
+            .all(|account| account.id != created.id)
+    );
+    assert!(
+        snapshot
+            .orders
+            .iter()
+            .all(|order| order.account_id != created.id)
+    );
+    assert!(
+        snapshot
+            .fills
+            .iter()
+            .all(|fill| fill.account_id != created.id)
+    );
+    assert!(
+        snapshot
+            .positions
+            .iter()
+            .all(|position| position.account_id != created.id)
+    );
+
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let reopened = TradingService::start(config(&directory)).expect("service reopens");
+    assert!(
+        reopened
+            .snapshot()
+            .expect("restored snapshot")
+            .accounts
+            .iter()
+            .all(|account| account.id != created.id)
     );
     reopened
         .shutdown(Duration::from_secs(2))

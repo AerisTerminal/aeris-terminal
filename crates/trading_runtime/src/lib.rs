@@ -309,6 +309,7 @@ enum Command {
     Status(Reply<TradingServiceStatus>),
     RegisterAccount(TradingAccount, Reply<()>),
     CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
+    DeletePracticeAccount(TradingAccountId, Reply<TradingAccount>),
     RegisterInstrument(TradingInstrument, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
     PlaceBracket(PlaceBracket, Reply<ManagedBracket>),
@@ -463,6 +464,22 @@ impl TradingService {
         account: CreatePracticeAccount,
     ) -> Result<TradingAccount, String> {
         self.request(|reply| Command::CreatePracticeAccount(account, reply))
+    }
+
+    /// Permanently removes one simulated practice account and its local trading history.
+    ///
+    /// The account must have no working orders and no open position. Closed order/fill history,
+    /// account risk state, session plans, copier references and locally-managed brackets owned by
+    /// the account are removed atomically with the account.
+    ///
+    /// # Errors
+    /// Returns an error when the account is missing, is not simulated, still has actionable
+    /// trading state, persistence fails, or the owner queue is unavailable.
+    pub fn delete_practice_account(
+        &self,
+        account_id: TradingAccountId,
+    ) -> Result<TradingAccount, String> {
+        self.request(|reply| Command::DeletePracticeAccount(account_id, reply))
     }
 
     /// Adds or replaces provider-sourced contract terms.
@@ -836,6 +853,9 @@ impl Coordinator {
                 Command::CreatePracticeAccount(account, reply) => {
                     let _ = reply.send(self.create_practice_account(&account));
                 }
+                Command::DeletePracticeAccount(account_id, reply) => {
+                    let _ = reply.send(self.delete_practice_account(&account_id));
+                }
                 Command::RegisterInstrument(instrument, reply) => {
                     let _ = reply.send(self.register_instrument(instrument));
                 }
@@ -978,6 +998,154 @@ impl Coordinator {
         };
         self.register_account(account.clone())?;
         Ok(account)
+    }
+
+    fn delete_practice_account(
+        &mut self,
+        account_id: &TradingAccountId,
+    ) -> Result<TradingAccount, String> {
+        let account = self.deletable_practice_account(account_id)?;
+        let (account_order_ids, account_client_order_ids, managed_bracket_ids) =
+            self.practice_account_order_identity(account_id);
+        self.store
+            .delete_practice_account(account_id, &managed_bracket_ids)?;
+        self.purge_practice_account_state(
+            account_id,
+            &account_order_ids,
+            &account_client_order_ids,
+            &managed_bracket_ids,
+        );
+        self.bump_revision()?;
+        Ok(account)
+    }
+
+    fn deletable_practice_account(
+        &self,
+        account_id: &TradingAccountId,
+    ) -> Result<TradingAccount, String> {
+        let account = self
+            .state
+            .accounts
+            .get(account_id)
+            .cloned()
+            .ok_or_else(|| "practice account was not found".to_string())?;
+        if account.environment != AccountEnvironment::Simulated {
+            return Err("only simulated practice accounts can be deleted".to_string());
+        }
+        if self
+            .state
+            .orders
+            .values()
+            .any(|order| &order.account_id == account_id && order.status.is_open())
+        {
+            return Err("cancel working orders before deleting this practice account".to_string());
+        }
+        if self.state.positions.values().any(|position| {
+            &position.account_id == account_id && position.net_quantity.units() != 0
+        }) {
+            return Err("flatten open positions before deleting this practice account".to_string());
+        }
+        if self.state.trade_copiers.iter().any(|(source, config)| {
+            source == account_id
+                || config
+                    .targets
+                    .iter()
+                    .any(|target| &target.account_id == account_id)
+        }) {
+            return Err(
+                "remove this account from trade copier configuration before deleting it"
+                    .to_string(),
+            );
+        }
+        Ok(account)
+    }
+
+    fn practice_account_order_identity(
+        &self,
+        account_id: &TradingAccountId,
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+        Vec<String>,
+    ) {
+        let account_order_ids = self
+            .state
+            .orders
+            .values()
+            .filter(|order| &order.account_id == account_id)
+            .map(|order| order.id.as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let account_client_order_ids = self
+            .state
+            .orders
+            .values()
+            .filter(|order| &order.account_id == account_id)
+            .map(|order| order.client_order_id.as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let managed_bracket_ids = self
+            .state
+            .managed_brackets
+            .values()
+            .filter(|bracket| {
+                account_client_order_ids.contains(bracket.entry_client_order_id.as_str())
+                    || bracket
+                        .stop_client_order_id
+                        .as_ref()
+                        .is_some_and(|id| account_client_order_ids.contains(id.as_str()))
+                    || bracket
+                        .target_client_order_ids
+                        .iter()
+                        .any(|id| account_client_order_ids.contains(id.as_str()))
+            })
+            .map(|bracket| bracket.bracket_id.clone())
+            .collect::<Vec<_>>();
+        (
+            account_order_ids,
+            account_client_order_ids,
+            managed_bracket_ids,
+        )
+    }
+
+    fn purge_practice_account_state(
+        &mut self,
+        account_id: &TradingAccountId,
+        account_order_ids: &std::collections::BTreeSet<String>,
+        account_client_order_ids: &std::collections::BTreeSet<String>,
+        managed_bracket_ids: &[String],
+    ) {
+        self.state.accounts.remove(account_id);
+        self.state
+            .orders
+            .retain(|_, order| &order.account_id != account_id);
+        self.state
+            .order_events
+            .retain(|event| !account_order_ids.contains(event.order_id.as_str()));
+        self.state
+            .fills
+            .retain(|fill| &fill.account_id != account_id);
+        self.state
+            .positions
+            .retain(|(stored_account, _), _| stored_account != account_id);
+        self.state.risk_profiles.remove(account_id);
+        self.state.risk_locks.remove(account_id);
+        self.state.risk_rule_states.remove(account_id);
+        self.state
+            .risk_trade_cycles
+            .retain(|(stored_account, _), _| stored_account != account_id);
+        self.state.session_plans.remove(account_id);
+        self.state.discipline_states.remove(account_id);
+        self.state.managed_brackets.retain(|bracket_id, _| {
+            !managed_bracket_ids
+                .iter()
+                .any(|deleted| deleted == bracket_id)
+        });
+        self.state.protective_orders.retain(|client_order_id, _| {
+            !account_client_order_ids.contains(client_order_id.as_str())
+        });
+        self.copy_dispatches.retain(|dispatch| {
+            &dispatch.target_account_id != account_id
+                && !account_client_order_ids.contains(&dispatch.source_client_order_id)
+        });
     }
 
     fn register_instrument(&mut self, instrument: TradingInstrument) -> Result<(), String> {
@@ -3826,6 +3994,12 @@ fn next_position(
         let entry = current
             .and_then(|position| position.average_entry_price)
             .ok_or_else(|| "position average is unavailable for realized PnL".to_string())?;
+        let closed_quantity = FixedPoint::try_new(
+            i64::try_from(closed_quantity)
+                .map_err(|_| "realized PnL quantity overflowed".to_string())?,
+            fill.quantity.scale(),
+        )
+        .map_err(|error| error.to_string())?;
         realized_pnl(
             entry,
             fill.price,
@@ -3855,7 +4029,7 @@ fn realized_pnl(
     entry: FixedPoint,
     exit: FixedPoint,
     position_sign: i64,
-    quantity: u64,
+    quantity: FixedPoint,
     currency_scale: u8,
     instrument: &TradingInstrument,
 ) -> Result<FixedPoint, String> {
@@ -3863,21 +4037,23 @@ fn realized_pnl(
         .contract
         .point_value
         .ok_or_else(|| "point value is unavailable for realized PnL".to_string())?;
-    let price_difference = i128::from(exit.units()) - i128::from(entry.units());
-    let raw = price_difference
-        .checked_mul(i128::from(position_sign))
-        .and_then(|value| value.checked_mul(i128::from(quantity)))
-        .and_then(|value| value.checked_mul(i128::from(point_value.units())))
-        .ok_or_else(|| "realized PnL overflowed".to_string())?;
-    let raw_scale = entry
-        .scale()
-        .checked_add(point_value.scale())
-        .ok_or_else(|| "realized PnL scale overflowed".to_string())?;
-    let raw = i64::try_from(raw).map_err(|_| "realized PnL overflowed".to_string())?;
-    FixedPoint::try_new(raw, raw_scale)
-        .map_err(|error| error.to_string())?
-        .exact_rescale(currency_scale)
-        .map_err(|error| error.to_string())
+    let signed_quantity = FixedPoint::try_new(
+        quantity
+            .units()
+            .checked_mul(position_sign)
+            .ok_or_else(|| "realized PnL quantity overflowed".to_string())?,
+        quantity.scale(),
+    )
+    .map_err(|error| error.to_string())?;
+    project_unrealized_pnl(
+        entry,
+        exit,
+        signed_quantity,
+        FixedPoint::try_new(point_value.units(), point_value.scale())
+            .map_err(|error| error.to_string())?,
+        currency_scale,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn negative_loss(value: FixedPoint) -> Result<FixedPoint, String> {

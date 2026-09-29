@@ -760,10 +760,13 @@ pub(super) fn chart_settings_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> AnyElement {
+    let scale = MenuScale::for_viewport(viewport);
     let panel_size = chart_settings_panel_size(viewport);
-    let origin = chart_settings_centered_origin(viewport, panel_size);
-    let animation_origin =
-        PopupAnimationOrigin::from_trigger(menu.position, Bounds::new(origin, panel_size));
+    let bounds = Bounds::new(
+        chart_settings_centered_origin(viewport, panel_size),
+        panel_size,
+    );
+    let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, bounds);
     let dismiss = terminal.clone();
     let content = match view.section {
         ChartSettingsSection::Series => {
@@ -771,6 +774,9 @@ pub(super) fn chart_settings_menu_layer(
         }
         ChartSettingsSection::Canvas => {
             chart_canvas_settings(terminal, menu, view.snapshot, view.color_picker, theme)
+        }
+        ChartSettingsSection::Trading => {
+            chart_trading_settings(terminal, menu, view.snapshot, theme)
         }
     };
     div()
@@ -788,7 +794,7 @@ pub(super) fn chart_settings_menu_layer(
             cx.stop_propagation();
         })
         .child(animate_popup_from_origin(
-            chart_settings_panel(terminal, menu, origin, panel_size, content, view, theme),
+            chart_settings_panel(terminal, menu, bounds, scale, content, view, theme),
             "chart_settings_menu_enter",
             animation_origin,
         ))
@@ -815,23 +821,21 @@ pub(super) struct ChartSettingsTemplateView<'a> {
 fn chart_settings_panel(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
-    origin: gpui::Point<Pixels>,
-    panel_size: gpui::Size<Pixels>,
+    bounds: Bounds<Pixels>,
+    scale: MenuScale,
     content: AnyElement,
     view: ChartSettingsView<'_>,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
-    let actions = chart_settings_actions(terminal, menu, theme);
     div()
         .id("chart_settings_menu")
         .absolute()
-        .left(origin.x)
-        .top(origin.y)
-        .w(panel_size.width)
-        .h(panel_size.height)
-        .flex()
+        .left(bounds.origin.x)
+        .top(bounds.origin.y)
+        .w(bounds.size.width)
+        .h(bounds.size.height)
         .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
@@ -846,6 +850,26 @@ fn chart_settings_panel(
             });
             cx.stop_propagation();
         })
+        .child(rem_scaled(
+            scale,
+            chart_settings_panel_body(terminal, menu, content, view, theme),
+        ))
+}
+
+/// Sidebar, content surface and template dialog, laid out at the panel's scaled rem.
+fn chart_settings_panel_body(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    content: AnyElement,
+    view: ChartSettingsView<'_>,
+    theme: &AerisTheme,
+) -> Div {
+    let colors = theme.colors;
+    let actions = chart_settings_actions(terminal, menu, theme);
+    div()
+        .relative()
+        .size_full()
+        .flex()
         .child(chart_settings_sidebar(
             terminal,
             menu,
@@ -900,8 +924,8 @@ fn chart_settings_actions(
     let reset_menu = menu.clone();
     div()
         .absolute()
-        .top(px(10.0))
-        .right(px(10.0))
+        .top(design_rems(10.0))
+        .right(design_rems(10.0))
         .flex()
         .items_center()
         .gap_1()
@@ -941,13 +965,18 @@ fn chart_settings_centered_origin(
     )
 }
 
+/// Grows the 900x660 design with the shared screen-aware [`MenuScale`] and insets it inside
+/// smaller viewports.
 fn chart_settings_panel_size(viewport: gpui::Size<Pixels>) -> gpui::Size<Pixels> {
+    let scale = MenuScale::for_viewport(viewport);
     let horizontal_margin = OVERLAY_EDGE_MARGIN * 2.0;
     let vertical_margin = OVERLAY_EDGE_MARGIN * 2.0;
     size(
-        px(CHART_SETTINGS_PANEL_WIDTH
+        px(scale
+            .len(CHART_SETTINGS_PANEL_WIDTH)
             .min((f32::from(viewport.width) - horizontal_margin).max(0.0))),
-        px(CHART_SETTINGS_PANEL_HEIGHT
+        px(scale
+            .len(CHART_SETTINGS_PANEL_HEIGHT)
             .min((f32::from(viewport.height) - vertical_margin).max(0.0))),
     )
 }
@@ -971,7 +1000,7 @@ fn chart_settings_sidebar(
             div()
                 .id(("chart_settings_section", section as usize))
                 .w_full()
-                .h(px(32.0))
+                .h(design_rems(32.0))
                 .px_2()
                 .flex()
                 .items_center()
@@ -1005,7 +1034,7 @@ fn chart_settings_sidebar(
     }
     div()
         .id("chart_settings_sidebar")
-        .w(px(CHART_SETTINGS_SIDEBAR_WIDTH))
+        .w(design_rems(CHART_SETTINGS_SIDEBAR_WIDTH))
         .h_full()
         .flex_none()
         .flex()
@@ -1037,6 +1066,7 @@ fn chart_settings_template_control(
                 .theme(theme)
                 .resting_fill(colors.surface)
                 .w_full()
+                .h(design_rems(32.0))
                 .label("Template")
                 .caret(header_icon(HugeIcon::ChevronDown))
                 .on_click(move |_, _, cx| {
@@ -1054,10 +1084,10 @@ fn chart_settings_template_control(
         let mut popup = div()
             .id("chart_settings_template_menu")
             .absolute()
-            .bottom(px(36.0))
+            .bottom(design_rems(36.0))
             .left_0()
-            .w(px(240.0))
-            .max_h(px(360.0))
+            .w(design_rems(240.0))
+            .max_h(design_rems(360.0))
             .overflow_y_scroll()
             .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
             .border_1()
@@ -1134,7 +1164,7 @@ fn chart_settings_template_save_dialog(
         .bg(gpui_color(colors.surface.with_alpha(0.72)))
         .child(
             div()
-                .w(px(420.0))
+                .w(design_rems(420.0))
                 .p_4()
                 .flex()
                 .flex_col()
@@ -1164,6 +1194,7 @@ fn chart_settings_template_save_dialog(
                         .child(
                             Button::new("chart_template_cancel")
                                 .variant(theme, ButtonVariant::Secondary)
+                                .h(design_rems(32.0))
                                 .label("Cancel")
                                 .on_click(move |_, _, cx| {
                                     cancel.update(cx, |terminal, terminal_cx| {
@@ -1174,6 +1205,7 @@ fn chart_settings_template_save_dialog(
                         .child(
                             Button::new("chart_template_confirm")
                                 .variant(theme, ButtonVariant::Filled)
+                                .h(design_rems(32.0))
                                 .label("Save")
                                 .on_click(move |_, _, cx| {
                                     save.update(cx, |terminal, terminal_cx| {
@@ -1692,6 +1724,41 @@ fn chart_canvas_settings(
     .into_any_element()
 }
 
+fn chart_trading_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    snapshot: &ChartSettingsSnapshot,
+    theme: &AerisTheme,
+) -> AnyElement {
+    settings_content_header(
+        "Trading",
+        "Control chart trading overlays without changing account or order state.",
+        theme,
+    )
+    .child(settings_group_heading(
+        "Chart overlays",
+        "Practice and execution presentation",
+        theme,
+    ))
+    .child(settings_toggle_row(
+        terminal,
+        menu,
+        "Order management lines",
+        snapshot.trading_visibility.show_order_management_lines,
+        ChartSettingsAction::ToggleOrderManagementLines,
+        theme,
+    ))
+    .child(settings_toggle_row(
+        terminal,
+        menu,
+        "Execution marks",
+        snapshot.trading_visibility.show_execution_marks,
+        ChartSettingsAction::ToggleExecutionMarks,
+        theme,
+    ))
+    .into_any_element()
+}
+
 fn canvas_grid_settings(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
@@ -1853,7 +1920,7 @@ fn settings_content_header(
         .flex()
         .flex_col()
         .gap_2()
-        .pr(px(72.0))
+        .pr(design_rems(72.0))
         .child(
             div()
                 .text_base()
@@ -1908,7 +1975,7 @@ fn settings_toggle_row(
     let terminal = terminal.clone();
     let menu = menu.clone();
     div()
-        .h(px(38.0))
+        .h(design_rems(38.0))
         .flex()
         .items_center()
         .justify_between()
@@ -1923,9 +1990,9 @@ fn settings_toggle_row(
         .child(
             div()
                 .id(label)
-                .w(px(34.0))
-                .h(px(19.0))
-                .p(px(2.0))
+                .w(design_rems(34.0))
+                .h(design_rems(19.0))
+                .p(design_rems(2.0))
                 .flex()
                 .items_center()
                 .when(enabled, |track| {
@@ -1946,7 +2013,7 @@ fn settings_toggle_row(
                 })
                 .child(
                     div()
-                        .size(px(15.0))
+                        .size(design_rems(15.0))
                         .rounded_full()
                         .bg(gpui_color(colors.primary_foreground)),
                 ),
@@ -1989,7 +2056,7 @@ fn settings_color_row(
         .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
-                .h(px(38.0))
+                .h(design_rems(38.0))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -2002,7 +2069,7 @@ fn settings_color_row(
                 .child(
                     div()
                         .id(("chart_color_picker", setting as usize))
-                        .h(px(30.0))
+                        .h(design_rems(30.0))
                         .px_2()
                         .flex()
                         .items_center()
@@ -2025,10 +2092,10 @@ fn settings_color_row(
                             });
                             cx.stop_propagation();
                         })
-                        .child(div().size(px(16.0)).rounded_full().bg(color))
+                        .child(div().size(design_rems(16.0)).rounded_full().bg(color))
                         .child(
                             div()
-                                .w(px(62.0))
+                                .w(design_rems(62.0))
                                 .font_family(aeris_design_system::platform_font_family())
                                 .text_xs()
                                 .text_color(gpui_color(colors.text_muted))
@@ -2132,7 +2199,7 @@ fn settings_choice_row(
         .flex()
         .items_center()
         .gap_1()
-        .p(px(2.0))
+        .p(design_rems(2.0))
         .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
@@ -2148,7 +2215,7 @@ fn settings_choice_row(
                 .selected(selected)
                 .aria_label(choice)
                 .px_2()
-                .h(px(24.0))
+                .h(design_rems(24.0))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2163,7 +2230,7 @@ fn settings_choice_row(
         );
     }
     div()
-        .min_h(px(42.0))
+        .min_h(design_rems(42.0))
         .flex()
         .items_center()
         .justify_between()
@@ -2746,6 +2813,23 @@ mod tests {
             chart_settings_centered_origin(viewport, panel_size),
             point(px(250.0), px(170.0))
         );
+    }
+
+    #[test]
+    fn chart_settings_panel_grows_on_large_screens() {
+        let viewport = size(px(3_840.0), px(2_160.0));
+        let factor = MenuScale::for_viewport(viewport).factor();
+        assert!(factor > 1.0);
+        let panel_size = chart_settings_panel_size(viewport);
+        assert_eq!(
+            panel_size,
+            size(
+                px(CHART_SETTINGS_PANEL_WIDTH * factor),
+                px(CHART_SETTINGS_PANEL_HEIGHT * factor)
+            )
+        );
+        let origin = chart_settings_centered_origin(viewport, panel_size);
+        assert!(origin.x >= px(OVERLAY_EDGE_MARGIN) && origin.y >= px(OVERLAY_EDGE_MARGIN));
     }
 
     #[test]

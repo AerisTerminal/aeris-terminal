@@ -472,13 +472,6 @@ pub(super) fn header_controls(
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
         ))
-        .child(time_zone_selector(
-            app.clone(),
-            state.time_zone_clock,
-            &state.time_zone_id,
-            state.controls.enabled(HeaderControls::CHART_TYPE),
-            &state.theme,
-        ))
         .child(indicator_selector(
             app.clone(),
             state.indicator_input,
@@ -501,6 +494,13 @@ pub(super) fn header_controls(
         .children(side_panel_toggles)
         .child(context_toggle)
         .child(link_toggle);
+    let time_zone = time_zone_selector(
+        app.clone(),
+        state.time_zone_clock,
+        &state.time_zone_id,
+        state.controls.enabled(HeaderControls::CHART_TYPE),
+        &state.theme,
+    );
     div()
         .w_full()
         .h_full()
@@ -509,6 +509,7 @@ pub(super) fn header_controls(
         .flex()
         .items_center()
         .child(market_controls)
+        .child(time_zone)
 }
 
 fn header_panel_toggles(

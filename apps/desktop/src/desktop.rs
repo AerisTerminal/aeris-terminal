@@ -175,6 +175,7 @@ use native_ui::{
         flat_compact_menu_panel, menu_separator,
     },
     platform_font_weight, platform_tabular_numerals,
+    rem_scale::{design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     tab::Tab,
     theme::{ButtonVariant, base_theme, gpui_color},
@@ -733,6 +734,7 @@ struct WorkspaceSurface {
     connection_message: Option<String>,
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPnlState,
+    chart_trading_visibility: ChartTradingVisibilitySettings,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
     market_state: WorkspaceMarketState,
@@ -811,6 +813,7 @@ struct TradingPnlState {
     market_error: Option<String>,
     order_entry: TradingOrderEntryState,
     account_creator: Option<PracticeAccountDialogState>,
+    account_delete_confirmation: Option<aeris_trading::TradingAccountId>,
     refresh_pending: bool,
     next_refresh: Instant,
 }
@@ -933,6 +936,7 @@ impl Default for TradingPnlState {
             market_error: None,
             order_entry: TradingOrderEntryState::default(),
             account_creator: None,
+            account_delete_confirmation: None,
             refresh_pending: false,
             next_refresh: Instant::now(),
         }
@@ -1626,6 +1630,10 @@ fn chart_position_id(
     ChartPositionId::new(format!("position:{}:{instrument_id}", account_id.as_str())).ok()
 }
 
+fn chart_time_seconds_from_unix_nanos(unix_nanos: i64) -> i64 {
+    unix_nanos.div_euclid(1_000_000_000)
+}
+
 fn chart_executions(
     snapshot: &aeris_trading_runtime::TradingSnapshot,
     account_id: &aeris_trading::TradingAccountId,
@@ -1655,7 +1663,7 @@ fn chart_executions(
                 price_scale: ChartTradingPriceScale::Right,
                 side,
                 kind: ChartExecutionKind::PartialFill,
-                time: fill.execution_unix_nanos,
+                time: chart_time_seconds_from_unix_nanos(fill.execution_unix_nanos),
                 price: chart_price(Some(fill.price))?,
                 quantity: chart_quantity(fill.quantity)?,
                 order_id,
@@ -1747,14 +1755,14 @@ fn chart_session_plan_overlay(
         events: vec![
             ChartHostEventMarker {
                 id: "session-plan-start".to_string(),
-                time: plan.session_start_unix_nanos,
+                time: chart_time_seconds_from_unix_nanos(plan.session_start_unix_nanos),
                 importance: 1,
                 label: label.clone(),
                 icon: None,
             },
             ChartHostEventMarker {
                 id: "session-plan-end".to_string(),
-                time: plan.session_end_unix_nanos,
+                time: chart_time_seconds_from_unix_nanos(plan.session_end_unix_nanos),
                 importance: 1,
                 label: "PLAN END".to_string(),
                 icon: None,
@@ -1762,8 +1770,8 @@ fn chart_session_plan_overlay(
         ],
         windows: vec![ChartHostTimeWindow {
             id: "session-plan-window".to_string(),
-            start_time: plan.session_start_unix_nanos,
-            end_time: plan.session_end_unix_nanos,
+            start_time: chart_time_seconds_from_unix_nanos(plan.session_start_unix_nanos),
+            end_time: chart_time_seconds_from_unix_nanos(plan.session_end_unix_nanos),
             label,
         }],
     }
@@ -4008,15 +4016,17 @@ enum ChartSettingsSection {
     #[default]
     Series,
     Canvas,
+    Trading,
 }
 
 impl ChartSettingsSection {
-    const ALL: [Self; 2] = [Self::Series, Self::Canvas];
+    const ALL: [Self; 3] = [Self::Series, Self::Canvas, Self::Trading];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Series => "Series",
             Self::Canvas => "Canvas",
+            Self::Trading => "Trading",
         }
     }
 }
@@ -4082,6 +4092,23 @@ enum ChartSettingsAction {
     TradeBubbleMinimumVolumeBits(u64),
     /// Instrument ticks per footprint row; zero is automatic.
     FootprintTicksPerRow(u32),
+    ToggleOrderManagementLines,
+    ToggleExecutionMarks,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChartTradingVisibilitySettings {
+    show_order_management_lines: bool,
+    show_execution_marks: bool,
+}
+
+impl Default for ChartTradingVisibilitySettings {
+    fn default() -> Self {
+        Self {
+            show_order_management_lines: true,
+            show_execution_marks: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -4091,6 +4118,7 @@ struct ChartSettingsSnapshot {
     crosshair_mode: u8,
     order_flow: OrderFlowSettings,
     time_zone: String,
+    trading_visibility: ChartTradingVisibilitySettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

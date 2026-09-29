@@ -162,8 +162,36 @@ pub fn project_unrealized_pnl(
         .checked_add(net_quantity.scale())
         .and_then(|scale| scale.checked_add(point_value.scale()))
         .ok_or(TradingValidationError::ArithmeticOverflow)?;
-    let raw = i64::try_from(raw).map_err(|_| TradingValidationError::ArithmeticOverflow)?;
-    FixedPoint::try_new(raw, raw_scale)?.exact_rescale(currency_scale)
+    fixed_point_from_i128_exact(raw, raw_scale, currency_scale)
+}
+
+fn fixed_point_from_i128_exact(
+    units: i128,
+    source_scale: u8,
+    target_scale: u8,
+) -> Result<FixedPoint, TradingValidationError> {
+    if target_scale > MAXIMUM_DECIMAL_SCALE {
+        return Err(TradingValidationError::ScaleOutOfRange(target_scale));
+    }
+    let adjusted = match target_scale.cmp(&source_scale) {
+        std::cmp::Ordering::Equal => units,
+        std::cmp::Ordering::Greater => {
+            let factor = power_of_ten_i128(target_scale - source_scale)?;
+            units
+                .checked_mul(factor)
+                .ok_or(TradingValidationError::ArithmeticOverflow)?
+        }
+        std::cmp::Ordering::Less => {
+            let divisor = power_of_ten_i128(source_scale - target_scale)?;
+            if units % divisor != 0 {
+                return Err(TradingValidationError::InexactRescale);
+            }
+            units / divisor
+        }
+    };
+    let adjusted =
+        i64::try_from(adjusted).map_err(|_| TradingValidationError::ArithmeticOverflow)?;
+    FixedPoint::try_new(adjusted, target_scale)
 }
 
 /// Provenance kept on every canonical trading mutation.
@@ -627,6 +655,12 @@ fn power_of_ten(exponent: u8) -> Result<i64, TradingValidationError> {
         .ok_or(TradingValidationError::ArithmeticOverflow)
 }
 
+fn power_of_ten_i128(exponent: u8) -> Result<i128, TradingValidationError> {
+    10_i128
+        .checked_pow(u32::from(exponent))
+        .ok_or(TradingValidationError::ArithmeticOverflow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +704,18 @@ mod tests {
                 2,
             ),
             Ok(FixedPoint::try_new(-2_500, 2).expect("short pnl"))
+        );
+    }
+
+    #[test]
+    fn high_precision_crypto_pnl_reduces_before_narrowing_to_i64() {
+        let entry = FixedPoint::try_new(8_400_000_000_000, 8).expect("entry");
+        let mark = FixedPoint::try_new(8_410_000_000_000, 8).expect("mark");
+        let quantity = FixedPoint::try_new(1_500_000_000, 8).expect("quantity");
+        let point_value = FixedPoint::try_new(100_000_000, 8).expect("point value");
+        assert_eq!(
+            project_unrealized_pnl(entry, mark, quantity, point_value, 2),
+            Ok(FixedPoint::try_new(150_000, 2).expect("pnl"))
         );
     }
 

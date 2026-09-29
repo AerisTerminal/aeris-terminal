@@ -109,6 +109,30 @@ pub fn create_practice_account(name: String, equity: &str, cx: &mut gpui::App) {
         .detach();
 }
 
+/// Permanently removes one flat simulated practice account off the UI thread.
+pub fn delete_practice_account(account_key: String, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
+        return;
+    };
+    let account_id = match aeris_trading::TradingAccountId::try_new(account_key) {
+        Ok(account_id) => account_id,
+        Err(error) => {
+            record_feedback(Err(error.to_string()));
+            return;
+        }
+    };
+    cx.background_executor()
+        .spawn(async move {
+            record_feedback(
+                service
+                    .delete_practice_account(account_id)
+                    .map(|account| format!("Deleted {}", account.display_name)),
+            );
+        })
+        .detach();
+}
+
 fn parse_usd_equity(value: &str) -> Result<aeris_trading::FixedPoint, String> {
     let value = value.trim().trim_start_matches('$').replace(',', "");
     let (whole, fraction) = value.split_once('.').unwrap_or((&value, ""));
@@ -660,7 +684,7 @@ pub fn publish_simulated_market_observation(frame: &aeris_market_data::OrderBook
     let Some(service) = TRADING_SERVICE.get() else {
         return;
     };
-    let Some((_, observation)) = prepare_flatten(frame) else {
+    let Some(observation) = simulated_market_observation(frame) else {
         return;
     };
     if let Err(error) = service.publish_market_observation(observation) {
@@ -733,7 +757,7 @@ pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx:
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some((_, observation)) = prepare_flatten(frame) else {
+    let Some(observation) = simulated_market_observation(frame) else {
         record_feedback(Err("Flatten requires a current bid and ask".to_string()));
         return;
     };
@@ -748,14 +772,6 @@ pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx:
         .detach();
 }
 
-/// Prepares the simulated account identity and its current BBO observation.
-#[must_use]
-pub fn prepare_flatten(
-    frame: &aeris_market_data::OrderBookFrame,
-) -> Option<(aeris_trading::TradingAccountId, SimulatedMarketObservation)> {
-    prepare_flatten_for(frame, None)
-}
-
 /// Prepares a selected simulated account and current BBO observation.
 #[must_use]
 pub fn prepare_flatten_for(
@@ -764,6 +780,17 @@ pub fn prepare_flatten_for(
 ) -> Option<(aeris_trading::TradingAccountId, SimulatedMarketObservation)> {
     let account_id = selected_account_key
         .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
+    let observation = simulated_market_observation(frame)?;
+    Some((account_id, observation))
+}
+
+/// Converts one current order-book BBO into the practice venue's canonical market observation.
+/// This path intentionally does not require a selected account so global market publication and
+/// Flatten All cannot be disabled by account-selection state.
+#[must_use]
+pub fn simulated_market_observation(
+    frame: &aeris_market_data::OrderBookFrame,
+) -> Option<SimulatedMarketObservation> {
     let (bid, ask) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref())?;
     let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
     let bid = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?;
@@ -783,7 +810,7 @@ pub fn prepare_flatten_for(
             observed_unix_nanos: now(),
         },
     };
-    Some((account_id, observation))
+    Some(observation)
 }
 
 #[must_use]
@@ -909,7 +936,10 @@ fn parse_contract_date(value: &str) -> Result<ContractDate, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_contract_date, parse_usd_equity, prepare_simulated_order};
+    use super::{
+        parse_contract_date, parse_usd_equity, prepare_simulated_order,
+        simulated_market_observation,
+    };
 
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
@@ -998,6 +1028,15 @@ mod tests {
         .expect("scaled order command");
         assert_eq!(order.quantity.units(), 5_000);
         assert_eq!(order.quantity.scale(), 3);
+    }
+
+    #[test]
+    fn global_practice_market_observation_does_not_require_selected_account() {
+        let observation =
+            simulated_market_observation(&order_book_frame()).expect("current BBO observation");
+        assert_eq!(observation.instrument_id.as_str(), "test:instrument");
+        assert_eq!(observation.bid.units(), 10_000);
+        assert_eq!(observation.ask.units(), 10_001);
     }
 
     #[test]

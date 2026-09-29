@@ -15,10 +15,11 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) market_error: Option<&'a str>,
     pub(super) order_entry: &'a super::TradingOrderEntryState,
     pub(super) account_creator: Option<&'a super::PracticeAccountDialogState>,
+    pub(super) account_delete_confirmation: Option<&'a aeris_trading::TradingAccountId>,
     pub(super) theme: &'a AerisTheme,
 }
 
-const CONTROL_HEIGHT: f32 = 36.0;
+const CONTROL_HEIGHT: f32 = 32.0;
 const GAP: f32 = 4.0;
 
 pub(super) fn trading_order_controls(
@@ -31,8 +32,6 @@ pub(super) fn trading_order_controls(
             .iter()
             .any(|lock| Some(&lock.account_id) == selected_account);
     let ready = !locked && state.frame.is_some();
-    let (bid_fill, bid_text) = join_button_colors(state.theme, aeris_trading::OrderSide::Buy);
-    let (ask_fill, ask_text) = join_button_colors(state.theme, aeris_trading::OrderSide::Sell);
     div()
         .relative()
         .flex_none()
@@ -51,24 +50,22 @@ pub(super) fn trading_order_controls(
             state.theme,
         ))
         .child(action_row([
-            order_button(
+            trade_order_button(
                 "trading_buy_market",
                 "Buy",
                 state,
                 ready,
-                state.theme.colors.bullish,
-                state.theme.colors.surface,
+                aeris_trading::OrderSide::Buy,
                 move |frame, account, quantity, cx| {
                     dispatch_market(frame, account, quantity, aeris_trading::OrderSide::Buy, cx);
                 },
             ),
-            order_button(
+            trade_order_button(
                 "trading_sell_market",
                 "Sell",
                 state,
                 ready,
-                state.theme.colors.bearish,
-                state.theme.colors.surface,
+                aeris_trading::OrderSide::Sell,
                 move |frame, account, quantity, cx| {
                     dispatch_market(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
@@ -80,8 +77,6 @@ pub(super) fn trading_order_controls(
                 "Join Bid",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_bid.is_some()),
-                bid_fill,
-                bid_text,
                 move |frame, account, quantity, cx| {
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Buy, cx);
                 },
@@ -91,8 +86,6 @@ pub(super) fn trading_order_controls(
                 "Join Ask",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_ask.is_some()),
-                ask_fill,
-                ask_text,
                 move |frame, account, quantity, cx| {
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
@@ -106,21 +99,9 @@ pub(super) fn trading_order_controls(
                 .account_creator
                 .map(|creator| practice_account_dialog(state.app, creator, state.theme)),
         )
-}
-
-fn join_button_colors(
-    theme: &AerisTheme,
-    side: aeris_trading::OrderSide,
-) -> (
-    aeris_design_system::ThemeColor,
-    aeris_design_system::ThemeColor,
-) {
-    match side {
-        aeris_trading::OrderSide::Buy => (theme.colors.positive_subtle, theme.colors.text_positive),
-        aeris_trading::OrderSide::Sell => {
-            (theme.colors.negative_subtle, theme.colors.text_negative)
-        }
-    }
+        .children(state.account_delete_confirmation.map(|account_id| {
+            practice_account_delete_dialog(state.app, account_id, state.accounts, state.theme)
+        }))
 }
 
 fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
@@ -134,7 +115,6 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
         account.display_name.as_str()
     });
     let toggle = state.app.clone();
-    let create = state.app.clone();
     let mut selector = div().relative().child(
         div()
             .id("trading_account_selector")
@@ -145,12 +125,14 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
             .justify_between()
             .rounded(px(5.0))
             .border_1()
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface_secondary))
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.surface))
             .text_color(gpui_color(colors.text_primary))
             .cursor_pointer()
             .role(Role::Button)
             .aria_label("Select or add a practice account")
+            .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+            .active(move |button| button.bg(gpui_color(colors.active_bg)))
             .on_click(move |_, window, cx| {
                 toggle.update(cx, |surface, surface_cx| {
                     if surface.trading_pnl.accounts.is_empty() {
@@ -166,55 +148,184 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
             .child(header_icon(HugeIcon::ChevronDown)),
     );
     if state.order_entry.account_menu_open {
-        let mut menu = div()
-            .id("trading_account_menu")
-            .absolute()
-            .top(px(CONTROL_HEIGHT + 2.0))
-            .left_0()
-            .right_0()
-            .max_h(px(240.0))
-            .overflow_y_scroll()
-            .occlude()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface))
-            .shadow_md()
-            .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
-        for (index, account) in state.accounts.iter().enumerate() {
-            let select = state.app.clone();
-            let account_id = account.id.clone();
-            menu = menu.child(
-                MenuRow::compact(
-                    ("trading_account_option", index),
-                    account.display_name.clone(),
-                    state.theme,
-                )
-                .highlighted(state.order_entry.selected_account_id.as_ref() == Some(&account.id))
-                .on_click(move |_, _, cx| {
-                    select.update(cx, |surface, surface_cx| {
-                        surface.trading_pnl.order_entry.selected_account_id =
-                            Some(account_id.clone());
-                        surface.trading_pnl.order_entry.account_menu_open = false;
-                        surface.trading_pnl.current = None;
-                        surface_cx.notify();
-                    });
-                }),
-            );
-        }
-        menu = menu.child(
-            MenuRow::compact("trading_add_account", "Add practice account…", state.theme)
-                .leading(header_icon(HugeIcon::Add).with_size(px(16.0)))
-                .on_click(move |_, window, cx| {
-                    create.update(cx, |surface, surface_cx| {
-                        surface.trading_pnl.order_entry.account_menu_open = false;
-                        open_practice_account_dialog(surface, window, surface_cx);
-                    });
-                }),
-        );
-        selector = selector.child(gpui::deferred(menu));
+        selector = selector.child(gpui::deferred(account_selector_menu(state)));
     }
     selector
+}
+
+fn account_selector_menu(state: &TradingOrderControlsState<'_>) -> Stateful<Div> {
+    let colors = state.theme.colors;
+    let mut menu = div()
+        .id("trading_account_menu")
+        .absolute()
+        .top(px(CONTROL_HEIGHT + 2.0))
+        .left_0()
+        .right_0()
+        .max_h(px(240.0))
+        .overflow_y_scroll()
+        .occlude()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface))
+        .shadow_md()
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+    for (index, account) in state.accounts.iter().enumerate() {
+        let select = state.app.clone();
+        let delete = state.app.clone();
+        let account_id = account.id.clone();
+        let delete_account_id = account.id.clone();
+        let delete_button = div()
+            .id(("trading_account_delete", index))
+            .size(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(gpui_color(colors.border))
+            .bg(gpui_color(colors.surface))
+            .text_color(gpui_color(colors.icon))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(format!("Delete {}", account.display_name))
+            .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+            .active(move |button| button.bg(gpui_color(colors.active_bg)))
+            .child(header_icon(HugeIcon::Trash).with_size(px(14.0)))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                delete.update(cx, |surface, surface_cx| {
+                    surface.trading_pnl.order_entry.account_menu_open = false;
+                    surface.trading_pnl.account_delete_confirmation =
+                        Some(delete_account_id.clone());
+                    surface_cx.notify();
+                });
+                cx.stop_propagation();
+            });
+        menu = menu.child(
+            MenuRow::compact(
+                ("trading_account_option", index),
+                account.display_name.clone(),
+                state.theme,
+            )
+            .highlighted(state.order_entry.selected_account_id.as_ref() == Some(&account.id))
+            .trailing(delete_button)
+            .on_click(move |_, _, cx| {
+                select.update(cx, |surface, surface_cx| {
+                    surface.trading_pnl.order_entry.selected_account_id = Some(account_id.clone());
+                    surface.trading_pnl.order_entry.account_menu_open = false;
+                    surface.trading_pnl.current = None;
+                    surface_cx.notify();
+                });
+            }),
+        );
+    }
+    let create = state.app.clone();
+    menu.child(
+        MenuRow::compact("trading_add_account", "Add practice account…", state.theme)
+            .leading(header_icon(HugeIcon::Add).with_size(px(16.0)))
+            .on_click(move |_, window, cx| {
+                create.update(cx, |surface, surface_cx| {
+                    surface.trading_pnl.order_entry.account_menu_open = false;
+                    open_practice_account_dialog(surface, window, surface_cx);
+                });
+            }),
+    )
+}
+
+fn practice_account_delete_dialog(
+    app: &Entity<WorkspaceSurface>,
+    account_id: &aeris_trading::TradingAccountId,
+    accounts: &[aeris_trading::TradingAccount],
+    theme: &AerisTheme,
+) -> AnyElement {
+    let display_name = accounts
+        .iter()
+        .find(|account| &account.id == account_id)
+        .map_or(account_id.as_str(), |account| account.display_name.as_str())
+        .to_string();
+    let account_key = account_id.as_str().to_string();
+    let dismiss_scrim = app.clone();
+    let cancel = app.clone();
+    let confirm = app.clone();
+    div()
+        .id("practice_account_delete_scrim")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p_2()
+        .bg(gpui_color(theme.colors.surface.with_alpha(0.86)))
+        .on_any_mouse_down(move |_, _, cx| {
+            dismiss_scrim.update(cx, |surface, surface_cx| {
+                surface.trading_pnl.account_delete_confirmation = None;
+                surface_cx.notify();
+            });
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .id("practice_account_delete_dialog")
+                .w_full()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(gpui_color(theme.colors.border_secondary))
+                .bg(gpui_color(theme.colors.surface))
+                .shadow_lg()
+                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .child("Delete practice account?"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(gpui_color(theme.colors.text_secondary))
+                        .child(format!(
+                            "Delete {display_name} and its local practice-trading history. Open positions and working orders must be cleared first."
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(dialog_button(
+                            "practice_account_delete_cancel",
+                            "Cancel",
+                            theme,
+                            move |cx| {
+                                cancel.update(cx, |surface, surface_cx| {
+                                    surface.trading_pnl.account_delete_confirmation = None;
+                                    surface_cx.notify();
+                                });
+                            },
+                        ))
+                        .child(dialog_button(
+                            "practice_account_delete_confirm",
+                            "Delete",
+                            theme,
+                            move |cx| {
+                                confirm.update(cx, |surface, surface_cx| {
+                                    surface.trading_pnl.account_delete_confirmation = None;
+                                    surface_cx.notify();
+                                });
+                                aeris_desktop::trading::delete_practice_account(
+                                    account_key.clone(),
+                                    cx,
+                                );
+                            },
+                        )),
+                ),
+        )
+        .into_any_element()
 }
 
 fn account_summary(
@@ -281,12 +392,15 @@ fn quantity_selector(
     let increment = app.clone();
     row = row
         .child(
-            compact_button("trading_quantity_decrement", "−", theme).on_click(move |_, _, cx| {
-                decrement.update(cx, |surface, surface_cx| {
-                    surface.trading_pnl.order_entry.quantity = quantity.saturating_sub(1).max(1);
-                    surface_cx.notify();
-                });
-            }),
+            quantity_step_button("trading_quantity_decrement", false, theme).on_click(
+                move |_, _, cx| {
+                    decrement.update(cx, |surface, surface_cx| {
+                        surface.trading_pnl.order_entry.quantity =
+                            quantity.saturating_sub(1).max(1);
+                        surface_cx.notify();
+                    });
+                },
+            ),
         )
         .child(
             div()
@@ -299,12 +413,15 @@ fn quantity_selector(
                 .child(format!("{quantity} lots")),
         )
         .child(
-            compact_button("trading_quantity_increment", "+", theme).on_click(move |_, _, cx| {
-                increment.update(cx, |surface, surface_cx| {
-                    surface.trading_pnl.order_entry.quantity = quantity.saturating_add(1).min(999);
-                    surface_cx.notify();
-                });
-            }),
+            quantity_step_button("trading_quantity_increment", true, theme).on_click(
+                move |_, _, cx| {
+                    increment.update(cx, |surface, surface_cx| {
+                        surface.trading_pnl.order_entry.quantity =
+                            quantity.saturating_add(1).min(999);
+                        surface_cx.notify();
+                    });
+                },
+            ),
         );
     for preset in [1_u64, 3, 5, 10, 15] {
         let select = app.clone();
@@ -326,12 +443,61 @@ fn quantity_selector(
     row
 }
 
+fn quantity_step_button(
+    id: impl Into<gpui::ElementId>,
+    plus: bool,
+    theme: &AerisTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let stroke = colors.text_secondary;
+    div()
+        .id(id)
+        .min_w(px(28.0))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
+        .cursor_pointer()
+        .role(Role::Button)
+        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+        .active(move |button| button.bg(gpui_color(colors.active_bg)))
+        .child(
+            div()
+                .relative()
+                .size(px(14.0))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(2.0))
+                        .top(px(6.5))
+                        .w(px(10.0))
+                        .h(px(1.0))
+                        .bg(gpui_color(stroke)),
+                )
+                .when(plus, |icon| {
+                    icon.child(
+                        div()
+                            .absolute()
+                            .left(px(6.5))
+                            .top(px(2.0))
+                            .w(px(1.0))
+                            .h(px(10.0))
+                            .bg(gpui_color(stroke)),
+                    )
+                }),
+        )
+}
+
 fn compact_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
-    let hover = theme.colors.hover_bg;
+    let colors = theme.colors;
     div()
         .id(id)
         .min_w(px(28.0))
@@ -342,11 +508,13 @@ fn compact_button(
         .justify_center()
         .rounded(px(5.0))
         .border_1()
-        .border_color(gpui_color(theme.colors.border_secondary))
-        .text_color(gpui_color(theme.colors.text_secondary))
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
+        .text_color(gpui_color(colors.text_secondary))
         .cursor_pointer()
         .role(Role::Button)
-        .hover(move |button| button.bg(gpui_color(hover)))
+        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+        .active(move |button| button.bg(gpui_color(colors.active_bg)))
         .child(label.into())
 }
 
@@ -363,8 +531,6 @@ fn order_button(
     label: &'static str,
     state: &TradingOrderControlsState<'_>,
     enabled: bool,
-    background: aeris_design_system::ThemeColor,
-    foreground: aeris_design_system::ThemeColor,
     action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
 ) -> Stateful<Div> {
     let frame = state.frame.cloned();
@@ -374,11 +540,7 @@ fn order_button(
         .as_ref()
         .map(|id| id.as_str().to_string());
     let quantity = state.order_entry.quantity;
-    let background = if enabled {
-        background
-    } else {
-        state.theme.colors.hover_bg
-    };
+    let colors = state.theme.colors;
     div()
         .id(id)
         .h_full()
@@ -387,20 +549,109 @@ fn order_button(
         .items_center()
         .justify_center()
         .rounded(px(5.0))
-        .bg(gpui_color(background))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
         .text_color(gpui_color(if enabled {
-            foreground
+            colors.text_primary
         } else {
-            state.theme.colors.text_muted
+            colors.text_muted
         }))
         .font_weight(platform_font_weight(TypographyRole::Strong))
         .role(Role::Button)
         .when(enabled, |button| {
-            button.cursor_pointer().on_click(move |_, _, cx| {
-                if let Some(frame) = frame.as_ref() {
-                    action(frame, account.clone(), quantity, cx);
-                }
-            })
+            button
+                .cursor_pointer()
+                .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+                .active(move |button| button.bg(gpui_color(colors.active_bg)))
+                .on_click(move |_, _, cx| {
+                    if let Some(frame) = frame.as_ref() {
+                        action(frame, account.clone(), quantity, cx);
+                    }
+                })
+        })
+        .when(!enabled, gpui::Styled::cursor_not_allowed)
+        .child(label)
+}
+
+#[derive(Clone, Copy)]
+struct TradeButtonPalette {
+    fill: aeris_design_system::ThemeColor,
+    hover: aeris_design_system::ThemeColor,
+    active: aeris_design_system::ThemeColor,
+    disabled: aeris_design_system::ThemeColor,
+    foreground: aeris_design_system::ThemeColor,
+    disabled_foreground: aeris_design_system::ThemeColor,
+}
+
+fn trade_button_palette(theme: &AerisTheme, side: aeris_trading::OrderSide) -> TradeButtonPalette {
+    let colors = theme.colors;
+    match side {
+        aeris_trading::OrderSide::Buy => TradeButtonPalette {
+            fill: colors.buy,
+            hover: colors.buy_hover,
+            active: colors.buy_active,
+            disabled: colors.buy_disabled,
+            foreground: colors.buy_foreground,
+            disabled_foreground: colors.buy_disabled_foreground,
+        },
+        aeris_trading::OrderSide::Sell => TradeButtonPalette {
+            fill: colors.sell,
+            hover: colors.sell_hover,
+            active: colors.sell_active,
+            disabled: colors.sell_disabled,
+            foreground: colors.sell_foreground,
+            disabled_foreground: colors.sell_disabled_foreground,
+        },
+    }
+}
+
+fn trade_order_button(
+    id: &'static str,
+    label: &'static str,
+    state: &TradingOrderControlsState<'_>,
+    enabled: bool,
+    side: aeris_trading::OrderSide,
+    action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
+) -> Stateful<Div> {
+    let frame = state.frame.cloned();
+    let account = state
+        .order_entry
+        .selected_account_id
+        .as_ref()
+        .map(|id| id.as_str().to_string());
+    let quantity = state.order_entry.quantity;
+    let palette = trade_button_palette(state.theme, side);
+    div()
+        .id(id)
+        .h_full()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .bg(gpui_color(if enabled {
+            palette.fill
+        } else {
+            palette.disabled
+        }))
+        .text_color(gpui_color(if enabled {
+            palette.foreground
+        } else {
+            palette.disabled_foreground
+        }))
+        .font_weight(platform_font_weight(TypographyRole::Strong))
+        .role(Role::Button)
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(move |button| button.bg(gpui_color(palette.hover)))
+                .active(move |button| button.bg(gpui_color(palette.active)))
+                .on_click(move |_, _, cx| {
+                    if let Some(frame) = frame.as_ref() {
+                        action(frame, account.clone(), quantity, cx);
+                    }
+                })
         })
         .when(!enabled, gpui::Styled::cursor_not_allowed)
         .child(label)
@@ -460,7 +711,7 @@ fn neutral_action_button(
     enabled: bool,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
-    let hover = theme.colors.button_fill_hover;
+    let colors = theme.colors;
     div()
         .id(id)
         .h_full()
@@ -469,18 +720,21 @@ fn neutral_action_button(
         .items_center()
         .justify_center()
         .rounded(px(5.0))
-        .bg(gpui_color(theme.colors.button_fill))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
         .text_color(gpui_color(if enabled {
-            theme.colors.button_fill_foreground
+            colors.text_primary
         } else {
-            theme.colors.text_muted
+            colors.text_muted
         }))
         .font_weight(platform_font_weight(TypographyRole::Strong))
         .role(Role::Button)
         .when(enabled, |button| {
             button
                 .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(hover)))
+                .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+                .active(move |button| button.bg(gpui_color(colors.active_bg)))
         })
         .when(!enabled, gpui::Styled::cursor_not_allowed)
         .child(label)
@@ -605,6 +859,9 @@ fn open_practice_account_dialog(
     let name = cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Account name"));
     let equity =
         cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Starting equity"));
+    name.update(cx, |input, input_cx| {
+        input.focus(window, input_cx);
+    });
     equity.update(cx, |input, input_cx| {
         input.set_value("50000", window, input_cx);
     });
@@ -661,36 +918,62 @@ fn practice_account_dialog(
                         .flex()
                         .justify_end()
                         .gap_2()
-                        .child(
-                            Button::new("practice_account_cancel")
-                                .variant(theme, ButtonVariant::Secondary)
-                                .label("Cancel")
-                                .on_click(move |_, _, cx| {
-                                    cancel.update(cx, |surface, surface_cx| {
-                                        surface.trading_pnl.account_creator = None;
-                                        surface_cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(
-                            Button::new("practice_account_create")
-                                .variant(theme, ButtonVariant::Filled)
-                                .label("Create")
-                                .on_click(move |_, _, cx| {
-                                    let name = name.read(cx).value().to_string();
-                                    let equity = equity.read(cx).value().to_string();
-                                    create.update(cx, |surface, surface_cx| {
-                                        surface.trading_pnl.account_creator = None;
-                                        surface_cx.notify();
-                                    });
-                                    aeris_desktop::trading::create_practice_account(
-                                        name, &equity, cx,
-                                    );
-                                }),
-                        ),
+                        .child(dialog_button(
+                            "practice_account_cancel",
+                            "Cancel",
+                            theme,
+                            move |cx| {
+                                cancel.update(cx, |surface, surface_cx| {
+                                    surface.trading_pnl.account_creator = None;
+                                    surface_cx.notify();
+                                });
+                            },
+                        ))
+                        .child(dialog_button(
+                            "practice_account_create",
+                            "Create",
+                            theme,
+                            move |cx| {
+                                let name = name.read(cx).value().to_string();
+                                let equity = equity.read(cx).value().to_string();
+                                create.update(cx, |surface, surface_cx| {
+                                    surface.trading_pnl.account_creator = None;
+                                    surface_cx.notify();
+                                });
+                                aeris_desktop::trading::create_practice_account(name, &equity, cx);
+                            },
+                        )),
                 ),
         )
         .into_any_element()
+}
+
+fn dialog_button(
+    id: &'static str,
+    label: &'static str,
+    theme: &AerisTheme,
+    action: impl Fn(&mut App) + 'static,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .h(px(CONTROL_HEIGHT))
+        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
+        .text_color(gpui_color(colors.text_primary))
+        .font_weight(platform_font_weight(TypographyRole::Strong))
+        .cursor_pointer()
+        .role(Role::Button)
+        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+        .active(move |button| button.bg(gpui_color(colors.active_bg)))
+        .on_click(move |_, _, cx| action(cx))
+        .child(label)
 }
 
 #[cfg(test)]
@@ -698,15 +981,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn join_buttons_use_the_raw_semantic_fill_and_text_tokens() {
+    fn market_buttons_use_the_dedicated_trade_tokens() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let buy = trade_button_palette(&theme, aeris_trading::OrderSide::Buy);
+            assert_eq!(buy.fill, theme.colors.buy);
+            assert_eq!(buy.hover, theme.colors.buy_hover);
+            assert_eq!(buy.active, theme.colors.buy_active);
+            assert_eq!(buy.disabled, theme.colors.buy_disabled);
+            assert_eq!(buy.foreground, theme.colors.buy_foreground);
             assert_eq!(
-                join_button_colors(&theme, aeris_trading::OrderSide::Buy),
-                (theme.colors.positive_subtle, theme.colors.text_positive)
+                buy.disabled_foreground,
+                theme.colors.buy_disabled_foreground
             );
+
+            let sell = trade_button_palette(&theme, aeris_trading::OrderSide::Sell);
+            assert_eq!(sell.fill, theme.colors.sell);
+            assert_eq!(sell.hover, theme.colors.sell_hover);
+            assert_eq!(sell.active, theme.colors.sell_active);
+            assert_eq!(sell.disabled, theme.colors.sell_disabled);
+            assert_eq!(sell.foreground, theme.colors.sell_foreground);
             assert_eq!(
-                join_button_colors(&theme, aeris_trading::OrderSide::Sell),
-                (theme.colors.negative_subtle, theme.colors.text_negative)
+                sell.disabled_foreground,
+                theme.colors.sell_disabled_foreground
             );
         }
     }

@@ -15,16 +15,16 @@ use super::{
     WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
     aeris_chart_theme, bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
     catalog_rejection_message, chart_context_menu_scale, chart_position_id, chart_status_detail,
-    chart_surface_notice, chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
-    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
-    clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
-    connection_presentation, connectivity_chart_state, current_instrument_menu_index,
-    default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
-    gpui_color, instrument_listing_refresh_needed, instrument_row_highlighted,
-    instrument_selector_label, instrument_target_after_close, price_axis_flyout_rows,
-    price_axis_root_rows, publication_chart_state, ready_state_can_complete_switch,
-    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
-    should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
+    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_control_foreground,
+    chrome_menu_extent, chrome_overlay_progress, chrome_typeahead_char_from, claim_once,
+    clamp_anchored_menu_left, clamp_chart_context_menu_origin, clamp_price_axis_menu_origin,
+    clamped_side_panel_width, connection_presentation, connectivity_chart_state,
+    current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
+    fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
+    instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
+    price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
+    series_selector_label, should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
     stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
     switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
@@ -397,6 +397,11 @@ mod timeframe_input {
             let surface = self.0.read(cx);
             let input = surface.timeframe_input.clone();
             let quick = surface.chrome_overlay == Some(ChromeOverlay::QuickTimeframe);
+            let practice_name = surface
+                .trading_pnl
+                .account_creator
+                .as_ref()
+                .map(|creator| creator.name.clone());
             div()
                 .size_full()
                 .track_focus(&surface.chrome_focus)
@@ -409,6 +414,7 @@ mod timeframe_input {
                     }
                 }))
                 .when(quick, |root| root.child(Input::new(&input)))
+                .when_some(practice_name, |root, input| root.child(Input::new(&input)))
         }
     }
 
@@ -539,6 +545,35 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn practice_account_name_input_does_not_open_symbol_typeahead(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        cx.update(|window, cx| {
+            let name = cx.new(|input_cx| InputState::new(window, input_cx));
+            let equity = cx.new(|input_cx| InputState::new(window, input_cx));
+            name.update(cx, |input, input_cx| input.focus(window, input_cx));
+            surface.update(cx, |surface, surface_cx| {
+                surface.trading_pnl.account_creator =
+                    Some(PracticeAccountDialogState { name, equity });
+                surface_cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("a");
+
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(surface.chrome_overlay, None);
+            let creator = surface
+                .trading_pnl
+                .account_creator
+                .as_ref()
+                .expect("practice dialog remains open");
+            assert_eq!(creator.name.read(cx).value().as_ref(), "a");
+        });
+    }
+
+    #[gpui::test]
     fn normal_timeframe_menu_keeps_keyboard_submission(cx: &mut TestAppContext) {
         let (surface, requests, _publications, cx) = harness(cx);
         cx.update(|window, cx| {
@@ -557,6 +592,18 @@ mod timeframe_input {
             .collect::<Vec<_>>();
         assert_eq!(selections, [ChartInterval::Day1]);
     }
+}
+
+#[test]
+fn chart_execution_time_converts_runtime_nanoseconds_to_utc_seconds_exactly() {
+    assert_eq!(
+        chart_time_seconds_from_unix_nanos(1_725_000_037_823_456_789),
+        1_725_000_037
+    );
+    assert_eq!(
+        chart_time_seconds_from_unix_nanos(1_725_000_037_000_000_000),
+        1_725_000_037
+    );
 }
 
 #[test]

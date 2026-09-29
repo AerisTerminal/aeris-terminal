@@ -593,6 +593,53 @@ impl TradingStore {
         Ok(())
     }
 
+    pub(super) fn delete_practice_account(
+        &mut self,
+        account_id: &TradingAccountId,
+        managed_bracket_ids: &[String],
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        for bracket_id in managed_bracket_ids {
+            transaction
+                .execute(
+                    "DELETE FROM managed_brackets WHERE bracket_id = ?1",
+                    [bracket_id],
+                )
+                .map_err(database_error)?;
+        }
+        for statement in [
+            "DELETE FROM trade_copier_targets WHERE source_account_id = ?1 OR target_account_id = ?1",
+            "DELETE FROM economic_event_risk_actions WHERE account_id = ?1",
+            "DELETE FROM discipline_states WHERE account_id = ?1",
+            "DELETE FROM session_plans WHERE account_id = ?1",
+            "DELETE FROM risk_trade_cycles WHERE account_id = ?1",
+            "DELETE FROM risk_rule_states WHERE account_id = ?1",
+            "DELETE FROM risk_locks WHERE account_id = ?1",
+            "DELETE FROM risk_profiles WHERE account_id = ?1",
+            "DELETE FROM protective_orders WHERE client_order_id IN (
+                SELECT client_order_id FROM orders WHERE account_id = ?1
+             )",
+            "DELETE FROM order_events WHERE order_id IN (
+                SELECT id FROM orders WHERE account_id = ?1
+             )",
+            "DELETE FROM fills WHERE account_id = ?1",
+            "DELETE FROM positions WHERE account_id = ?1",
+            "DELETE FROM orders WHERE account_id = ?1",
+            "DELETE FROM trade_copiers WHERE source_account_id = ?1",
+        ] {
+            transaction
+                .execute(statement, [account_id.as_str()])
+                .map_err(database_error)?;
+        }
+        let deleted = transaction
+            .execute("DELETE FROM accounts WHERE id = ?1", [account_id.as_str()])
+            .map_err(database_error)?;
+        if deleted != 1 {
+            return Err("practice account disappeared before deletion".to_string());
+        }
+        transaction.commit().map_err(database_error)
+    }
+
     pub(super) fn put_instrument(&self, instrument: &TradingInstrument) -> Result<(), String> {
         let contract = encode_contract(&instrument.contract)?;
         self.connection

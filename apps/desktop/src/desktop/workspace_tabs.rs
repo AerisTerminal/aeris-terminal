@@ -831,6 +831,7 @@ impl TerminalApp {
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
             time_zone: surface.chart_time_zone_id(cx).to_string(),
+            trading_visibility: surface.chart_trading_visibility(),
         })
     }
 
@@ -1020,6 +1021,28 @@ impl TerminalApp {
             cx.notify();
             return;
         }
+        if matches!(
+            action,
+            ChartSettingsAction::ToggleOrderManagementLines
+                | ChartSettingsAction::ToggleExecutionMarks
+        ) {
+            let mut visibility = surface.read(cx).chart_trading_visibility();
+            match action {
+                ChartSettingsAction::ToggleOrderManagementLines => {
+                    visibility.show_order_management_lines =
+                        !visibility.show_order_management_lines;
+                }
+                ChartSettingsAction::ToggleExecutionMarks => {
+                    visibility.show_execution_marks = !visibility.show_execution_marks;
+                }
+                _ => unreachable!(),
+            }
+            surface.update(cx, |surface, surface_cx| {
+                surface.set_chart_trading_visibility(visibility, surface_cx);
+            });
+            cx.notify();
+            return;
+        }
         if Self::apply_order_flow_settings_action(&surface, action, cx) {
             cx.notify();
             return;
@@ -1036,7 +1059,9 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleDeltaHistogram
             | ChartSettingsAction::ToggleTradeBubbles
             | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
-            | ChartSettingsAction::FootprintTicksPerRow(_) => unreachable!(),
+            | ChartSettingsAction::FootprintTicksPerRow(_)
+            | ChartSettingsAction::ToggleOrderManagementLines
+            | ChartSettingsAction::ToggleExecutionMarks => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -1073,7 +1098,9 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleDeltaHistogram
             | ChartSettingsAction::ToggleTradeBubbles
             | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
-            | ChartSettingsAction::FootprintTicksPerRow(_) => unreachable!(),
+            | ChartSettingsAction::FootprintTicksPerRow(_)
+            | ChartSettingsAction::ToggleOrderManagementLines
+            | ChartSettingsAction::ToggleExecutionMarks => unreachable!(),
         });
         cx.notify();
     }
@@ -1082,6 +1109,10 @@ impl TerminalApp {
         if let Some(surface) = self.chart_settings_surface(menu) {
             surface.update(cx, |surface, surface_cx| {
                 surface.reset_chart_appearance(surface_cx);
+                surface.set_chart_trading_visibility(
+                    ChartTradingVisibilitySettings::default(),
+                    surface_cx,
+                );
             });
         }
         self.chart_settings_color_picker = None;
@@ -1104,6 +1135,10 @@ impl TerminalApp {
             )),
             crosshair_mode: u32::from(snapshot.crosshair_mode),
             time_zone: snapshot.time_zone,
+            show_order_management_lines: Some(
+                snapshot.trading_visibility.show_order_management_lines,
+            ),
+            show_execution_marks: Some(snapshot.trading_visibility.show_execution_marks),
         })
     }
 
@@ -1132,11 +1167,16 @@ impl TerminalApp {
         } else {
             template.time_zone.as_str()
         };
+        let trading_visibility = ChartTradingVisibilitySettings {
+            show_order_management_lines: template.show_order_management_lines.unwrap_or(true),
+            show_execution_marks: template.show_execution_marks.unwrap_or(true),
+        };
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_type(chart_type, surface_cx);
             surface.set_chart_appearance(&appearance, surface_cx);
             surface.set_chart_crosshair_mode(crosshair_mode, surface_cx);
             surface.set_chart_time_zone(time_zone, surface_cx);
+            surface.set_chart_trading_visibility(trading_visibility, surface_cx);
         });
     }
 
