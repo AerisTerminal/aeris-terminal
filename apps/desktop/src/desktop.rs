@@ -121,6 +121,8 @@ use aeris_terminal_ui::{
     OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 use assets::UiIcon as HugeIcon;
+#[cfg(test)]
+use chart_context_menus::chart_context_menu_scale;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
     chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
@@ -169,8 +171,8 @@ use native_ui::{
     input::{Input, InputEvent, InputState},
     loader::Loader,
     menu::{
-        MenuRow, PopupAnimationOrigin, animate_popup_from_origin, flat_compact_menu_panel,
-        menu_separator,
+        MenuRow, MenuScale, PopupAnimationOrigin, animate_popup_from_origin,
+        flat_compact_menu_panel, menu_separator,
     },
     platform_font_weight, platform_tabular_numerals,
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
@@ -416,6 +418,9 @@ fn current_plan_limits() -> PlanLimits {
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
+/// Chart and price-axis context menus render this much above the shared
+/// screen-aware menu scale, so they read comfortably even at the 1x design size.
+const CHART_CONTEXT_MENU_EMPHASIS: f32 = 1.125;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;

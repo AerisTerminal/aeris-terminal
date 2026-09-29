@@ -5,8 +5,8 @@ use aeris_design_system::{
 };
 use gpui::{
     Animation, AnimationElement, AnimationExt, AnyElement, App, Bounds, ClickEvent, Div, ElementId,
-    IntoElement, Pixels, Point, RenderOnce, SharedString, Stateful, Window, div, ease_out_quint,
-    point, prelude::*, px,
+    IntoElement, Pixels, Point, Rems, RenderOnce, SharedString, Size, Stateful, Window, div,
+    ease_out_quint, point, prelude::*, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use std::time::Duration;
@@ -24,6 +24,59 @@ const SEARCH_ROW_HEIGHT: Pixels = px(36.0);
 const SEPARATOR_HEIGHT: Pixels = px(1.0);
 const POPUP_ENTER_DURATION: Duration = Duration::from_millis(130);
 const POPUP_ENTER_TRAVEL: f32 = 2.0;
+/// Logical viewport at which scaled menus render at their 1x design size.
+const MENU_SCALE_REFERENCE_WIDTH: f32 = 1440.0;
+const MENU_SCALE_REFERENCE_HEIGHT: f32 = 900.0;
+const MENU_SCALE_MAX: f32 = 1.5;
+
+/// Viewport-derived size factor for menus that should grow on large screens.
+///
+/// GPUI already converts device pixels to logical pixels, so this only grows
+/// menus when the logical viewport is larger than the reference, e.g. a 4K
+/// monitor at 100% scaling. The factor never shrinks below the 1x design:
+/// cramped viewports keep the clamping and scrolling the menus already have.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MenuScale(f32);
+
+impl MenuScale {
+    pub(crate) const BASE: Self = Self(1.0);
+
+    pub(crate) fn for_viewport(viewport: Size<Pixels>) -> Self {
+        let fit = (f32::from(viewport.width) / MENU_SCALE_REFERENCE_WIDTH)
+            .min(f32::from(viewport.height) / MENU_SCALE_REFERENCE_HEIGHT);
+        Self::clamped(fit)
+    }
+
+    /// Enlarges the menu by `emphasis`, still within the shared ceiling.
+    pub(crate) fn emphasized(self, emphasis: f32) -> Self {
+        Self::clamped(self.0 * emphasis)
+    }
+
+    fn clamped(factor: f32) -> Self {
+        Self(if factor.is_finite() {
+            factor.clamp(1.0, MENU_SCALE_MAX)
+        } else {
+            1.0
+        })
+    }
+
+    pub(crate) const fn factor(self) -> f32 {
+        self.0
+    }
+
+    /// Scales a 1x logical length.
+    pub(crate) fn len(self, logical: f32) -> f32 {
+        logical * self.0
+    }
+
+    pub(crate) fn px(self, logical: f32) -> Pixels {
+        px(self.len(logical))
+    }
+
+    pub(crate) fn rems(self, value: f32) -> Rems {
+        rems(value * self.0)
+    }
+}
 
 /// Normalized origin used to choose the direction of native menu motion.
 ///
@@ -101,11 +154,12 @@ enum RowKind {
     SearchResult,
 }
 
-fn row_geometry(kind: RowKind) -> (Pixels, Pixels, bool) {
-    match kind {
+fn row_geometry(kind: RowKind, scale: MenuScale) -> (Pixels, Pixels, bool) {
+    let (height, padding, rounded) = match kind {
         RowKind::Compact => (COMPACT_ROW_HEIGHT, px(12.0), false),
         RowKind::SearchResult => (SEARCH_ROW_HEIGHT, px(8.0), true),
-    }
+    };
+    (height * scale.factor(), padding * scale.factor(), rounded)
 }
 
 const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
@@ -117,6 +171,7 @@ const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
 pub(crate) struct MenuRow {
     id: ElementId,
     kind: RowKind,
+    scale: MenuScale,
     theme: AerisTheme,
     resting_fill: ThemeColor,
     label: SharedString,
@@ -182,6 +237,7 @@ impl MenuRow {
         Self {
             id: id.into(),
             kind,
+            scale: MenuScale::BASE,
             theme: *theme,
             resting_fill: theme.colors.surface_secondary,
             label: label.into(),
@@ -192,6 +248,12 @@ impl MenuRow {
             behavior: MenuRowBehavior::default(),
             edges: MenuRowEdges::default(),
         }
+    }
+
+    /// Sizes the row, its text and its spacing for a screen-aware menu.
+    pub(crate) fn scale(mut self, scale: MenuScale) -> Self {
+        self.scale = scale;
+        self
     }
 
     pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
@@ -284,7 +346,7 @@ impl MenuRow {
         } else {
             colors.hover_bg.over(self.resting_fill)
         };
-        let (height, horizontal_padding, rounded) = row_geometry(self.kind);
+        let (height, horizontal_padding, rounded) = row_geometry(self.kind, self.scale);
         let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels())
             - self.theme.dimensions.border_width)
             .max(0.0));
@@ -309,6 +371,7 @@ impl RenderOnce for MenuRow {
         let round_top = self.edges.round_top;
         let round_bottom = self.edges.round_bottom;
         let fill_width = self.edges.fill_width;
+        let scale = self.scale;
         let label = div()
             .flex_1()
             .min_w_0()
@@ -328,11 +391,11 @@ impl RenderOnce for MenuRow {
             .flex_none()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(scale.rems(0.5))
             .px(presentation.horizontal_padding)
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
-            .text_sm()
+            .text_size(scale.rems(0.875))
             .text_color(gpui_color(presentation.label_color))
             .when(presentation.rounded, |row| {
                 row.rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
@@ -433,8 +496,8 @@ mod tests {
     use gpui::{Bounds, point, px, size};
 
     use super::{
-        COMPACT_ROW_HEIGHT, POPUP_ENTER_TRAVEL, PopupAnimationOrigin, RowKind, SEARCH_ROW_HEIGHT,
-        accepts_input, row_geometry,
+        COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MenuScale, POPUP_ENTER_TRAVEL, PopupAnimationOrigin,
+        RowKind, SEARCH_ROW_HEIGHT, accepts_input, row_geometry,
     };
 
     #[test]
@@ -447,13 +510,31 @@ mod tests {
     #[test]
     fn row_kinds_preserve_menu_geometry() {
         assert_eq!(
-            row_geometry(RowKind::Compact),
+            row_geometry(RowKind::Compact, MenuScale::BASE),
             (COMPACT_ROW_HEIGHT, px(12.0), false)
         );
         assert_eq!(
-            row_geometry(RowKind::SearchResult),
+            row_geometry(RowKind::SearchResult, MenuScale::BASE),
             (SEARCH_ROW_HEIGHT, px(8.0), true)
         );
+        assert_eq!(
+            row_geometry(RowKind::SearchResult, MenuScale::clamped(1.5)),
+            (px(54.0), px(12.0), true)
+        );
+    }
+
+    #[test]
+    fn menu_scale_grows_with_large_viewports_and_stays_bounded() {
+        let scale =
+            |width: f32, height: f32| MenuScale::for_viewport(size(px(width), px(height))).factor();
+        assert!((scale(1440.0, 900.0) - 1.0).abs() < f32::EPSILON);
+        assert!((scale(1280.0, 720.0) - 1.0).abs() < f32::EPSILON);
+        assert!((scale(1920.0, 1080.0) - 1.2).abs() < 1e-5);
+        // The narrower axis wins so an ultrawide window does not inflate menus.
+        assert!((scale(3440.0, 900.0) - 1.0).abs() < f32::EPSILON);
+        assert!((scale(3840.0, 2160.0) - MENU_SCALE_MAX).abs() < f32::EPSILON);
+        assert!((scale(0.0, 0.0) - 1.0).abs() < f32::EPSILON);
+        assert!((MenuScale::BASE.emphasized(10.0).factor() - MENU_SCALE_MAX).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -2,9 +2,8 @@ use super::*;
 use crate::desktop::workspace_surface::OrderFlowMenuStudy;
 
 use super::chrome_menu::{
-    CHROME_MENU_SEARCH_HEIGHT, ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading,
-    chrome_menu_scroll_body, chrome_menu_search_header, chrome_menu_surface,
-    compact_menu_add_button, scrollable_menu_body,
+    ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading, chrome_menu_scroll_body,
+    chrome_menu_search_header, chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
 };
 
 pub(super) fn indicator_selector(
@@ -59,6 +58,7 @@ fn available_indicator_rows(
     app: &Entity<WorkspaceSurface>,
     specs: &[&chart_chrome::IndicatorSpec],
     keyboard_selection: usize,
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> Vec<AnyElement> {
     specs
@@ -69,6 +69,7 @@ fn available_indicator_rows(
             let add_app = app.clone();
             let indicator = native_indicator(spec.kind);
             MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
+                .scale(scale)
                 .highlighted(keyboard_selection == index)
                 .on_click(move |_, window, cx| {
                     if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
@@ -78,7 +79,7 @@ fn available_indicator_rows(
                     }
                 })
                 .trailing(button_activation(
-                    compact_menu_add_button(("add_indicator", index), theme),
+                    compact_menu_add_button(("add_indicator", index), scale, theme),
                     true,
                     move |window, cx| {
                         if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
@@ -108,25 +109,33 @@ pub(super) fn indicator_dialog_content(
     );
     let query = state.input.read(cx).value().to_ascii_lowercase();
     let order_flow_studies = order_flow_menu_studies(app, &query, cx);
-    let mut list = chrome_menu_scroll_body();
+    let scale = state.extent.scale;
+    let mut list = chrome_menu_scroll_body(scale);
     if !order_flow_studies.is_empty() {
         list = list
-            .child(chrome_menu_group_heading("Order flow", &colors))
-            .children(order_flow_study_rows(app, &order_flow_studies, theme));
+            .child(chrome_menu_group_heading("Order flow", scale, &colors))
+            .children(order_flow_study_rows(
+                app,
+                &order_flow_studies,
+                scale,
+                theme,
+            ));
     }
     if indicator_specs.is_empty() && order_flow_studies.is_empty() {
         list = list.child(chrome_menu_empty(
             "No matching indicators",
             "Try “average”, “bands”, or a kind like SMA.",
+            scale,
             &colors,
         ));
     } else if !indicator_specs.is_empty() {
         list = list
-            .child(chrome_menu_group_heading("Indicators", &colors))
+            .child(chrome_menu_group_heading("Indicators", scale, &colors))
             .children(available_indicator_rows(
                 app,
                 &indicator_specs,
                 state.keyboard_selection,
+                scale,
                 theme,
             ));
     }
@@ -136,7 +145,7 @@ pub(super) fn indicator_dialog_content(
             theme,
             app,
             hint,
-            CHROME_MENU_SEARCH_HEIGHT,
+            state.extent,
         ))
         .child(scrollable_menu_body(
             list,
@@ -168,6 +177,7 @@ fn order_flow_menu_studies(
 fn order_flow_study_rows(
     app: &Entity<WorkspaceSurface>,
     studies: &[OrderFlowMenuStudy],
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> Vec<AnyElement> {
     studies
@@ -177,6 +187,7 @@ fn order_flow_study_rows(
             let row_app = app.clone();
             let add_app = app.clone();
             MenuRow::search_result(("order_flow_study_row", index), study.label(), theme)
+                .scale(scale)
                 .on_click(move |_, window, cx| {
                     if row_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
                         row_app.update(cx, |app, app_cx| {
@@ -185,7 +196,7 @@ fn order_flow_study_rows(
                     }
                 })
                 .trailing(button_activation(
-                    compact_menu_add_button(("add_order_flow_study", index), theme),
+                    compact_menu_add_button(("add_order_flow_study", index), scale, theme),
                     true,
                     move |window, cx| {
                         if add_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {

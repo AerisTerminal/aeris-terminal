@@ -1,9 +1,9 @@
 use super::*;
 
 use super::chrome_menu::{
-    CHROME_MENU_ROW_ICON_WELL, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_SEARCH_ICON_SIZE,
-    ChromeMenuExtent, chrome_menu_close_button, chrome_menu_empty, chrome_menu_scroll_body,
-    chrome_menu_surface, compact_menu_add_button, scrollable_menu_body,
+    CHROME_MENU_ROW_ICON_WELL, CHROME_MENU_SEARCH_ICON_SIZE, ChromeMenuExtent,
+    chrome_menu_close_button, chrome_menu_empty, chrome_menu_scroll_body, chrome_menu_surface,
+    compact_menu_add_button, scrollable_menu_body,
 };
 
 fn provider_exchange_logo(provider: TerminalProvider) -> assets::ExchangeLogo {
@@ -101,11 +101,12 @@ pub(super) fn instrument_dialog_content(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let mut list = chrome_menu_scroll_body();
+    let mut list = chrome_menu_scroll_body(extent.scale);
     if state.instruments.is_empty() {
         list = list.child(chrome_menu_empty(
             "No matching markets",
             "Try a symbol or instrument code.",
+            extent.scale,
             &colors,
         ));
     } else {
@@ -115,14 +116,14 @@ pub(super) fn instrument_dialog_content(
                 .iter()
                 .enumerate()
                 .map(|(index, instrument)| {
-                    instrument_dialog_row(app, instrument, index, state, theme)
+                    instrument_dialog_row(app, instrument, index, state, extent.scale, theme)
                 }),
         );
     }
     chrome_menu_surface(&colors, extent)
         .child(state.input.as_ref().map_or_else(
             || div().into_any_element(),
-            |input| instrument_search_header(input, theme, app, state).into_any_element(),
+            |input| instrument_search_header(input, theme, app, state, extent).into_any_element(),
         ))
         .child(scrollable_menu_body(
             list,
@@ -137,6 +138,7 @@ pub(super) fn instrument_dialog_row(
     instrument: &InstrumentMenuEntry,
     index: usize,
     state: &InstrumentSelectorState,
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let checked = instrument.checked;
@@ -149,6 +151,7 @@ pub(super) fn instrument_dialog_row(
         instrument.label.clone(),
         theme,
     )
+    .scale(scale)
     .highlighted(instrument_row_highlighted(
         checked,
         index,
@@ -167,13 +170,13 @@ pub(super) fn instrument_dialog_row(
     });
     row = row.leading(exchange_mark(
         provider_exchange_logo(state.provider),
-        px(CHROME_MENU_ROW_ICON_WELL),
+        scale.px(CHROME_MENU_ROW_ICON_WELL),
         true,
         &theme.colors,
     ));
     if state.target == SymbolSelectionTarget::Watchlist {
         row = row.trailing(button_activation(
-            compact_menu_add_button(("add_watchlist_symbol", index), theme)
+            compact_menu_add_button(("add_watchlist_symbol", index), scale, theme)
                 .disabled(state.availability.selection_pending),
             !state.availability.selection_pending,
             move |_, cx| {
@@ -183,7 +186,7 @@ pub(super) fn instrument_dialog_row(
             },
         ));
     } else if checked {
-        row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
+        row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(scale.px(14.0)));
     }
     row
 }
@@ -193,23 +196,25 @@ pub(super) fn instrument_search_header(
     theme: &AerisTheme,
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
+    extent: ChromeMenuExtent,
 ) -> Div {
     let colors = theme.colors;
+    let scale = extent.scale;
     div()
-        .h(px(CHROME_MENU_SEARCH_HEIGHT))
+        .h(px(extent.search_height))
         .relative()
         .flex_none()
         .flex()
         .items_center()
-        .gap_2()
-        .px_3()
+        .gap(scale.rems(0.5))
+        .px(scale.px(12.0))
         .border_b_1()
         .border_color(gpui_color(colors.border))
-        .text_sm()
+        .text_size(scale.rems(0.875))
         .text_color(gpui_color(colors.text_primary))
         .child(exchange_mark(
             provider_exchange_logo(state.provider),
-            px(CHROME_MENU_SEARCH_ICON_SIZE),
+            scale.px(CHROME_MENU_SEARCH_ICON_SIZE),
             false,
             &colors,
         ))

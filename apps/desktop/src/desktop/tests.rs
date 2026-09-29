@@ -14,8 +14,8 @@ use super::{
     WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
     WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
     aeris_chart_theme, bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_position_id, chart_status_detail, chart_surface_notice,
-    chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
+    catalog_rejection_message, chart_context_menu_scale, chart_position_id, chart_status_detail,
+    chart_surface_notice, chrome_control_foreground, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, current_instrument_menu_index,
@@ -1661,14 +1661,34 @@ fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
 
 #[test]
 fn chart_context_menu_stays_inside_the_window() {
-    let overflow =
-        clamp_chart_context_menu_origin(point(px(2000.0), px(2000.0)), size(px(800.0), px(600.0)));
-    assert!(overflow.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+    let viewport = size(px(800.0), px(600.0));
+    let width = chart_context_menu_scale(viewport).px(CHART_CONTEXT_MENU_WIDTH);
+    let overflow = clamp_chart_context_menu_origin(point(px(2000.0), px(2000.0)), viewport);
+    assert!(overflow.x + width <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
     assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
     assert_eq!(
         clamp_chart_context_menu_origin(point(px(-20.0), px(-20.0)), size(px(800.0), px(600.0))),
         point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
     );
+}
+
+#[test]
+fn chart_context_menus_grow_on_large_screens() {
+    let laptop = chart_context_menu_scale(size(px(1280.0), px(720.0))).factor();
+    let desktop = chart_context_menu_scale(size(px(1920.0), px(1080.0))).factor();
+    let large = chart_context_menu_scale(size(px(3840.0), px(2160.0))).factor();
+    assert!(
+        laptop > 1.0,
+        "context menus are larger than the compact 1x design"
+    );
+    assert!(desktop > laptop);
+    assert!(large > desktop);
+    assert!(large <= 1.5, "growth stays bounded on very large screens");
+
+    let viewport = size(px(3840.0), px(2160.0));
+    let width = chart_context_menu_scale(viewport).px(CHART_CONTEXT_MENU_WIDTH);
+    let overflow = clamp_chart_context_menu_origin(point(px(9000.0), px(9000.0)), viewport);
+    assert!(overflow.x + width <= px(3840.0) - px(OVERLAY_EDGE_MARGIN));
 }
 
 #[test]
@@ -1729,17 +1749,35 @@ fn copy_price_feedback_generation_fences_stale_close_timers() {
 #[test]
 fn chrome_menus_shrink_to_fit_a_small_viewport() {
     let chrome_height = 44.0;
-    let roomy = chrome_menu_extent(size(px(1920.0), px(1200.0)), chrome_height);
+    let roomy = chrome_menu_extent(size(px(1440.0), px(900.0)), chrome_height);
     assert!((roomy.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
     assert!((roomy.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
+    assert!((roomy.search_height - CHROME_MENU_SEARCH_HEIGHT).abs() < f32::EPSILON);
 
     let cramped = chrome_menu_extent(size(px(800.0), px(600.0)), chrome_height);
     assert!(cramped.width < CHROME_MENU_WIDTH);
     assert!(cramped.width + OVERLAY_EDGE_MARGIN * 2.0 <= 800.0);
     assert!(cramped.list_height < CHROME_MENU_LIST_HEIGHT);
-    let drawn = CHROME_MENU_SEARCH_HEIGHT + cramped.list_height;
+    let drawn = cramped.search_height + cramped.list_height;
     assert!(drawn + chrome_height + OVERLAY_EDGE_MARGIN * 2.0 <= 600.0);
     assert!(drawn <= CHROME_MENU_MAX_HEIGHT);
+}
+
+#[test]
+fn chrome_menus_grow_with_a_large_viewport() {
+    let chrome_height = 44.0;
+    let large = chrome_menu_extent(size(px(3840.0), px(2160.0)), chrome_height);
+    let factor = large.scale.factor();
+    assert!(factor > 1.0);
+    assert!((large.width - CHROME_MENU_WIDTH * factor).abs() < 1e-3);
+    assert!((large.search_height - CHROME_MENU_SEARCH_HEIGHT * factor).abs() < 1e-3);
+    assert!((large.list_height - CHROME_MENU_LIST_HEIGHT * factor).abs() < 1e-3);
+    assert!(large.search_height + large.list_height <= CHROME_MENU_MAX_HEIGHT * factor);
+
+    // A wide but short window scales by its shorter axis and still fits vertically.
+    let short = chrome_menu_extent(size(px(3440.0), px(700.0)), chrome_height);
+    assert!((short.scale.factor() - 1.0).abs() < f32::EPSILON);
+    assert!(short.search_height + short.list_height + chrome_height <= 700.0);
 }
 
 #[test]
@@ -1747,7 +1785,7 @@ fn chrome_menus_never_exceed_a_tiny_viewport() {
     let tiny = chrome_menu_extent(size(px(240.0), px(180.0)), 44.0);
     assert!(tiny.width <= 240.0);
     assert!(tiny.list_height >= 0.0);
-    assert!(CHROME_MENU_SEARCH_HEIGHT + tiny.list_height <= 180.0 - 44.0);
+    assert!(tiny.search_height + tiny.list_height <= 180.0 - 44.0);
 }
 
 #[test]
@@ -1803,26 +1841,28 @@ fn price_axis_menu_stays_inside_the_window() {
         size(px(800.0), px(600.0)),
         false,
     );
+    let width = chart_context_menu_scale(size(px(800.0), px(600.0))).px(CHART_CONTEXT_MENU_WIDTH);
     assert!(overflow.x >= px(OVERLAY_EDGE_MARGIN));
     assert!(overflow.y >= px(OVERLAY_EDGE_MARGIN));
-    assert!(overflow.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+    assert!(overflow.x + width <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
     assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
 }
 
 #[test]
 fn price_axis_menu_opens_into_the_chart() {
+    let width = chart_context_menu_scale(size(px(800.0), px(600.0))).px(CHART_CONTEXT_MENU_WIDTH);
     let right_axis = clamp_price_axis_menu_origin(
         point(px(780.0), px(200.0)),
         size(px(800.0), px(600.0)),
         false,
     );
-    assert!(right_axis.x + px(CHART_CONTEXT_MENU_WIDTH) + px(PRICE_AXIS_MENU_GAP) <= px(780.0));
+    assert!(right_axis.x + width + px(PRICE_AXIS_MENU_GAP) <= px(780.0));
     assert!(right_axis.x >= px(OVERLAY_EDGE_MARGIN));
 
     let left_axis =
         clamp_price_axis_menu_origin(point(px(24.0), px(200.0)), size(px(800.0), px(600.0)), true);
     assert!(left_axis.x >= px(24.0) + px(PRICE_AXIS_MENU_GAP));
-    assert!(left_axis.x + px(CHART_CONTEXT_MENU_WIDTH) <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
+    assert!(left_axis.x + width <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
 }
 
 #[test]

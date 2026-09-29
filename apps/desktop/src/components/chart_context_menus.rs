@@ -2,8 +2,18 @@ use super::*;
 use crate::desktop::native_ui::theme::platform_border_width;
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
+    scaled_overlay_height(rows, separators, MenuScale::BASE)
+}
+
+pub(super) fn scaled_overlay_height(rows: f32, separators: f32, scale: MenuScale) -> f32 {
     // 1px border on each side. Compact dropdowns have no extra panel padding.
-    2.0 + CHART_CONTEXT_MENU_ROW_HEIGHT * rows + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
+    2.0 + scale.len(CHART_CONTEXT_MENU_ROW_HEIGHT) * rows
+        + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
+}
+
+/// Screen-aware scale shared by the chart and price-axis context menus.
+pub(super) fn chart_context_menu_scale(viewport: gpui::Size<Pixels>) -> MenuScale {
+    MenuScale::for_viewport(viewport).emphasized(CHART_CONTEXT_MENU_EMPHASIS)
 }
 
 pub(super) fn clamp_overlay_origin(
@@ -13,8 +23,19 @@ pub(super) fn clamp_overlay_origin(
     rows: f32,
     separators: f32,
 ) -> gpui::Point<Pixels> {
-    let width = px(width);
-    let height = px(overlay_height(rows, separators));
+    clamp_scaled_overlay_origin(origin, viewport, width, rows, separators, MenuScale::BASE)
+}
+
+fn clamp_scaled_overlay_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    width: f32,
+    rows: f32,
+    separators: f32,
+    scale: MenuScale,
+) -> gpui::Point<Pixels> {
+    let width = scale.px(width);
+    let height = px(scaled_overlay_height(rows, separators, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let max_x = (viewport.width - width - margin).max(margin);
     let max_y = (viewport.height - height - margin).max(margin);
@@ -28,7 +49,14 @@ pub(super) fn clamp_chart_context_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 8.0, 5.0)
+    clamp_scaled_overlay_origin(
+        origin,
+        viewport,
+        CHART_CONTEXT_MENU_WIDTH,
+        8.0,
+        5.0,
+        chart_context_menu_scale(viewport),
+    )
 }
 
 /// Prefer opening the Y-axis menu into the chart, then keep an edge margin so it
@@ -38,8 +66,9 @@ pub(super) fn clamp_price_axis_menu_origin(
     viewport: gpui::Size<Pixels>,
     axis_on_left: bool,
 ) -> gpui::Point<Pixels> {
-    let width = px(CHART_CONTEXT_MENU_WIDTH);
-    let height = px(overlay_height(7.0, 2.0));
+    let scale = chart_context_menu_scale(viewport);
+    let width = scale.px(CHART_CONTEXT_MENU_WIDTH);
+    let height = px(scaled_overlay_height(7.0, 2.0, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_MENU_GAP);
     let preferred_x = if axis_on_left {
@@ -61,15 +90,16 @@ pub(super) fn clamp_price_axis_flyout_origin(
     flyout: PriceAxisMenuFlyout,
 ) -> gpui::Point<Pixels> {
     let (rows, separators, row, separators_before) = flyout.geometry();
-    let width = px(PRICE_AXIS_FLYOUT_WIDTH);
-    let height = px(overlay_height(rows, separators));
+    let scale = chart_context_menu_scale(viewport);
+    let width = scale.px(PRICE_AXIS_FLYOUT_WIDTH);
+    let height = px(scaled_overlay_height(rows, separators, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_FLYOUT_GAP);
     let parent_y = root.y
-        + px(CHART_CONTEXT_MENU_ROW_HEIGHT * row)
+        + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * row
         + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before);
     let left_x = root.x - width - gap;
-    let right_x = root.x + px(CHART_CONTEXT_MENU_WIDTH) + gap;
+    let right_x = root.x + scale.px(CHART_CONTEXT_MENU_WIDTH) + gap;
     let max_x = (viewport.width - width - margin).max(margin);
     let x = if left_x >= margin {
         left_x
@@ -95,10 +125,14 @@ pub(super) fn chart_context_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> AnyElement {
+    let scale = chart_context_menu_scale(viewport);
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
     let popup_bounds = Bounds::new(
         origin,
-        size(px(CHART_CONTEXT_MENU_WIDTH), px(overlay_height(8.0, 5.0))),
+        size(
+            scale.px(CHART_CONTEXT_MENU_WIDTH),
+            px(scaled_overlay_height(8.0, 5.0, scale)),
+        ),
     );
     let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, popup_bounds);
     let dismiss = terminal.clone();
@@ -117,7 +151,7 @@ pub(super) fn chart_context_menu_layer(
             cx.stop_propagation();
         })
         .child(animate_popup_from_origin(
-            chart_context_menu_panel(terminal, menu, state, origin, theme),
+            chart_context_menu_panel(terminal, menu, state, origin, scale, theme),
             "chart_context_menu_enter",
             animation_origin,
         ))
@@ -129,12 +163,13 @@ pub(super) fn chart_context_menu_panel(
     menu: &ChartContextMenu,
     state: ChartContextMenuState,
     origin: gpui::Point<Pixels>,
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "chart_context_menu",
         origin,
-        px(CHART_CONTEXT_MENU_WIDTH),
+        scale.px(CHART_CONTEXT_MENU_WIDTH),
         theme,
     );
     let items = chart_context_menu_items(state);
@@ -148,6 +183,7 @@ pub(super) fn chart_context_menu_panel(
             item,
             theme,
             menu.clone(),
+            scale,
             index == 0,
             index == last,
         ));
@@ -221,9 +257,11 @@ pub(super) fn chart_context_menu_item(
     item: ChartContextMenuItem,
     theme: &AerisTheme,
     menu: ChartContextMenu,
+    scale: MenuScale,
     first: bool,
     last: bool,
 ) -> impl IntoElement {
+    let icon_size = scale.px(16.0);
     let action_terminal = terminal.clone();
     let destructive = item.action.is_destructive();
     let copy_feedback_generation = (item.action == ChartContextAction::CopyPrice)
@@ -251,13 +289,13 @@ pub(super) fn chart_context_menu_item(
     } = item;
     let leading = if let Some(generation) = copy_feedback_generation {
         div()
-            .size(px(16.0))
+            .size(icon_size)
             .flex()
             .items_center()
             .justify_center()
             .child(
                 header_icon(HugeIcon::CopySuccess)
-                    .with_size(px(16.0))
+                    .with_size(icon_size)
                     .color(icon_color),
             )
             .with_animation(
@@ -268,7 +306,7 @@ pub(super) fn chart_context_menu_item(
             .into_any_element()
     } else {
         header_icon(icon)
-            .with_size(px(16.0))
+            .with_size(icon_size)
             .color(icon_color)
             .into_any_element()
     };
@@ -278,6 +316,7 @@ pub(super) fn chart_context_menu_item(
         label
     };
     let mut row = MenuRow::compact(id, row_label, theme)
+        .scale(scale)
         .leading(leading)
         .disabled(!enabled)
         .destructive(destructive)
@@ -285,7 +324,7 @@ pub(super) fn chart_context_menu_item(
     if action == ChartContextAction::CopyPrice
         && let Some(price) = menu.copy_price.clone()
     {
-        row = row.trailing(copy_price_chip(price, enabled, theme));
+        row = row.trailing(copy_price_chip(price, enabled, scale, theme));
     }
     row.on_click(move |event, window, cx| {
         if enabled {
@@ -303,6 +342,7 @@ pub(super) fn chart_context_menu_item(
 pub(super) fn copy_price_chip(
     price: SharedString,
     enabled: bool,
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -313,8 +353,8 @@ pub(super) fn copy_price_chip(
     };
     div()
         .flex_none()
-        .h(px(18.0))
-        .px(px(6.0))
+        .h(scale.px(18.0))
+        .px(scale.px(6.0))
         .flex()
         .items_center()
         .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
@@ -323,7 +363,7 @@ pub(super) fn copy_price_chip(
         .bg(gpui_color(colors.surface_secondary))
         .font_family(aeris_design_system::platform_font_family())
         .font_features(platform_tabular_numerals())
-        .text_xs()
+        .text_size(scale.rems(0.75))
         .text_color(gpui_color(ink))
         .child(price)
 }
@@ -335,10 +375,14 @@ pub(super) fn price_axis_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> AnyElement {
+    let scale = chart_context_menu_scale(viewport);
     let origin = clamp_price_axis_menu_origin(menu.position, viewport, state.left);
     let root_bounds = Bounds::new(
         origin,
-        size(px(CHART_CONTEXT_MENU_WIDTH), px(overlay_height(7.0, 2.0))),
+        size(
+            scale.px(CHART_CONTEXT_MENU_WIDTH),
+            px(scaled_overlay_height(7.0, 2.0, scale)),
+        ),
     );
     let root_animation_origin = PopupAnimationOrigin::from_trigger(menu.position, root_bounds);
     let dismiss = terminal.clone();
@@ -357,7 +401,7 @@ pub(super) fn price_axis_menu_layer(
             cx.stop_propagation();
         })
         .child(animate_popup_from_origin(
-            price_axis_menu_panel(terminal, menu, state, origin, theme),
+            price_axis_menu_panel(terminal, menu, state, origin, scale, theme),
             "price_axis_menu_enter",
             root_animation_origin,
         ));
@@ -367,23 +411,24 @@ pub(super) fn price_axis_menu_layer(
         let flyout_bounds = Bounds::new(
             flyout_origin,
             size(
-                px(PRICE_AXIS_FLYOUT_WIDTH),
-                px(overlay_height(rows, separators)),
+                scale.px(PRICE_AXIS_FLYOUT_WIDTH),
+                px(scaled_overlay_height(rows, separators, scale)),
             ),
         );
+        let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
         let parent_y = origin.y
-            + px(CHART_CONTEXT_MENU_ROW_HEIGHT * row)
+            + row_height * row
             + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before)
-            + px(CHART_CONTEXT_MENU_ROW_HEIGHT / 2.0);
+            + row_height / 2.0;
         let parent_x = if flyout_origin.x < origin.x {
             origin.x
         } else {
-            origin.x + px(CHART_CONTEXT_MENU_WIDTH)
+            origin.x + scale.px(CHART_CONTEXT_MENU_WIDTH)
         };
         let flyout_animation_origin =
             PopupAnimationOrigin::from_trigger(point(parent_x, parent_y), flyout_bounds);
         layer = layer.child(animate_popup_from_origin(
-            price_axis_flyout_panel(terminal, menu, state, flyout_origin, viewport, theme),
+            price_axis_flyout_panel(terminal, menu, state, flyout_origin, viewport, scale, theme),
             ("price_axis_flyout_enter", menu.flyout as usize),
             flyout_animation_origin,
         ));
@@ -396,12 +441,13 @@ pub(super) fn price_axis_menu_panel(
     menu: &ChartContextMenu,
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "price_axis_menu",
         origin,
-        px(CHART_CONTEXT_MENU_WIDTH),
+        scale.px(CHART_CONTEXT_MENU_WIDTH),
         theme,
     );
     let rows = price_axis_root_rows(menu.flyout, state);
@@ -415,6 +461,7 @@ pub(super) fn price_axis_menu_panel(
             menu,
             row,
             theme,
+            scale,
             index == 0,
             index == last,
         ));
@@ -428,12 +475,13 @@ pub(super) fn price_axis_flyout_panel(
     state: PriceAxisMenuState,
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
+    scale: MenuScale,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
     let mut panel = flat_compact_menu_panel(
         "price_axis_flyout",
         origin,
-        px(PRICE_AXIS_FLYOUT_WIDTH),
+        scale.px(PRICE_AXIS_FLYOUT_WIDTH),
         theme,
     )
     .max_h(viewport.height)
@@ -449,6 +497,7 @@ pub(super) fn price_axis_flyout_panel(
             menu,
             row,
             theme,
+            scale,
             index == 0,
             index == last,
         ));
@@ -652,10 +701,12 @@ pub(super) fn price_axis_menu_item(
     menu: &ChartContextMenu,
     row: PriceAxisMenuRow,
     theme: &AerisTheme,
+    scale: MenuScale,
     first: bool,
     last: bool,
 ) -> impl IntoElement {
     let colors = theme.colors;
+    let icon_size = scale.px(16.0);
     let action_terminal = terminal.clone();
     let enabled = row.enabled();
     let checked = matches!(row, PriceAxisMenuRow::Toggle { checked: true, .. });
@@ -664,6 +715,7 @@ pub(super) fn price_axis_menu_item(
     let label = row.label();
     let menu = menu.clone();
     let mut item = MenuRow::compact(label, label, theme)
+        .scale(scale)
         .highlighted(open)
         .disabled(!enabled)
         .flush_in_panel(first, last)
@@ -683,18 +735,20 @@ pub(super) fn price_axis_menu_item(
     if checked {
         item = item.trailing(
             header_icon(HugeIcon::CheckIcon)
-                .with_size(px(16.0))
+                .with_size(icon_size)
                 .color(gpui_color(colors.icon)),
         );
     }
     if chevron {
-        item = item.trailing(header_icon(HugeIcon::ArrowRight).with_size(px(16.0)).color(
-            gpui_color(if enabled {
-                colors.icon
-            } else {
-                colors.text_muted
-            }),
-        ));
+        item = item.trailing(
+            header_icon(HugeIcon::ArrowRight)
+                .with_size(icon_size)
+                .color(gpui_color(if enabled {
+                    colors.icon
+                } else {
+                    colors.text_muted
+                })),
+        );
     }
     item
 }
