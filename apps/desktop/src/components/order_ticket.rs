@@ -31,14 +31,8 @@ pub(super) fn trading_order_controls(
             .iter()
             .any(|lock| Some(&lock.account_id) == selected_account);
     let ready = !locked && state.frame.is_some();
-    let bid_colors = aeris_terminal_ui::order_book_side_colors(
-        state.theme,
-        aeris_terminal_ui::OrderBookLevelSide::Bid,
-    );
-    let ask_colors = aeris_terminal_ui::order_book_side_colors(
-        state.theme,
-        aeris_terminal_ui::OrderBookLevelSide::Ask,
-    );
+    let (bid_fill, bid_text) = join_button_colors(state.theme, aeris_trading::OrderSide::Buy);
+    let (ask_fill, ask_text) = join_button_colors(state.theme, aeris_trading::OrderSide::Sell);
     div()
         .relative()
         .flex_none()
@@ -86,8 +80,8 @@ pub(super) fn trading_order_controls(
                 "Join Bid",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_bid.is_some()),
-                bid_colors.fill,
-                bid_colors.text,
+                bid_fill,
+                bid_text,
                 move |frame, account, quantity, cx| {
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Buy, cx);
                 },
@@ -97,8 +91,8 @@ pub(super) fn trading_order_controls(
                 "Join Ask",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_ask.is_some()),
-                ask_colors.fill,
-                ask_colors.text,
+                ask_fill,
+                ask_text,
                 move |frame, account, quantity, cx| {
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
@@ -112,6 +106,21 @@ pub(super) fn trading_order_controls(
                 .account_creator
                 .map(|creator| practice_account_dialog(state.app, creator, state.theme)),
         )
+}
+
+fn join_button_colors(
+    theme: &AerisTheme,
+    side: aeris_trading::OrderSide,
+) -> (
+    aeris_design_system::ThemeColor,
+    aeris_design_system::ThemeColor,
+) {
+    match side {
+        aeris_trading::OrderSide::Buy => (theme.colors.positive_subtle, theme.colors.text_positive),
+        aeris_trading::OrderSide::Sell => {
+            (theme.colors.negative_subtle, theme.colors.text_negative)
+        }
+    }
 }
 
 fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
@@ -687,6 +696,20 @@ fn practice_account_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_buttons_use_the_raw_semantic_fill_and_text_tokens() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            assert_eq!(
+                join_button_colors(&theme, aeris_trading::OrderSide::Buy),
+                (theme.colors.positive_subtle, theme.colors.text_positive)
+            );
+            assert_eq!(
+                join_button_colors(&theme, aeris_trading::OrderSide::Sell),
+                (theme.colors.negative_subtle, theme.colors.text_negative)
+            );
+        }
+    }
 
     #[test]
     fn money_format_keeps_exact_currency_scale() {
