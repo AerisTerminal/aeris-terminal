@@ -183,14 +183,24 @@ fn account_selector_menu(state: &TradingOrderControlsState<'_>) -> Stateful<Div>
             .justify_center()
             .rounded(px(4.0))
             .border_1()
-            .border_color(gpui_color(colors.border))
+            .border_color(gpui_color(colors.danger_ring))
             .bg(gpui_color(colors.surface))
-            .text_color(gpui_color(colors.icon))
+            .text_color(gpui_color(colors.danger))
             .cursor_pointer()
             .role(Role::Button)
             .aria_label(format!("Delete {}", account.display_name))
-            .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-            .active(move |button| button.bg(gpui_color(colors.active_bg)))
+            .hover(move |button| {
+                button
+                    .border_color(gpui_color(colors.danger))
+                    .bg(gpui_color(colors.danger))
+                    .text_color(gpui_color(colors.danger_foreground))
+            })
+            .active(move |button| {
+                button
+                    .border_color(gpui_color(colors.danger.with_alpha(0.85)))
+                    .bg(gpui_color(colors.danger.with_alpha(0.85)))
+                    .text_color(gpui_color(colors.danger_foreground))
+            })
             .child(header_icon(HugeIcon::Trash).with_size(px(14.0)))
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 delete.update(cx, |surface, surface_cx| {
