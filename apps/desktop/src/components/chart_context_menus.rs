@@ -755,21 +755,70 @@ pub(super) fn price_axis_menu_item(
     item
 }
 
+/// Where the viewer dragged the chart settings panel. `None` keeps it centered; every fresh
+/// open starts centered again.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct ChartSettingsPlacement {
+    pub(super) origin: Option<gpui::Point<Pixels>>,
+    /// Pointer offset from the panel origin captured when a title-bar drag begins.
+    grab: gpui::Point<Pixels>,
+}
+
+/// Cursor of the settings title bar, kept for the whole move because GPUI shows the drag
+/// source's cursor while a drag is active. GPUI's Windows backend maps the open/closed hand
+/// styles to the arrow (Windows has no grab cursor), so Windows uses its hand cursor instead.
+#[cfg(target_os = "windows")]
+const CHART_SETTINGS_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
+#[cfg(not(target_os = "windows"))]
+const CHART_SETTINGS_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::OpenHand;
+
+/// Drag payload for moving the chart settings panel by its title bar.
+#[derive(Clone)]
+struct ChartSettingsMoveDrag;
+
+impl Render for ChartSettingsMoveDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+impl TerminalApp {
+    fn begin_chart_settings_move(
+        &mut self,
+        pointer: gpui::Point<Pixels>,
+        origin: gpui::Point<Pixels>,
+    ) {
+        self.chart_settings_placement.grab = pointer - origin;
+    }
+
+    fn move_chart_settings(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let origin = pointer - self.chart_settings_placement.grab;
+        if self.chart_settings_placement.origin != Some(origin) {
+            self.chart_settings_placement.origin = Some(origin);
+            cx.notify();
+        }
+    }
+}
+
 pub(super) fn chart_settings_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
     view: ChartSettingsView<'_>,
+    placement: Option<gpui::Point<Pixels>>,
     viewport: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let scale = MenuScale::for_viewport(viewport);
+    let scale = chart_settings_scale(viewport);
     let panel_size = chart_settings_panel_size(viewport);
-    let bounds = Bounds::new(
-        chart_settings_centered_origin(viewport, panel_size),
+    let origin = clamp_chart_settings_origin(
+        placement.unwrap_or_else(|| chart_settings_centered_origin(viewport, panel_size)),
+        viewport,
         panel_size,
     );
+    let bounds = Bounds::new(origin, panel_size);
     let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, bounds);
     let dismiss = terminal.clone();
+    let move_terminal = terminal.clone();
     let content = match view.section {
         ChartSettingsSection::Series => {
             chart_series_settings(terminal, menu, view.snapshot, view.color_picker, theme)
@@ -794,6 +843,11 @@ pub(super) fn chart_settings_menu_layer(
                 terminal.close_chart_settings_menu(terminal_cx);
             });
             cx.stop_propagation();
+        })
+        .on_drag_move::<ChartSettingsMoveDrag>(move |event, _, cx| {
+            move_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.move_chart_settings(event.event.position, terminal_cx);
+            });
         })
         .child(animate_popup_from_origin(
             chart_settings_panel(terminal, menu, bounds, scale, content, view, theme),
@@ -854,8 +908,59 @@ fn chart_settings_panel(
         })
         .child(rem_scaled(
             scale,
-            chart_settings_panel_body(terminal, menu, content, view, theme),
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(chart_settings_title_bar(
+                    terminal,
+                    menu,
+                    bounds.origin,
+                    theme,
+                ))
+                .child(div().flex_1().min_h_0().child(chart_settings_panel_body(
+                    terminal, menu, content, view, theme,
+                ))),
         ))
+}
+
+/// Title bar of the settings panel. Dragging it moves the panel anywhere in the window.
+fn chart_settings_title_bar(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    origin: gpui::Point<Pixels>,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let grab_terminal = terminal.clone();
+    div()
+        .id("chart_settings_title_bar")
+        .h(design_rems(CHART_SETTINGS_TITLE_BAR_HEIGHT))
+        .flex_none()
+        .pl_3()
+        .pr_2()
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border_secondary))
+        .cursor(CHART_SETTINGS_MOVE_CURSOR)
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            grab_terminal.update(cx, |terminal, _| {
+                terminal.begin_chart_settings_move(event.position, origin);
+            });
+        })
+        .on_drag(ChartSettingsMoveDrag, |drag, _, _, cx| {
+            cx.new(|_| drag.clone())
+        })
+        .child(
+            div()
+                .text_sm()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_primary))
+                .child("Chart settings"),
+        )
+        .child(chart_settings_actions(terminal, menu, theme))
 }
 
 /// Sidebar, content surface and template dialog, laid out at the panel's scaled rem.
@@ -867,7 +972,6 @@ fn chart_settings_panel_body(
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
-    let actions = chart_settings_actions(terminal, menu, theme);
     div()
         .relative()
         .size_full()
@@ -899,8 +1003,7 @@ fn chart_settings_panel_body(
                             .px_4()
                             .py_3()
                             .child(content),
-                    )
-                    .child(actions),
+                    ),
             ),
         )
         .children(
@@ -925,9 +1028,6 @@ fn chart_settings_actions(
     let reset_terminal = terminal.clone();
     let reset_menu = menu.clone();
     div()
-        .absolute()
-        .top(design_rems(10.0))
-        .right(design_rems(10.0))
         .flex()
         .items_center()
         .gap_1()
@@ -967,10 +1067,31 @@ fn chart_settings_centered_origin(
     )
 }
 
-/// Grows the 900x660 design with the shared screen-aware [`MenuScale`] and insets it inside
-/// smaller viewports.
+/// Screen-aware scale of the settings panel: part of the shared menu growth, so it stays
+/// compact on large screens.
+fn chart_settings_scale(viewport: gpui::Size<Pixels>) -> MenuScale {
+    MenuScale::for_viewport(viewport).with_growth_share(CHART_SETTINGS_GROWTH_SHARE)
+}
+
+/// Keeps a dragged settings panel fully inside the window, even after the window shrinks.
+fn clamp_chart_settings_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    panel_size: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let max_x = (viewport.width - panel_size.width - margin).max(margin);
+    let max_y = (viewport.height - panel_size.height - margin).max(margin);
+    point(
+        origin.x.max(margin).min(max_x),
+        origin.y.max(margin).min(max_y),
+    )
+}
+
+/// Grows the 840x600 design with the compact settings scale and insets it inside smaller
+/// viewports.
 fn chart_settings_panel_size(viewport: gpui::Size<Pixels>) -> gpui::Size<Pixels> {
-    let scale = MenuScale::for_viewport(viewport);
+    let scale = chart_settings_scale(viewport);
     let horizontal_margin = OVERLAY_EDGE_MARGIN * 2.0;
     let vertical_margin = OVERLAY_EDGE_MARGIN * 2.0;
     size(
@@ -2813,15 +2934,41 @@ mod tests {
         );
         assert_eq!(
             chart_settings_centered_origin(viewport, panel_size),
-            point(px(250.0), px(170.0))
+            point(px(280.0), px(200.0))
+        );
+    }
+
+    #[test]
+    fn dragged_chart_settings_panel_stays_inside_the_window() {
+        let viewport = size(px(1_400.0), px(1_000.0));
+        let panel_size = chart_settings_panel_size(viewport);
+        assert_eq!(
+            clamp_chart_settings_origin(point(px(120.0), px(90.0)), viewport, panel_size),
+            point(px(120.0), px(90.0)),
+            "a drag inside the window is kept exactly"
+        );
+        assert_eq!(
+            clamp_chart_settings_origin(point(px(-500.0), px(-500.0)), viewport, panel_size),
+            point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
+        );
+        assert_eq!(
+            clamp_chart_settings_origin(point(px(5_000.0), px(5_000.0)), viewport, panel_size),
+            point(
+                viewport.width - panel_size.width - px(OVERLAY_EDGE_MARGIN),
+                viewport.height - panel_size.height - px(OVERLAY_EDGE_MARGIN)
+            )
         );
     }
 
     #[test]
     fn chart_settings_panel_grows_on_large_screens() {
         let viewport = size(px(3_840.0), px(2_160.0));
-        let factor = MenuScale::for_viewport(viewport).factor();
+        let factor = chart_settings_scale(viewport).factor();
         assert!(factor > 1.0);
+        assert!(
+            factor < MenuScale::for_viewport(viewport).factor(),
+            "settings grow less than the full-screen pickers"
+        );
         let panel_size = chart_settings_panel_size(viewport);
         assert_eq!(
             panel_size,

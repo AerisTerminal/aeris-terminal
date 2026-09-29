@@ -438,8 +438,13 @@ const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
 const QUICK_TIMEFRAME_POPUP_TOP: f32 = 64.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
 const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
-const CHART_SETTINGS_PANEL_WIDTH: f32 = 900.0;
-const CHART_SETTINGS_PANEL_HEIGHT: f32 = 660.0;
+const CHART_SETTINGS_PANEL_WIDTH: f32 = 840.0;
+const CHART_SETTINGS_PANEL_HEIGHT: f32 = 600.0;
+/// Share of the shared screen-aware menu growth the chart settings panel takes, so it stays
+/// compact on large screens like the chart context menus.
+const CHART_SETTINGS_GROWTH_SHARE: f32 = 0.5;
+/// Design height of the settings title bar that doubles as the panel's drag handle.
+const CHART_SETTINGS_TITLE_BAR_HEIGHT: f32 = 36.0;
 const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 176.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 // GPUI snaps the hover fill and the glyph to device pixels independently, so the
@@ -4166,6 +4171,7 @@ struct TerminalApp {
     chart_context_menu: Option<ChartContextMenu>,
     chart_context_copy_feedback_generation: u64,
     chart_settings_menu: Option<ChartContextMenu>,
+    chart_settings_placement: chart_context_menus::ChartSettingsPlacement,
     chart_settings_section: ChartSettingsSection,
     chart_settings_color_picker: Option<ChartColorPickerState>,
     chart_settings_template_overlay: ChartSettingsTemplateOverlay,

@@ -108,20 +108,6 @@ impl TerminalApp {
         for workspace in &mut workspaces {
             workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
         }
-        for workspace in &workspaces {
-            for pane in &workspace.panes {
-                pane.surface.update(cx, |surface, _| {
-                    surface.set_market_message_wake(market_frame_wake.callback());
-                });
-                cx.observe(&pane.surface, |app, surface, cx| {
-                    if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
-                        app.persist_workspace_layout_if_changed(cx);
-                    }
-                    cx.notify();
-                })
-                .detach();
-            }
-        }
         let active = init
             .active_workspace_id
             .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
@@ -134,8 +120,16 @@ impl TerminalApp {
             };
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, _| {
+                    surface.set_market_message_wake(market_frame_wake.callback());
                     surface.set_market_resource_class(resource_class);
                 });
+                cx.observe(&pane.surface, |app, surface, cx| {
+                    if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
+                        app.persist_workspace_layout_if_changed(cx);
+                    }
+                    cx.notify();
+                })
+                .detach();
             }
         }
         let persisted_watchlist = init.watchlist_entries.clone();
@@ -177,6 +171,7 @@ impl TerminalApp {
             chart_context_menu: None,
             chart_context_copy_feedback_generation: 0,
             chart_settings_menu: None,
+            chart_settings_placement: chart_context_menus::ChartSettingsPlacement::default(),
             chart_settings_section: ChartSettingsSection::Series,
             chart_settings_color_picker: None,
             chart_settings_template_overlay: ChartSettingsTemplateOverlay::Closed,
@@ -1579,6 +1574,8 @@ impl TerminalApp {
                 self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
                 self.chart_settings_template_name = None;
                 self.chart_settings_template_error = None;
+                self.chart_settings_placement =
+                    chart_context_menus::ChartSettingsPlacement::default();
                 self.chart_settings_menu = Some(menu);
             }
         }
@@ -2792,6 +2789,7 @@ impl TerminalApp {
                                 .is_some_and(|workspace| workspace.panes.len() > 1),
                         },
                     },
+                    self.chart_settings_placement.origin,
                     viewport,
                     &self.theme,
                 )
