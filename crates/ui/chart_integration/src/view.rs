@@ -2115,6 +2115,23 @@ impl AerisChartView {
         )
     }
 
+    /// Calendar date and wall time of a UTC instant in the selected chart time zone, for host
+    /// surfaces such as trade history that must read in the same zone as the time axis.
+    #[must_use]
+    pub fn time_zone_date_time_label_at(&self, utc_seconds: i64) -> String {
+        let parts = aeris_charts_engine::ChartTimeZone::parse(self.engine.time_zone_id())
+            .and_then(|zone| zone.local_parts(utc_seconds));
+        parts.map_or_else(
+            || "----------".to_string(),
+            |parts| {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
+                )
+            },
+        )
+    }
+
     /// Revision of the one-second presentation clock, separate from durable user state.
     #[must_use]
     pub const fn clock_revision(&self) -> u64 {

@@ -384,6 +384,22 @@ impl TerminalApp {
             .then(|| about_dialog_layer(terminal, self.update_presentation(), &self.theme))
     }
 
+    fn rendered_bottom_panel(
+        &self,
+        terminal: &Entity<Self>,
+        active: &Entity<WorkspaceSurface>,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        bottom_panel::bottom_panel(
+            bottom_panel::BottomPanelView {
+                terminal,
+                state: &self.bottom_panel,
+                chart: active.read(cx).chart.clone(),
+            },
+            &self.theme,
+        )
+    }
+
     fn rendered_header(
         &self,
         _terminal: &Entity<Self>,
@@ -439,6 +455,7 @@ impl Render for TerminalApp {
         let command_palette = self.rendered_command_palette(&terminal, cx);
         let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
         let header = self.rendered_header(&terminal, &active, cx);
+        let bottom_panel = self.rendered_bottom_panel(&terminal, &active, cx);
         let watchlist = self.watchlist_panel_state(cx);
         let market = workspace_market_area(
             &terminal,
@@ -494,6 +511,7 @@ impl Render for TerminalApp {
                     .bg(gpui_color(self.theme.colors.surface))
                     .child(market),
             )
+            .child(bottom_panel)
             .children(overlay)
             .children(context_menu)
             .children(settings_menu)

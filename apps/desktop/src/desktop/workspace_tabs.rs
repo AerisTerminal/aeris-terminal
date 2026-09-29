@@ -186,6 +186,7 @@ impl TerminalApp {
             chart_settings_persistence_dirty: false,
             account_menu_open: false,
             account_menu_anchor: None,
+            bottom_panel: bottom_panel::BottomPanelState::default(),
             profile_refresh_on_activation: false,
             about_dialog_open: false,
             command_palette_input,

@@ -154,6 +154,21 @@ fn observation(bid: i64, ask: i64, sequence: u64, time: i64) -> SimulatedMarketO
 }
 
 #[test]
+fn snapshot_projects_registered_instruments_with_provider_symbols() {
+    let directory = TestDirectory::new("snapshot-instruments");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.instruments, vec![instrument()]);
+    assert_eq!(
+        snapshot.instruments[0].contract.provenance.provider_symbol,
+        "ESZ6"
+    );
+}
+
+#[test]
 fn practice_accounts_are_user_created_with_durable_opening_equity() {
     let directory = TestDirectory::new("practice-account");
     let service = TradingService::start(config(&directory)).expect("service starts");

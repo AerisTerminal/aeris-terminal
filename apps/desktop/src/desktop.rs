@@ -4,6 +4,8 @@
 mod about_dialog;
 #[path = "assets.rs"]
 mod assets;
+#[path = "components/bottom_panel.rs"]
+mod bottom_panel;
 #[path = "chart_chrome.rs"]
 mod chart_chrome;
 #[path = "components/chart_context_menus.rs"]
@@ -4173,6 +4175,7 @@ struct TerminalApp {
     chart_settings_persistence_dirty: bool,
     account_menu_open: bool,
     account_menu_anchor: Option<gpui::Point<Pixels>>,
+    bottom_panel: bottom_panel::BottomPanelState,
     profile_refresh_on_activation: bool,
     about_dialog_open: bool,
     command_palette_input: Entity<InputState>,

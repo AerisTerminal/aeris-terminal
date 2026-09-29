@@ -229,6 +229,8 @@ pub struct TradingSnapshot {
     pub revision: u64,
     pub market_observation_error: Option<String>,
     pub accounts: Vec<TradingAccount>,
+    /// Registered contract terms, including each instrument's provider symbol.
+    pub instruments: Vec<TradingInstrument>,
     pub orders: Vec<Order>,
     pub order_events: Vec<OrderEvent>,
     pub fills: Vec<Fill>,
@@ -3642,6 +3644,7 @@ impl Coordinator {
 
     fn snapshot(&self) -> Result<TradingSnapshot, String> {
         if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
+            || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.orders.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.positions.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.protective_orders.len() > MAXIMUM_SNAPSHOT_ITEMS
@@ -3652,6 +3655,7 @@ impl Coordinator {
             revision: self.state.revision,
             market_observation_error: self.market_observation_error.clone(),
             accounts: self.state.accounts.values().cloned().collect(),
+            instruments: self.state.instruments.values().cloned().collect(),
             orders: self.state.orders.values().cloned().collect(),
             order_events: self
                 .state

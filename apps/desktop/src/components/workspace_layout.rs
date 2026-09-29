@@ -318,7 +318,15 @@ pub(super) fn workspace_market_area(
     theme: &AerisTheme,
     cx: &mut Context<TerminalApp>,
 ) -> impl IntoElement + use<> {
-    refresh_trading_pnl(active_surface.clone(), cx);
+    refresh_trading_pnl(
+        active_surface.clone(),
+        workspace
+            .panes
+            .iter()
+            .map(|pane| pane.surface.clone())
+            .collect(),
+        cx,
+    );
     let grid = workspace_pane_grid(terminal, workspace, theme, cx);
     let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
         let surface = pane.surface.read(cx);
@@ -555,47 +563,77 @@ fn trading_pnl_refresh_due(
     !state.trading_pnl.refresh_pending && now >= state.trading_pnl.next_refresh
 }
 
-fn refresh_trading_pnl(surface: Entity<WorkspaceSurface>, cx: &mut Context<TerminalApp>) {
+/// Polls the single trading owner once for the visible workspace and applies the
+/// same snapshot to every pane, so side-by-side charts never keep showing orders
+/// or positions another pane already changed. The active pane owns the poll
+/// cadence; each pane still projects the snapshot for its own product, and the
+/// bottom panel's trade history adopts it once per owner revision.
+fn refresh_trading_pnl(
+    active: Entity<WorkspaceSurface>,
+    panes: Vec<Entity<WorkspaceSurface>>,
+    cx: &mut Context<TerminalApp>,
+) {
     let now = std::time::Instant::now();
-    if !trading_pnl_refresh_due(&surface, cx, now) {
+    if !trading_pnl_refresh_due(&active, cx, now) {
         return;
     }
     let Some(service) = aeris_desktop::trading::handle() else {
         return;
     };
-    surface.update(cx, |state, _| {
+    active.update(cx, |state, _| {
         state.trading_pnl.refresh_pending = true;
         state.trading_pnl.next_refresh = now + std::time::Duration::from_millis(250);
     });
     let snapshot = cx
         .background_executor()
         .spawn(async move { service.snapshot() });
-    cx.spawn(async move |_, cx| {
+    cx.spawn(async move |terminal, cx| {
         let result = snapshot.await;
-        surface.update(cx, |state, state_cx| {
-            state.trading_pnl.refresh_pending = false;
-            let feedback = aeris_desktop::trading::latest_feedback();
-            if feedback.as_ref().map(|feedback| feedback.revision)
-                > state
-                    .trading_pnl
-                    .feedback
-                    .as_ref()
-                    .map(|feedback| feedback.revision)
-            {
-                state.trading_pnl.feedback = feedback;
-            }
-            match result {
-                Ok(snapshot) => apply_trading_snapshot(state, snapshot, state_cx),
-                Err(error) => {
-                    state.trading_pnl.market_error =
-                        Some(format!("Practice trading is unavailable: {error}"));
-                    state_cx.notify();
+        if let Ok(snapshot) = &result {
+            let _ = terminal.update(cx, |terminal, terminal_cx| {
+                if terminal.bottom_panel.apply_snapshot(snapshot) {
+                    terminal_cx.notify();
                 }
-            }
+            });
+        }
+        let feedback = aeris_desktop::trading::latest_feedback();
+        for surface in panes.iter().filter(|surface| *surface != &active) {
+            surface.update(cx, |state, state_cx| {
+                apply_trading_refresh(state, &result, feedback.as_ref(), state_cx);
+            });
+        }
+        active.update(cx, |state, state_cx| {
+            state.trading_pnl.refresh_pending = false;
+            apply_trading_refresh(state, &result, feedback.as_ref(), state_cx);
             schedule_trading_refresh(state_cx);
         });
     })
     .detach();
+}
+
+fn apply_trading_refresh(
+    state: &mut WorkspaceSurface,
+    result: &Result<aeris_trading_runtime::TradingSnapshot, String>,
+    feedback: Option<&aeris_desktop::trading::TradingCommandFeedback>,
+    state_cx: &mut Context<WorkspaceSurface>,
+) {
+    if feedback.map(|feedback| feedback.revision)
+        > state
+            .trading_pnl
+            .feedback
+            .as_ref()
+            .map(|feedback| feedback.revision)
+    {
+        state.trading_pnl.feedback = feedback.cloned();
+    }
+    match result {
+        Ok(snapshot) => apply_trading_snapshot(state, snapshot.clone(), state_cx),
+        Err(error) => {
+            state.trading_pnl.market_error =
+                Some(format!("Practice trading is unavailable: {error}"));
+            state_cx.notify();
+        }
+    }
 }
 
 /// Re-arms the bounded trading poll so fills and command outcomes appear even

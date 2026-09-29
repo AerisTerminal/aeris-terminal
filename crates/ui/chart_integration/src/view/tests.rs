@@ -1802,6 +1802,23 @@ fn selected_time_zone_clock_uses_the_same_utc_offset_notation_as_the_menu() {
 }
 
 #[test]
+fn selected_time_zone_date_time_crosses_the_local_calendar_day() {
+    let mut chart = AerisChartView::new();
+    // 2026-01-15 00:00:00 UTC is still the previous evening in New York.
+    assert_eq!(
+        chart.time_zone_date_time_label_at(1_768_435_200),
+        "2026-01-15 00:00:00"
+    );
+    chart
+        .set_time_zone("America/New_York")
+        .expect("New York zone accepted");
+    assert_eq!(
+        chart.time_zone_date_time_label_at(1_768_435_200),
+        "2026-01-14 19:00:00"
+    );
+}
+
+#[test]
 fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
     let mut chart = interactive_chart();
     let mut series = chart.appearance_settings();
