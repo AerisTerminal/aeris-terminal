@@ -8,15 +8,16 @@ use num_traits::ToPrimitive;
 use std::num::NonZeroUsize;
 
 const DEFAULT_CHART_DATA_QUEUE_CAPACITY: usize = 64;
-const FUTURE_TIME_PROJECTION_POINTS: usize = 512;
+const TIME_PROJECTION_POINTS: usize = 512;
 
-fn apply_future_time_projection(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
+fn apply_time_projection(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
     let definition = replay.bar_definition();
     let cadence = (definition.interval_seconds > 0
         && definition.trades_per_bar.is_none()
         && definition.calendar_months.is_none())
     .then_some(i64::from(definition.interval_seconds));
-    engine.set_future_time_projection(cadence, FUTURE_TIME_PROJECTION_POINTS);
+    engine.set_past_time_projection(cadence, TIME_PROJECTION_POINTS);
+    engine.set_future_time_projection(cadence, TIME_PROJECTION_POINTS);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -334,7 +335,7 @@ pub(crate) fn install_replay_with_deltas(
     }
 
     product_bars.replace(times, open, high, low, close);
-    apply_future_time_projection(engine, replay);
+    apply_time_projection(engine, replay);
     install_product_price_series(engine, chart_type, product_bars);
     apply_price_series_chrome(engine, replay.instrument().symbol.as_str());
     let _ = engine.set_series_data(

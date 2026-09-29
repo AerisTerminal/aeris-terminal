@@ -2061,7 +2061,7 @@ impl AerisChartView {
         aeris_charts_engine::TRADINGVIEW_TIME_ZONES
     }
 
-    /// Current DST-aware zone badge for a supported IANA identifier.
+    /// Current DST-aware UTC-offset badge for a supported IANA identifier.
     ///
     /// The offset is resolved for the supplied UTC instant rather than being stored as a static
     /// property, so zones that observe daylight saving time remain accurate throughout the year.
@@ -2069,13 +2069,7 @@ impl AerisChartView {
     pub fn time_zone_badge_label(time_zone: &str, utc_seconds: i64) -> Option<String> {
         let zone = aeris_charts_engine::ChartTimeZone::parse(time_zone)?;
         let parts = zone.local_parts(utc_seconds)?;
-        let offset = format_utc_offset(parts.offset_seconds);
-        let abbreviation = zone.abbreviation(utc_seconds);
-        Some(if abbreviation == "UTC" && parts.offset_seconds == 0 {
-            "UTC".to_string()
-        } else {
-            format!("{abbreviation} · {offset}")
-        })
+        Some(format_utc_offset(parts.offset_seconds))
     }
 
     /// Applies a selected IANA display time zone and records it as durable presentation state.
@@ -2098,7 +2092,27 @@ impl AerisChartView {
             return "--:--:--".to_string();
         };
         let seconds = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
-        self.engine.time_zone_clock_text(seconds, true)
+        self.time_zone_clock_label_at(seconds)
+    }
+
+    /// Clock text for the selected zone using the same TradingView-style UTC-offset notation as
+    /// the selector menu. Kept instant-addressable so the selected-state presentation is testable
+    /// across DST boundaries.
+    #[must_use]
+    pub fn time_zone_clock_label_at(&self, utc_seconds: i64) -> String {
+        let time_zone = self.engine.time_zone_id();
+        let Some(zone) = aeris_charts_engine::ChartTimeZone::parse(time_zone) else {
+            return "--:--:--".to_string();
+        };
+        let Some(parts) = zone.local_parts(utc_seconds) else {
+            return "--:--:--".to_string();
+        };
+        let badge = Self::time_zone_badge_label(time_zone, utc_seconds)
+            .unwrap_or_else(|| "UTC".to_string());
+        format!(
+            "{:02}:{:02}:{:02} {badge}",
+            parts.hour, parts.minute, parts.second
+        )
     }
 
     /// Revision of the one-second presentation clock, separate from durable user state.
@@ -2556,11 +2570,18 @@ impl AerisChartView {
 }
 
 fn format_utc_offset(offset_seconds: i32) -> String {
+    if offset_seconds == 0 {
+        return "UTC".to_string();
+    }
     let sign = if offset_seconds < 0 { '-' } else { '+' };
     let total_minutes = offset_seconds.unsigned_abs() / 60;
     let hours = total_minutes / 60;
     let minutes = total_minutes % 60;
-    format!("UTC{sign}{hours:02}:{minutes:02}")
+    if minutes == 0 {
+        format!("UTC{sign}{hours}")
+    } else {
+        format!("UTC{sign}{hours}:{minutes:02}")
+    }
 }
 
 impl Default for AerisChartView {

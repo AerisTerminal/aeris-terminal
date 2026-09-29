@@ -1766,23 +1766,39 @@ fn chart_time_zone_is_durable_user_state_and_uses_the_shared_parity_list() {
 }
 
 #[test]
-fn time_zone_badges_are_dst_aware_and_include_the_current_utc_offset() {
+fn time_zone_badges_match_tradingview_utc_offset_notation_and_follow_dst() {
     assert_eq!(
         AerisChartView::time_zone_badge_label("America/New_York", 1_768_435_200),
-        Some("EST · UTC-05:00".to_string())
+        Some("UTC-5".to_string())
     );
     assert_eq!(
         AerisChartView::time_zone_badge_label("America/New_York", 1_784_073_600),
-        Some("EDT · UTC-04:00".to_string())
+        Some("UTC-4".to_string())
     );
     assert_eq!(
         AerisChartView::time_zone_badge_label("Asia/Kolkata", 1_784_073_600),
-        Some("IST · UTC+05:30".to_string())
+        Some("UTC+5:30".to_string())
     );
     assert_eq!(
         AerisChartView::time_zone_badge_label("Etc/UTC", 1_784_073_600),
         Some("UTC".to_string())
     );
+}
+
+#[test]
+fn selected_time_zone_clock_uses_the_same_utc_offset_notation_as_the_menu() {
+    let mut chart = AerisChartView::new();
+    chart
+        .set_time_zone("America/New_York")
+        .expect("New York zone accepted");
+
+    let winter = chart.time_zone_clock_label_at(1_768_435_200);
+    assert!(winter.ends_with("UTC-5"), "{winter}");
+    assert!(!winter.contains("EST"), "{winter}");
+
+    let summer = chart.time_zone_clock_label_at(1_784_073_600);
+    assert!(summer.ends_with("UTC-4"), "{summer}");
+    assert!(!summer.contains("EDT"), "{summer}");
 }
 
 #[test]
