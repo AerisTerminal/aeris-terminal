@@ -1518,7 +1518,34 @@ fn scroll_to_latest_preserves_zoom_and_returns_to_real_time_edge() {
     chart.scroll_to_latest();
 
     assert!(chart.is_at_latest());
+    assert!((chart.engine.scroll_position() - REAL_TIME_RIGHT_OFFSET_BARS).abs() < f64::EPSILON);
     assert!((chart.engine.bar_spacing() - spacing).abs() < f64::EPSILON);
+}
+
+#[test]
+fn fixed_time_chart_projects_future_axis_times_without_synthetic_bars() {
+    let chart = interactive_chart();
+    let (times, _) = chart.engine.data_layer().series_data(0).unwrap();
+    assert!(times.len() >= 2);
+    let canonical_len = times.len();
+    let last = times.last().unwrap().to_f64().unwrap();
+    let previous = times[times.len() - 2].to_f64().unwrap();
+    let cadence = last - previous;
+    assert!(cadence > 0.0);
+    let last_index = chart.engine.time_to_index(last, false).unwrap();
+    let future_x = chart
+        .engine
+        .logical_to_coordinate(last_index.to_f64().unwrap() + 1.0)
+        .unwrap();
+
+    assert_eq!(
+        chart.engine.coordinate_to_time(future_x),
+        Some(last + cadence)
+    );
+    assert_eq!(
+        chart.engine.data_layer().series_data(0).unwrap().0.len(),
+        canonical_len
+    );
 }
 
 #[test]

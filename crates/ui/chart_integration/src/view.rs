@@ -95,6 +95,9 @@ fn replay_time_visible(replay: &ReplaySnapshot) -> bool {
 /// Bars a freshly installed market opens on, matching the runtime's visible share of its
 /// first history page.
 const INITIAL_VISIBLE_BARS: f64 = 600.0;
+/// Trading-style breathing room to the right of the newest real bar. Future timestamps are
+/// display-only; no candle or volume data is synthesized for these logical slots.
+const REAL_TIME_RIGHT_OFFSET_BARS: f64 = 24.0;
 
 fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) {
     let options = serde_json::json!({
@@ -113,6 +116,22 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) 
     engine
         .apply_options(&options)
         .expect("the platform text options derived from platform.css are valid");
+}
+
+fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
+    let definition = replay.bar_definition();
+    let right_offset = if definition.interval_seconds > 0
+        && definition.trades_per_bar.is_none()
+        && definition.calendar_months.is_none()
+    {
+        REAL_TIME_RIGHT_OFFSET_BARS
+    } else {
+        0.0
+    };
+    let options = serde_json::json!({ "timeScale": { "rightOffset": right_offset } }).to_string();
+    engine
+        .apply_options(&options)
+        .expect("the platform time-scale defaults are valid");
 }
 
 const LEGEND_INSET: f32 = 8.0;
@@ -979,6 +998,7 @@ impl AerisChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         apply_platform_chrome_contract(&mut engine, replay_time_visible(replay));
+        apply_replay_time_scale_defaults(&mut engine, replay);
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
         install_replay(
@@ -1076,6 +1096,7 @@ impl AerisChartView {
             &mut self.product_bars,
         );
         apply_platform_chrome_contract(&mut self.engine, replay_time_visible(replay));
+        apply_replay_time_scale_defaults(&mut self.engine, replay);
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
@@ -1382,7 +1403,12 @@ impl AerisChartView {
 
     /// Returns the time scale to the newest bar without changing its zoom.
     pub fn scroll_to_latest(&mut self) {
-        self.engine.scroll_to_real_time();
+        let offset = if self.engine.has_future_time_projection() {
+            REAL_TIME_RIGHT_OFFSET_BARS
+        } else {
+            0.0
+        };
+        self.engine.scroll_to_position(offset);
         self.invalidate_series_layout();
     }
 
@@ -1418,10 +1444,22 @@ impl AerisChartView {
         if start >= end {
             return false;
         }
-        self.engine.set_visible_time_range(
-            start.to_f64().unwrap_or(0.0) / 1_000_000_000.0,
-            end.to_f64().unwrap_or(0.0) / 1_000_000_000.0,
-        );
+        let start_seconds = start.to_f64().unwrap_or(0.0) / 1_000_000_000.0;
+        let end_seconds = end.to_f64().unwrap_or(0.0) / 1_000_000_000.0;
+        if self.engine.has_future_time_projection()
+            && let (Some(logical_start), Some(logical_end)) = (
+                self.product_bars.logical_at_time(start_seconds),
+                self.product_bars.logical_at_time(end_seconds),
+            )
+            && logical_start < logical_end
+        {
+            self.engine
+                .set_visible_logical_range(logical_start, logical_end);
+            self.invalidate_series_layout();
+            return true;
+        }
+        self.engine
+            .set_visible_time_range(start_seconds, end_seconds);
         self.invalidate_series_layout();
         self.fitted = true;
         true
@@ -1478,10 +1516,16 @@ impl AerisChartView {
         true
     }
 
-    /// Returns whether the newest bar is aligned to the real-time edge.
+    /// Returns whether the newest bar is at the platform's real-time presentation edge, including
+    /// its intentional right-side future-time margin.
     #[must_use]
     pub fn is_at_latest(&self) -> bool {
-        self.engine.scroll_position().abs() < f64::EPSILON
+        let expected = if self.engine.has_future_time_projection() {
+            REAL_TIME_RIGHT_OFFSET_BARS
+        } else {
+            0.0
+        };
+        (self.engine.scroll_position() - expected).abs() < f64::EPSILON
     }
 
     /// Returns whether a provider snapshot has populated the chart surface.
