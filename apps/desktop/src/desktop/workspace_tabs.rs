@@ -830,6 +830,7 @@ impl TerminalApp {
             appearance: surface.chart_appearance(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
+            time_zone: surface.chart_time_zone_id(cx).to_string(),
         })
     }
 
@@ -1102,6 +1103,7 @@ impl TerminalApp {
                 &snapshot.appearance,
             )),
             crosshair_mode: u32::from(snapshot.crosshair_mode),
+            time_zone: snapshot.time_zone,
         })
     }
 
@@ -1125,10 +1127,16 @@ impl TerminalApp {
             return;
         };
         let crosshair_mode = u8::try_from(template.crosshair_mode).unwrap_or(0).min(3);
+        let time_zone = if template.time_zone.is_empty() {
+            aeris_chart_integration::DEFAULT_TIME_ZONE
+        } else {
+            template.time_zone.as_str()
+        };
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_type(chart_type, surface_cx);
             surface.set_chart_appearance(&appearance, surface_cx);
             surface.set_chart_crosshair_mode(crosshair_mode, surface_cx);
+            surface.set_chart_time_zone(time_zone, surface_cx);
         });
     }
 

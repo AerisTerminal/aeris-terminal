@@ -1719,6 +1719,26 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
 }
 
 #[test]
+fn chart_time_zone_is_durable_user_state_and_uses_the_shared_parity_list() {
+    let mut chart = interactive_chart();
+    let revision = chart.user_state_revision();
+    assert_eq!(chart.time_zone_id(), aeris_charts_engine::DEFAULT_TIME_ZONE);
+    assert!(AerisChartView::supported_time_zones().contains(&"America/New_York"));
+    assert!(AerisChartView::supported_time_zones().contains(&"Asia/Astana"));
+
+    assert!(
+        chart
+            .set_time_zone("America/New_York")
+            .expect("supported zone")
+    );
+    assert_eq!(chart.time_zone_id(), "America/New_York");
+    assert_eq!(chart.user_state_revision(), revision + 1);
+    assert!(!chart.set_time_zone("America/New_York").expect("same zone"));
+    assert_eq!(chart.user_state_revision(), revision + 1);
+    assert!(chart.set_time_zone("Mars/Olympus_Mons").is_err());
+}
+
+#[test]
 fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
     let mut chart = interactive_chart();
     let mut series = chart.appearance_settings();

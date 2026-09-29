@@ -472,6 +472,13 @@ pub(super) fn header_controls(
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
         ))
+        .child(time_zone_selector(
+            app.clone(),
+            state.time_zone_clock,
+            &state.time_zone_id,
+            state.controls.enabled(HeaderControls::CHART_TYPE),
+            &state.theme,
+        ))
         .child(indicator_selector(
             app.clone(),
             state.indicator_input,
@@ -1116,6 +1123,61 @@ pub(super) fn chart_type_selector(
         .inset_0(),
     );
     chrome_tooltip("chart_type_selector", "Select chart type", trigger, theme)
+}
+
+pub(super) fn time_zone_selector(
+    app: Entity<WorkspaceSurface>,
+    clock: String,
+    time_zone_id: &str,
+    enabled: bool,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    let button = Button::new("time_zone_selector")
+        .label(clock)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .disabled(!enabled)
+        .when(enabled, Button::cursor_pointer)
+        .when(!enabled, Button::cursor_not_allowed);
+    let open_app = app.clone();
+    let bounds_app = app;
+    let button = button_activation_at(
+        chrome_button_style(button, theme, false, enabled),
+        enabled,
+        move |trigger_position, window, cx| {
+            open_app.update(cx, |app, app_cx| {
+                app.open_chrome_overlay_at(
+                    ChromeOverlay::TimeZone,
+                    trigger_position,
+                    window,
+                    app_cx,
+                );
+            });
+        },
+    );
+    let trigger = div().relative().flex_none().child(button).child(
+        canvas(
+            move |bounds, _, cx| {
+                bounds_app.update(cx, |app, app_cx| {
+                    if app.time_zone_trigger_bounds == Some(bounds) {
+                        return;
+                    }
+                    app.time_zone_trigger_bounds = Some(bounds);
+                    if app.chrome_overlay == Some(ChromeOverlay::TimeZone) {
+                        app_cx.notify();
+                    }
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .inset_0(),
+    );
+    chrome_tooltip(
+        "time_zone_selector",
+        format!("Chart time zone · {time_zone_id}"),
+        trigger,
+        theme,
+    )
 }
 
 pub(super) fn chrome_button_style(

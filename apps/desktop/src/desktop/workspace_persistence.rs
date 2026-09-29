@@ -390,6 +390,7 @@ mod tests {
             chart_type: "candles".to_string(),
             appearance: None,
             crosshair_mode: 1,
+            time_zone: "Etc/UTC".to_string(),
         };
 
         let watchlist_entry = WorkspaceWatchlistEntryState {

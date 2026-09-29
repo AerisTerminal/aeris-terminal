@@ -34,6 +34,7 @@ struct WorkspaceSurfaceInitialization {
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
+    time_zone_input: Entity<InputState>,
     chart_chrome: chart_chrome::ChartChromePreferences,
     restored_chart_state: Option<WorkspaceChartState>,
     restored_rithmic: Option<(ChartInterval, Option<(i64, i64)>)>,
@@ -105,6 +106,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         symbol_input: init.symbol_input,
         indicator_input: init.indicator_input,
         timeframe_input: init.timeframe_input,
+        time_zone_input: init.time_zone_input,
         indicator_message: None,
         studies: init.studies,
         study_settings_dialog: None,
@@ -117,6 +119,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         timeframe_hover_regions: 0,
         timeframe_trigger_bounds: None,
         chart_type_trigger_bounds: None,
+        time_zone_trigger_bounds: None,
         chrome_selection: 0,
         chrome_focus: init.chrome_focus,
         provider: startup.provider,
@@ -129,6 +132,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         rithmic_previous_selection: None,
         restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
         last_persisted_viewport: None,
+        last_chart_clock_revision: 0,
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
         pending_study_settings_request: None,
@@ -1338,6 +1342,7 @@ impl WorkspaceSurface {
             context_panel_height: self.context_panel_height.round().to_u32().unwrap_or(0),
             chart_link_group: u32::from(self.chart_link_group),
             chart_link_flags: u32::from(self.chart_link_flags),
+            time_zone: chart.time_zone_id().to_string(),
         })
     }
 
@@ -1381,7 +1386,15 @@ impl WorkspaceSurface {
             .order_flow
             .as_ref()
             .and_then(restored_order_flow_settings);
+        let time_zone = if state.time_zone.is_empty() {
+            aeris_chart_integration::DEFAULT_TIME_ZONE
+        } else {
+            state.time_zone.as_str()
+        };
         chart.update(cx, |chart, _| {
+            if let Err(error) = chart.set_time_zone(time_zone) {
+                eprintln!("Aeris persisted chart time zone could not be restored: {error}");
+            }
             if let Some(order_flow) = order_flow {
                 let _ = chart.set_order_flow_settings(order_flow);
             }
@@ -1418,6 +1431,7 @@ impl WorkspaceSurface {
         symbol_input: Option<Entity<InputState>>,
         indicator_input: Entity<InputState>,
         timeframe_input: Entity<InputState>,
+        time_zone_input: Entity<InputState>,
         chart_chrome: chart_chrome::ChartChromePreferences,
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
@@ -1452,6 +1466,7 @@ impl WorkspaceSurface {
             symbol_input,
             indicator_input,
             timeframe_input,
+            time_zone_input,
             chart_chrome,
             restored_chart_state,
             restored_rithmic,
@@ -1621,6 +1636,89 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn time_zone_matches(&self, cx: &App) -> Vec<&'static str> {
+        let query = self
+            .time_zone_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_ascii_lowercase();
+        AerisChartView::supported_time_zones()
+            .iter()
+            .copied()
+            .filter(|zone| {
+                if query.is_empty() {
+                    return true;
+                }
+                let normalized = zone.replace(['_', '/'], " ").to_ascii_lowercase();
+                zone.to_ascii_lowercase().contains(&query) || normalized.contains(&query)
+            })
+            .collect()
+    }
+
+    pub(super) fn chart_time_zone_id(&self, cx: &App) -> &'static str {
+        self.chart
+            .as_ref()
+            .map_or(aeris_chart_integration::DEFAULT_TIME_ZONE, |chart| {
+                chart.read(cx).time_zone_id()
+            })
+    }
+
+    pub(super) fn chart_time_zone_clock(&self, cx: &App) -> String {
+        self.chart.as_ref().map_or_else(
+            || "--:--:-- UTC".to_string(),
+            |chart| chart.read(cx).time_zone_clock_label(),
+        )
+    }
+
+    fn sync_time_zone_menu_selection(&mut self, cx: &App) {
+        let selected = self.chart_time_zone_id(cx);
+        self.chrome_selection = self
+            .time_zone_matches(cx)
+            .iter()
+            .position(|zone| *zone == selected)
+            .unwrap_or(0);
+    }
+
+    pub(super) fn set_chart_time_zone(&mut self, time_zone: &str, cx: &mut Context<Self>) -> bool {
+        let Some(chart) = &self.chart else {
+            return false;
+        };
+        match chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_time_zone(time_zone)?;
+            if changed {
+                chart_cx.notify();
+            }
+            Ok::<_, String>(changed)
+        }) {
+            Ok(true) => {
+                self.chart_persistence_dirty = true;
+                cx.notify();
+                true
+            }
+            Ok(false) => true,
+            Err(error) => {
+                self.indicator_message = Some(error);
+                false
+            }
+        }
+    }
+
+    pub(super) fn apply_highlighted_time_zone(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(time_zone) = self
+            .time_zone_matches(cx)
+            .get(self.chrome_selection)
+            .copied()
+            && self.set_chart_time_zone(time_zone, cx)
+        {
+            self.close_chrome_overlay(window, cx);
+        }
+    }
+
     pub(super) fn sync_quick_timeframe_selection(&mut self, cx: &App) {
         let query = self.timeframe_input.read(cx).value();
         let intervals = self.quick_timeframe_matches(cx);
@@ -1779,7 +1877,7 @@ impl WorkspaceSurface {
     fn activate_chrome_list_keyboard(&mut self) {
         if matches!(
             self.chrome_overlay,
-            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator)
+            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator | ChromeOverlay::TimeZone)
         ) {
             self.menu_state.chrome_list_keyboard = true;
         }
@@ -1802,6 +1900,9 @@ impl WorkspaceSurface {
                 self.scrolls
                     .indicator
                     .scroll_to_item(self.chrome_selection.saturating_add(1));
+            }
+            Some(ChromeOverlay::TimeZone) if !self.time_zone_matches(cx).is_empty() => {
+                self.scrolls.time_zone.scroll_to_item(self.chrome_selection);
             }
             _ => {}
         }
@@ -1905,6 +2006,11 @@ impl WorkspaceSurface {
                 input.set_value("", window, input_cx);
             });
         }
+        if overlay == ChromeOverlay::TimeZone {
+            self.time_zone_input.update(cx, |input, input_cx| {
+                input.set_value("", window, input_cx);
+            });
+        }
         if overlay != ChromeOverlay::Timeframe {
             self.timeframe_menu_flyout = None;
             self.menu_state.timeframe_flyout_keyboard = false;
@@ -1928,6 +2034,10 @@ impl WorkspaceSurface {
                 current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0)
             }
             ChromeOverlay::Indicator => 0,
+            ChromeOverlay::TimeZone => {
+                self.sync_time_zone_menu_selection(cx);
+                self.chrome_selection
+            }
         };
         match overlay {
             ChromeOverlay::Instrument => {
@@ -1945,6 +2055,11 @@ impl WorkspaceSurface {
             }
             ChromeOverlay::QuickTimeframe => {
                 self.timeframe_input
+                    .update(cx, |input, input_cx| input.focus(window, input_cx));
+            }
+            ChromeOverlay::TimeZone => {
+                self.scrolls.time_zone.set_offset(point(px(0.0), px(0.0)));
+                self.time_zone_input
                     .update(cx, |input, input_cx| input.focus(window, input_cx));
             }
             ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {
@@ -1973,6 +2088,11 @@ impl WorkspaceSurface {
             }
             Some(ChromeOverlay::QuickTimeframe) => {
                 self.timeframe_input.update(cx, |input, input_cx| {
+                    input.set_value("", window, input_cx);
+                });
+            }
+            Some(ChromeOverlay::TimeZone) => {
+                self.time_zone_input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
             }
@@ -2080,6 +2200,7 @@ impl WorkspaceSurface {
                     Some(ChromeOverlay::Timeframe) => self.timeframe_menu_keyboard_count(),
                     Some(ChromeOverlay::ChartType) => ChartType::ALL.len(),
                     Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
+                    Some(ChromeOverlay::TimeZone) => self.time_zone_matches(cx).len(),
                     None => 0,
                 };
                 self.activate_chrome_list_keyboard();
@@ -2125,7 +2246,7 @@ impl WorkspaceSurface {
                 }
             }
             Some(ChromeOverlay::ChartType) => self.apply_highlighted_chart_type(window, cx),
-            Some(ChromeOverlay::QuickTimeframe) => {
+            Some(ChromeOverlay::TimeZone | ChromeOverlay::QuickTimeframe) => {
                 // InputState emits PressEnter before propagating the raw key.
                 // Its subscription owns submission: handling both would submit
                 // again after closing clears the query, selecting another interval.
@@ -2175,7 +2296,8 @@ impl WorkspaceSurface {
                 | ChromeOverlay::Indicator
                 | ChromeOverlay::Timeframe
                 | ChromeOverlay::QuickTimeframe
-                | ChromeOverlay::ChartType,
+                | ChromeOverlay::ChartType
+                | ChromeOverlay::TimeZone,
             )
             | None => false,
         }
@@ -2310,6 +2432,7 @@ impl WorkspaceSurface {
                     });
                 }
                 self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
+                self.last_chart_clock_revision = chart.read(cx).clock_revision();
                 observe_chart(Some(&chart), cx);
                 self.chart = Some(chart);
                 self.synchronize_runtime_studies(cx);

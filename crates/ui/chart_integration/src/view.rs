@@ -834,6 +834,9 @@ pub struct AerisChartView {
     user_state_revision: u64,
     /// The pending one-second self-wake. Held so only one is ever in flight.
     clock_tick: Option<Task<()>>,
+    /// Monotonic presentation-clock revision. It advances once per scheduled clock wake and is
+    /// intentionally separate from durable user state so a ticking header never dirties storage.
+    clock_revision: u64,
     /// Hover dwell before a close control reveals its action tooltip; the engine owns no clock.
     trading_tooltip: TradingTooltipDwell,
     #[cfg(feature = "diagnostics")]
@@ -929,6 +932,7 @@ impl AerisChartView {
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
             clock_tick: None,
+            clock_revision: 0,
             trading_tooltip: TradingTooltipDwell::Idle,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
@@ -1033,6 +1037,7 @@ impl AerisChartView {
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
             clock_tick: None,
+            clock_revision: 0,
             trading_tooltip: TradingTooltipDwell::Idle,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
@@ -1742,6 +1747,7 @@ impl AerisChartView {
             cx.background_executor().timer(delay).await;
             let _ = chart.update(cx, |chart, chart_cx| {
                 chart.clock_tick = None;
+                chart.clock_revision = chart.clock_revision.wrapping_add(1);
                 chart_cx.notify();
             });
         }));
@@ -1997,6 +2003,47 @@ impl AerisChartView {
         }
         self.mark_user_state_changed();
         true
+    }
+
+    /// Selected IANA display time zone. Canonical chart timestamps remain UTC.
+    #[must_use]
+    pub fn time_zone_id(&self) -> &'static str {
+        self.engine.time_zone_id()
+    }
+
+    /// TradingView-parity time zones exposed by Aeris Charts.
+    #[must_use]
+    pub const fn supported_time_zones() -> &'static [&'static str] {
+        aeris_charts_engine::TRADINGVIEW_TIME_ZONES
+    }
+
+    /// Applies a selected IANA display time zone and records it as durable presentation state.
+    ///
+    /// # Errors
+    /// Returns an error when Aeris Charts rejects the supplied time-zone identifier.
+    pub fn set_time_zone(&mut self, time_zone: &str) -> Result<bool, String> {
+        let changed = self.engine.set_time_zone(time_zone)?;
+        if changed {
+            self.invalidate_series_layout();
+            self.mark_user_state_changed();
+        }
+        Ok(changed)
+    }
+
+    /// Current clock text rendered in the selected chart time zone.
+    #[must_use]
+    pub fn time_zone_clock_label(&self) -> String {
+        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return "--:--:--".to_string();
+        };
+        let seconds = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+        self.engine.time_zone_clock_text(seconds, true)
+    }
+
+    /// Revision of the one-second presentation clock, separate from durable user state.
+    #[must_use]
+    pub const fn clock_revision(&self) -> u64 {
+        self.clock_revision
     }
 
     /// Monotonic revision of durable user-authored presentation state.

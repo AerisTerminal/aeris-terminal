@@ -11,9 +11,15 @@ pub(super) fn chrome_overlay_layer(
     let overlay = app_state.chrome_overlay?;
     let compact_panel = matches!(
         overlay,
-        ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe | ChromeOverlay::ChartType
+        ChromeOverlay::Timeframe
+            | ChromeOverlay::QuickTimeframe
+            | ChromeOverlay::ChartType
+            | ChromeOverlay::TimeZone
     );
-    let anchored_menu = matches!(overlay, ChromeOverlay::Timeframe | ChromeOverlay::ChartType);
+    let anchored_menu = matches!(
+        overlay,
+        ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::TimeZone
+    );
     let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
     let dual_container = overlay == ChromeOverlay::Timeframe;
     let menu_left = compact_menu_left(overlay, app_state, viewport);
@@ -92,6 +98,9 @@ fn chrome_overlay_animation_origin(
             ChromeOverlay::ChartType => app_state
                 .chart_type_trigger_bounds
                 .map(|bounds| bounds.center()),
+            ChromeOverlay::TimeZone => app_state
+                .time_zone_trigger_bounds
+                .map(|bounds| bounds.center()),
             ChromeOverlay::Instrument | ChromeOverlay::Indicator => None,
         });
     let Some(trigger) = trigger else {
@@ -111,6 +120,7 @@ fn chrome_overlay_animation_origin(
             (menu_left, timeframe_overlay_extent(groups.len(), flyout).0)
         }
         ChromeOverlay::ChartType => (menu_left, TIMEFRAME_MENU_WIDTH),
+        ChromeOverlay::TimeZone => (menu_left, TIME_ZONE_MENU_WIDTH),
         ChromeOverlay::QuickTimeframe => (
             ((viewport.width - px(QUICK_TIMEFRAME_POPUP_WIDTH)) / 2.0).max(px(0.0)),
             QUICK_TIMEFRAME_POPUP_WIDTH,
@@ -140,6 +150,7 @@ pub(super) fn compact_menu_left(
 ) -> Pixels {
     let (trigger, width) = match overlay {
         ChromeOverlay::ChartType => (app_state.chart_type_trigger_bounds, TIMEFRAME_MENU_WIDTH),
+        ChromeOverlay::TimeZone => (app_state.time_zone_trigger_bounds, TIME_ZONE_MENU_WIDTH),
         ChromeOverlay::Timeframe => {
             let intervals = app_state.available_intervals();
             let groups = timeframe_menu_groups(intervals);
@@ -242,6 +253,9 @@ pub(super) fn chrome_overlay_content(
             theme,
         )
         .into_any_element(),
+        ChromeOverlay::TimeZone => {
+            time_zone_overlay_content(app_state, app, theme, cx).into_any_element()
+        }
     }
 }
 
@@ -257,7 +271,8 @@ const fn chrome_overlay_elevation(overlay: ChromeOverlay) -> ChromeOverlayElevat
         ChromeOverlay::Instrument
         | ChromeOverlay::Indicator
         | ChromeOverlay::Timeframe
-        | ChromeOverlay::ChartType => ChromeOverlayElevation::Flat,
+        | ChromeOverlay::ChartType
+        | ChromeOverlay::TimeZone => ChromeOverlayElevation::Flat,
     }
 }
 
@@ -627,6 +642,60 @@ pub(super) fn chart_type_overlay_content(
         ));
     }
     panel
+}
+
+pub(super) fn time_zone_overlay_content(
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+    cx: &App,
+) -> impl IntoElement {
+    let colors = theme.colors;
+    let matches = app_state.time_zone_matches(cx);
+    let selected = app_state.chart_time_zone_id(cx);
+    let last = matches.len().saturating_sub(1);
+    let mut rows = div()
+        .id("time_zone_rows")
+        .flex()
+        .flex_col()
+        .max_h(px(TIME_ZONE_MENU_MAX_HEIGHT - 58.0))
+        .overflow_y_scroll()
+        .track_scroll(&app_state.scrolls.time_zone);
+    for (index, time_zone) in matches.into_iter().enumerate() {
+        let row_app = app.clone();
+        let mut row = MenuRow::compact(("time_zone_row", index), time_zone, theme)
+            .highlighted(app_state.chrome_selection == index)
+            .flush_in_panel(index == 0, index == last)
+            .on_click(move |_, window, cx| {
+                row_app.update(cx, |app, app_cx| {
+                    if app.set_chart_time_zone(time_zone, app_cx) {
+                        app.close_chrome_overlay(window, app_cx);
+                    }
+                });
+            });
+        if time_zone == selected {
+            row = row.trailing(
+                header_icon(HugeIcon::CheckIcon)
+                    .with_size(px(16.0))
+                    .color(gpui_color(colors.icon)),
+            );
+        }
+        rows = rows.child(row);
+    }
+    div()
+        .w(px(TIME_ZONE_MENU_WIDTH))
+        .max_h(px(TIME_ZONE_MENU_MAX_HEIGHT))
+        .flex()
+        .flex_col()
+        .bg(gpui_color(colors.surface))
+        .child(
+            div()
+                .p_2()
+                .border_b_1()
+                .border_color(gpui_color(colors.border))
+                .child(Input::new(&app_state.time_zone_input)),
+        )
+        .child(rows)
 }
 
 pub(super) fn quick_timeframe_overlay_content(

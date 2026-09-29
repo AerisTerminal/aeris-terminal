@@ -220,6 +220,9 @@ pub struct WorkspaceChartSettingsTemplateState {
     pub appearance: Option<WorkspaceChartAppearanceState>,
     #[prost(uint32, tag = "4")]
     pub crosshair_mode: u32,
+    /// Persisted IANA display time zone. Empty in legacy workspaces means Etc/UTC.
+    #[prost(string, tag = "5")]
+    pub time_zone: String,
 }
 
 /// Persisted presentation state for one pane.
@@ -313,6 +316,9 @@ pub struct WorkspaceChartState {
     /// older workspaces) uses the default height.
     #[prost(uint32, tag = "15")]
     pub context_panel_height: u32,
+    /// Persisted IANA display time zone. Empty in legacy workspaces means Etc/UTC.
+    #[prost(string, tag = "16")]
+    pub time_zone: String,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]

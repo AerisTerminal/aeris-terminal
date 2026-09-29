@@ -400,6 +400,9 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
         {
             chart.appearance = None;
         }
+        if !valid_chart_time_zone(&chart.time_zone) {
+            chart.time_zone.clear();
+        }
         if chart.context_panel_tab > 4 {
             chart.context_panel_tab = 0;
         }
@@ -495,10 +498,15 @@ fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState)
         && !template.name.chars().any(char::is_control)
         && aeris_chart_integration::ChartType::from_identifier(&template.chart_type).is_some()
         && template.crosshair_mode <= 3
+        && valid_chart_time_zone(&template.time_zone)
         && template
             .appearance
             .as_ref()
             .is_some_and(valid_chart_appearance)
+}
+
+fn valid_chart_time_zone(time_zone: &str) -> bool {
+    time_zone.is_empty() || aeris_chart_integration::TRADINGVIEW_TIME_ZONES.contains(&time_zone)
 }
 
 fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
@@ -824,6 +832,7 @@ mod tests {
             chart_link_group: 2,
             chart_link_flags: 3,
             context_panel_height: 320,
+            time_zone: "America/New_York".to_string(),
         }
     }
 
@@ -833,7 +842,39 @@ mod tests {
             chart_type: "candles".to_string(),
             appearance: round_trip_chart_state().appearance,
             crosshair_mode: 1,
+            time_zone: "Europe/London".to_string(),
         }
+    }
+
+    #[test]
+    fn sanitizer_preserves_supported_time_zones_and_drops_unknown_ones_to_legacy_default() {
+        let mut workspace = default_workspace();
+        let pane = workspace.workspace_tabs[0].panes.first_mut().expect("pane");
+        pane.chart = Some(round_trip_chart_state());
+        let sanitized = sanitize_workspace(workspace.clone());
+        assert_eq!(
+            sanitized.workspace_tabs[0].panes[0]
+                .chart
+                .as_ref()
+                .expect("chart")
+                .time_zone,
+            "America/New_York"
+        );
+
+        workspace.workspace_tabs[0].panes[0]
+            .chart
+            .as_mut()
+            .expect("chart")
+            .time_zone = "Mars/Olympus_Mons".to_string();
+        let sanitized = sanitize_workspace(workspace);
+        assert!(
+            sanitized.workspace_tabs[0].panes[0]
+                .chart
+                .as_ref()
+                .expect("chart")
+                .time_zone
+                .is_empty()
+        );
     }
 
     #[test]
