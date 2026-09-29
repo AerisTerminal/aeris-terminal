@@ -14,6 +14,7 @@ pub enum UiIcon {
     ArrowRightDouble,
     ArrowRight,
     Close,
+    CloseBold,
     Chart,
     CheckIcon,
     ChevronDown,
@@ -48,12 +49,13 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 37] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
         Self::ArrowRight,
         Self::Close,
+        Self::CloseBold,
         Self::Chart,
         Self::CheckIcon,
         Self::ChevronDown,
@@ -95,6 +97,7 @@ impl UiIcon {
             Self::ArrowRightDouble => "arrow-right-double.svg",
             Self::ArrowRight => "arrow-right.svg",
             Self::Close => "close.svg",
+            Self::CloseBold => "close-bold.svg",
             Self::Chart => "chart.svg",
             Self::CheckIcon => "check.svg",
             Self::ChevronDown => "chevron-down.svg",
@@ -312,6 +315,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         }
         "arrow-right.svg" => include_bytes!("../assets/icons/ui/arrow-right.svg"),
         "close.svg" => include_bytes!("../assets/icons/ui/close.svg"),
+        "close-bold.svg" => include_bytes!("../assets/icons/ui/close-bold.svg"),
         "chart.svg" => include_bytes!("../assets/icons/ui/chart.svg"),
         "check.svg" => include_bytes!("../assets/icons/ui/check.svg"),
         "chevron-down.svg" => include_bytes!("../assets/icons/ui/chevron-down.svg"),

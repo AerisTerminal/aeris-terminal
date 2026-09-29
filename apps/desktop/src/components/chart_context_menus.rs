@@ -11,9 +11,11 @@ pub(super) fn scaled_overlay_height(rows: f32, separators: f32, scale: MenuScale
         + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
 }
 
-/// Screen-aware scale shared by the chart and price-axis context menus.
+/// Screen-aware scale for the chart and price-axis context menus. They follow the
+/// shared menu scale but keep only part of its growth, so a cursor popup stays
+/// compact on large screens where the symbol and indicator panels grow fully.
 pub(super) fn chart_context_menu_scale(viewport: gpui::Size<Pixels>) -> MenuScale {
-    MenuScale::for_viewport(viewport).emphasized(CHART_CONTEXT_MENU_EMPHASIS)
+    MenuScale::for_viewport(viewport).with_growth_share(CHART_CONTEXT_MENU_GROWTH_SHARE)
 }
 
 pub(super) fn clamp_overlay_origin(
@@ -237,7 +239,7 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
         },
         ChartContextMenuItem {
             id: "chart_context_close_pane",
-            icon: HugeIcon::Close,
+            icon: HugeIcon::CloseBold,
             label: "Close chart",
             enabled: state.pane_count > 1,
             action: ChartContextAction::Close,

@@ -49,9 +49,10 @@ impl MenuScale {
         Self::clamped(fit)
     }
 
-    /// Enlarges the menu by `emphasis`, still within the shared ceiling.
-    pub(crate) fn emphasized(self, emphasis: f32) -> Self {
-        Self::clamped(self.0 * emphasis)
+    /// Keeps only `share` of this scale's growth above the 1x design, for small
+    /// popups that should stay compact beside the panels that grow fully.
+    pub(crate) fn with_growth_share(self, share: f32) -> Self {
+        Self::clamped(1.0 + (self.0 - 1.0) * share.clamp(0.0, 1.0))
     }
 
     fn clamped(factor: f32) -> Self {
@@ -536,7 +537,10 @@ mod tests {
         assert!((scale(3440.0, 900.0) - 1.0).abs() < f32::EPSILON);
         assert!((scale(3840.0, 2160.0) - MENU_SCALE_MAX).abs() < f32::EPSILON);
         assert!((scale(0.0, 0.0) - 1.0).abs() < f32::EPSILON);
-        assert!((MenuScale::BASE.emphasized(10.0).factor() - MENU_SCALE_MAX).abs() < f32::EPSILON);
+        let large = MenuScale::for_viewport(size(px(3840.0), px(2160.0)));
+        assert!((large.with_growth_share(0.5).factor() - 1.25).abs() < 1e-5);
+        assert!((large.with_growth_share(0.0).factor() - 1.0).abs() < f32::EPSILON);
+        assert!((MenuScale::BASE.with_growth_share(0.5).factor() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

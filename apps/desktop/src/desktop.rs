@@ -420,9 +420,8 @@ fn current_plan_limits() -> PlanLimits {
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
-/// Chart and price-axis context menus render this much above the shared
-/// screen-aware menu scale, so they read comfortably even at the 1x design size.
-const CHART_CONTEXT_MENU_EMPHASIS: f32 = 1.125;
+/// Share of the shared screen-aware menu growth the chart context menus take.
+const CHART_CONTEXT_MENU_GROWTH_SHARE: f32 = 0.5;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
