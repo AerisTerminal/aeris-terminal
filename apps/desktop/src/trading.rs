@@ -6,8 +6,8 @@ use aeris_instruments::{
     SessionHours,
 };
 use aeris_trading_runtime::{
-    ModifyOrder, PlaceBracket, PlaceOrder, SimulatedMarketObservation, TradeCopierConfig,
-    TradingInstrument, TradingService,
+    CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, SimulatedMarketObservation,
+    TradeCopierConfig, TradingInstrument, TradingService,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -80,6 +80,70 @@ pub fn install(service: TradingService) -> Result<(), String> {
 #[must_use]
 pub fn handle() -> Option<TradingService> {
     TRADING_SERVICE.get().cloned()
+}
+
+/// Creates a durable user-named practice account off the UI thread.
+pub fn create_practice_account(name: String, equity: &str, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
+        return;
+    };
+    let starting_equity = match parse_usd_equity(equity) {
+        Ok(value) => value,
+        Err(error) => {
+            record_feedback(Err(error));
+            return;
+        }
+    };
+    cx.background_executor()
+        .spawn(async move {
+            record_feedback(
+                service
+                    .create_practice_account(CreatePracticeAccount {
+                        display_name: name,
+                        starting_equity,
+                    })
+                    .map(|account| format!("Created {}", account.display_name)),
+            );
+        })
+        .detach();
+}
+
+fn parse_usd_equity(value: &str) -> Result<aeris_trading::FixedPoint, String> {
+    let value = value.trim().trim_start_matches('$').replace(',', "");
+    let (whole, fraction) = value.split_once('.').unwrap_or((&value, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 2
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(
+            "Starting equity must be a positive USD amount with at most two decimals".to_string(),
+        );
+    }
+    let whole = whole
+        .parse::<i64>()
+        .map_err(|_| "Starting equity is too large".to_string())?;
+    let fractional = match fraction.len() {
+        0 => 0,
+        1 => {
+            fraction
+                .parse::<i64>()
+                .map_err(|_| "Starting equity is invalid")?
+                * 10
+        }
+        _ => fraction
+            .parse::<i64>()
+            .map_err(|_| "Starting equity is invalid")?,
+    };
+    let units = whole
+        .checked_mul(100)
+        .and_then(|units| units.checked_add(fractional))
+        .filter(|units| *units > 0)
+        .ok_or_else(|| {
+            "Starting equity must be positive and within the supported range".to_string()
+        })?;
+    aeris_trading::FixedPoint::try_new(units, 2).map_err(|error| error.to_string())
 }
 
 /// Dispatches a market order and its immediate simulated-market observation off the UI thread.
@@ -520,8 +584,7 @@ pub fn prepare_simulated_order(
 ) -> Option<(PlaceOrder, Option<SimulatedMarketObservation>)> {
     let submitted_unix_nanos = now();
     let account_id = selected_account_key
-        .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
-        .or_else(|| aeris_trading::TradingAccountId::try_new("aeris-sim-1").ok())?;
+        .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
     let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
     let client_order_id = aeris_trading::ClientOrderId::try_new(format!(
         "ui-{}-{submitted_unix_nanos}",
@@ -637,6 +700,33 @@ pub fn flatten_simulated_account_for(
         .detach();
 }
 
+/// Closes and reverses the selected practice position at the current BBO.
+pub fn reverse_simulated_position(
+    frame: &aeris_market_data::OrderBookFrame,
+    account_key: Option<String>,
+    cx: &mut gpui::App,
+) {
+    let Some(service) = handle() else {
+        record_feedback(Err("Practice trading is unavailable".to_string()));
+        return;
+    };
+    let Some((account_id, observation)) = prepare_flatten_for(frame, account_key) else {
+        record_feedback(Err(
+            "Reverse requires a selected account and current bid and ask".to_string(),
+        ));
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            record_feedback(
+                service
+                    .reverse_position(account_id, observation)
+                    .map(|fills| format!("Reversed practice position · {} fill(s)", fills.len())),
+            );
+        })
+        .detach();
+}
+
 /// Flattens every simulated account using the current best bid and ask off the UI thread.
 pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx: &mut gpui::App) {
     let Some(service) = handle() else {
@@ -673,8 +763,7 @@ pub fn prepare_flatten_for(
     selected_account_key: Option<String>,
 ) -> Option<(aeris_trading::TradingAccountId, SimulatedMarketObservation)> {
     let account_id = selected_account_key
-        .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())
-        .or_else(|| aeris_trading::TradingAccountId::try_new("aeris-sim-1").ok())?;
+        .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
     let (bid, ask) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref())?;
     let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
     let bid = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?;
@@ -820,7 +909,7 @@ fn parse_contract_date(value: &str) -> Result<ContractDate, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_contract_date, prepare_simulated_order};
+    use super::{parse_contract_date, parse_usd_equity, prepare_simulated_order};
 
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
@@ -901,7 +990,7 @@ mod tests {
         let (order, _) = prepare_simulated_order(
             &frame,
             aeris_trading::OrderSide::Buy,
-            None,
+            Some("aeris-practice-1".to_string()),
             5,
             aeris_trading::OrderType::Market,
             aeris_trading::TimeInForce::Day,
@@ -909,5 +998,16 @@ mod tests {
         .expect("scaled order command");
         assert_eq!(order.quantity.units(), 5_000);
         assert_eq!(order.quantity.scale(), 3);
+    }
+
+    #[test]
+    fn practice_equity_accepts_usd_and_rejects_ambiguous_values() {
+        let equity = parse_usd_equity("$50,000.25").expect("valid starting equity");
+        assert_eq!(equity.units(), 5_000_025);
+        assert_eq!(equity.scale(), 2);
+
+        for invalid in ["", "0", "-1", "10.001", "ten"] {
+            assert!(parse_usd_equity(invalid).is_err(), "accepted {invalid}");
+        }
     }
 }

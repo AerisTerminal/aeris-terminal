@@ -2272,12 +2272,16 @@ pub(super) fn account_menu_layer(
     let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + ACCOUNT_MENU_GAP;
     let anchor = anchor.unwrap_or(point(px(OVERLAY_EDGE_MARGIN), px(header_bottom)));
     let header_rows = if has_header { 2.0 } else { 0.0 };
-    let action_rows = if account.signed_in() || account.authorizing() || account.retry_sign_out {
-        3.0
-    } else {
-        2.0
-    };
-    let separators = 1.0 + if has_header { 1.0 } else { 0.0 };
+    let menu_rows = account_menu_action_rows(account);
+    let action_rows = menu_rows
+        .iter()
+        .filter(|row| row.is_some())
+        .fold(0.0, |count, _| count + 1.0);
+    let separators = menu_rows
+        .iter()
+        .filter(|row| row.is_none())
+        .fold(0.0, |count, _| count + 1.0)
+        + if has_header { 1.0 } else { 0.0 };
     let origin = clamp_overlay_origin(
         point(
             anchor.x,
@@ -2409,6 +2413,7 @@ fn account_menu_header(
 
 #[derive(Clone, Copy)]
 enum AccountMenuClick {
+    ToggleTheme,
     SignIn,
     Cancel,
     SignOut,
@@ -2438,16 +2443,31 @@ type AccountMenuActionRow = Option<(&'static str, &'static str, bool, AccountMen
 fn account_menu_action_rows(
     account: &aeris_desktop::account::AccountMenuState,
 ) -> Vec<AccountMenuActionRow> {
+    let mut rows = vec![
+        Some((
+            "account_menu_theme",
+            "Switch theme",
+            false,
+            AccountMenuClick::ToggleTheme,
+        )),
+        None,
+    ];
+    rows.extend(authentication_account_menu_action_rows(account));
+    rows
+}
+
+fn authentication_account_menu_action_rows(
+    account: &aeris_desktop::account::AccountMenuState,
+) -> Vec<AccountMenuActionRow> {
     if !aeris_desktop::account::AUTH_BACKEND_CONFIGURED {
-        return vec![Some((
+        vec![Some((
             "account_menu_about",
             "About Aeris Terminal",
             false,
             AccountMenuClick::About,
-        ))];
-    }
-    if account.authorizing() {
-        return vec![
+        ))]
+    } else if account.authorizing() {
+        vec![
             Some((
                 "account_menu_reopen",
                 "Open browser page again",
@@ -2467,10 +2487,9 @@ fn account_menu_action_rows(
                 false,
                 AccountMenuClick::About,
             )),
-        ];
-    }
-    if account.signed_in() {
-        return vec![
+        ]
+    } else if account.signed_in() {
+        vec![
             Some((
                 "account_menu_manage_profile",
                 "Manage Profile",
@@ -2490,10 +2509,9 @@ fn account_menu_action_rows(
                 true,
                 AccountMenuClick::SignOut,
             )),
-        ];
-    }
-    if account.retry_sign_out {
-        return vec![
+        ]
+    } else if account.retry_sign_out {
+        vec![
             Some((
                 "account_menu_retry_sign_out",
                 "Retry sign-out",
@@ -2513,23 +2531,24 @@ fn account_menu_action_rows(
                 false,
                 AccountMenuClick::About,
             )),
-        ];
+        ]
+    } else {
+        vec![
+            Some((
+                "account_menu_sign_in",
+                "Sign in",
+                false,
+                AccountMenuClick::SignIn,
+            )),
+            None,
+            Some((
+                "account_menu_about",
+                "About Aeris Terminal",
+                false,
+                AccountMenuClick::About,
+            )),
+        ]
     }
-    vec![
-        Some((
-            "account_menu_sign_in",
-            "Sign in",
-            false,
-            AccountMenuClick::SignIn,
-        )),
-        None,
-        Some((
-            "account_menu_about",
-            "About Aeris Terminal",
-            false,
-            AccountMenuClick::About,
-        )),
-    ]
 }
 
 fn account_menu_actions(
@@ -2551,7 +2570,9 @@ fn account_menu_actions(
                 return menu_separator(theme).into_any_element();
             };
             let enabled = match click {
-                AccountMenuClick::ManageProfile | AccountMenuClick::About => true,
+                AccountMenuClick::ToggleTheme
+                | AccountMenuClick::ManageProfile
+                | AccountMenuClick::About => true,
                 AccountMenuClick::SignIn
                 | AccountMenuClick::Cancel
                 | AccountMenuClick::SignOut
@@ -2582,6 +2603,10 @@ fn account_menu_row(
     theme: &AerisTheme,
 ) -> AnyElement {
     let icon = match spec.click {
+        AccountMenuClick::ToggleTheme => match theme.mode {
+            aeris_design_system::ThemeMode::Light => HugeIcon::Moon,
+            aeris_design_system::ThemeMode::Dark => HugeIcon::Sun,
+        },
         AccountMenuClick::ManageProfile => HugeIcon::User,
         AccountMenuClick::About => HugeIcon::Info,
         AccountMenuClick::SignOut => HugeIcon::SignOut,
@@ -2600,14 +2625,23 @@ fn account_menu_row(
     } else {
         theme.colors.text_muted
     });
-    MenuRow::compact(spec.id, spec.label, theme)
+    let label = if matches!(spec.click, AccountMenuClick::ToggleTheme) {
+        format!("Switch to {} theme", theme.mode.toggled().label())
+    } else {
+        spec.label.to_string()
+    };
+    MenuRow::compact(spec.id, label, theme)
         .leading(header_icon(icon).with_size(px(16.0)).color(icon_color))
         .disabled(!spec.enabled)
         .destructive(spec.destructive)
         .flush_in_panel(spec.edges.first, spec.edges.last)
-        .on_click(move |_, _, cx| {
+        .on_click(move |_, window, cx| {
             if spec.enabled {
                 action_terminal.update(cx, |terminal, terminal_cx| match spec.click {
+                    AccountMenuClick::ToggleTheme => {
+                        terminal.toggle_theme(window, terminal_cx);
+                        terminal.close_account_menu(terminal_cx);
+                    }
                     AccountMenuClick::SignIn => {
                         TerminalApp::request_sign_in(terminal_cx);
                         terminal.close_account_menu(terminal_cx);
@@ -2684,8 +2718,16 @@ mod tests {
     fn development_menu_has_no_authentication_actions() {
         let account = aeris_desktop::account::unavailable_menu_state();
         let rows = account_menu_action_rows(&account);
-        assert_eq!(rows.len(), 1);
-        let Some((id, label, destructive, click)) = rows[0] else {
+        assert_eq!(rows.len(), 3);
+        let Some((theme_id, theme_label, theme_destructive, theme_click)) = rows[0] else {
+            panic!("Theme row must be present");
+        };
+        assert_eq!(theme_id, "account_menu_theme");
+        assert_eq!(theme_label, "Switch theme");
+        assert!(!theme_destructive);
+        assert!(matches!(theme_click, AccountMenuClick::ToggleTheme));
+        assert!(rows[1].is_none());
+        let Some((id, label, destructive, click)) = rows[2] else {
             panic!("About row must be present");
         };
         assert_eq!(id, "account_menu_about");

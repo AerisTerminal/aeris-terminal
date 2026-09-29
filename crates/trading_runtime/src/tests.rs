@@ -39,6 +39,28 @@ fn config(directory: &TestDirectory) -> TradingServiceConfig {
     }
 }
 
+fn start_service(directory: &TestDirectory) -> TradingService {
+    let service = TradingService::start(config(directory)).expect("service starts");
+    if service
+        .snapshot()
+        .expect("initial snapshot")
+        .accounts
+        .is_empty()
+    {
+        service
+            .register_account(TradingAccount {
+                id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+                display_name: "SIM • Test".to_string(),
+                environment: AccountEnvironment::Simulated,
+                currency: "USD".to_string(),
+                currency_scale: 2,
+                starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
+            })
+            .expect("default test account registers");
+    }
+    service
+}
+
 fn instrument() -> TradingInstrument {
     TradingInstrument {
         instrument_id: InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument"),
@@ -109,6 +131,42 @@ fn observation(bid: i64, ask: i64, sequence: u64, time: i64) -> SimulatedMarketO
     }
 }
 
+#[test]
+fn practice_accounts_are_user_created_with_durable_opening_equity() {
+    let directory = TestDirectory::new("practice-account");
+    let service = TradingService::start(config(&directory)).expect("service starts");
+    assert!(
+        service
+            .snapshot()
+            .expect("empty snapshot")
+            .accounts
+            .is_empty()
+    );
+    let created = service
+        .create_practice_account(CreatePracticeAccount {
+            display_name: "Evaluation".to_string(),
+            starting_equity: FixedPoint::try_new(10_000_000, 2).expect("equity"),
+        })
+        .expect("account creates");
+    assert_eq!(created.display_name, "SIM • Evaluation");
+    assert_eq!(
+        service.snapshot().expect("snapshot").account_pnl[0].equity,
+        created.starting_equity
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let reopened = TradingService::start(config(&directory)).expect("service reopens");
+    assert_eq!(
+        reopened.snapshot().expect("restored snapshot").accounts[0],
+        created
+    );
+    reopened
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 fn bracket_template() -> BracketStrategyTemplate {
     BracketStrategyTemplate {
         template_id: "two-target".to_string(),
@@ -140,7 +198,7 @@ fn bracket_template() -> BracketStrategyTemplate {
 #[test]
 fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     let directory = TestDirectory::new("managed-bracket");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -204,7 +262,7 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.managed_brackets, complete.managed_brackets);
     restarted
@@ -215,7 +273,7 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
 #[test]
 fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     let directory = TestDirectory::new("protective-order");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -272,7 +330,7 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     assert_eq!(
         restarted
             .snapshot()
@@ -289,7 +347,7 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
 #[test]
 fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
     let directory = TestDirectory::new("intraday-drawdown");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -340,7 +398,7 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("snapshot");
     assert_eq!(restored.risk_rule_states, locked.risk_rule_states);
     assert_eq!(restored.risk_locks, locked.risk_locks);
@@ -352,7 +410,7 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
 #[test]
 fn maximum_contracts_counts_all_working_order_scenarios() {
     let directory = TestDirectory::new("working-exposure");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -417,7 +475,7 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
 #[test]
 fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
     let directory = TestDirectory::new("bracket-stop-risk");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -476,7 +534,7 @@ fn bracket_is_blocked_when_its_stop_would_reach_a_loss_limit() {
 #[test]
 fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
     let directory = TestDirectory::new("consistency");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -562,7 +620,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     assert_eq!(
         restarted.snapshot().expect("snapshot").risk_rule_states,
         before_restart
@@ -575,7 +633,7 @@ fn consistency_rule_tracks_completed_trades_atomically_across_restart() {
 #[test]
 fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
     let directory = TestDirectory::new("session-plan");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -644,7 +702,7 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("snapshot");
     assert_eq!(restored.session_plans, snapshot.session_plans);
     assert_eq!(
@@ -660,7 +718,7 @@ fn session_plan_enforces_checklist_hours_and_maximum_loss_across_restart() {
 #[test]
 fn tilt_rules_apply_size_reduction_and_restart_safe_rapid_loss_cooldown() {
     let directory = TestDirectory::new("tilt-cooldown");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -719,7 +777,7 @@ fn tilt_rules_apply_size_reduction_and_restart_safe_rapid_loss_cooldown() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     assert!(
         restarted
             .place_order(market_order(
@@ -751,7 +809,7 @@ fn tilt_rules_apply_size_reduction_and_restart_safe_rapid_loss_cooldown() {
 #[test]
 fn filled_stop_produces_a_fast_reentry_warning() {
     let directory = TestDirectory::new("stop-reentry");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -802,7 +860,7 @@ fn filled_stop_produces_a_fast_reentry_warning() {
 #[test]
 fn simulated_execution_and_records_survive_restart_and_export() {
     let directory = TestDirectory::new("restart");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -866,7 +924,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.orders.len(), 2);
     assert!(
@@ -893,35 +951,9 @@ fn simulated_execution_and_records_survive_restart_and_export() {
 }
 
 #[test]
-fn simulated_account_bootstrap_exposes_distinct_multi_account_targets() {
-    let directory = TestDirectory::new("simulated-accounts");
-    let service = TradingService::start(config(&directory)).expect("service starts");
-    let snapshot = service.snapshot().expect("snapshot");
-
-    assert_eq!(snapshot.accounts.len(), 3);
-    assert!(snapshot.accounts.iter().all(|account| {
-        account.environment == AccountEnvironment::Simulated
-            && account.display_name.to_ascii_uppercase().contains("SIM")
-    }));
-    assert_eq!(
-        snapshot
-            .accounts
-            .iter()
-            .map(|account| account.id.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        3
-    );
-
-    service
-        .shutdown(std::time::Duration::from_secs(2))
-        .expect("shutdown");
-}
-
-#[test]
 fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
     let directory = TestDirectory::new("risk");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -995,7 +1027,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.risk_profiles.len(), 1);
     assert_eq!(restored.risk_locks.len(), 1);
@@ -1021,7 +1053,7 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
 #[test]
 fn news_time_restriction_blocks_and_persists_a_hard_lock() {
     let directory = TestDirectory::new("news-restriction");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1056,7 +1088,7 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     assert!(
         restarted.snapshot().expect("snapshot").risk_locks[0]
             .reason
@@ -1070,7 +1102,7 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
 #[test]
 fn flatten_closes_positions_and_survives_a_restart() {
     let directory = TestDirectory::new("flatten");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1095,7 +1127,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.positions[0].net_quantity.units(), 0);
     assert_eq!(restored.fills.len(), 2);
@@ -1107,7 +1139,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
 #[test]
 fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
     let directory = TestDirectory::new("economic-event-lock");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
     service
         .register_risk_profile(RiskProfile {
@@ -1182,7 +1214,7 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
         .expect("retained event action count");
     assert_eq!(retained_actions, 4);
     drop(database);
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     assert_eq!(
         restarted.snapshot().expect("snapshot").risk_locks[0].account_id,
         account_id
@@ -1195,7 +1227,7 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
 #[test]
 fn global_flatten_closes_every_registered_account() {
     let directory = TestDirectory::new("flatten-all");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1207,6 +1239,7 @@ fn global_flatten_closes_every_registered_account() {
             environment: AccountEnvironment::Simulated,
             currency: "USD".to_string(),
             currency_scale: 2,
+            starting_equity: None,
         })
         .expect("secondary account registers");
     service
@@ -1245,9 +1278,36 @@ fn global_flatten_closes_every_registered_account() {
 }
 
 #[test]
+fn reverse_closes_and_reopens_the_exact_opposite_position() {
+    let directory = TestDirectory::new("reverse-position");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .place_order(market_order("reverse-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry accepts");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    let fills = service
+        .reverse_position(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            observation(10_100, 10_125, 3, 3_000),
+        )
+        .expect("position reverses");
+    assert_eq!(fills.len(), 2);
+    let position = service.snapshot().expect("snapshot").positions[0].clone();
+    assert_eq!(position.net_quantity.units(), -1);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
 fn invalid_json_never_enters_the_store() {
     let directory = TestDirectory::new("invalid-json");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     let error = service
         .put_user_record(UserRecord {
             id: "note-1".to_string(),
@@ -1266,7 +1326,7 @@ fn invalid_json_never_enters_the_store() {
 #[test]
 fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
     let directory = TestDirectory::new("copier");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
@@ -1278,6 +1338,7 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
                 environment: AccountEnvironment::Simulated,
                 currency: "USD".to_string(),
                 currency_scale: 2,
+                starting_equity: None,
             })
             .expect("account registers");
     }
@@ -1332,7 +1393,7 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.trade_copiers.len(), 1);
     assert_eq!(restored.trade_copiers[0].targets.len(), 2);
@@ -1344,7 +1405,7 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
 #[test]
 fn bracket_strategy_templates_are_revisioned_and_restart_safe() {
     let directory = TestDirectory::new("strategy-template");
-    let service = TradingService::start(config(&directory)).expect("service starts");
+    let service = start_service(&directory);
     let template = BracketStrategyTemplate {
         template_id: "scalp-two-target".to_string(),
         revision: 1,
@@ -1383,7 +1444,7 @@ fn bracket_strategy_templates_are_revisioned_and_restart_safe() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = TradingService::start(config(&directory)).expect("service restarts");
+    let restarted = start_service(&directory);
     assert!(
         restarted
             .snapshot()
@@ -1468,7 +1529,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
 #[test]
 fn published_observations_fill_resting_orders_once_and_never_regress() {
     let directory = TestDirectory::new("published-observations");
-    let service = TradingService::start(config(&directory)).expect("service");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument");
@@ -1506,7 +1567,7 @@ fn published_observations_fill_resting_orders_once_and_never_regress() {
 #[test]
 fn published_observations_for_unregistered_instruments_are_ignored() {
     let directory = TestDirectory::new("unregistered-observation");
-    let service = TradingService::start(config(&directory)).expect("service");
+    let service = start_service(&directory);
     service
         .publish_market_observation(observation(500_000, 500_025, 1, 1_000))
         .expect("offered");
@@ -1523,7 +1584,7 @@ fn published_observations_for_unregistered_instruments_are_ignored() {
 #[test]
 fn cancelling_a_protective_stop_leaves_it_cancelled() {
     let directory = TestDirectory::new("protective-cancel");
-    let service = TradingService::start(config(&directory)).expect("service");
+    let service = start_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument");

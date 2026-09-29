@@ -2353,8 +2353,8 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
         ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
     };
     use aeris_trading::{
-        ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingAccountId,
-        TradingProvenance,
+        AccountEnvironment, ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce,
+        TradingAccount, TradingAccountId, TradingProvenance,
     };
     use aeris_trading_runtime::{
         PlaceOrder, TradingInstrument, TradingRetention, TradingService, TradingServiceConfig,
@@ -2395,6 +2395,16 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
         })
         .expect("register instrument");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .register_account(TradingAccount {
+            id: account.clone(),
+            display_name: "SIM • Chart fixture".to_string(),
+            environment: AccountEnvironment::Simulated,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
+        })
+        .expect("register account");
     let limit = |id: &str| PlaceOrder {
         client_order_id: ClientOrderId::try_new(id).expect("client id"),
         account_id: account.clone(),

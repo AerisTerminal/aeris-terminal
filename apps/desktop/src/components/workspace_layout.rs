@@ -337,6 +337,20 @@ pub(super) fn workspace_market_area(
     let drawing_scroll = surface.scrolls.drawing.clone();
     let chrome_focus = surface.chrome_focus.clone();
     let order_book_frame = surface.order_book.read(cx).frame().cloned();
+    let has_open_position = order_book_frame.as_ref().is_some_and(|frame| {
+        surface
+            .trading_pnl
+            .order_entry
+            .selected_account_id
+            .as_ref()
+            .is_some_and(|account_id| {
+                surface.trading_pnl.positions.iter().any(|position| {
+                    &position.position.account_id == account_id
+                        && position.position.instrument_id.as_str() == frame.instrument_id
+                        && position.position.net_quantity.units() != 0
+                })
+            })
+    });
     let side_panel = surface.side_panels.any().then(|| {
         workspace_side_panel(WorkspaceSidePanelState {
             app: active_surface.clone(),
@@ -353,20 +367,13 @@ pub(super) fn workspace_market_area(
                     app: active_surface,
                     frame: order_book_frame.as_ref(),
                     trading_pnl: surface.trading_pnl.current.as_ref(),
+                    has_open_position,
                     accounts: &surface.trading_pnl.accounts,
-                    orders: &surface.trading_pnl.orders,
-                    positions: &surface.trading_pnl.positions,
-                    risk_meters: &surface.trading_pnl.risk_meters,
                     risk_locks: &surface.trading_pnl.risk_locks,
-                    session_plans: &surface.trading_pnl.session_plans,
-                    session_reviews: &surface.trading_pnl.session_reviews,
-                    trade_copiers: &surface.trading_pnl.trade_copiers,
-                    copy_dispatches: &surface.trading_pnl.copy_dispatches,
-                    strategy_templates: &surface.trading_pnl.strategy_templates,
-                    managed_brackets: &surface.trading_pnl.managed_brackets,
                     feedback: surface.trading_pnl.feedback.as_ref(),
                     market_error: surface.trading_pnl.market_error.as_deref(),
                     order_entry: &surface.trading_pnl.order_entry,
+                    account_creator: surface.trading_pnl.account_creator.as_ref(),
                     theme,
                 },
             },
@@ -621,17 +628,9 @@ fn apply_trading_snapshot(
     let accounts = snapshot.accounts;
     let account_pnl = snapshot.account_pnl;
     state.trading_pnl.orders = snapshot.orders;
-    state.trading_pnl.fills = snapshot.fills;
     state.trading_pnl.positions = snapshot.position_pnl;
-    state.trading_pnl.risk_meters = snapshot.risk_meters;
     state.trading_pnl.risk_profiles = snapshot.risk_profiles;
     state.trading_pnl.risk_locks = snapshot.risk_locks;
-    state.trading_pnl.session_plans = snapshot.session_plans;
-    state.trading_pnl.session_reviews = snapshot.session_adherence_reviews;
-    state.trading_pnl.trade_copiers = snapshot.trade_copiers;
-    state.trading_pnl.copy_dispatches = snapshot.copy_dispatches;
-    state.trading_pnl.strategy_templates = snapshot.strategy_templates;
-    state.trading_pnl.managed_brackets = snapshot.managed_brackets;
     state.trading_pnl.accounts = accounts;
     if state
         .trading_pnl

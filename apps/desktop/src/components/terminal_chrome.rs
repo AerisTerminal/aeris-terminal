@@ -138,12 +138,11 @@ pub(super) const fn workspace_title_bar_visible(is_fullscreen: bool) -> bool {
 }
 
 pub(super) fn terminal_header(
-    terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
 ) -> impl IntoElement + use<> {
     let theme = state.theme;
-    let controls = header_controls(terminal, app, state);
+    let controls = header_controls(app, state);
     div()
         .w_full()
         .h(px(theme.dimensions.app_header_height))
@@ -416,10 +415,7 @@ pub(super) fn workspace_window_controls(
         .child(close)
 }
 
-const HEADER_GLOBAL_CONTROLS_WIDTH: f32 = chart_chrome::CHART_CONTROL_SIZE + 8.0;
-
 pub(super) fn header_controls(
-    terminal: &Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: HeaderState,
 ) -> impl IntoElement {
@@ -498,8 +494,6 @@ pub(super) fn header_controls(
         .children(side_panel_toggles)
         .child(context_toggle)
         .child(link_toggle);
-    let global_controls = header_global_controls(terminal, &state.theme);
-
     div()
         .w_full()
         .h_full()
@@ -508,7 +502,6 @@ pub(super) fn header_controls(
         .flex()
         .items_center()
         .child(market_controls)
-        .child(global_controls)
 }
 
 fn header_panel_toggles(
@@ -566,22 +559,6 @@ fn header_panel_toggles(
     )
     .into_any_element();
     (side_panels, context, link)
-}
-
-fn header_global_controls(
-    terminal: &Entity<TerminalApp>,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    div()
-        .w(px(HEADER_GLOBAL_CONTROLS_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_end()
-        .gap_2()
-        .pl_2()
-        .child(theme_toggle(terminal.clone(), theme))
 }
 
 pub(super) fn side_panel_toggle(
@@ -841,30 +818,6 @@ fn drawing_history_control(
         app.update(cx, step);
     });
     chrome_button_style(button, theme, false, enabled)
-}
-
-pub(super) fn theme_toggle(
-    terminal: Entity<TerminalApp>,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let next = theme.mode.toggled();
-    let icon = match next {
-        aeris_design_system::ThemeMode::Light => HugeIcon::Sun,
-        aeris_design_system::ThemeMode::Dark => HugeIcon::Moon,
-    };
-    let tooltip = format!("Switch to {} theme", next.label());
-    let button = Button::new("theme_toggle")
-        .tab_index(0)
-        .icon(header_icon(icon))
-        .aria_label(tooltip.clone())
-        .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
-        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-        .w(px(chart_chrome::CHART_CONTROL_SIZE))
-        .cursor_pointer();
-    let button = button_activation(button, true, move |window, cx| {
-        terminal.update(cx, |terminal, cx| terminal.toggle_theme(window, cx));
-    });
-    chrome_button_style(button, theme, false, true)
 }
 
 pub(super) fn header_icon(name: HugeIcon) -> Icon {

@@ -249,6 +249,13 @@ pub struct TradingSnapshot {
     pub protective_orders: Vec<ProtectiveOrder>,
 }
 
+/// User-authored definition for one durable local practice account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatePracticeAccount {
+    pub display_name: String,
+    pub starting_equity: FixedPoint,
+}
+
 /// Position-level currency and tick P/L projection for bounded desktop panels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PositionPnl {
@@ -301,6 +308,7 @@ struct PendingObservations {
 enum Command {
     Status(Reply<TradingServiceStatus>),
     RegisterAccount(TradingAccount, Reply<()>),
+    CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
     RegisterInstrument(TradingInstrument, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
     PlaceBracket(PlaceBracket, Reply<ManagedBracket>),
@@ -318,6 +326,11 @@ enum Command {
     UnlockAccount(TradingAccountId, Reply<()>),
     KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
     Flatten(
+        TradingAccountId,
+        SimulatedMarketObservation,
+        Reply<Vec<Fill>>,
+    ),
+    Reverse(
         TradingAccountId,
         SimulatedMarketObservation,
         Reply<Vec<Fill>>,
@@ -438,6 +451,18 @@ impl TradingService {
     /// Returns an error for invalid account data, overload, or a storage failure.
     pub fn register_account(&self, account: TradingAccount) -> Result<(), String> {
         self.request(|reply| Command::RegisterAccount(account, reply))
+    }
+
+    /// Creates one durable simulated account with user-selected opening equity.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid name/equity, account-capacity exhaustion,
+    /// owner overload, or a storage failure.
+    pub fn create_practice_account(
+        &self,
+        account: CreatePracticeAccount,
+    ) -> Result<TradingAccount, String> {
+        self.request(|reply| Command::CreatePracticeAccount(account, reply))
     }
 
     /// Adds or replaces provider-sourced contract terms.
@@ -597,6 +622,19 @@ impl TradingService {
         observation: SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
         self.request(|reply| Command::Flatten(account_id, observation, reply))
+    }
+
+    /// Closes and reverses the selected account's position for the observed instrument.
+    ///
+    /// # Errors
+    /// Returns an error when the position is flat, the observation is invalid,
+    /// persistence fails, or the replacement side violates account risk.
+    pub fn reverse_position(
+        &self,
+        account_id: TradingAccountId,
+        observation: SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
+        self.request(|reply| Command::Reverse(account_id, observation, reply))
     }
 
     /// Cancels working orders and closes simulated positions for every account at the observed BBO.
@@ -795,6 +833,9 @@ impl Coordinator {
                 Command::RegisterAccount(account, reply) => {
                     let _ = reply.send(self.register_account(account));
                 }
+                Command::CreatePracticeAccount(account, reply) => {
+                    let _ = reply.send(self.create_practice_account(&account));
+                }
                 Command::RegisterInstrument(instrument, reply) => {
                     let _ = reply.send(self.register_instrument(instrument));
                 }
@@ -847,6 +888,9 @@ impl Coordinator {
                 Command::Flatten(account_id, observation, reply) => {
                     let _ = reply.send(self.flatten_account(&account_id, &observation));
                 }
+                Command::Reverse(account_id, observation, reply) => {
+                    let _ = reply.send(self.reverse_position(&account_id, &observation));
+                }
                 Command::FlattenAll(observation, reply) => {
                     let _ = reply.send(self.flatten_all(&observation));
                 }
@@ -898,6 +942,42 @@ impl Coordinator {
         self.store.put_account(&account)?;
         self.state.accounts.insert(account.id.clone(), account);
         self.bump_revision()
+    }
+
+    fn create_practice_account(
+        &mut self,
+        request: &CreatePracticeAccount,
+    ) -> Result<TradingAccount, String> {
+        let name = request.display_name.trim();
+        if name.is_empty() {
+            return Err("practice account name must not be empty".to_string());
+        }
+        let starting_equity = request
+            .starting_equity
+            .exact_rescale(2)
+            .map_err(|error| error.to_string())?;
+        if starting_equity.units() <= 0 {
+            return Err("practice account equity must be positive".to_string());
+        }
+        if self.state.accounts.len() >= MAXIMUM_SNAPSHOT_ITEMS {
+            return Err("practice account limit reached".to_string());
+        }
+        let sequence = self
+            .state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "practice account identity overflowed".to_string())?;
+        let account = TradingAccount {
+            id: TradingAccountId::try_new(format!("aeris-practice-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            display_name: format!("SIM • {name}"),
+            environment: AccountEnvironment::Simulated,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: Some(starting_equity),
+        };
+        self.register_account(account.clone())?;
+        Ok(account)
     }
 
     fn register_instrument(&mut self, instrument: TradingInstrument) -> Result<(), String> {
@@ -2997,6 +3077,52 @@ impl Coordinator {
         Ok(fills)
     }
 
+    fn reverse_position(
+        &mut self,
+        account_id: &TradingAccountId,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
+        let key = (account_id.clone(), observation.instrument_id.clone());
+        let position = self
+            .state
+            .positions
+            .get(&key)
+            .filter(|position| position.net_quantity.units() != 0)
+            .cloned()
+            .ok_or_else(|| "reverse requires an open position".to_string())?;
+        let side = if position.net_quantity.units() > 0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let quantity = FixedPoint::try_new(
+            i64::try_from(position.net_quantity.units().unsigned_abs())
+                .map_err(|_| "reverse quantity overflowed".to_string())?,
+            position.net_quantity.scale(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut fills = self.flatten_account(account_id, observation)?;
+        let client_order_id =
+            ClientOrderId::try_new(format!("sim-reverse-{}", self.state.next_sequence))
+                .map_err(|error| error.to_string())?;
+        let order = PlaceOrder {
+            client_order_id,
+            account_id: account_id.clone(),
+            instrument_id: observation.instrument_id.clone(),
+            side,
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::Day,
+            quantity,
+            limit_price: None,
+            stop_price: None,
+            submitted_unix_nanos: observation.provenance.observed_unix_nanos,
+            provenance: observation.provenance.clone(),
+        };
+        self.place_order(&order)?;
+        fills.extend(self.observe_market(observation)?);
+        Ok(fills)
+    }
+
     fn apply_economic_event_risk(
         &mut self,
         event: &EconomicEventRiskTrigger,
@@ -3319,6 +3445,15 @@ impl Coordinator {
                     currency: account.currency.clone(),
                     realized,
                     unrealized,
+                    equity: account
+                        .starting_equity
+                        .map(|starting| {
+                            starting
+                                .checked_add(realized)
+                                .and_then(|value| value.checked_add(unrealized))
+                        })
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
                 })
             })
             .collect()

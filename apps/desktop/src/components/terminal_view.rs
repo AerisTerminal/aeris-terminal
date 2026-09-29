@@ -385,7 +385,7 @@ impl TerminalApp {
 
     fn rendered_header(
         &self,
-        terminal: &Entity<Self>,
+        _terminal: &Entity<Self>,
         surface: &Entity<WorkspaceSurface>,
         cx: &App,
     ) -> impl IntoElement + use<> {
@@ -395,7 +395,6 @@ impl TerminalApp {
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
         terminal_header(
-            terminal,
             surface,
             active_header_state(workspace, &self.theme, has_data, cx),
         )
@@ -533,8 +532,8 @@ impl TerminalApp {
                 .as_ref()
                 .map(|id| id.as_str().to_string()),
             entry.quantity,
-            entry.order_type,
-            entry.time_in_force,
+            aeris_trading::OrderType::Market,
+            aeris_trading::TimeInForce::Day,
         )
     }
 

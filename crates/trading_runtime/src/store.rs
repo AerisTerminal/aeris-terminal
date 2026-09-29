@@ -25,7 +25,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 14;
+pub(super) const SCHEMA_VERSION: u32 = 15;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -166,6 +166,8 @@ const MIGRATION_V14: &str = "ALTER TABLE risk_profiles ADD COLUMN event_action T
      applied_unix_nanos INTEGER NOT NULL,
      PRIMARY KEY(account_id, event_id, profile_version)
  ) STRICT;";
+const MIGRATION_V15: &str = "ALTER TABLE accounts ADD COLUMN starting_equity_units INTEGER;
+ ALTER TABLE accounts ADD COLUMN starting_equity_scale INTEGER;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -296,7 +298,6 @@ impl TradingStore {
             retention,
         };
         store.migrate()?;
-        store.ensure_simulated_accounts()?;
         store.ensure_default_strategy_templates()?;
         store.enforce_retention()?;
         Ok(store)
@@ -379,7 +380,11 @@ impl TradingStore {
             version = 13;
         }
         if version == 13 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V14)?;
+            self.apply_migration(14, MIGRATION_V14)?;
+            version = 14;
+        }
+        if version == 14 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V15)?;
         }
         Ok(())
     }
@@ -398,24 +403,6 @@ impl TradingStore {
         transaction
             .commit()
             .map_err(|error| format!("trading migration could not commit: {error}"))
-    }
-
-    fn ensure_simulated_accounts(&mut self) -> Result<(), String> {
-        for (id, display_name) in [
-            ("aeris-sim-1", "SIM • Aeris Practice 1"),
-            ("aeris-sim-2", "SIM • Aeris Practice 2"),
-            ("aeris-sim-3", "SIM • Aeris Practice 3"),
-        ] {
-            let account = TradingAccount {
-                id: TradingAccountId::try_new(id).map_err(|error| error.to_string())?,
-                display_name: display_name.to_string(),
-                environment: AccountEnvironment::Simulated,
-                currency: "USD".to_string(),
-                currency_scale: 2,
-            };
-            self.put_account(&account)?;
-        }
-        Ok(())
     }
 
     fn ensure_default_strategy_templates(&self) -> Result<(), String> {
@@ -478,7 +465,8 @@ impl TradingStore {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT id, display_name, environment, currency, currency_scale FROM accounts ORDER BY id",
+                    "SELECT id, display_name, environment, currency, currency_scale,
+                        starting_equity_units, starting_equity_scale FROM accounts ORDER BY id",
                 )
                 .map_err(database_error)?;
             let rows = statement
@@ -490,12 +478,21 @@ impl TradingStore {
                         environment,
                         row.get::<_, String>(3)?,
                         row.get::<_, u8>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<u8>>(6)?,
                     ))
                 })
                 .map_err(database_error)?;
             for row in rows {
-                let (id, display_name, environment, currency, currency_scale) =
-                    row.map_err(database_error)?;
+                let (
+                    id,
+                    display_name,
+                    environment,
+                    currency,
+                    currency_scale,
+                    starting_equity_units,
+                    starting_equity_scale,
+                ) = row.map_err(database_error)?;
                 let id = TradingAccountId::try_new(id).map_err(|error| error.to_string())?;
                 let account = TradingAccount {
                     id: id.clone(),
@@ -503,6 +500,11 @@ impl TradingStore {
                     environment: parse_environment(&environment)?,
                     currency,
                     currency_scale,
+                    starting_equity: starting_equity_units
+                        .zip(starting_equity_scale)
+                        .map(|(units, scale)| FixedPoint::try_new(units, scale))
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
                 };
                 account.validate().map_err(|error| error.to_string())?;
                 accounts.insert(id, account);
@@ -569,17 +571,22 @@ impl TradingStore {
         account.validate().map_err(|error| error.to_string())?;
         self.connection
             .execute(
-                "INSERT INTO accounts(id, display_name, environment, currency, currency_scale)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO accounts(id, display_name, environment, currency, currency_scale,
+                    starting_equity_units, starting_equity_scale)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,
                     environment=excluded.environment, currency=excluded.currency,
-                    currency_scale=excluded.currency_scale",
+                    currency_scale=excluded.currency_scale,
+                    starting_equity_units=excluded.starting_equity_units,
+                    starting_equity_scale=excluded.starting_equity_scale",
                 params![
                     account.id.as_str(),
                     account.display_name,
                     account.environment.as_str(),
                     account.currency,
                     account.currency_scale,
+                    account.starting_equity.map(FixedPoint::units),
+                    account.starting_equity.map(FixedPoint::scale),
                 ],
             )
             .map_err(database_error)?;

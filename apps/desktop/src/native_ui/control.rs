@@ -255,11 +255,6 @@ impl Control {
         self
     }
 
-    pub(crate) fn tab_index(mut self, tab_index: isize) -> Self {
-        self.tab_index = tab_index;
-        self
-    }
-
     pub(crate) fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.flags.set(ControlFlags::TAB_STOP, tab_stop);
         self

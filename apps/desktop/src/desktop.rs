@@ -794,20 +794,13 @@ struct TradingPnlState {
     current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
     orders: Vec<aeris_trading::Order>,
-    fills: Vec<aeris_trading::Fill>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
-    risk_meters: Vec<aeris_trading_runtime::RiskMeter>,
     risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
     risk_locks: Vec<aeris_trading_runtime::RiskLock>,
-    session_plans: Vec<aeris_trading_runtime::SessionPlan>,
-    session_reviews: Vec<aeris_trading_runtime::SessionAdherenceReview>,
-    trade_copiers: Vec<aeris_trading_runtime::TradeCopierConfig>,
-    copy_dispatches: Vec<aeris_trading_runtime::TradeCopyDispatch>,
-    strategy_templates: Vec<aeris_trading_runtime::BracketStrategyTemplate>,
-    managed_brackets: Vec<aeris_trading_runtime::ManagedBracket>,
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
     market_error: Option<String>,
     order_entry: TradingOrderEntryState,
+    account_creator: Option<PracticeAccountDialogState>,
     refresh_pending: bool,
     next_refresh: Instant,
 }
@@ -923,20 +916,13 @@ impl Default for TradingPnlState {
             current: None,
             accounts: Vec::new(),
             orders: Vec::new(),
-            fills: Vec::new(),
             positions: Vec::new(),
-            risk_meters: Vec::new(),
             risk_profiles: Vec::new(),
             risk_locks: Vec::new(),
-            session_plans: Vec::new(),
-            session_reviews: Vec::new(),
-            trade_copiers: Vec::new(),
-            copy_dispatches: Vec::new(),
-            strategy_templates: Vec::new(),
-            managed_brackets: Vec::new(),
             feedback: None,
             market_error: None,
             order_entry: TradingOrderEntryState::default(),
+            account_creator: None,
             refresh_pending: false,
             next_refresh: Instant::now(),
         }
@@ -955,22 +941,23 @@ fn selected_account_lock_reason(state: &TradingPnlState) -> Option<&str> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TradingOrderEntryState {
     quantity: u64,
-    order_type: aeris_trading::OrderType,
-    time_in_force: aeris_trading::TimeInForce,
     selected_account_id: Option<aeris_trading::TradingAccountId>,
-    selected_strategy_template_id: Option<String>,
+    account_menu_open: bool,
 }
 
 impl Default for TradingOrderEntryState {
     fn default() -> Self {
         Self {
             quantity: 1,
-            order_type: aeris_trading::OrderType::Market,
-            time_in_force: aeris_trading::TimeInForce::Day,
             selected_account_id: None,
-            selected_strategy_template_id: None,
+            account_menu_open: false,
         }
     }
+}
+
+struct PracticeAccountDialogState {
+    name: Entity<InputState>,
+    equity: Entity<InputState>,
 }
 
 #[derive(Clone)]
@@ -1863,7 +1850,7 @@ fn chart_order_from_intent(
         instrument_id: instrument_id.clone(),
         side,
         order_type,
-        time_in_force: app.trading_pnl.order_entry.time_in_force,
+        time_in_force: aeris_trading::TimeInForce::Day,
         quantity,
         limit_price,
         stop_price,
@@ -3317,7 +3304,7 @@ fn run_desktop_readiness_command(
         }
         let release = aeris_platform_runtime::current_release_identity();
         let trading_status = trading.status()?;
-        if trading_status.schema_version == 0 || trading_status.account_count == 0 {
+        if trading_status.schema_version == 0 {
             return Err("candidate trading service did not reach readiness".to_string());
         }
         let report = LifecycleReadinessReport {
@@ -3702,7 +3689,8 @@ fn subscribe_order_book_trading(
                 let Some(frame) = frame else {
                     return;
                 };
-                let (side, order_type) = ladder_click_order(event.side, order_entry.order_type);
+                let (side, order_type) =
+                    ladder_click_order(event.side, aeris_trading::OrderType::Market);
                 aeris_desktop::trading::dispatch_simulated_order_at_price(
                     &frame,
                     aeris_desktop::trading::SimulatedPricedOrder {
@@ -3712,7 +3700,7 @@ fn subscribe_order_book_trading(
                             .selected_account_id
                             .map(|id| id.as_str().to_string()),
                         quantity: order_entry.quantity,
-                        time_in_force: order_entry.time_in_force,
+                        time_in_force: aeris_trading::TimeInForce::Day,
                         price_units: event.price,
                     },
                     cx,

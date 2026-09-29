@@ -220,6 +220,9 @@ pub struct TradingAccount {
     pub environment: AccountEnvironment,
     pub currency: String,
     pub currency_scale: u8,
+    /// User-selected opening equity for a locally simulated account. Provider
+    /// accounts and legacy local accounts may not expose an opening balance.
+    pub starting_equity: Option<FixedPoint>,
 }
 
 impl TradingAccount {
@@ -232,6 +235,12 @@ impl TradingAccount {
         validate_field("currency", &self.currency)?;
         if self.currency_scale > MAXIMUM_DECIMAL_SCALE {
             return Err(TradingValidationError::ScaleOutOfRange(self.currency_scale));
+        }
+        if self
+            .starting_equity
+            .is_some_and(|equity| equity.units() <= 0 || equity.scale() != self.currency_scale)
+        {
+            return Err(TradingValidationError::InvalidStartingEquity);
         }
         if self.environment == AccountEnvironment::Simulated
             && !self.display_name.to_ascii_uppercase().contains("SIM")
@@ -548,6 +557,7 @@ pub struct AccountPnl {
     pub currency: String,
     pub realized: FixedPoint,
     pub unrealized: FixedPoint,
+    pub equity: Option<FixedPoint>,
 }
 
 /// Validation failures at the provider-neutral trading boundary.
@@ -558,6 +568,7 @@ pub enum TradingValidationError {
     FieldTooLong(&'static str),
     InexactRescale,
     InvalidOrderPrices,
+    InvalidStartingEquity,
     InvalidFilledQuantity,
     InvalidTimestamp,
     NonPositivePrice,
@@ -579,6 +590,8 @@ impl fmt::Display for TradingValidationError {
                 formatter.write_str("fixed-point rescale would require rounding")
             }
             Self::InvalidOrderPrices => formatter.write_str("prices do not match the order type"),
+            Self::InvalidStartingEquity => formatter
+                .write_str("starting equity must be positive and use the account currency scale"),
             Self::InvalidFilledQuantity => {
                 formatter.write_str("filled quantity does not match the order lifecycle")
             }
@@ -668,6 +681,7 @@ mod tests {
             environment: AccountEnvironment::Simulated,
             currency: "USD".to_string(),
             currency_scale: 2,
+            starting_equity: None,
         };
         assert_eq!(
             account.validate(),
