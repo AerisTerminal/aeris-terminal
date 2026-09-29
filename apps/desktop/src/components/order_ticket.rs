@@ -31,6 +31,14 @@ pub(super) fn trading_order_controls(
             .iter()
             .any(|lock| Some(&lock.account_id) == selected_account);
     let ready = !locked && state.frame.is_some();
+    let bid_colors = aeris_terminal_ui::order_book_side_colors(
+        state.theme,
+        aeris_terminal_ui::OrderBookLevelSide::Bid,
+    );
+    let ask_colors = aeris_terminal_ui::order_book_side_colors(
+        state.theme,
+        aeris_terminal_ui::OrderBookLevelSide::Ask,
+    );
     div()
         .relative()
         .flex_none()
@@ -55,6 +63,7 @@ pub(super) fn trading_order_controls(
                 state,
                 ready,
                 state.theme.colors.bullish,
+                state.theme.colors.surface,
                 move |frame, account, quantity, cx| {
                     dispatch_market(frame, account, quantity, aeris_trading::OrderSide::Buy, cx);
                 },
@@ -65,6 +74,7 @@ pub(super) fn trading_order_controls(
                 state,
                 ready,
                 state.theme.colors.bearish,
+                state.theme.colors.surface,
                 move |frame, account, quantity, cx| {
                     dispatch_market(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
@@ -76,7 +86,8 @@ pub(super) fn trading_order_controls(
                 "Join Bid",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_bid.is_some()),
-                state.theme.colors.text_secondary,
+                bid_colors.fill,
+                bid_colors.text,
                 move |frame, account, quantity, cx| {
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Buy, cx);
                 },
@@ -86,7 +97,8 @@ pub(super) fn trading_order_controls(
                 "Join Ask",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_ask.is_some()),
-                state.theme.colors.text_secondary,
+                ask_colors.fill,
+                ask_colors.text,
                 move |frame, account, quantity, cx| {
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
@@ -342,7 +354,8 @@ fn order_button(
     label: &'static str,
     state: &TradingOrderControlsState<'_>,
     enabled: bool,
-    tone: aeris_design_system::ThemeColor,
+    background: aeris_design_system::ThemeColor,
+    foreground: aeris_design_system::ThemeColor,
     action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
 ) -> Stateful<Div> {
     let frame = state.frame.cloned();
@@ -353,7 +366,7 @@ fn order_button(
         .map(|id| id.as_str().to_string());
     let quantity = state.order_entry.quantity;
     let background = if enabled {
-        tone
+        background
     } else {
         state.theme.colors.hover_bg
     };
@@ -367,7 +380,7 @@ fn order_button(
         .rounded(px(5.0))
         .bg(gpui_color(background))
         .text_color(gpui_color(if enabled {
-            state.theme.colors.surface
+            foreground
         } else {
             state.theme.colors.text_muted
         }))

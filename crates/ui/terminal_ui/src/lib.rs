@@ -16,7 +16,7 @@ pub use order_book::{OrderBookSelection, project_order_book};
 pub use order_book_view::{
     OrderBookColumn, OrderBookColumnVisibility, OrderBookConnectionState, OrderBookLevelClick,
     OrderBookLevelDrop, OrderBookLevelSide, OrderBookPositionMarker, OrderBookRenderMetrics,
-    OrderBookWorkingOrder, ReadOnlyOrderBookView,
+    OrderBookSideColors, OrderBookWorkingOrder, ReadOnlyOrderBookView, order_book_side_colors,
 };
 
 /// A bounded queue that prevents background producers from growing UI work.

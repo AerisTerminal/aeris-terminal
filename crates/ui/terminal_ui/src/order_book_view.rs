@@ -1331,26 +1331,29 @@ enum BookColumnSide {
     Ask,
 }
 
+/// Shared semantic fill and text colors for one side of the order book.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct OrderBookSideAppearance {
-    fill: ThemeColor,
-    text: ThemeColor,
+pub struct OrderBookSideColors {
+    pub fill: ThemeColor,
+    pub text: ThemeColor,
 }
 
 /// One shared opacity keeps bid and ask fills equally weighted and quieter than the
 /// opaque subtle tokens, so quantities and working orders stay the ladder's focus.
 const ORDER_BOOK_SIDE_FILL_ALPHA: f32 = 0.35;
 
-fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideAppearance {
+/// Returns the canonical ladder palette for bid- or ask-side controls.
+#[must_use]
+pub fn order_book_side_colors(theme: &AerisTheme, side: OrderBookLevelSide) -> OrderBookSideColors {
     match side {
-        BookColumnSide::Bid => OrderBookSideAppearance {
+        OrderBookLevelSide::Bid => OrderBookSideColors {
             fill: theme
                 .colors
                 .positive_subtle
                 .with_alpha(ORDER_BOOK_SIDE_FILL_ALPHA),
             text: theme.colors.text_positive,
         },
-        BookColumnSide::Ask => OrderBookSideAppearance {
+        OrderBookLevelSide::Ask => OrderBookSideColors {
             fill: theme
                 .colors
                 .negative_subtle
@@ -1358,6 +1361,10 @@ fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> Order
             text: theme.colors.text_negative,
         },
     }
+}
+
+fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> OrderBookSideColors {
+    order_book_side_colors(theme, order_book_level_side(side))
 }
 
 const fn order_book_level_side(side: BookColumnSide) -> OrderBookLevelSide {
@@ -1927,7 +1934,7 @@ fn trade_volume_cell(
     column_width: f32,
     quantity: i64,
     quantity_scale: u8,
-    appearance: OrderBookSideAppearance,
+    appearance: OrderBookSideColors,
     align_right: bool,
     maximum_trade_quantity: i64,
 ) -> impl IntoElement + use<> {
@@ -1961,7 +1968,7 @@ fn trade_volume_cell(
 fn quantity_cell(
     column_width: f32,
     level: Option<&OrderBookColumnLevel>,
-    appearance: OrderBookSideAppearance,
+    appearance: OrderBookSideColors,
     align_right: bool,
     maximum_quantity: i64,
 ) -> impl IntoElement + use<> {
@@ -2142,7 +2149,7 @@ mod tests {
             );
             assert_eq!(
                 bid,
-                OrderBookSideAppearance {
+                OrderBookSideColors {
                     fill: theme
                         .colors
                         .positive_subtle
@@ -2152,7 +2159,7 @@ mod tests {
             );
             assert_eq!(
                 order_book_side_appearance(&theme, BookColumnSide::Ask),
-                OrderBookSideAppearance {
+                OrderBookSideColors {
                     fill: theme
                         .colors
                         .negative_subtle
