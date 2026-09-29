@@ -631,6 +631,16 @@ impl TradingStore {
                 .execute(statement, [account_id.as_str()])
                 .map_err(database_error)?;
         }
+        transaction
+            .execute(
+                "DELETE FROM trade_copiers
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM trade_copier_targets
+                    WHERE trade_copier_targets.source_account_id = trade_copiers.source_account_id
+                 )",
+                [],
+            )
+            .map_err(database_error)?;
         let deleted = transaction
             .execute("DELETE FROM accounts WHERE id = ?1", [account_id.as_str()])
             .map_err(database_error)?;

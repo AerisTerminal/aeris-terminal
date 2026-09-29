@@ -268,7 +268,182 @@ fn high_precision_crypto_pnl_updates_live_and_closes_without_overflow() {
 }
 
 #[test]
-fn practice_account_delete_requires_flat_state_and_is_durable() {
+fn weighted_average_entry_never_disappears_when_the_exact_ratio_repeats() {
+    let average = weighted_average_entry_price(
+        FixedPoint::try_new(8_402_000_000_000, 8).expect("first price"),
+        300_000_000,
+        FixedPoint::try_new(8_440_200_000_000, 8).expect("second price"),
+        400_000_000,
+    )
+    .expect("weighted average");
+    assert_eq!(
+        average,
+        FixedPoint::try_new(8_423_828_571_429, 8).expect("rounded average")
+    );
+}
+
+#[test]
+fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger() {
+    let directory = TestDirectory::new("position-repair");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+
+    let mut first = market_order("repair-first", OrderSide::Buy, 1, 1_000);
+    first.quantity = FixedPoint::try_new(3, 0).expect("quantity");
+    service.place_order(first).expect("first order accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("first fill");
+
+    let mut second = market_order("repair-second", OrderSide::Buy, 3, 3_000);
+    second.quantity = FixedPoint::try_new(4, 0).expect("quantity");
+    service.place_order(second).expect("second order accepted");
+    service
+        .observe_market(observation(10_000, 10_001, 4, 4_000))
+        .expect("second fill");
+
+    let before = service.snapshot().expect("snapshot");
+    let before_position = before
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument().instrument_id)
+        .expect("open position");
+    assert_eq!(before_position.net_quantity.units(), 7);
+    assert_eq!(
+        before_position.average_entry_price,
+        Some(FixedPoint::try_new(10_001, 2).expect("rounded average"))
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let connection =
+        rusqlite::Connection::open(directory.0.join("trading.sqlite3")).expect("database opens");
+    connection
+        .execute(
+            "UPDATE positions
+             SET average_units = NULL, average_scale = NULL, unrealized_units = 999
+             WHERE account_id = 'aeris-sim-1' AND instrument_id = ?1",
+            [instrument().instrument_id.as_str()],
+        )
+        .expect("legacy corruption injected");
+    drop(connection);
+
+    let reopened = TradingService::start(config(&directory)).expect("service reopens and repairs");
+    let repaired = reopened.snapshot().expect("repaired snapshot");
+    let position = repaired
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument().instrument_id)
+        .expect("repaired position");
+    assert_eq!(position.net_quantity.units(), 7);
+    assert_eq!(
+        position.average_entry_price,
+        Some(FixedPoint::try_new(10_001, 2).expect("repaired average"))
+    );
+    assert_eq!(position.unrealized_pnl.units(), 0);
+
+    let mut third = market_order("repair-third", OrderSide::Buy, 5, 5_000);
+    third.quantity = FixedPoint::try_new(1, 0).expect("quantity");
+    reopened
+        .place_order(third)
+        .expect("new order accepted after repair");
+    let fills = reopened
+        .observe_market(observation(10_024, 10_025, 6, 6_000))
+        .expect("new market update succeeds after repair");
+    assert_eq!(fills.len(), 1);
+    let after_trade = reopened.snapshot().expect("post-repair trading snapshot");
+    assert!(after_trade.market_observation_error.is_none());
+    let position = after_trade
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument().instrument_id)
+        .expect("updated position");
+    assert_eq!(position.net_quantity.units(), 8);
+    assert!(position.average_entry_price.is_some());
+    reopened
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_deleted() {
+    let directory = TestDirectory::new("position-preflight");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .place_order(market_order("legacy-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let connection =
+        rusqlite::Connection::open(directory.0.join("trading.sqlite3")).expect("database opens");
+    connection
+        .execute("DELETE FROM fills", [])
+        .expect("retained fill ledger removed");
+    connection
+        .execute(
+            "UPDATE positions SET average_units = NULL, average_scale = NULL
+             WHERE account_id = 'aeris-sim-1'",
+            [],
+        )
+        .expect("legacy corruption injected");
+    drop(connection);
+
+    let reopened = TradingService::start(config(&directory)).expect("service reopens");
+    reopened
+        .place_order(market_order("must-not-fill", OrderSide::Buy, 3, 3_000))
+        .expect("order itself is accepted");
+    let error = reopened
+        .observe_market(observation(10_024, 10_025, 4, 4_000))
+        .expect_err("invalid existing position blocks before fill commit");
+    assert!(error.contains("position average is unavailable"));
+    let snapshot = reopened.snapshot().expect("snapshot");
+    let order = snapshot
+        .orders
+        .iter()
+        .find(|order| order.client_order_id.as_str() == "must-not-fill")
+        .expect("order retained");
+    assert_eq!(order.filled_quantity.units(), 0);
+    assert!(snapshot.fills.is_empty());
+    assert_eq!(
+        snapshot
+            .positions
+            .iter()
+            .find(|position| position.account_id.as_str() == "aeris-sim-1")
+            .expect("legacy position")
+            .net_quantity
+            .units(),
+        1
+    );
+
+    reopened
+        .delete_practice_account(TradingAccountId::try_new("aeris-sim-1").expect("account"))
+        .expect("confirmed destructive deletion remains available for corrupt state");
+    assert!(
+        reopened
+            .snapshot()
+            .expect("post-delete snapshot")
+            .accounts
+            .iter()
+            .all(|account| account.id.as_str() != "aeris-sim-1")
+    );
+    reopened
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn confirmed_practice_account_delete_purges_open_state_and_is_durable() {
     let directory = TestDirectory::new("practice-account-delete");
     let service = TradingService::start(config(&directory)).expect("service starts");
     let created = service
@@ -288,19 +463,26 @@ fn practice_account_delete_requires_flat_state_and_is_durable() {
     service
         .place_order(working)
         .expect("working order accepted");
-    assert!(
-        service
-            .delete_practice_account(created.id.clone())
-            .expect_err("working order blocks deletion")
-            .contains("cancel working orders")
-    );
-
+    let mut market = market_order("delete-position", OrderSide::Buy, 1, 1_100);
+    market.account_id = created.id.clone();
+    service.place_order(market).expect("market order accepted");
     service
-        .cancel_all(Some(created.id.clone()))
-        .expect("working orders cancel");
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("market order fills");
+    let before = service.snapshot().expect("snapshot before deletion");
+    assert!(
+        before
+            .orders
+            .iter()
+            .any(|order| order.account_id == created.id)
+    );
+    assert!(before.positions.iter().any(|position| {
+        position.account_id == created.id && position.net_quantity.units() != 0
+    }));
+
     let deleted = service
         .delete_practice_account(created.id.clone())
-        .expect("flat account deletes");
+        .expect("confirmed destructive delete succeeds");
     assert_eq!(deleted, created);
     let snapshot = service.snapshot().expect("snapshot");
     assert!(

@@ -403,7 +403,8 @@ impl TradingService {
             .spawn(move || {
                 let coordinator =
                     TradingStore::open(&database_path, retention).and_then(|mut store| {
-                        store.load_state().map(|state| Coordinator {
+                        let state = store.load_state()?;
+                        let mut coordinator = Coordinator {
                             store,
                             state,
                             retention,
@@ -411,7 +412,9 @@ impl TradingService {
                             market_observation_error: None,
                             observations: coordinator_observations,
                             observation_cursors: BTreeMap::new(),
-                        })
+                        };
+                        coordinator.repair_loaded_position_projections()?;
+                        Ok(coordinator)
                     });
                 match coordinator {
                     Ok(mut coordinator) => {
@@ -466,15 +469,15 @@ impl TradingService {
         self.request(|reply| Command::CreatePracticeAccount(account, reply))
     }
 
-    /// Permanently removes one simulated practice account and its local trading history.
+    /// Permanently removes one simulated practice account and all of its local trading state.
     ///
-    /// The account must have no working orders and no open position. Closed order/fill history,
-    /// account risk state, session plans, copier references and locally-managed brackets owned by
-    /// the account are removed atomically with the account.
+    /// This is the destructive counterpart to user confirmation in the desktop UI: working
+    /// orders, open positions, fills/history, risk state, session plans, copier references and
+    /// locally-managed brackets owned by the account are removed atomically with the account.
     ///
     /// # Errors
-    /// Returns an error when the account is missing, is not simulated, still has actionable
-    /// trading state, persistence fails, or the owner queue is unavailable.
+    /// Returns an error when the account is missing, is not simulated, persistence fails, or the
+    /// owner queue is unavailable.
     pub fn delete_practice_account(
         &self,
         account_id: TradingAccountId,
@@ -841,6 +844,87 @@ fn observation_revision(observation: &SimulatedMarketObservation) -> (u64, u64) 
 }
 
 impl Coordinator {
+    fn repair_loaded_position_projections(&mut self) -> Result<(), String> {
+        let keys = self.state.positions.keys().cloned().collect::<Vec<_>>();
+        let mut repaired = Vec::new();
+        for key in keys {
+            let Some(stored) = self.state.positions.get(&key).cloned() else {
+                continue;
+            };
+            if !self.position_projection_needs_repair(&stored) {
+                continue;
+            }
+            let Some(rebuilt) = self.rebuild_position_from_retained_fills(&key) else {
+                continue;
+            };
+            // Fills are the durable ledger and positions are a projection. Only replace a loaded
+            // projection when the retained ledger reproduces both the current net quantity and
+            // the last-fill boundary. This prevents retention-truncated history from rewriting a
+            // still-valid open position while repairing projections produced by older buggy math.
+            if rebuilt.net_quantity == stored.net_quantity
+                && rebuilt.last_fill_unix_nanos == stored.last_fill_unix_nanos
+                && rebuilt != stored
+            {
+                repaired.push((key, rebuilt));
+            }
+        }
+        if repaired.is_empty() {
+            return Ok(());
+        }
+        for (key, position) in repaired {
+            self.store.update_position(&position)?;
+            self.state.positions.insert(key, position);
+        }
+        self.bump_revision()
+    }
+
+    fn position_projection_needs_repair(&self, position: &Position) -> bool {
+        let account_scale_mismatch =
+            self.state
+                .accounts
+                .get(&position.account_id)
+                .is_some_and(|account| {
+                    position.realized_pnl.scale() != account.currency_scale
+                        || position.unrealized_pnl.scale() != account.currency_scale
+                });
+        let instrument_scale_mismatch = self
+            .state
+            .instruments
+            .get(&position.instrument_id)
+            .is_some_and(|instrument| {
+                position.net_quantity.scale() != instrument.quantity_scale
+                    || position
+                        .average_entry_price
+                        .is_some_and(|average| average.scale() != instrument.price_scale)
+            });
+        let lifecycle_mismatch = if position.net_quantity.units() == 0 {
+            position.average_entry_price.is_some() || position.unrealized_pnl.units() != 0
+        } else {
+            position.average_entry_price.is_none()
+        };
+        account_scale_mismatch || instrument_scale_mismatch || lifecycle_mismatch
+    }
+
+    fn rebuild_position_from_retained_fills(
+        &self,
+        key: &(TradingAccountId, InstrumentId),
+    ) -> Option<Position> {
+        let account = self.state.accounts.get(&key.0)?;
+        let instrument = self.state.instruments.get(&key.1)?;
+        let mut rebuilt: Option<Position> = None;
+        let mut saw_fill = false;
+        for fill in self
+            .state
+            .fills
+            .iter()
+            .filter(|fill| fill.account_id == key.0 && fill.instrument_id == key.1)
+        {
+            saw_fill = true;
+            rebuilt = Some(next_position(rebuilt.as_ref(), fill, account, instrument).ok()?);
+        }
+        saw_fill.then_some(rebuilt).flatten()
+    }
+
     fn run(&mut self, commands: &Receiver<Command>) {
         while let Ok(command) = commands.recv() {
             match command {
@@ -920,7 +1004,9 @@ impl Coordinator {
                 }
                 Command::Observe(observation, reply) => {
                     self.advance_observation_cursor(&observation);
-                    let _ = reply.send(self.observe_market(&observation));
+                    let result = self.observe_market(&observation);
+                    self.market_observation_error = result.as_ref().err().cloned();
+                    let _ = reply.send(result);
                 }
                 Command::DrainObservations => self.drain_observations(),
                 Command::PutUserRecord(record, reply) => {
@@ -1032,31 +1118,6 @@ impl Coordinator {
         if account.environment != AccountEnvironment::Simulated {
             return Err("only simulated practice accounts can be deleted".to_string());
         }
-        if self
-            .state
-            .orders
-            .values()
-            .any(|order| &order.account_id == account_id && order.status.is_open())
-        {
-            return Err("cancel working orders before deleting this practice account".to_string());
-        }
-        if self.state.positions.values().any(|position| {
-            &position.account_id == account_id && position.net_quantity.units() != 0
-        }) {
-            return Err("flatten open positions before deleting this practice account".to_string());
-        }
-        if self.state.trade_copiers.iter().any(|(source, config)| {
-            source == account_id
-                || config
-                    .targets
-                    .iter()
-                    .any(|target| &target.account_id == account_id)
-        }) {
-            return Err(
-                "remove this account from trade copier configuration before deleting it"
-                    .to_string(),
-            );
-        }
         Ok(account)
     }
 
@@ -1142,6 +1203,15 @@ impl Coordinator {
         self.state.protective_orders.retain(|client_order_id, _| {
             !account_client_order_ids.contains(client_order_id.as_str())
         });
+        self.state.trade_copiers.remove(account_id);
+        for config in self.state.trade_copiers.values_mut() {
+            config
+                .targets
+                .retain(|target| &target.account_id != account_id);
+        }
+        self.state
+            .trade_copiers
+            .retain(|_, config| !config.targets.is_empty());
         self.copy_dispatches.retain(|dispatch| {
             &dispatch.target_account_id != account_id
                 && !account_client_order_ids.contains(&dispatch.source_client_order_id)
@@ -2328,6 +2398,10 @@ impl Coordinator {
         if observation.bid.scale() != instrument.price_scale {
             return Err("market observation scale does not match the instrument".to_string());
         }
+        // Validate every existing open-position projection before any order can fill. A broken
+        // legacy/cache projection must never allow a durable fill to commit and only then turn the
+        // command into an error; that produces invisible exposure and encourages repeated clicks.
+        self.validate_mark_to_market(observation, &instrument)?;
         self.recover_managed_brackets(observation, &instrument)?;
         self.update_managed_stops(observation, &instrument)?;
         let candidates = market_fill_candidates(&self.state.orders, observation);
@@ -2346,6 +2420,44 @@ impl Coordinator {
             self.bump_revision()?;
         }
         Ok(fills)
+    }
+
+    fn validate_mark_to_market(
+        &self,
+        observation: &SimulatedMarketObservation,
+        instrument: &TradingInstrument,
+    ) -> Result<(), String> {
+        let point_value = instrument
+            .contract
+            .point_value
+            .ok_or_else(|| "point value is unavailable for unrealized PnL".to_string())?;
+        let point_value = FixedPoint::try_new(point_value.units(), point_value.scale())
+            .map_err(|error| error.to_string())?;
+        for current in self.state.positions.values().filter(|position| {
+            position.instrument_id == observation.instrument_id
+                && position.net_quantity.units() != 0
+        }) {
+            let mark = if current.net_quantity.units() > 0 {
+                observation.bid
+            } else {
+                observation.ask
+            };
+            project_unrealized_pnl(
+                current.average_entry_price.ok_or_else(|| {
+                    format!(
+                        "position average is unavailable for unrealized PnL ({}/{})",
+                        current.account_id.as_str(),
+                        current.instrument_id.as_str()
+                    )
+                })?,
+                mark,
+                current.net_quantity,
+                point_value,
+                current.realized_pnl.scale(),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn evaluate_live_risk(&mut self, observed_unix_nanos: i64) -> Result<(), String> {
@@ -3951,26 +4063,12 @@ fn next_position(
     } else if same_direction {
         match current.and_then(|position| position.average_entry_price) {
             None => Some(fill.price),
-            Some(previous_average) => {
-                let previous_weight = i128::from(previous_average.units())
-                    .checked_mul(i128::from(previous_quantity.unsigned_abs()))
-                    .ok_or_else(|| "position cost overflowed".to_string())?;
-                let fill_weight = i128::from(fill.price.units())
-                    .checked_mul(i128::from(signed_fill.unsigned_abs()))
-                    .ok_or_else(|| "position cost overflowed".to_string())?;
-                let numerator = previous_weight
-                    .checked_add(fill_weight)
-                    .ok_or_else(|| "position cost overflowed".to_string())?;
-                let denominator = i128::from(next_quantity.unsigned_abs());
-                let average = numerator / denominator;
-                if numerator % denominator == 0 {
-                    i64::try_from(average)
-                        .ok()
-                        .and_then(|units| FixedPoint::try_new(units, fill.price.scale()).ok())
-                } else {
-                    None
-                }
-            }
+            Some(previous_average) => Some(weighted_average_entry_price(
+                previous_average,
+                previous_quantity.unsigned_abs(),
+                fill.price,
+                signed_fill.unsigned_abs(),
+            )?),
         }
     } else if next_quantity.signum() == previous_quantity.signum() {
         current.and_then(|position| position.average_entry_price)
@@ -4023,6 +4121,53 @@ fn next_position(
             .map_err(|error| error.to_string())?,
         last_fill_unix_nanos: fill.execution_unix_nanos,
     })
+}
+
+fn weighted_average_entry_price(
+    previous_average: FixedPoint,
+    previous_quantity_units: u64,
+    fill_price: FixedPoint,
+    fill_quantity_units: u64,
+) -> Result<FixedPoint, String> {
+    let previous_average = previous_average
+        .exact_rescale(fill_price.scale())
+        .map_err(|error| format!("position average scale is invalid: {error}"))?;
+    let previous_weight = i128::from(previous_average.units())
+        .checked_mul(i128::from(previous_quantity_units))
+        .ok_or_else(|| "position cost overflowed".to_string())?;
+    let fill_weight = i128::from(fill_price.units())
+        .checked_mul(i128::from(fill_quantity_units))
+        .ok_or_else(|| "position cost overflowed".to_string())?;
+    let numerator = previous_weight
+        .checked_add(fill_weight)
+        .ok_or_else(|| "position cost overflowed".to_string())?;
+    let denominator = i128::from(
+        previous_quantity_units
+            .checked_add(fill_quantity_units)
+            .ok_or_else(|| "position quantity overflowed".to_string())?,
+    );
+    if denominator <= 0 {
+        return Err("position average denominator is invalid".to_string());
+    }
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let rounded = if remainder == 0 {
+        quotient
+    } else {
+        let doubled = remainder
+            .checked_abs()
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| "position average overflowed".to_string())?;
+        if doubled >= denominator {
+            quotient
+                .checked_add(numerator.signum())
+                .ok_or_else(|| "position average overflowed".to_string())?
+        } else {
+            quotient
+        }
+    };
+    let units = i64::try_from(rounded).map_err(|_| "position average overflowed".to_string())?;
+    FixedPoint::try_new(units, fill_price.scale()).map_err(|error| error.to_string())
 }
 
 fn realized_pnl(

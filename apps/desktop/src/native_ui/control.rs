@@ -319,6 +319,31 @@ impl Control {
             Some(gpui_color(theme.colors.active_bg.over(backdrop))),
         )
     }
+
+    fn focus_color(&self, window: &Window) -> Hsla {
+        self.surface.map_or_else(
+            || {
+                self.theme.map_or_else(
+                    || window.text_style().color,
+                    |theme| gpui_color(theme.colors.ring),
+                )
+            },
+            |surface| gpui_color(surface.focus_ring),
+        )
+    }
+
+    fn disabled_colors(&self) -> (Option<Hsla>, Option<Hsla>) {
+        let foreground = self
+            .surface
+            .and_then(|surface| surface.disabled_foreground)
+            .map(gpui_color)
+            .or_else(|| self.theme.map(|theme| gpui_color(theme.colors.text_muted)));
+        let fill = self
+            .surface
+            .and_then(|surface| surface.disabled_fill)
+            .map(gpui_color);
+        (fill, foreground)
+    }
 }
 
 impl Styled for Control {
@@ -349,12 +374,9 @@ impl RenderOnce for Control {
     fn render(mut self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let policy = self.policy();
         let loader_id = self.loader_id();
-        let focus_color = self.theme.map_or_else(
-            || window.text_style().color,
-            |theme| gpui_color(theme.colors.ring),
-        );
+        let focus_color = self.focus_color(window);
         let (hover_color, selected_color) = self.state_colors();
-        let disabled_color = self.theme.map(|theme| gpui_color(theme.colors.text_muted));
+        let (disabled_fill, disabled_color) = self.disabled_colors();
         // `with_size` is the control-size contract used by the desktop shell.
         // A custom-sized icon is painted at 75% of that square, preserving the
         // established 32 px control / 24 px glyph geometry.
@@ -414,7 +436,8 @@ impl RenderOnce for Control {
             this.opacity(0.8)
         })
         .when(self.flags.contains(ControlFlags::DISABLED), |this| {
-            this.when_some(disabled_color, gpui::Styled::text_color)
+            this.when_some(disabled_fill, gpui::Styled::bg)
+                .when_some(disabled_color, gpui::Styled::text_color)
         })
         .focus_visible(move |style| style.border_2().border_color(focus_color))
         .when_some(

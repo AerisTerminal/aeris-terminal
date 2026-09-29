@@ -135,7 +135,10 @@ impl FixedPoint {
 ///
 /// # Errors
 /// Returns a validation error when price scales differ, contract terms are
-/// invalid, or the exact result cannot be represented at `currency_scale`.
+/// invalid, or the rounded result cannot be represented at `currency_scale`.
+/// Values finer than the account currency precision are rounded to nearest,
+/// with ties away from zero. This is an explicit monetary projection policy,
+/// not an implicit `FixedPoint` rescale.
 pub fn project_unrealized_pnl(
     entry: FixedPoint,
     mark: FixedPoint,
@@ -162,10 +165,10 @@ pub fn project_unrealized_pnl(
         .checked_add(net_quantity.scale())
         .and_then(|scale| scale.checked_add(point_value.scale()))
         .ok_or(TradingValidationError::ArithmeticOverflow)?;
-    fixed_point_from_i128_exact(raw, raw_scale, currency_scale)
+    fixed_point_from_i128_rounded(raw, raw_scale, currency_scale)
 }
 
-fn fixed_point_from_i128_exact(
+fn fixed_point_from_i128_rounded(
     units: i128,
     source_scale: u8,
     target_scale: u8,
@@ -183,15 +186,34 @@ fn fixed_point_from_i128_exact(
         }
         std::cmp::Ordering::Less => {
             let divisor = power_of_ten_i128(source_scale - target_scale)?;
-            if units % divisor != 0 {
-                return Err(TradingValidationError::InexactRescale);
-            }
-            units / divisor
+            round_divide_i128(units, divisor)?
         }
     };
     let adjusted =
         i64::try_from(adjusted).map_err(|_| TradingValidationError::ArithmeticOverflow)?;
     FixedPoint::try_new(adjusted, target_scale)
+}
+
+fn round_divide_i128(
+    numerator: i128,
+    positive_denominator: i128,
+) -> Result<i128, TradingValidationError> {
+    debug_assert!(positive_denominator > 0);
+    let quotient = numerator / positive_denominator;
+    let remainder = numerator % positive_denominator;
+    if remainder == 0 {
+        return Ok(quotient);
+    }
+    let doubled_remainder = remainder
+        .checked_abs()
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(TradingValidationError::ArithmeticOverflow)?;
+    if doubled_remainder < positive_denominator {
+        return Ok(quotient);
+    }
+    quotient
+        .checked_add(numerator.signum())
+        .ok_or(TradingValidationError::ArithmeticOverflow)
 }
 
 /// Provenance kept on every canonical trading mutation.
@@ -716,6 +738,24 @@ mod tests {
         assert_eq!(
             project_unrealized_pnl(entry, mark, quantity, point_value, 2),
             Ok(FixedPoint::try_new(150_000, 2).expect("pnl"))
+        );
+    }
+
+    #[test]
+    fn pnl_projection_rounds_sub_cent_values_instead_of_failing_market_updates() {
+        let entry = FixedPoint::try_new(10_000, 2).expect("entry");
+        let mark = FixedPoint::try_new(10_001, 2).expect("mark");
+        let point_value = FixedPoint::try_new(1, 0).expect("point value");
+        let positive = FixedPoint::try_new(50, 2).expect("0.5 quantity");
+        let negative = FixedPoint::try_new(-50, 2).expect("-0.5 quantity");
+
+        assert_eq!(
+            project_unrealized_pnl(entry, mark, positive, point_value, 2),
+            Ok(FixedPoint::try_new(1, 2).expect("rounded pnl"))
+        );
+        assert_eq!(
+            project_unrealized_pnl(entry, mark, negative, point_value, 2),
+            Ok(FixedPoint::try_new(-1, 2).expect("rounded pnl"))
         );
     }
 

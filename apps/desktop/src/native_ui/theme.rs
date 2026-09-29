@@ -20,6 +20,9 @@ pub(crate) struct ButtonAppearance {
     pub(crate) border: Option<ThemeColor>,
     pub(crate) hover: ThemeColor,
     pub(crate) active: ThemeColor,
+    pub(crate) disabled_fill: Option<ThemeColor>,
+    pub(crate) disabled_foreground: Option<ThemeColor>,
+    pub(crate) focus_ring: ThemeColor,
 }
 
 pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> ButtonAppearance {
@@ -36,8 +39,21 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
     };
     let (hover, active) = match variant {
         ButtonVariant::Filled => (colors.button_fill_hover, colors.button_fill_active),
-        ButtonVariant::Destructive => (colors.danger, colors.danger),
+        ButtonVariant::Destructive => (
+            colors.danger.with_alpha(0.90),
+            colors.danger.with_alpha(0.85),
+        ),
         ButtonVariant::Secondary | ButtonVariant::Ghost => (colors.hover_bg, colors.active_bg),
+    };
+    let (disabled_fill, disabled_foreground, focus_ring) = match variant {
+        ButtonVariant::Destructive => (
+            Some(colors.danger_disabled),
+            Some(colors.danger_disabled_foreground),
+            colors.danger_ring,
+        ),
+        ButtonVariant::Filled | ButtonVariant::Secondary | ButtonVariant::Ghost => {
+            (None, None, colors.ring)
+        }
     };
     ButtonAppearance {
         fill,
@@ -45,6 +61,9 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
         border,
         hover,
         active,
+        disabled_fill,
+        disabled_foreground,
+        focus_ring,
     }
 }
 
@@ -143,6 +162,17 @@ mod tests {
             let destructive = button_appearance(&theme, ButtonVariant::Destructive);
             assert_eq!(destructive.fill, theme.colors.danger);
             assert_eq!(destructive.foreground, theme.colors.danger_foreground);
+            assert_eq!(destructive.hover, theme.colors.danger.with_alpha(0.90));
+            assert_eq!(destructive.active, theme.colors.danger.with_alpha(0.85));
+            assert_eq!(
+                destructive.disabled_fill,
+                Some(theme.colors.danger_disabled)
+            );
+            assert_eq!(
+                destructive.disabled_foreground,
+                Some(theme.colors.danger_disabled_foreground)
+            );
+            assert_eq!(destructive.focus_ring, theme.colors.danger_ring);
 
             let (field_fill, field_border, focus) = input_appearance(&theme);
             assert_eq!(field_fill, secondary.fill);

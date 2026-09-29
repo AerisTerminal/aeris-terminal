@@ -289,7 +289,7 @@ fn practice_account_delete_dialog(
                         .text_xs()
                         .text_color(gpui_color(theme.colors.text_secondary))
                         .child(format!(
-                            "Delete {display_name} and its local practice-trading history. Open positions and working orders must be cleared first."
+                            "Delete {display_name} permanently, including its open positions, working orders, fills, P/L history, risk state, and local copier references. This cannot be undone."
                         )),
                 )
                 .child(
@@ -308,11 +308,12 @@ fn practice_account_delete_dialog(
                                 });
                             },
                         ))
-                        .child(dialog_button(
-                            "practice_account_delete_confirm",
-                            "Delete",
-                            theme,
-                            move |cx| {
+                        .child(
+                            Button::new("practice_account_delete_confirm")
+                                .variant(theme, ButtonVariant::Destructive)
+                                .with_size(px(CONTROL_HEIGHT))
+                                .label("Delete")
+                                .on_click(move |_, _, cx| {
                                 confirm.update(cx, |surface, surface_cx| {
                                     surface.trading_pnl.account_delete_confirmation = None;
                                     surface_cx.notify();
@@ -321,8 +322,8 @@ fn practice_account_delete_dialog(
                                     account_key.clone(),
                                     cx,
                                 );
-                            },
-                        )),
+                                }),
+                        ),
                 ),
         )
         .into_any_element()
