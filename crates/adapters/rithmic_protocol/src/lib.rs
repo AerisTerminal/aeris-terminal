@@ -89,8 +89,8 @@ pub use provider_session::{
     try_recv_rithmic_event,
 };
 pub use session::{
-    RithmicApplication, RithmicCredentials, RithmicHistoryConnection, RithmicSessionMessage,
-    RithmicTestSession, RithmicTickerConnection,
+    RithmicApplication, RithmicCredentials, RithmicHistoryConnection, RithmicLoginMetadata,
+    RithmicSessionMessage, RithmicTestSession, RithmicTickerConnection,
 };
 pub use session_contract::{
     AuthenticationState, InstrumentContractMetadata, InstrumentDescriptor,

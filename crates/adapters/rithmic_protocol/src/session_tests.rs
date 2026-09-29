@@ -79,6 +79,12 @@ fn discovery_closes_before_fresh_ticker_login_over_tls() {
     )
     .expect("discover and log in over local TLS");
     assert_eq!(connection.heartbeat_interval(), Duration::from_secs(10));
+    assert_eq!(connection.login_metadata().plant.name(), "ticker");
+    assert_eq!(
+        connection.login_metadata().unique_user_id.as_deref(),
+        Some("fixture-unique-user-id")
+    );
+    assert!(connection.login_metadata().started_at_utc.ends_with('Z'));
     let debug = format!("{connection:?}");
     assert!(!debug.contains(FIXTURE_USER));
     assert!(!debug.contains(FIXTURE_PASSWORD));
@@ -608,7 +614,7 @@ fn login_response(accepted: bool, user_messages: &[&str]) -> Vec<u8> {
         ib_id: None,
         country_code: None,
         state_code: None,
-        unique_user_id: None,
+        unique_user_id: Some("fixture-unique-user-id".to_string()),
         heartbeat_interval: Some(10.0),
     }
     .encode_to_vec()

@@ -137,6 +137,16 @@ pub enum ReadOnlyPlant {
     History,
 }
 
+impl ReadOnlyPlant {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ticker => "ticker",
+            Self::History => "history",
+        }
+    }
+}
+
 /// Complete market-data subscription request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MarketDataSubscription<'a> {
@@ -345,6 +355,7 @@ pub enum DecodedControlMessage {
     Login {
         accepted: bool,
         heartbeat_seconds: Option<f64>,
+        unique_user_id: Option<String>,
     },
     Logout {
         accepted: bool,
@@ -1007,9 +1018,13 @@ mod kit {
         {
             return Err(ProtocolError::InvalidHeartbeat);
         }
+        if let Some(unique_user_id) = response.unique_user_id.as_deref() {
+            validate_field("unique_user_id", unique_user_id)?;
+        }
         Ok(DecodedControlMessage::Login {
             accepted: accepted(&response.rp_code),
             heartbeat_seconds,
+            unique_user_id: response.unique_user_id,
         })
     }
 
@@ -1284,7 +1299,7 @@ mod tests {
             ib_id: None,
             country_code: None,
             state_code: None,
-            unique_user_id: None,
+            unique_user_id: Some("fixture-unique-user-id".to_string()),
             heartbeat_interval: Some(10.0),
         }
         .encode_to_vec();
@@ -1293,6 +1308,7 @@ mod tests {
             DecodedControlMessage::Login {
                 accepted: true,
                 heartbeat_seconds: Some(10.0),
+                unique_user_id: Some("fixture-unique-user-id".to_string()),
             }
         );
     }

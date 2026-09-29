@@ -10,11 +10,12 @@ use crate::{
         set_deadline,
     },
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use rustls::ClientConfig;
 use std::{
     fmt,
     sync::{Arc, atomic::AtomicBool},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tungstenite::{Bytes, Message};
 
@@ -47,6 +48,17 @@ impl fmt::Debug for RithmicCredentials<'_> {
 pub struct RithmicApplication<'a> {
     pub name: &'a str,
     pub version: &'a str,
+}
+
+/// Provider-issued identity and UTC start time for one authenticated plant
+/// connection. Rithmic support uses this metadata to find a reviewed session
+/// in its server logs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RithmicLoginMetadata {
+    pub plant: ReadOnlyPlant,
+    pub system_name: &'static str,
+    pub unique_user_id: Option<String>,
+    pub started_at_utc: String,
 }
 
 /// One sanitized inbound message from the authenticated read-only session.
@@ -235,15 +247,24 @@ impl RithmicTestSession {
             DecodedControlMessage::Login {
                 accepted: true,
                 heartbeat_seconds: Some(heartbeat_seconds),
+                unique_user_id,
             } => {
                 let heartbeat_interval = Duration::from_secs_f64(heartbeat_seconds);
                 if heartbeat_interval.is_zero() {
                     return Err(RithmicSessionError::Protocol);
                 }
+                let metadata = RithmicLoginMetadata {
+                    plant,
+                    system_name: TEST_SYSTEM,
+                    unique_user_id,
+                    started_at_utc: utc_timestamp(SystemTime::now()),
+                };
+                log_session_event("login", &metadata, None);
                 Ok(AuthenticatedConnection {
                     socket,
                     heartbeat_interval,
                     limits,
+                    metadata,
                 })
             }
             DecodedControlMessage::Login {
@@ -258,11 +279,16 @@ struct AuthenticatedConnection {
     socket: RithmicWebSocket,
     heartbeat_interval: Duration,
     limits: RithmicSessionLimits,
+    metadata: RithmicLoginMetadata,
 }
 
 impl AuthenticatedConnection {
     const fn heartbeat_interval(&self) -> Duration {
         self.heartbeat_interval
+    }
+
+    const fn login_metadata(&self) -> &RithmicLoginMetadata {
+        &self.metadata
     }
 
     fn send(&mut self, request: OutboundRequest<'_>) -> Result<(), RithmicSessionError> {
@@ -329,6 +355,29 @@ impl AuthenticatedConnection {
     }
 }
 
+impl Drop for AuthenticatedConnection {
+    fn drop(&mut self) {
+        let ended_at_utc = utc_timestamp(SystemTime::now());
+        log_session_event("end", &self.metadata, Some(&ended_at_utc));
+    }
+}
+
+fn utc_timestamp(timestamp: SystemTime) -> String {
+    DateTime::<Utc>::from(timestamp).to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn log_session_event(event: &str, metadata: &RithmicLoginMetadata, ended_at_utc: Option<&str>) {
+    let record = serde_json::json!({
+        "event": event,
+        "system": metadata.system_name,
+        "plant": metadata.plant.name(),
+        "unique_user_id": metadata.unique_user_id,
+        "started_at_utc": metadata.started_at_utc,
+        "ended_at_utc": ended_at_utc,
+    });
+    eprintln!("AERIS_RITHMIC_SESSION {record}");
+}
+
 /// Authenticated read-only ticker-plant connection.
 pub struct RithmicTickerConnection {
     connection: AuthenticatedConnection,
@@ -356,6 +405,12 @@ impl RithmicTickerConnection {
     #[must_use]
     pub const fn heartbeat_interval(&self) -> Duration {
         self.connection.heartbeat_interval()
+    }
+
+    /// Returns the provider identity and UTC start time for this ticker login.
+    #[must_use]
+    pub const fn login_metadata(&self) -> &RithmicLoginMetadata {
+        self.connection.login_metadata()
     }
 
     /// Sends a provider heartbeat request.
@@ -503,6 +558,12 @@ impl RithmicHistoryConnection {
     #[must_use]
     pub const fn heartbeat_interval(&self) -> Duration {
         self.connection.heartbeat_interval()
+    }
+
+    /// Returns the provider identity and UTC start time for this history login.
+    #[must_use]
+    pub const fn login_metadata(&self) -> &RithmicLoginMetadata {
+        self.connection.login_metadata()
     }
 
     /// Sends a provider heartbeat request.
