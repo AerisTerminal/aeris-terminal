@@ -148,11 +148,31 @@ pub(super) fn terminal_header(
         .h(px(theme.dimensions.app_header_height))
         .flex()
         .items_center()
-        .px_3()
         .border_b_1()
         .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface))
-        .child(controls)
+        .child(header_brand(&theme))
+        .child(div().h_full().min_w_0().flex_1().pr_3().child(controls))
+}
+
+fn header_brand(theme: &AerisTheme) -> Stateful<Div> {
+    div()
+        .id("aeris_header_brand")
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .pl_2()
+        .pr_3()
+        .child(brand_logo_sized(px(32.0)))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child("Aeris"),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -998,9 +1018,9 @@ pub(super) fn exchange_mark(
         })
 }
 
-pub(super) fn brand_mark_sized(size: Pixels) -> impl IntoElement {
+pub(super) fn brand_logo_sized(size: Pixels) -> impl IntoElement {
     ColoredSvgMark {
-        path: assets::BrandIcon::Mark.path(),
+        path: assets::BrandAsset::MainLogo.path(),
         size,
     }
 }

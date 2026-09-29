@@ -1,14 +1,14 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/aeris_assets/aeris.ico");
+    println!("cargo:rerun-if-changed=assets/aeris_assets/icons/desktop/windows/aeris.ico");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let icon =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies manifest dir"))
-            .join("assets/aeris_assets/aeris.ico")
+            .join("assets/aeris_assets/icons/desktop/windows/aeris.ico")
             .canonicalize()
             .expect("Aeris Windows icon exists");
     let resource = out_dir.join("aeris.rc");

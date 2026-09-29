@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Aeris
+Exec=aeris
+Icon=aeris
+Terminal=false
+Categories=Utility;

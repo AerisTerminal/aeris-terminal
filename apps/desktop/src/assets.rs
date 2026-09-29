@@ -220,17 +220,21 @@ impl SeriesIcon {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BrandIcon {
-    Mark,
+pub enum BrandAsset {
+    MainLogo,
+    LogomarkDark,
+    LogomarkWhite,
 }
 
-impl BrandIcon {
-    pub const ALL: [Self; 1] = [Self::Mark];
+impl BrandAsset {
+    pub const ALL: [Self; 3] = [Self::MainLogo, Self::LogomarkDark, Self::LogomarkWhite];
 
     #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
-            Self::Mark => "logo.svg",
+            Self::MainLogo => "logo.svg",
+            Self::LogomarkDark => "Logomark-dark.svg",
+            Self::LogomarkWhite => "Logomark-white.svg",
         };
         format!("{BRAND_ASSET_PREFIX}{name}").into()
     }
@@ -277,7 +281,7 @@ impl AssetSource for AerisAssets {
             .map(DrawingIcon::path)
             .chain(UiIcon::ALL.into_iter().map(UiIcon::path))
             .chain(SeriesIcon::ALL.into_iter().map(SeriesIcon::path))
-            .chain(BrandIcon::ALL.into_iter().map(BrandIcon::path))
+            .chain(BrandAsset::ALL.into_iter().map(BrandAsset::path))
             .chain(ExchangeLogo::ALL.into_iter().map(ExchangeLogo::path))
             .filter(|asset| path.is_empty() || asset.starts_with(path))
             .collect())
@@ -360,6 +364,8 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
 fn brand_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(BRAND_ASSET_PREFIX)? {
         "logo.svg" => include_bytes!("../assets/aeris_assets/logo.svg"),
+        "Logomark-dark.svg" => include_bytes!("../assets/aeris_assets/Logomark-dark.svg"),
+        "Logomark-white.svg" => include_bytes!("../assets/aeris_assets/Logomark-white.svg"),
         _ => return None,
     })
 }
@@ -463,7 +469,7 @@ mod tests {
             DrawingIcon::ALL.len()
                 + UiIcon::ALL.len()
                 + SeriesIcon::ALL.len()
-                + BrandIcon::ALL.len()
+                + BrandAsset::ALL.len()
                 + ExchangeLogo::ALL.len()
         );
         assert_eq!(
@@ -524,7 +530,7 @@ mod tests {
             assert!(!svg.contains("<image"), "{}", logo.path());
         }
 
-        for logo in BrandIcon::ALL {
+        for logo in BrandAsset::ALL {
             let bytes = assets
                 .load(logo.path().as_ref())
                 .unwrap()
@@ -534,15 +540,23 @@ mod tests {
             assert!(!svg.contains("<image"), "{}", logo.path());
         }
 
-        let mark = assets
-            .load(BrandIcon::Mark.path().as_ref())
+        let main_logo = assets
+            .load(BrandAsset::MainLogo.path().as_ref())
             .unwrap()
-            .expect("brand mark");
+            .expect("main brand logo");
         assert!(
-            std::str::from_utf8(&mark)
+            std::str::from_utf8(&main_logo)
                 .unwrap()
                 .contains("viewBox=\"0 0 54 54\"")
         );
+        for mark in [BrandAsset::LogomarkDark, BrandAsset::LogomarkWhite] {
+            let bytes = assets
+                .load(mark.path().as_ref())
+                .unwrap()
+                .expect("logomark");
+            let svg = std::str::from_utf8(&bytes).unwrap();
+            assert!(svg.contains("viewBox=\"0 0 40 48\""), "{}", mark.path());
+        }
     }
 
     #[test]

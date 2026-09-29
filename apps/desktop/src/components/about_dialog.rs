@@ -72,7 +72,7 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> An
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(super::terminal_chrome::brand_mark_sized(px(34.0)))
+                .child(super::terminal_chrome::brand_logo_sized(px(34.0)))
                 .child(
                     div()
                         .flex()
