@@ -612,6 +612,10 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .observe_market(observation(10_200, 10_225, 3, 3_000))
         .expect("first target fills");
     let scaled = service.snapshot().expect("scaled snapshot");
+    assert!(
+        scaled.completed_trade_pnl.is_empty(),
+        "a partial exit must not report final trade P&L"
+    );
     let stop = scaled
         .orders
         .iter()
@@ -627,6 +631,11 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .observe_market(observation(10_000, 10_025, 4, 4_000))
         .expect("stop fills");
     let complete = service.snapshot().expect("complete snapshot");
+    assert_eq!(complete.completed_trade_pnl.len(), 1);
+    assert_eq!(
+        complete.completed_trade_pnl.get(&complete.fills[0].id),
+        Some(&complete.positions[0].realized_pnl)
+    );
     assert_eq!(
         complete.managed_brackets[0].status,
         ManagedBracketStatus::Completed
@@ -1232,6 +1241,39 @@ fn filled_stop_produces_a_fast_reentry_warning() {
         .expect("service stops");
 }
 
+fn replace_risk_policy_mid_trade(service: &TradingService) {
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "mid-trade-policy".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("session baseline"),
+            daily_loss_limit: FixedPoint::try_new(1_000_000, 2).expect("loss limit"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::Intraday,
+            max_contracts: FixedPoint::try_new(100, 0).expect("contract limit"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            economic_event_rule: None,
+            enabled: false,
+        })
+        .expect("changing risk policy mid-trade does not reset trade P&L");
+}
+
+fn assert_completed_trade_pnl(snapshot: &TradingSnapshot, expected: FixedPoint) {
+    assert_eq!(snapshot.completed_trade_pnl.len(), 1);
+    assert_eq!(
+        snapshot.completed_trade_pnl.get(&snapshot.fills[0].id),
+        Some(&expected)
+    );
+    assert!(
+        !snapshot
+            .completed_trade_pnl
+            .contains_key(&snapshot.fills[1].id)
+    );
+}
+
 #[test]
 fn simulated_execution_and_records_survive_restart_and_export() {
     let directory = TestDirectory::new("restart");
@@ -1252,6 +1294,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .expect("buy fills");
     assert_eq!(fills.len(), 1);
     let open_snapshot = service.snapshot().expect("snapshot");
+    assert!(open_snapshot.completed_trade_pnl.is_empty());
     assert_eq!(open_snapshot.orders[0].status, OrderStatus::Filled);
     assert_eq!(
         open_snapshot.orders[0].filled_quantity,
@@ -1265,6 +1308,11 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         open_snapshot.position_pnl[0].unrealized_ticks,
         Some(FixedPoint::try_new(-1, 0).expect("unrealized ticks"))
     );
+    replace_risk_policy_mid_trade(&service);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("open trade survives a clean shutdown");
+    let service = start_service(&directory);
     service
         .place_order(market_order("client-close", OrderSide::Sell, 4, 3_000))
         .expect("sell accepted");
@@ -1282,6 +1330,10 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .expect("journal stores");
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.fills.len(), 2);
+    assert_completed_trade_pnl(
+        &snapshot,
+        FixedPoint::try_new(5_000, 2).expect("final trade pnl"),
+    );
     assert_eq!(snapshot.positions.len(), 1);
     assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
     assert_eq!(
@@ -1309,6 +1361,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
             .all(|order| order.filled_quantity == order.quantity)
     );
     assert_eq!(restored.fills.len(), 2);
+    assert_eq!(restored.completed_trade_pnl, snapshot.completed_trade_pnl);
     assert_eq!(restored.positions, snapshot.positions);
     assert!(
         fs::read_to_string(directory.0.join("export/executions.csv"))

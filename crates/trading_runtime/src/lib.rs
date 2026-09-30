@@ -234,6 +234,8 @@ pub struct TradingSnapshot {
     pub orders: Vec<Order>,
     pub order_events: Vec<OrderEvent>,
     pub fills: Vec<Fill>,
+    /// Final realized P&L keyed by the fill that closed each trade cycle.
+    pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
     pub positions: Vec<Position>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
@@ -384,6 +386,8 @@ struct FillPolicyUpdate {
     rule_state: Option<RiskRuleState>,
     trade_cycle: RiskTradeCycleState,
     discipline_state: DisciplineState,
+    completed_trade_pnl: Option<FixedPoint>,
+    trade_pnl_cycle: Option<FixedPoint>,
 }
 
 impl TradingService {
@@ -1183,6 +1187,14 @@ impl Coordinator {
         self.state
             .order_events
             .retain(|event| !account_order_ids.contains(event.order_id.as_str()));
+        for fill in self
+            .state
+            .fills
+            .iter()
+            .filter(|fill| &fill.account_id == account_id)
+        {
+            self.state.completed_trade_pnl.remove(&fill.id);
+        }
         self.state
             .fills
             .retain(|fill| &fill.account_id != account_id);
@@ -1194,6 +1206,9 @@ impl Coordinator {
         self.state.risk_rule_states.remove(account_id);
         self.state
             .risk_trade_cycles
+            .retain(|(stored_account, _), _| stored_account != account_id);
+        self.state
+            .trade_pnl_cycles
             .retain(|(stored_account, _), _| stored_account != account_id);
         self.state.session_plans.remove(account_id);
         self.state.discipline_states.remove(account_id);
@@ -2710,6 +2725,9 @@ impl Coordinator {
             });
         let previous_realized = previous_position.map_or(zero, |position| position.realized_pnl);
         let realized_change = subtract_fixed(next_position.realized_pnl, previous_realized)?;
+        let previous_quantity =
+            previous_position.map_or(0, |position| position.net_quantity.units());
+        let next_quantity = next_position.net_quantity.units();
         trade_cycle.realized_pnl = trade_cycle
             .realized_pnl
             .checked_add(
@@ -2718,9 +2736,6 @@ impl Coordinator {
                     .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
-        let previous_quantity =
-            previous_position.map_or(0, |position| position.net_quantity.units());
-        let next_quantity = next_position.net_quantity.units();
         let peak_units = previous_quantity
             .unsigned_abs()
             .max(next_quantity.unsigned_abs())
@@ -2741,7 +2756,14 @@ impl Coordinator {
         }
         let completed = previous_quantity != 0
             && (next_quantity == 0 || previous_quantity.signum() != next_quantity.signum());
-        let completed_pnl = completed.then_some(trade_cycle.realized_pnl);
+        let risk_completed_pnl = completed.then_some(trade_cycle.realized_pnl);
+        let (completed_pnl, trade_pnl_cycle) = self.next_trade_pnl_state(
+            fill,
+            previous_quantity,
+            next_quantity,
+            realized_change,
+            zero,
+        )?;
         let completed_quantity = completed.then_some(trade_cycle.peak_quantity);
         let mut rule_state = self
             .state
@@ -2756,34 +2778,85 @@ impl Coordinator {
             })
             .transpose()?;
         if completed {
-            if trade_cycle.realized_pnl.units() > 0
-                && let Some(state) = rule_state.as_mut()
-            {
-                let winner = trade_cycle
-                    .realized_pnl
-                    .exact_rescale(state.total_winning_pnl.scale())
-                    .map_err(|error| error.to_string())?;
-                state.total_winning_pnl = state
-                    .total_winning_pnl
-                    .checked_add(winner)
-                    .map_err(|error| error.to_string())?;
-                let winner = winner
-                    .exact_rescale(state.largest_winning_trade_pnl.scale())
-                    .map_err(|error| error.to_string())?;
-                if winner.units() > state.largest_winning_trade_pnl.units() {
-                    state.largest_winning_trade_pnl = winner;
-                }
-            }
-            trade_cycle.realized_pnl = zero;
-            trade_cycle.peak_quantity = zero_quantity;
+            Self::finish_risk_trade_cycle(
+                &mut trade_cycle,
+                rule_state.as_mut(),
+                zero,
+                zero_quantity,
+            )?;
         }
         let discipline_state =
-            self.next_discipline_state(fill, completed_pnl.zip(completed_quantity))?;
+            self.next_discipline_state(fill, risk_completed_pnl.zip(completed_quantity))?;
         Ok(FillPolicyUpdate {
             rule_state,
             trade_cycle,
             discipline_state,
+            completed_trade_pnl: completed_pnl,
+            trade_pnl_cycle,
         })
+    }
+
+    fn finish_risk_trade_cycle(
+        trade_cycle: &mut RiskTradeCycleState,
+        rule_state: Option<&mut RiskRuleState>,
+        zero: FixedPoint,
+        zero_quantity: FixedPoint,
+    ) -> Result<(), String> {
+        if trade_cycle.realized_pnl.units() > 0
+            && let Some(state) = rule_state
+        {
+            let winner = trade_cycle
+                .realized_pnl
+                .exact_rescale(state.total_winning_pnl.scale())
+                .map_err(|error| error.to_string())?;
+            state.total_winning_pnl = state
+                .total_winning_pnl
+                .checked_add(winner)
+                .map_err(|error| error.to_string())?;
+            let winner = winner
+                .exact_rescale(state.largest_winning_trade_pnl.scale())
+                .map_err(|error| error.to_string())?;
+            if winner.units() > state.largest_winning_trade_pnl.units() {
+                state.largest_winning_trade_pnl = winner;
+            }
+        }
+        trade_cycle.realized_pnl = zero;
+        trade_cycle.peak_quantity = zero_quantity;
+        Ok(())
+    }
+
+    fn next_trade_pnl_state(
+        &self,
+        fill: &Fill,
+        previous_quantity: i64,
+        next_quantity: i64,
+        realized_change: FixedPoint,
+        zero: FixedPoint,
+    ) -> Result<(Option<FixedPoint>, Option<FixedPoint>), String> {
+        // A pre-migration open trade has no reliable cycle baseline. Leave its final P&L
+        // unknown rather than assigning the last closing fill's partial result to the trade.
+        let prior = if previous_quantity == 0 {
+            Some(zero)
+        } else {
+            self.state
+                .trade_pnl_cycles
+                .get(&(fill.account_id.clone(), fill.instrument_id.clone()))
+                .copied()
+        };
+        let total = prior
+            .map(|value| {
+                value
+                    .checked_add(realized_change)
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        let completed = previous_quantity != 0
+            && (next_quantity == 0 || previous_quantity.signum() != next_quantity.signum());
+        if completed {
+            Ok((total, (next_quantity != 0).then_some(zero)))
+        } else {
+            Ok((None, total))
+        }
     }
 
     fn next_discipline_state(
@@ -2861,6 +2934,15 @@ impl Coordinator {
         );
         self.state.order_events.push_back(event);
         self.state.fills.push_back(fill.clone());
+        if let Some(pnl) = update.policy_update.completed_trade_pnl {
+            self.state.completed_trade_pnl.insert(fill.id.clone(), pnl);
+        }
+        let trade_key = (fill.account_id.clone(), fill.instrument_id.clone());
+        if let Some(cycle) = update.policy_update.trade_pnl_cycle {
+            self.state.trade_pnl_cycles.insert(trade_key, cycle);
+        } else {
+            self.state.trade_pnl_cycles.remove(&trade_key);
+        }
         self.state
             .positions
             .insert(update.position_key, update.position);
@@ -3673,6 +3755,19 @@ impl Coordinator {
                 .take(MAXIMUM_SNAPSHOT_ITEMS)
                 .cloned()
                 .collect(),
+            completed_trade_pnl: self
+                .state
+                .fills
+                .iter()
+                .rev()
+                .take(MAXIMUM_SNAPSHOT_ITEMS)
+                .filter_map(|fill| {
+                    self.state
+                        .completed_trade_pnl
+                        .get(&fill.id)
+                        .map(|pnl| (fill.id.clone(), *pnl))
+                })
+                .collect(),
             positions: self.state.positions.values().cloned().collect(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
@@ -3919,7 +4014,9 @@ impl Coordinator {
             self.state.order_events.pop_front();
         }
         while self.state.fills.len() > self.retention.maximum_fills {
-            self.state.fills.pop_front();
+            if let Some(fill) = self.state.fills.pop_front() {
+                self.state.completed_trade_pnl.remove(&fill.id);
+            }
         }
         while self.state.orders.len() > self.retention.maximum_orders {
             let Some(retired) = self
@@ -3944,6 +4041,8 @@ fn fill_policy_persistence(update: &FillPolicyUpdate) -> FillPolicyPersistence<'
         rule_state: update.rule_state.as_ref(),
         trade_cycle: &update.trade_cycle,
         discipline_state: &update.discipline_state,
+        completed_trade_pnl: update.completed_trade_pnl,
+        trade_pnl_cycle: update.trade_pnl_cycle,
     }
 }
 

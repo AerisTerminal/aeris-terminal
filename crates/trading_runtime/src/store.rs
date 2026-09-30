@@ -25,7 +25,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 15;
+pub(super) const SCHEMA_VERSION: u32 = 16;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -168,6 +168,14 @@ const MIGRATION_V14: &str = "ALTER TABLE risk_profiles ADD COLUMN event_action T
  ) STRICT;";
 const MIGRATION_V15: &str = "ALTER TABLE accounts ADD COLUMN starting_equity_units INTEGER;
  ALTER TABLE accounts ADD COLUMN starting_equity_scale INTEGER;";
+const MIGRATION_V16: &str = "ALTER TABLE fills ADD COLUMN completed_trade_pnl_units INTEGER;
+ ALTER TABLE fills ADD COLUMN completed_trade_pnl_scale INTEGER;
+ CREATE TABLE trade_pnl_cycles (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -177,6 +185,8 @@ pub(super) struct StoredState {
     pub orders: BTreeMap<OrderId, Order>,
     pub order_events: VecDeque<OrderEvent>,
     pub fills: VecDeque<Fill>,
+    pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
+    pub trade_pnl_cycles: BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
@@ -275,6 +285,8 @@ pub(super) struct FillPolicyPersistence<'a> {
     pub rule_state: Option<&'a RiskRuleState>,
     pub trade_cycle: &'a RiskTradeCycleState,
     pub discipline_state: &'a DisciplineState,
+    pub completed_trade_pnl: Option<FixedPoint>,
+    pub trade_pnl_cycle: Option<FixedPoint>,
 }
 
 impl TradingStore {
@@ -384,7 +396,11 @@ impl TradingStore {
             version = 14;
         }
         if version == 14 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V15)?;
+            self.apply_migration(15, MIGRATION_V15)?;
+            version = 15;
+        }
+        if version == 15 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V16)?;
         }
         Ok(())
     }
@@ -514,6 +530,8 @@ impl TradingStore {
         let orders = self.load_orders()?;
         let order_events = self.load_events()?;
         let fills = self.load_fills()?;
+        let completed_trade_pnl = self.load_completed_trade_pnl()?;
+        let trade_pnl_cycles = self.load_trade_pnl_cycles()?;
         let positions = self.load_positions()?;
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
@@ -533,6 +551,8 @@ impl TradingStore {
             orders,
             order_events,
             fills,
+            completed_trade_pnl,
+            trade_pnl_cycles,
             positions,
             risk_profiles,
             risk_locks,
@@ -612,6 +632,7 @@ impl TradingStore {
             "DELETE FROM economic_event_risk_actions WHERE account_id = ?1",
             "DELETE FROM discipline_states WHERE account_id = ?1",
             "DELETE FROM session_plans WHERE account_id = ?1",
+            "DELETE FROM trade_pnl_cycles WHERE account_id = ?1",
             "DELETE FROM risk_trade_cycles WHERE account_id = ?1",
             "DELETE FROM risk_rule_states WHERE account_id = ?1",
             "DELETE FROM risk_locks WHERE account_id = ?1",
@@ -1537,8 +1558,9 @@ impl TradingStore {
         transaction
             .execute(
                 "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
-                    price_scale, quantity_units, quantity_scale, execution_unix_nanos, provenance_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    price_scale, quantity_units, quantity_scale, execution_unix_nanos,
+                    provenance_json, completed_trade_pnl_units, completed_trade_pnl_scale)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     fill.id.as_str(),
                     fill.order_id.as_str(),
@@ -1551,10 +1573,35 @@ impl TradingStore {
                     fill.quantity.scale(),
                     fill.execution_unix_nanos,
                     encode_provenance(&fill.provenance),
+                    policy.completed_trade_pnl.map(FixedPoint::units),
+                    policy.completed_trade_pnl.map(FixedPoint::scale),
                 ],
             )
             .map_err(database_error)?;
         upsert_position(&transaction, position)?;
+        if let Some(cycle) = policy.trade_pnl_cycle {
+            transaction
+                .execute(
+                    "INSERT INTO trade_pnl_cycles(account_id, instrument_id, realized_units, realized_scale)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(account_id, instrument_id) DO UPDATE SET
+                       realized_units=excluded.realized_units, realized_scale=excluded.realized_scale",
+                    params![
+                        fill.account_id.as_str(),
+                        fill.instrument_id.as_str(),
+                        cycle.units(),
+                        cycle.scale(),
+                    ],
+                )
+                .map_err(database_error)?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM trade_pnl_cycles WHERE account_id = ?1 AND instrument_id = ?2",
+                    params![fill.account_id.as_str(), fill.instrument_id.as_str()],
+                )
+                .map_err(database_error)?;
+        }
         if let Some(rule_state) = policy.rule_state {
             upsert_risk_rule_state(&transaction, rule_state)?;
         }
@@ -2017,6 +2064,69 @@ impl TradingStore {
             };
             fill.validate().map_err(|error| error.to_string())?;
             output.push_back(fill);
+        }
+        Ok(output)
+    }
+
+    fn load_completed_trade_pnl(&self) -> Result<BTreeMap<FillId, FixedPoint>, String> {
+        let mut output = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, completed_trade_pnl_units, completed_trade_pnl_scale
+                 FROM fills WHERE completed_trade_pnl_units IS NOT NULL
+                 ORDER BY execution_unix_nanos",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, u8>(2)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (id, units, scale) = row.map_err(database_error)?;
+            output.insert(
+                FillId::try_new(id).map_err(|error| error.to_string())?,
+                fixed(units, scale)?,
+            );
+        }
+        Ok(output)
+    }
+
+    fn load_trade_pnl_cycles(
+        &self,
+    ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>, String> {
+        let mut output = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, instrument_id, realized_units, realized_scale
+                 FROM trade_pnl_cycles ORDER BY account_id, instrument_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, u8>(3)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account, instrument, units, scale) = row.map_err(database_error)?;
+            output.insert(
+                (
+                    TradingAccountId::try_new(account).map_err(|error| error.to_string())?,
+                    InstrumentId::try_new(instrument).map_err(|error| error.to_string())?,
+                ),
+                fixed(units, scale)?,
+            );
         }
         Ok(output)
     }
@@ -2703,6 +2813,14 @@ mod tests {
                 )
                 .expect("historical order");
         }
+        connection
+            .execute_batch(
+                "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
+                    price_scale, quantity_units, quantity_scale, execution_unix_nanos, provenance_json)
+                 VALUES ('legacy-fill', 'filled-order', 'account', 'instrument', 'buy',
+                    5000, 2, 4, 0, 1, '{}');",
+            )
+            .expect("historical fill");
 
         let mut store = TradingStore {
             connection,
@@ -2733,5 +2851,12 @@ mod tests {
             )
             .expect("working progress");
         assert_eq!(working, (0, 0));
+        assert!(
+            store
+                .load_completed_trade_pnl()
+                .expect("historical fill has no recorded outcome")
+                .is_empty(),
+            "migration must not invent final P&L for old executions"
+        );
     }
 }

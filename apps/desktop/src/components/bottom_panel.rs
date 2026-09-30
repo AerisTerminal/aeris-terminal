@@ -18,10 +18,15 @@ const TRADE_HISTORY_MINIMUM_WORKSPACE_HEIGHT: f32 = 240.0;
 const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
 /// Header controls stay inside the panel header with room around their hover fill.
 const TRADE_HISTORY_HEADER_CONTROL_HEIGHT: f32 = 22.0;
-const TRADE_HISTORY_ROW_HEIGHT: f32 = 24.0;
-const TRADE_HISTORY_TIME_WIDTH: f32 = 150.0;
-const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 110.0;
-const TRADE_HISTORY_SIDE_WIDTH: f32 = 56.0;
+const TRADE_HISTORY_ROW_HEIGHT: f32 = 28.0;
+const TRADE_HISTORY_TIME_WIDTH: f32 = 125.0;
+const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 120.0;
+const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 95.0;
+const TRADE_HISTORY_SIDE_WIDTH: f32 = 50.0;
+const TRADE_HISTORY_QUANTITY_WIDTH: f32 = 90.0;
+const TRADE_HISTORY_PRICE_WIDTH: f32 = 110.0;
+const TRADE_HISTORY_PNL_WIDTH: f32 = 120.0;
+const TRADE_HISTORY_CELL_GAP: f32 = 8.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
 
@@ -50,6 +55,7 @@ pub(super) struct TradeHistory {
     revision: Option<u64>,
     /// Newest first, exactly as the owner's bounded snapshot orders them.
     fills: Arc<[aeris_trading::Fill]>,
+    completed_trade_pnl: Arc<BTreeMap<aeris_trading::FillId, aeris_trading::FixedPoint>>,
     accounts: Arc<[aeris_trading::TradingAccount]>,
     symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
     /// Indices into `fills` that pass the current account filter.
@@ -57,6 +63,13 @@ pub(super) struct TradeHistory {
 }
 
 impl TradeHistory {
+    fn account_currency(&self, account_key: &str) -> &str {
+        self.accounts
+            .iter()
+            .find(|account| account.id.as_str() == account_key)
+            .map_or("", |account| account.currency.as_str())
+    }
+
     fn account_name(&self, account_key: &str) -> String {
         self.accounts
             .iter()
@@ -110,6 +123,7 @@ impl BottomPanelState {
         }
         self.history.revision = Some(snapshot.revision);
         self.history.fills = snapshot.fills.clone().into();
+        self.history.completed_trade_pnl = Arc::new(snapshot.completed_trade_pnl.clone());
         self.history.accounts = snapshot.accounts.clone().into();
         self.history.symbols = Arc::new(
             snapshot
@@ -531,12 +545,25 @@ fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl I
         .text_color(gpui_color(colors.text_secondary))
         .child(trade_history_cell_fixed(TRADE_HISTORY_TIME_WIDTH).child("Time"))
         .when(show_account, |row| {
-            row.child(trade_history_cell_flex().child("Account"))
+            row.child(trade_history_cell_fixed(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
         })
         .child(trade_history_cell_fixed(TRADE_HISTORY_SYMBOL_WIDTH).child("Symbol"))
         .child(trade_history_cell_fixed(TRADE_HISTORY_SIDE_WIDTH).child("Side"))
-        .child(trade_history_cell_flex().text_right().child("Quantity"))
-        .child(trade_history_cell_flex().text_right().child("Price"))
+        .child(
+            trade_history_cell_fixed(TRADE_HISTORY_QUANTITY_WIDTH)
+                .text_right()
+                .child("Quantity"),
+        )
+        .child(
+            trade_history_cell_fixed(TRADE_HISTORY_PRICE_WIDTH)
+                .text_right()
+                .child("Price"),
+        )
+        .child(
+            trade_history_cell_fixed(TRADE_HISTORY_PNL_WIDTH)
+                .text_right()
+                .child("Final P&L"),
+        )
 }
 
 fn trade_history_list(
@@ -610,6 +637,22 @@ fn trade_history_row(
         aeris_trading::OrderSide::Buy => ("Buy", colors.text_positive),
         aeris_trading::OrderSide::Sell => ("Sell", colors.text_negative),
     };
+    let final_pnl = history.completed_trade_pnl.get(&fill.id).copied();
+    let pnl_color = final_pnl.map_or(colors.text_secondary, |pnl| match pnl.units().cmp(&0) {
+        std::cmp::Ordering::Less => colors.text_negative,
+        std::cmp::Ordering::Equal => colors.text_secondary,
+        std::cmp::Ordering::Greater => colors.text_positive,
+    });
+    let pnl_text = final_pnl.map_or_else(
+        || "—".to_string(),
+        |pnl| {
+            format!(
+                "{} {}",
+                history.account_currency(fill.account_id.as_str()),
+                market_price_text(pnl.units(), u32::from(pnl.scale()))
+            )
+        },
+    );
     trade_history_row_frame()
         .id(("trade_history_row", index))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
@@ -617,7 +660,8 @@ fn trade_history_row(
         .child(trade_history_cell_fixed(TRADE_HISTORY_TIME_WIDTH).child(time))
         .when(show_account, |row| {
             row.child(
-                trade_history_cell_flex().child(history.account_name(fill.account_id.as_str())),
+                trade_history_cell_fixed(TRADE_HISTORY_ACCOUNT_WIDTH)
+                    .child(history.account_name(fill.account_id.as_str())),
             )
         })
         .child(
@@ -630,7 +674,7 @@ fn trade_history_row(
                 .child(side),
         )
         .child(
-            trade_history_cell_flex()
+            trade_history_cell_fixed(TRADE_HISTORY_QUANTITY_WIDTH)
                 .text_right()
                 .child(market_price_text(
                     fill.quantity.units(),
@@ -638,12 +682,18 @@ fn trade_history_row(
                 )),
         )
         .child(
-            trade_history_cell_flex()
+            trade_history_cell_fixed(TRADE_HISTORY_PRICE_WIDTH)
                 .text_right()
                 .child(market_price_text(
                     fill.price.units(),
                     u32::from(fill.price.scale()),
                 )),
+        )
+        .child(
+            trade_history_cell_fixed(TRADE_HISTORY_PNL_WIDTH)
+                .text_right()
+                .text_color(gpui_color(pnl_color))
+                .child(pnl_text),
         )
 }
 
@@ -656,17 +706,13 @@ fn trade_history_row_frame() -> Div {
         .px_2()
         .flex()
         .items_center()
-        .gap_3()
+        .gap(px(TRADE_HISTORY_CELL_GAP))
         .text_xs()
         .font_features(platform_tabular_numerals())
 }
 
 fn trade_history_cell_fixed(width: f32) -> Div {
     div().w(px(width)).flex_none().truncate()
-}
-
-fn trade_history_cell_flex() -> Div {
-    div().flex_1().min_w_0().truncate()
 }
 
 #[cfg(test)]
@@ -726,5 +772,23 @@ mod tests {
             !state.set_height(10_000.0),
             "an unchanged height does not re-render"
         );
+    }
+
+    #[test]
+    fn all_trade_history_columns_fit_a_compact_window() {
+        let columns = [
+            TRADE_HISTORY_TIME_WIDTH,
+            TRADE_HISTORY_ACCOUNT_WIDTH,
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            TRADE_HISTORY_SIDE_WIDTH,
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            TRADE_HISTORY_PRICE_WIDTH,
+            TRADE_HISTORY_PNL_WIDTH,
+        ];
+        let width = columns.iter().sum::<f32>()
+            + TRADE_HISTORY_CELL_GAP
+                * f32::from(u8::try_from(columns.len() - 1).expect("column count fits"))
+            + 16.0;
+        assert!(width <= 800.0 - 12.0, "Final P&L must remain visible");
     }
 }
