@@ -15,13 +15,14 @@ Payments use Paddle as merchant of record.
 
 Paddle fees (5% + $0.50 per transaction) are separate and scale with revenue.
 
-> **One code change decides the auth design.** The desktop client only accepts `EdDSA` ID tokens,
-> requires every OIDC endpoint on the issuer's origin and an issuer ending in `/api/auth`, and binds
-> an OS-assigned loopback port. Cognito signs with RS256, its issuer
-> (`cognito-idp.us-east-1.amazonaws.com/...`) differs from its login domain, and it requires exact
-> callback URLs. Using Cognito means changing `oidc.rs` and `loopback.rs`: accept RS256, validate a
-> configured issuer plus login origin, configure the API origin for link and lease separately, and
-> register a small fixed set of loopback ports. The Ed25519 entitlement lease stays exactly as it is.
+> **One code change decides the auth design.** The desktop client was written for a Better Auth
+> issuer: it only accepts `EdDSA` ID tokens, requires every OIDC endpoint on the issuer's origin and
+> an issuer ending in `/api/auth`, binds an OS-assigned port on `127.0.0.1`, and sends the ID token in
+> the link and lease request bodies. Cognito signs with RS256, its issuer
+> (`cognito-idp.us-east-1.amazonaws.com/...`) differs from its login domain, it requires exact
+> callback URLs, and it only allows plain HTTP for `http://localhost`. The Ed25519 entitlement lease
+> stays exactly as it is. The full list of desktop changes is in
+> [Desktop changes for Cognito](#desktop-changes-for-cognito).
 
 ## Monthly AWS spend by stage
 
@@ -79,14 +80,102 @@ email-code and passkey sign-in. Add CloudFront Business ($200) only if the Pro p
 
 | Step | Actor | What happens |
 | :---: | --- | --- |
-| 1 | Desktop | Opens browser to `auth.<domain>` managed login with PKCE; waits on a loopback callback |
-| 2 | Cognito | Email code or Google sign-in; redirects back with an authorization code |
-| 3 | Desktop | Exchanges code for ID, access and refresh tokens; stores refresh token in the OS vault |
-| 4 | Desktop to `/api/aeris/link` | Access token checked by the API Gateway JWT authorizer; Lambda maps Cognito `sub` to the stable Aeris account ID |
-| 5 | Desktop to `/api/aeris/lease` (every 6 h) | Lambda reads the entitlement, KMS signs an Ed25519 lease bound to account + device; desktop verifies against the JWKS and caches it for 24 h offline |
+| 1 | Desktop | Binds the first free fixed loopback port, opens the browser to `auth.<domain>` managed login with PKCE, `state`, `nonce` and `prompt=login` |
+| 2 | Cognito | Email code or Google sign-in; redirects to `http://localhost:<port>/callback` with an authorization code |
+| 3 | Desktop | Exchanges the code for ID, access and refresh tokens; verifies the RS256 ID token; stores the refresh token in the OS vault |
+| 4 | Desktop to `/api/aeris/link` | `Authorization: Bearer <access token>`; the API Gateway JWT authorizer checks issuer, `client_id` and expiry; Lambda takes `sub` from the authorizer claims (never from the body), maps it to the stable Aeris account ID and returns the profile |
+| 5 | Desktop to `/api/aeris/lease` (every 6 h + up to 30 min jitter) | Same bearer check; body carries only `device_id`; KMS signs an Ed25519 lease bound to account + device; desktop verifies it against the entitlement key directory and caches it for up to 24 h offline |
 
 The website's account pages stay static: they use a separate Cognito public web client with PKCE and
 call the same `/api/*` routes with a bearer token. No server-side rendering is needed.
+
+### Lease signing key
+
+The lease is verified with Aeris's own key, never Cognito's JWKS. The desktop already fetches it from
+`{api origin}/.well-known/entitlement-jwks.json` on every online lease refresh and caches the last
+verified directory in the vault (`lease.rs`, `fetch_directory`).
+
+- The directory is a static JSON file in the site bucket, served by CloudFront with a 5-minute TTL.
+  It holds `OKP` / `Ed25519` keys with a `kid` and base64url `x`.
+- The deploy pipeline builds it from KMS `GetPublicKey` (DER SubjectPublicKeyInfo; the last 32 bytes
+  are `x`). No Lambda serves it and no private material ever leaves KMS.
+- `kid` names the KMS key (`ent-2026-10`, for example), and the lease Lambda puts the same `kid` in
+  the lease header.
+- Rotation: create the new KMS key and publish both keys. Once the CloudFront TTL has passed, switch
+  signing; the desktop fetches the directory alongside every lease, so no longer wait is needed.
+  Keep the old key published for 24 hours after the switch so leases it signed stay valid until they
+  expire.
+- Emergency revocation removes the key from the directory immediately. Online desktops reject leases
+  it signed at their next refresh, while offline desktops can keep a cached lease until it expires
+  (at most 24 hours).
+- Trust rests on TLS to the API origin. The directory is never loaded from the Cognito domain.
+
+### One account per person
+
+Without linking, Cognito creates a separate `Google_<id>` user when someone who signed up with an
+email code later signs in with Google using the same address. This would give one person two Aeris
+accounts.
+
+- The user pool signs in by email (`UsernameAttributes: email`, case-insensitive), with `email`
+  required and auto-verified. Google maps `email`, `email_verified`, `name` and `picture`.
+- A pre sign-up Lambda handles `PreSignUp_ExternalProvider`:
+  1. It rejects the sign-up unless Google reports `email_verified: true`. Unverified addresses are
+     never linked.
+  2. It looks up a local user with that email. If none exists, it creates one with
+     `AdminCreateUser` (`email_verified: true`, `MessageAction: SUPPRESS`).
+  3. It links the Google identity to that local user with `AdminLinkProviderForUser`
+     (`ProviderName: Google`, `ProviderAttributeName: Cognito_Subject`, value = Google `sub`).
+- Every person therefore has exactly one local profile. Email-code and Google sign-ins both return
+  that profile's `sub`, and it counts as one MAU.
+- The Aeris account table is keyed by that `sub` with a conditional put. Email is profile data only
+  and never an account key, so an email change never creates a second account.
+- Linking only works before a federated user's first sign-in. An existing `Google_<id>` profile
+  must be deleted and re-linked, so the trigger ships with the Identity stack, before any real
+  users sign in.
+- Verify first-time Google sign-in end to end in the dev pool. Community reports describe a one-time
+  error when linking runs inside the trigger. If it reproduces, the trigger links and then returns a
+  "sign in again" error, and the second attempt succeeds.
+
+### Loopback callback
+
+- Cognito allows plain HTTP only for `http://localhost`, so the redirect URI is
+  `http://localhost:<port>/callback`. `127.0.0.1` redirect URIs are not used.
+- There are three fixed ports, registered as three callback URLs on the desktop app client and
+  hard-coded in `loopback.rs`. They sit below Windows' dynamic range (49152–65535), where Hyper-V
+  and WinNAT reserve port blocks. The exact numbers are chosen once when the Identity stack is
+  written and never changed without shipping a desktop update first.
+- The listener tries the ports in order. On each port it binds both `127.0.0.1` and `[::1]` because
+  browsers may resolve `localhost` to either. It continues if only one address family is available
+  and accepts the first valid callback from either socket.
+- If all three ports are busy, sign-in fails with an actionable message naming the ports. It never
+  falls back to an OS-assigned port, because Cognito would reject the unregistered redirect.
+- AWS describes the localhost exception as intended for testing. If it is ever withdrawn, the
+  fallback is a registered `aeris://callback` URL scheme, which needs an installer protocol handler
+  and single-instance forwarding.
+
+### Sign-out and revocation
+
+| Event | What happens | Worst-case window |
+| --- | --- | --- |
+| User signs out in the desktop | The existing code deletes the lease and refresh token from the vault first, then calls `/oauth2/revoke` in the background with `token` and `client_id`. That revokes the refresh token and every access token issued from it | Immediate on the device |
+| Next sign-in after sign-out | `prompt=login` makes managed login ask again even if the browser still has a Cognito session cookie, so another person can sign in on that computer | None |
+| Stolen or leaked access token | API Gateway checks signatures, not revocation, so access and ID tokens last 15 minutes | 15 min |
+| Account disabled, refunded or banned | A DynamoDB `status` is checked by both the link and lease Lambdas. `AdminUserGlobalSignOut` revokes all refresh tokens | Up to 24 h on an offline desktop that holds a cached lease; about 6.5 h on an online one |
+| Subscription ends | The lease Lambda issues a lease for the lower plan, and the desktop applies it at the next refresh | About 6.5 h online, 24 h offline |
+
+The desktop app client sets `EnableTokenRevocation: true`, a 15-minute access and ID token validity
+and a 30-day refresh token validity in the CDK stack.
+
+### Desktop changes for Cognito
+
+All are in `crates/account_runtime/src/account_service`:
+
+| File | Change |
+| --- | --- |
+| `oidc.rs` | Accept RS256 ID tokens from the Cognito JWKS. Validate a configured issuer (`cognito-idp.<region>.amazonaws.com/<pool id>`) separately from the login origin (`auth.<domain>`) and the API origin, which replaces the `/api/auth` derivation. Request `scope=openid email profile`; Cognito has no `offline_access` scope, and the code grant always returns a refresh token. Send `prompt=login` instead of `prompt=consent`. Add `client_id` to the revocation body |
+| `oidc.rs`, `lease.rs` | Send the access token as `Authorization: Bearer` to link and lease. Remove `subject` and `id_token` from the request bodies |
+| `loopback.rs` | Use three fixed ports in order, `localhost` redirect URIs, and dual `127.0.0.1` / `[::1]` binds |
+| `lease.rs` | No change. It already fetches `/.well-known/entitlement-jwks.json` and verifies Ed25519 |
 
 ## How Paddle billing works
 
@@ -134,8 +223,11 @@ call the same `/api/*` routes with a bearer token. No server-side rendering is n
 - [ ] GitHub Actions deploy through OIDC role: `next build`, `s3 sync out/`, CloudFront invalidation.
 - [ ] Add Refund Policy page and legal entity name in Terms; submit domain to Paddle review (5–7
       business days).
-- [ ] Desktop sign-in changes for Cognito (RS256, split origins, fixed callback ports).
-- [ ] Identity + ControlPlane stacks: Cognito, link/lease/billing Lambdas, KMS, SQS, Scheduler.
+- [ ] Desktop sign-in changes for Cognito (see [Desktop changes for Cognito](#desktop-changes-for-cognito)).
+- [ ] Identity + ControlPlane stacks: Cognito with the pre sign-up linking trigger, link/lease/billing
+      Lambdas, KMS, the published entitlement key directory, SQS, Scheduler.
+- [ ] Dev-pool end to end: email code, Google, email code then Google with the same address, sign-out
+      then sign-in as another user, all three callback ports busy, key rotation.
 - [ ] Paddle sandbox end to end, then live; move CloudFront to Pro when installers ship.
 
 Non-AWS costs to budget: domain renewal, Paddle fees, Windows code signing for installers, business
