@@ -1,4 +1,5 @@
 use super::*;
+use crate::desktop::native_ui::switch::Switch;
 use crate::desktop::native_ui::theme::platform_border_width;
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
@@ -2134,36 +2135,12 @@ fn settings_toggle_row(
                 .child(label),
         )
         .child(
-            div()
-                .id(label)
-                .w(design_rems(34.0))
-                .h(design_rems(19.0))
-                .p(design_rems(2.0))
-                .flex()
-                .items_center()
-                .when(enabled, |track| {
-                    track.justify_end().bg(gpui_color(colors.primary))
-                })
-                .when(!enabled, |track| {
-                    track
-                        .justify_start()
-                        .bg(gpui_color(colors.border_secondary))
-                })
-                .rounded_full()
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.apply_chart_settings_action(&menu, action, terminal_cx);
-                    });
-                    cx.stop_propagation();
-                })
-                .child(
-                    div()
-                        .w(design_rems(19.0))
-                        .h(design_rems(15.0))
-                        .rounded_full()
-                        .bg(gpui_color(colors.primary_foreground)),
-                ),
+            Switch::new(label, label, enabled, theme).on_change(move |_, _, _, cx| {
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.apply_chart_settings_action(&menu, action, terminal_cx);
+                });
+                cx.stop_propagation();
+            }),
         )
 }
 

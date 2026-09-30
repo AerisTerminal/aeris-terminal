@@ -6,6 +6,7 @@ pub(crate) mod loader;
 pub(crate) mod menu;
 pub(crate) mod rem_scale;
 pub(crate) mod scroll;
+pub(crate) mod switch;
 pub(crate) mod tab;
 pub(crate) mod theme;
 pub(crate) mod tooltip;
