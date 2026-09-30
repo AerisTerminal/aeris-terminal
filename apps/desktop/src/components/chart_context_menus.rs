@@ -2159,7 +2159,8 @@ fn settings_toggle_row(
                 })
                 .child(
                     div()
-                        .size(design_rems(15.0))
+                        .w(design_rems(19.0))
+                        .h(design_rems(15.0))
                         .rounded_full()
                         .bg(gpui_color(colors.primary_foreground)),
                 ),
