@@ -117,13 +117,10 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --sell-ring: #ffc9c9;
   --sell-foreground: #ffffff;
 
-  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill).
-     Flash is the brief highlight when a level's size changes. */
+  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
   --book-bid-fill: #e0f3ef;
-  --book-bid-flash: #d2efe9;
   --book-bid-text: #067a66;
   --book-ask-fill: #fdeef0;
-  --book-ask-flash: #fce4e7;
   --book-ask-text: #d91a2b;
 
   /* Focus */
@@ -239,13 +236,10 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --sell-ring: #a3303a;
   --sell-foreground: #ffffff;
 
-  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill).
-     Flash is the brief highlight when a level's size changes. */
+  /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
   --book-bid-fill: #16332e;
-  --book-bid-flash: #1c4640;
   --book-bid-text: #22c3a6;
   --book-ask-fill: #3a2124;
-  --book-ask-flash: #4e2a2e;
   --book-ask-text: #ff6b76;
 
   /* Focus */

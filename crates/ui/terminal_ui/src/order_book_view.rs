@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::OrderBookRow;
 use crate::order_book::{compact_quantity_text, grouped_fixed_point_text};
 use crate::{OrderBookColumnLevel, OrderBookFrame};
@@ -12,17 +13,11 @@ use gpui::{
 };
 #[cfg(test)]
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 11.0;
-/// How long a level shows its `book-*-flash` fill after its resting size changes.
-const LEVEL_FLASH_DURATION: Duration = Duration::from_millis(350);
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
 // Match the reference ladder's four-significant-figure Hyperliquid grouping.
 // Derive this from price magnitude rather than the current top-20 snapshot's
@@ -250,8 +245,6 @@ pub struct ReadOnlyOrderBookView {
     follow_center: bool,
     columns: OrderBookColumnVisibility,
     render_metrics: OrderBookRenderMetrics,
-    level_flash: Arc<LevelFlash>,
-    level_flash_generation: u64,
 }
 
 impl EventEmitter<OrderBookLevelClick> for ReadOnlyOrderBookView {}
@@ -271,8 +264,6 @@ impl ReadOnlyOrderBookView {
             follow_center: true,
             columns: OrderBookColumnVisibility::default(),
             render_metrics: OrderBookRenderMetrics::default(),
-            level_flash: Arc::default(),
-            level_flash_generation: 0,
         }
     }
 
@@ -375,27 +366,7 @@ impl ReadOnlyOrderBookView {
     }
 
     fn discard_frames(&mut self) -> bool {
-        self.level_flash = Arc::default();
         self.frame.take().is_some()
-    }
-
-    /// Highlights levels whose resting size changed, then clears them after
-    /// `LEVEL_FLASH_DURATION`. A newer flash supersedes the pending clear.
-    fn flash_levels(&mut self, flash: LevelFlash, cx: &mut Context<Self>) {
-        self.level_flash = Arc::new(flash);
-        self.level_flash_generation = self.level_flash_generation.wrapping_add(1);
-        let generation = self.level_flash_generation;
-        let expiry = cx.background_executor().timer(LEVEL_FLASH_DURATION);
-        cx.spawn(async move |order_book, cx| {
-            expiry.await;
-            let _ = order_book.update(cx, |order_book, order_book_cx| {
-                if order_book.level_flash_generation == generation {
-                    order_book.level_flash = Arc::default();
-                    order_book_cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     /// Updates the connectivity banner without discarding the last valid book.
@@ -422,12 +393,6 @@ impl ReadOnlyOrderBookView {
         if recenter {
             self.ladder_scroll = UniformListScrollHandle::new();
             self.follow_center = true;
-            self.level_flash = Arc::default();
-        } else if let Some(current) = self.frame.as_deref() {
-            let flash = LevelFlash::between(current, frame.as_ref());
-            if !flash.is_empty() {
-                self.flash_levels(flash, cx);
-            }
         }
         let recenter_index = self
             .follow_center
@@ -441,59 +406,6 @@ impl ReadOnlyOrderBookView {
         }
         cx.notify();
     }
-}
-
-/// Prices whose resting size changed between two frames of the same book. Bounded
-/// by the frame's own level count.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct LevelFlash {
-    bids: BTreeSet<i64>,
-    asks: BTreeSet<i64>,
-}
-
-impl LevelFlash {
-    fn between(previous: &OrderBookFrame, next: &OrderBookFrame) -> Self {
-        Self {
-            bids: changed_prices(previous, next, |row| row.bid.as_ref()),
-            asks: changed_prices(previous, next, |row| row.ask.as_ref()),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.bids.is_empty() && self.asks.is_empty()
-    }
-
-    fn contains(&self, side: BookColumnSide, price: i64) -> bool {
-        match side {
-            BookColumnSide::Bid => self.bids.contains(&price),
-            BookColumnSide::Ask => self.asks.contains(&price),
-        }
-    }
-}
-
-/// Only levels present in both frames flash: a level appearing or leaving is a
-/// book-shape change, not a size change.
-fn changed_prices(
-    previous: &OrderBookFrame,
-    next: &OrderBookFrame,
-    level: fn(&OrderBookRow) -> Option<&OrderBookColumnLevel>,
-) -> BTreeSet<i64> {
-    let previous_sizes: BTreeMap<i64, i64> = previous
-        .rows
-        .iter()
-        .filter_map(level)
-        .map(|level| (level.price, level.quantity))
-        .collect();
-    next.rows
-        .iter()
-        .filter_map(level)
-        .filter(|level| {
-            previous_sizes
-                .get(&level.price)
-                .is_some_and(|quantity| *quantity != level.quantity)
-        })
-        .map(|level| level.price)
-        .collect()
 }
 
 fn should_recenter_ladder(current: Option<&OrderBookFrame>, next: &OrderBookFrame) -> bool {
@@ -579,7 +491,6 @@ impl Render for ReadOnlyOrderBookView {
                         &ladder_scroll,
                         LadderInteraction {
                             theme: &self.theme,
-                            level_flash: &self.level_flash,
                             order_book: &order_book,
                             working_orders: &working_orders,
                             position_marker: position_marker.as_ref(),
@@ -710,7 +621,6 @@ fn render_virtualized_ladder_list(
 ) -> AnyElement {
     let list_frame = Arc::clone(frame);
     let list_theme = *interaction.theme;
-    let list_level_flash = interaction.level_flash.clone();
     let list_order_book = interaction.order_book.clone();
     let scroll_order_book = interaction.order_book.clone();
     let fallback_scroll_order_book = interaction.order_book.clone();
@@ -736,7 +646,6 @@ fn render_virtualized_ladder_list(
                             maximum_trade_quantity,
                             LadderInteraction {
                                 theme: &list_theme,
-                                level_flash: &list_level_flash,
                                 order_book: &list_order_book,
                                 working_orders: &list_working_orders,
                                 position_marker: list_position_marker.as_ref(),
@@ -776,7 +685,6 @@ fn render_virtualized_ladder_list(
                         maximum_trade_quantity,
                         LadderInteraction {
                             theme: &list_theme,
-                            level_flash: &list_level_flash,
                             order_book: &list_order_book,
                             working_orders: &list_working_orders,
                             position_marker: list_position_marker.as_ref(),
@@ -1437,7 +1345,6 @@ enum BookColumnSide {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct OrderBookSideAppearance {
     fill: ThemeColor,
-    flash: ThemeColor,
     text: ThemeColor,
 }
 
@@ -1447,12 +1354,10 @@ fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> Order
     match side {
         BookColumnSide::Bid => OrderBookSideAppearance {
             fill: theme.colors.book_bid_fill,
-            flash: theme.colors.book_bid_flash,
             text: theme.colors.book_bid_text,
         },
         BookColumnSide::Ask => OrderBookSideAppearance {
             fill: theme.colors.book_ask_fill,
-            flash: theme.colors.book_ask_flash,
             text: theme.colors.book_ask_text,
         },
     }
@@ -1468,7 +1373,6 @@ const fn order_book_level_side(side: BookColumnSide) -> OrderBookLevelSide {
 #[derive(Clone, Copy)]
 struct LadderInteraction<'a> {
     theme: &'a AerisTheme,
-    level_flash: &'a LevelFlash,
     order_book: &'a Entity<ReadOnlyOrderBookView>,
     working_orders: &'a [OrderBookWorkingOrder],
     position_marker: Option<&'a OrderBookPositionMarker>,
@@ -1567,7 +1471,6 @@ fn render_level_row(
     let theme = interaction.theme;
     let colors = theme.colors;
     let appearance = order_book_side_appearance(theme, side);
-    let flashing = interaction.level_flash.contains(side, level.price);
     let row_id = match side {
         BookColumnSide::Bid => "order_book_bid_row",
         BookColumnSide::Ask => "order_book_ask_row",
@@ -1618,7 +1521,6 @@ fn render_level_row(
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
-        .when(flashing, |row| row.bg(gpui_color(appearance.flash)))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .on_click(move |_, _, cx| {
             order_book.update(cx, |_, order_book_cx| {
@@ -2273,7 +2175,6 @@ mod tests {
                 order_book_side_appearance(&theme, BookColumnSide::Bid),
                 OrderBookSideAppearance {
                     fill: theme.colors.book_bid_fill,
-                    flash: theme.colors.book_bid_flash,
                     text: theme.colors.book_bid_text,
                 }
             );
@@ -2281,7 +2182,6 @@ mod tests {
                 order_book_side_appearance(&theme, BookColumnSide::Ask),
                 OrderBookSideAppearance {
                     fill: theme.colors.book_ask_fill,
-                    flash: theme.colors.book_ask_flash,
                     text: theme.colors.book_ask_text,
                 }
             );
@@ -2333,36 +2233,6 @@ mod tests {
                 .into_iter()
                 .collect(),
         }
-    }
-
-    #[test]
-    fn only_levels_whose_resting_size_changed_flash() {
-        let book = |bids: &[(i64, i64)], asks: &[(i64, i64)]| {
-            let mut book = frame(1, 1, 1, OrderBookState::Ready, false);
-            book.rows = (0..bids.len().max(asks.len()))
-                .map(|index| OrderBookRow {
-                    bid: bids
-                        .get(index)
-                        .map(|&(price, size)| grid_level(price, size)),
-                    ask: asks
-                        .get(index)
-                        .map(|&(price, size)| grid_level(price, size)),
-                })
-                .collect();
-            book
-        };
-        let previous = book(&[(100, 5), (99, 3)], &[(101, 4), (102, 7)]);
-        let next = book(&[(100, 5), (99, 8), (98, 1)], &[(101, 2)]);
-
-        let flash = LevelFlash::between(&previous, &next);
-
-        // 99 bid changed size; 100 unchanged; 98 is new, 102 left the book.
-        assert!(flash.contains(BookColumnSide::Bid, 99));
-        assert!(!flash.contains(BookColumnSide::Bid, 100));
-        assert!(!flash.contains(BookColumnSide::Bid, 98));
-        assert!(flash.contains(BookColumnSide::Ask, 101));
-        assert!(!flash.contains(BookColumnSide::Ask, 102));
-        assert!(LevelFlash::between(&next, &next).is_empty());
     }
 
     #[test]

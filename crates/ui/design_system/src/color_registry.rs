@@ -81,14 +81,10 @@ macro_rules! platform_color_registry {
             sell_foreground => "sell-foreground",
             /// Order-book bid depth bar. Pair only with `book_bid_text`.
             book_bid_fill => "book-bid-fill",
-            /// Brief bid size-change highlight, above the depth bar and below the text.
-            book_bid_flash => "book-bid-flash",
             /// Order-book bid price text; passes 4.5:1 on `book_bid_fill`.
             book_bid_text => "book-bid-text",
             /// Order-book ask depth bar. Pair only with `book_ask_text`.
             book_ask_fill => "book-ask-fill",
-            /// Brief ask size-change highlight, above the depth bar and below the text.
-            book_ask_flash => "book-ask-flash",
             /// Order-book ask price text; passes 4.5:1 on `book_ask_fill`.
             book_ask_text => "book-ask-text",
             ring => "ring",

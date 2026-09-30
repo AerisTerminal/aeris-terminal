@@ -594,16 +594,12 @@ mod tests {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
         assert_eq!(light.book_bid_fill, ThemeColor::from_rgb8(224, 243, 239));
-        assert_eq!(light.book_bid_flash, ThemeColor::from_rgb8(210, 239, 233));
         assert_eq!(light.book_bid_text, ThemeColor::from_rgb8(6, 122, 102));
         assert_eq!(light.book_ask_fill, ThemeColor::from_rgb8(253, 238, 240));
-        assert_eq!(light.book_ask_flash, ThemeColor::from_rgb8(252, 228, 231));
         assert_eq!(light.book_ask_text, ThemeColor::from_rgb8(217, 26, 43));
         assert_eq!(dark.book_bid_fill, ThemeColor::from_rgb8(22, 51, 46));
-        assert_eq!(dark.book_bid_flash, ThemeColor::from_rgb8(28, 70, 64));
         assert_eq!(dark.book_bid_text, ThemeColor::from_rgb8(34, 195, 166));
         assert_eq!(dark.book_ask_fill, ThemeColor::from_rgb8(58, 33, 36));
-        assert_eq!(dark.book_ask_flash, ThemeColor::from_rgb8(78, 42, 46));
         assert_eq!(dark.book_ask_text, ThemeColor::from_rgb8(255, 107, 118));
 
         let light_tokens = AerisTheme::light().color_tokens();
@@ -611,7 +607,7 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "book-bid-fill"), "#e0f3ef");
         assert_eq!(token_source(&light_tokens, "book-ask-text"), "#d91a2b");
         assert_eq!(token_source(&dark_tokens, "book-bid-text"), "#22c3a6");
-        assert_eq!(token_source(&dark_tokens, "book-ask-flash"), "#4e2a2e");
+        assert_eq!(token_source(&dark_tokens, "book-ask-fill"), "#3a2124");
     }
 
     #[test]
