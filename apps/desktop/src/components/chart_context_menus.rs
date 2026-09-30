@@ -971,9 +971,9 @@ fn chart_settings_drag_grip(theme: &AerisTheme) -> Div {
         .left(relative(0.5))
         .top(relative(0.5))
         .ml(design_rems(-21.0))
-        .mt(design_rems(-11.0))
+        .mt(design_rems(-9.0))
         .w(design_rems(42.0))
-        .h(design_rems(22.0))
+        .h(design_rems(18.0))
         .flex()
         .items_center()
         .justify_center()
@@ -1048,17 +1048,22 @@ fn chart_settings_actions(
         .flex()
         .items_center()
         .gap_1()
-        .child(chrome_icon_button(
-            "chart_settings_reset",
-            HugeIcon::Refresh,
-            "Reset settings",
-            ChromeIconButtonTone::Neutral,
+        .child(chrome_tooltip(
+            "chart_settings_reset_tooltip",
+            "Reset this chart's appearance and trading overlays to defaults",
+            chrome_icon_button(
+                "chart_settings_reset",
+                HugeIcon::Refresh,
+                "Reset settings",
+                ChromeIconButtonTone::Neutral,
+                theme,
+                move |_, cx| {
+                    reset_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.reset_chart_settings(&reset_menu, terminal_cx);
+                    });
+                },
+            ),
             theme,
-            move |_, cx| {
-                reset_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.reset_chart_settings(&reset_menu, terminal_cx);
-                });
-            },
         ))
         .child(chrome_icon_button(
             "chart_settings_close",
