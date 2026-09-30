@@ -138,14 +138,12 @@ const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
 
-fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
+fn text_edit_text(event: &KeyDownEvent) -> Option<String> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
-        let mut chars = text.chars();
-        let ch = chars.next()?;
-        return (chars.next().is_none() && !ch.is_control()).then_some(ch);
+        return (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_owned());
     }
     match event.keystroke.key.as_str() {
-        "space" => Some(' '),
+        "space" => Some(" ".to_owned()),
         key => {
             let mut chars = key.chars();
             let ch = chars.next()?;
@@ -153,9 +151,9 @@ fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
                 return None;
             }
             if ch.is_ascii_alphabetic() && event.keystroke.modifiers.shift {
-                Some(ch.to_ascii_uppercase())
+                Some(ch.to_ascii_uppercase().to_string())
             } else {
-                Some(ch)
+                Some(ch.to_string())
             }
         }
     }

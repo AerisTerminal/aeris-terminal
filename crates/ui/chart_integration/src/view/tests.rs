@@ -3122,15 +3122,23 @@ fn text_tool_place_enters_edit_mode_and_keeps_typed_label() {
 }
 
 #[test]
-fn trend_line_double_click_edits_label_without_replacing_the_line() {
+fn trend_line_hover_and_first_label_click_edit_without_replacing_the_line() {
     let mut chart = interactive_chart();
     chart.set_drawing_tool(ChartDrawingTool::TrendLine);
     assert!(chart.drawing_pointer_down(260.0, 160.0, DrawingModifiers::default(), 1));
     assert!(chart.drawing_pointer_down(340.0, 160.0, DrawingModifiers::default(), 1));
     let id = chart.engine.drawings()[0].id;
-    assert!(chart.drawing_accepts_text(id));
+    let (label_x, label_y, _) = chart.engine.drawing_text_transform(id).unwrap();
+    let label_x = label_x - 20.0;
+    assert!(chart.engine.hit_test_drawing(label_x, label_y).is_none());
 
-    assert!(chart.drawing_pointer_down(300.0, 160.0, DrawingModifiers::default(), 2));
+    chart.update_cursor(label_x, label_y);
+    assert_eq!(chart.engine.hovered_text(), Some(id));
+    assert_eq!(chart.cursor_style, CursorStyle::IBeam);
+    assert!(chart.engine.build_frame().panes[0].main.iter().any(
+        |primitive| matches!(primitive, Prim::RotatedText { text, .. } if text == "+ Add text")
+    ));
+    assert!(chart.drawing_pointer_down(label_x, label_y, DrawingModifiers::default(), 1));
     assert_eq!(
         chart
             .engine
@@ -3147,6 +3155,21 @@ fn trend_line_double_click_edits_label_without_replacing_the_line() {
             .map(|drawing| drawing.text.as_str()),
         Some("Breakout")
     );
+
+    chart.begin_text_edit(id);
+    assert!(chart.engine.set_drawing_text_edit("Breakout!", 9));
+    assert!(chart.drawing_pointer_down(260.0, 160.0, DrawingModifiers::default(), 1));
+    assert!(!chart.is_editing_text());
+    assert_eq!(
+        chart
+            .engine
+            .drawing(id)
+            .map(|drawing| drawing.text.as_str()),
+        Some("Breakout!")
+    );
+
+    chart.update_cursor(-1.0, -1.0);
+    assert_eq!(chart.engine.hovered_text(), None);
 
     chart.begin_text_edit(id);
     assert!(chart.engine.set_drawing_text_edit("", 0));
@@ -3174,6 +3197,38 @@ fn pointer_exit_keeps_the_active_text_edit_session() {
     assert_eq!(
         chart.engine.drawing_text_edit().map(|(_, text, _)| text),
         Some("ES")
+    );
+}
+
+#[test]
+fn text_edit_accepts_committed_altgr_and_multicharacter_input() {
+    let mut chart = interactive_chart();
+    chart.set_drawing_tool(ChartDrawingTool::Text);
+    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+    let event =
+        |key: &str, text: &str, modifiers: Modifiers, prefer_character_input| KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers,
+                key: key.into(),
+                key_char: Some(text.into()),
+            },
+            is_held: false,
+            prefer_character_input,
+        };
+    assert!(chart.apply_text_edit_key(&event(
+        "q",
+        "@",
+        Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        },
+        true,
+    )));
+    assert!(chart.apply_text_edit_key(&event("emoji", "👩‍💻", Modifiers::default(), false,)));
+    assert_eq!(
+        chart.engine.drawing_text_edit().map(|(_, text, _)| text),
+        Some("@👩‍💻")
     );
 }
 

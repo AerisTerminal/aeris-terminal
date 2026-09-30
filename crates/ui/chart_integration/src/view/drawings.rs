@@ -2,7 +2,7 @@
 
 use super::{
     AerisChartView, ChartDrawingTool, CursorStyle, DrawingId, DrawingKind, DrawingModifiers,
-    DrawingTextEditKey, DrawingsLockSummary, KeyDownEvent, Modifiers, text_edit_char,
+    DrawingTextEditKey, DrawingsLockSummary, KeyDownEvent, Modifiers, text_edit_text,
 };
 
 impl AerisChartView {
@@ -79,33 +79,44 @@ impl AerisChartView {
             return false;
         }
         let modifiers = event.keystroke.modifiers;
-        let word = modifiers.control || modifiers.alt || modifiers.platform;
+        let word = if cfg!(target_os = "macos") {
+            modifiers.alt
+        } else {
+            modifiers.control && !event.prefer_character_input
+        };
+        let line = cfg!(target_os = "macos") && modifiers.platform;
         let key = match event.keystroke.key.as_str() {
             "escape" => return self.cancel_text_edit(),
             "enter" => return self.finish_text_edit(),
-            "a" if word => {
+            "a" if (modifiers.control || modifiers.platform)
+                && !modifiers.alt
+                && !event.prefer_character_input =>
+            {
                 return self.engine.drawing_text_edit_select_all() || self.is_editing_text();
             }
             "backspace" if word => Some(DrawingTextEditKey::DeleteWordBackward),
             "delete" if word => Some(DrawingTextEditKey::DeleteWordForward),
             "backspace" => Some(DrawingTextEditKey::Backspace),
             "delete" => Some(DrawingTextEditKey::Delete),
+            "left" if line => Some(DrawingTextEditKey::Home),
+            "right" if line => Some(DrawingTextEditKey::End),
             "left" if word => Some(DrawingTextEditKey::WordLeft),
             "right" if word => Some(DrawingTextEditKey::WordRight),
             "left" => Some(DrawingTextEditKey::Left),
             "right" => Some(DrawingTextEditKey::Right),
-            "home" => Some(DrawingTextEditKey::Home),
-            "end" => Some(DrawingTextEditKey::End),
+            "home" | "up" => Some(DrawingTextEditKey::Home),
+            "end" | "down" => Some(DrawingTextEditKey::End),
             _ => None,
         };
         if let Some(key) = key {
             let _ = self.engine.drawing_text_edit_key(key, modifiers.shift);
             self.invalidate_series_frame();
-        } else if !word
-            && !modifiers.function
-            && let Some(ch) = text_edit_char(event)
+        } else if !modifiers.function
+            && (event.prefer_character_input
+                || (!modifiers.control && !modifiers.platform && !modifiers.alt))
+            && let Some(text) = text_edit_text(event)
         {
-            let _ = self.engine.drawing_text_edit_insert(&ch.to_string());
+            let _ = self.engine.drawing_text_edit_insert(&text);
             self.invalidate_series_frame();
         }
         true
@@ -332,27 +343,37 @@ impl AerisChartView {
         if self.is_editing_text() {
             let editing = self.engine.editing_drawing();
             let hit_id = self.engine.hit_test_drawing(pane_x, y).map(|hit| hit.id);
-            if click_count >= 2
-                && let Some(id) = hit_id.filter(|&id| self.drawing_accepts_text(id))
-            {
-                self.begin_text_edit(id);
-                return true;
-            }
-            if hit_id != editing {
-                let _ = self.finish_text_edit();
-            } else if hit_id.is_some() {
+            let on_text = editing.is_some_and(|id| {
+                let on_label = self.engine.drawing_text_hit_at(pane_x, y) == Some(id);
+                let on_standalone_text = hit_id == Some(id)
+                    && self
+                        .engine
+                        .drawing(id)
+                        .is_some_and(|drawing| drawing.kind == DrawingKind::Text);
+                on_label || on_standalone_text
+            });
+            if on_text {
                 let _ = self.engine.drawing_text_edit_caret_at(pane_x, y);
                 self.invalidate_series_frame();
                 return true;
             }
+            let _ = self.finish_text_edit();
         }
 
         match self.drawing_tool {
             ChartDrawingTool::Cursor => {
+                if let Some(id) = self.engine.drawing_text_hit_at(pane_x, y) {
+                    self.begin_text_edit(id);
+                    return true;
+                }
                 let hit = self.engine.hit_test_drawing(pane_x, y);
-                if click_count >= 2
-                    && let Some(hit) = hit
-                    && self.drawing_accepts_text(hit.id)
+                if let Some(hit) = hit
+                    && self.engine.drawing(hit.id).is_some_and(|drawing| {
+                        drawing.kind == DrawingKind::Text
+                            && (drawing.text.trim().is_empty()
+                                || self.engine.selected_drawing() == Some(hit.id)
+                                || click_count >= 2)
+                    })
                 {
                     self.begin_text_edit(hit.id);
                     return true;
@@ -392,11 +413,6 @@ impl AerisChartView {
                 result != 0
             }
         }
-    }
-    pub(super) fn drawing_accepts_text(&self, id: DrawingId) -> bool {
-        self.engine.drawings().iter().any(|drawing| {
-            drawing.id == id && matches!(drawing.kind, DrawingKind::Text | DrawingKind::TrendLine)
-        })
     }
     pub(super) fn drawing_pointer_move(
         &mut self,

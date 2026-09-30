@@ -91,13 +91,17 @@ impl AerisChartView {
             self.engine.set_separator_hover(separator_hover);
             self.invalidate_series_frame();
         }
-        let drawing_cursor = (self.drawing_tool == ChartDrawingTool::Cursor
+        let drawing_hover = if self.drawing_tool == ChartDrawingTool::Cursor
             && self.drag.is_none()
             && native_drag.is_none()
-            && separator.is_none())
-        .then(|| self.engine.hit_test_drawing(pane_x, y))
-        .flatten()
-        .map(|hit| hit.cursor);
+            && separator.is_none()
+        {
+            self.engine.update_drawing_hover(pane_x, y)
+        } else {
+            self.engine.update_drawing_hover(-1.0, -1.0);
+            None
+        };
+        let drawing_cursor = drawing_hover.map(|(_, cursor)| cursor);
         let trading_idle = self.drawing_tool == ChartDrawingTool::Cursor
             && self.drag.is_none()
             && native_drag.is_none()
@@ -138,6 +142,7 @@ impl AerisChartView {
             CursorStyle::Crosshair
         } else if let Some(cursor) = drawing_cursor {
             match cursor {
+                "text" => CursorStyle::IBeam,
                 "pointer" => CursorStyle::PointingHand,
                 "move" => CursorStyle::OpenHand,
                 "ns-resize" => CursorStyle::ResizeUpDown,
@@ -310,6 +315,7 @@ impl AerisChartView {
         self.engine.clear_crosshair_at();
         self.engine.set_separator_hover(None);
         self.engine.set_hovered_series(None);
+        self.engine.update_drawing_hover(-1.0, -1.0);
         self.engine.clear_trading_hover();
         self.engine.clear_trading_pressed();
         self.trading_tooltip = TradingTooltipDwell::Idle;
