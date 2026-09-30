@@ -49,7 +49,7 @@ impl RenderOnce for Switch {
         BaseSwitch::new(self.id.clone())
             .checked(self.checked)
             .accessibility_label(self.label)
-            .w(design_rems(34.0))
+            .w(design_rems(44.0))
             .h(design_rems(19.0))
             .cursor_pointer()
             .when_some(self.on_change, |switch, on_change| {
@@ -75,7 +75,7 @@ impl RenderOnce for Switch {
                     .rounded_full()
                     .child(
                         SwitchThumb::new(self.checked)
-                            .w(design_rems(19.0))
+                            .w(design_rems(23.0))
                             .h(design_rems(15.0))
                             .rounded_full()
                             .bg(gpui_color(colors.primary_foreground)),
